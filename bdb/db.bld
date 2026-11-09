@@ -282,6 +282,10 @@ struct DB {
     // P16 history: the open transaction's TXID and OP lines as written, the
     // history file and whether it has appends not yet flushed.
     txn_parts: Vec<String>,
+    // WAL lines of the open explicit transaction not yet appended (P21):
+    // TXID and OP lines wait here and go to the WAL in one append, with
+    // the COMMIT record or with HOLD at a clean exit.
+    wal_pend: Vec<String>,
     hist_on: bool,
     hist_path: String,
     hist_dirty: bool,
@@ -418,6 +422,7 @@ fn db_new(db_path: String) -> DB {
     let pool0: Vec<String> = vec![];
     let parts0: Vec<String> = vec![];
     let txp0: Vec<String> = vec![];
+    let wpd0: Vec<String> = vec![];
     DB {
         db_path: db_path,
         pool: pool0, pn: 0,
@@ -461,6 +466,7 @@ fn db_new(db_path: String) -> DB {
         txn_id: 0,
         txn_hash: 0,
         txn_parts: txp0,
+        wal_pend: wpd0,
         hist_on: false,
         hist_path: db_path + ".hist",
         hist_dirty: false,
@@ -1126,6 +1132,23 @@ fn wal_write(d: &mut DB, line: String, tag: String) ~ Console + FileSystem + Pro
     wal_append(d, line + "\n", tag);
 }
 
+// Hold a line of the open explicit transaction for its closing append (P21).
+// Nothing in a transaction is durable before its COMMIT record, and replay
+// drops a transaction without one, so holding the lines in memory loses
+// nothing a crash could have kept; it saves one file append per statement.
+fn wal_hold_line(d: &mut DB, line: String) {
+    vec_push(d.wal_pend, line + "\n");
+}
+
+// Append the held lines and the closing line in one write.
+fn wal_flush_pend(d: &mut DB, last: String, tag: String) ~ Console + FileSystem + Process {
+    vec_push(d.wal_pend, last + "\n");
+    let text = concat_parts(d.wal_pend);
+    let fresh: Vec<String> = vec![];
+    d.wal_pend = fresh;
+    wal_append(d, text, tag);
+}
+
 // Checkpoint: merge WAL into main .db file, then clear WAL
 fn wal_checkpoint(d: &mut DB) ~ Console + FileSystem + Process {
     // Every transaction this checkpoint folds into the .db must be durable
@@ -1167,7 +1190,7 @@ fn maybe_checkpoint(d: &mut DB) ~ Console + FileSystem + Process {
 // is discarded at the next start, as before.
 fn wal_close(d: &mut DB) ~ Console + FileSystem + Process {
     if d.in_transaction {
-        wal_write(d, "HOLD " + to_string_i32(d.txn_id), "wal_hold");
+        wal_flush_pend(d, "HOLD " + to_string_i32(d.txn_id), "wal_hold");
         return;
     }
     if d.wal_bytes > 0 { wal_checkpoint(d); }
@@ -1401,15 +1424,17 @@ fn take_snapshot(d: &mut DB) {
 
 // Restore state from snapshot (for ROLLBACK)
 fn restore_snapshot(d: &mut DB) {
+    // Copies, not the snapshot's own vectors: UPDATE and DELETE write the
+    // live arrays in place (P20), which must never reach a snapshot.
     d.con_map_ok = false;
     d.con_tbl = copy_vec(d.snap_con_tbl);
     d.con_kind = copy_vec(d.snap_con_kind);
     d.con_cs = copy_vec(d.snap_con_cs);
     d.con_cn = copy_vec(d.snap_con_cn);
     d.con_cols = copy_vec(d.snap_con_cols);
-    d.cells = d.snap_cells;
-    d.tbl_row_starts = d.snap_row_starts;
-    d.tbl_row_counts = d.snap_row_counts;
+    d.cells = copy_vec(d.snap_cells);
+    d.tbl_row_starts = copy_vec(d.snap_row_starts);
+    d.tbl_row_counts = copy_vec(d.snap_row_counts);
     d.tbl_names = d.snap_tbl_names;
     d.tbl_count = d.snap_tbl_count;
     d.col_names = d.snap_col_names;
@@ -1420,10 +1445,10 @@ fn restore_snapshot(d: &mut DB) {
     d.idx_tables = d.snap_idx_tables;
     d.idx_col_indices = d.snap_idx_col_indices;
     d.idx_count = d.snap_idx_count;
-    d.idx_keys = d.snap_idx_keys;
-    d.idx_rowids = d.snap_idx_rowids;
-    d.idx_key_starts = d.snap_idx_key_starts;
-    d.idx_key_counts = d.snap_idx_key_counts;
+    d.idx_keys = copy_vec(d.snap_idx_keys);
+    d.idx_rowids = copy_vec(d.snap_idx_rowids);
+    d.idx_key_starts = copy_vec(d.snap_idx_key_starts);
+    d.idx_key_counts = copy_vec(d.snap_idx_key_counts);
     // The snapshot's index entries may predate rows that were appended and
     // not yet folded in; rebuild from the restored rows on the next read.
     d.idx_stale = true;
@@ -1443,7 +1468,9 @@ fn wal_begin(d: &mut DB) ~ Console + FileSystem + Process {
     let fresh: Vec<String> = vec![];
     d.txn_parts = fresh;
     if d.hist_on { vec_push(d.txn_parts, tl + "\n"); }
-    wal_write(d, tl, "wal_begin");
+    let fresh2: Vec<String> = vec![];
+    d.wal_pend = fresh2;
+    wal_hold_line(d, tl);
 }
 
 // COMMIT — finalize the current transaction
@@ -1452,7 +1479,7 @@ fn wal_commit(d: &mut DB) ~ Console + FileSystem + Process {
         println!("Error: no transaction in progress");
         return;
     }
-    wal_write(d, commit_line(d.txn_hash), "wal_commit");
+    wal_flush_pend(d, commit_line(d.txn_hash), "wal_commit");
     durable_sync(d, d.wal_path, "wal_sync");
     if d.hist_on {
         hist_append(d, concat_parts(d.txn_parts) + commit_line(d.txn_hash) + "\n");
@@ -1471,6 +1498,8 @@ fn wal_rollback(d: &mut DB) ~ Console + FileSystem + Process {
     }
     restore_snapshot(d);
     d.in_transaction = false;
+    let fresh: Vec<String> = vec![];
+    d.wal_pend = fresh;
     // Discard WAL entries for this txn by checkpointing restored state
     wal_checkpoint(d);
 }
@@ -1497,7 +1526,7 @@ fn wal_log_mutation(d: &mut DB, sql: String) ~ Console + FileSystem + Process {
         let ol = wal_op_line(sql);
         d.txn_hash = fnv_extend(d.txn_hash, ol + "\n");
         if d.hist_on { vec_push(d.txn_parts, ol + "\n"); }
-        wal_write(d, ol, "wal_op");
+        wal_hold_line(d, ol);
     } else {
         // Auto-commit: wrap in a single-statement transaction, written as one
         // append so a torn write cannot leave a COMMIT without its OP.
@@ -6390,6 +6419,194 @@ fn eval_join_where(d: &DB, cs1: i32, cc1: i32, rs1: i32, r1: i32,
 // SET column value for rows that match the WHERE condition. Rebuilds
 // the entire cells array (no in-place mutation due to Vec immutability
 // constraints). Rebuilds affected indexes afterward.
+// The index whose sorted entries give every row an UPDATE or DELETE WHERE
+// can match, or -1. Only a WHERE that is one bare equality on an indexed
+// column qualifies. The index's equality search uses compare_vals, which
+// on a TEXT column compares text while eval_where compares two numeric
+// strings as numbers ('1' = '1.0'); so on a TEXT column a numeric right side
+// does not qualify. Callers still check each candidate against the WHERE.
+fn where_eq_index(d: &mut DB, tidx: i32, cs: i32, cc: i32, tname: String) -> i32 {
+    if d.has_where != 1 || d.wc_count != 1 || d.wn_count != 1 { return 0 - 1; }
+    if vec_get(d.wc_neg, 0) != 0 || vec_get(d.wc_op, 0) != 0 { return 0 - 1; }
+    let wcol = resolve_col(d, cs, cc, tname, d.alias1, sp_get(d, vec_get(d.wc_left, 0)));
+    if wcol < 0 { return 0 - 1; }
+    let ix = find_index_for(d, tidx, wcol);
+    if ix < 0 { return 0 - 1; }
+    let ctype = vec_get(d.col_types, cs + wcol);
+    let wr = sp_get(d, vec_get(d.wc_right, 0));
+    if ctype != 0 && ctype != 1 && is_numeric_str(wr) { return 0 - 1; }
+    refresh_index(d, ix);
+    ix
+}
+
+// The rows of table tidx that the WHERE matches, in row order: through
+// where_eq_index when it applies, else by a scan.
+fn where_rows(d: &mut DB, tidx: i32, cs: i32, cc: i32, rs: i32, rc: i32, tname: String) -> Vec<i32> {
+    let mut out: Vec<i32> = vec![];
+    let ix = where_eq_index(d, tidx, cs, cc, tname);
+    if ix >= 0 {
+        let cand = index_scan(d, ix, 0, sp_get(d, vec_get(d.wc_right, 0)));
+        let mut i = 0;
+        while i < vec_len(cand) {
+            let r = vec_get(cand, i);
+            if eval_compound_where(d, cs, cc, rs, r, tname, d.alias1) { vec_push(out, r); }
+            i = i + 1;
+        }
+        // Equal keys sit in row order in the index, so out is ascending.
+        return out;
+    }
+    let mut r = 0;
+    while r < rc {
+        if eval_compound_where(d, cs, cc, rs, r, tname, d.alias1) { vec_push(out, r); }
+        r = r + 1;
+    }
+    out
+}
+
+// Order of index entry e (absolute position in idx_keys) against the pair
+// (key, row): by key under compare_vals, then by row id.
+fn ix_cmp(d: &DB, e: i32, key: String, row: i32, col_type: i32) -> i64 {
+    let c = compare_vals(sp_get(d, vec_get(d.idx_keys, e)), key, col_type);
+    if c != 0 { return c; }
+    vec_get(d.idx_rowids, e) - row
+}
+
+// First position in [ks, ks + kc) whose entry is not below (key, row).
+fn ix_lower(d: &DB, ks: i32, kc: i32, key: String, row: i32, col_type: i32) -> i32 {
+    let mut lo = ks;
+    let mut hi = ks + kc;
+    while lo < hi {
+        let mid = (lo + hi) / 2;
+        if ix_cmp(d, mid, key, row, col_type) < 0 { lo = mid + 1; } else { hi = mid; }
+    }
+    lo
+}
+
+// Row `row` of index ix changed its key from old_id to new_id (pool ids):
+// move its entry to the sorted place a rebuild would give it, shifting only
+// the entries between the two places. Returns false when the entry is not
+// where the index says (the caller then rebuilds).
+fn ix_move(d: &mut DB, ix: i32, row: i32, old_id: i32, new_id: i32, col_type: i32) -> bool {
+    let ks = vec_get(d.idx_key_starts, ix);
+    let kc = vec_get(d.idx_key_counts, ix);
+    let p = ix_lower(d, ks, kc, sp_get(d, old_id), row, col_type);
+    if p >= ks + kc { return false; }
+    if vec_get(d.idx_rowids, p) != row { return false; }
+    let mut q = ix_lower(d, ks, kc, sp_get(d, new_id), row, col_type);
+    let keys = d.idx_keys;
+    let rids = d.idx_rowids;
+    if q > p {
+        q = q - 1;
+        let mut i = p;
+        while i < q {
+            keys[i] = vec_get(keys, i + 1);
+            rids[i] = vec_get(rids, i + 1);
+            i = i + 1;
+        }
+    } else {
+        let mut i = p;
+        while i > q {
+            keys[i] = vec_get(keys, i - 1);
+            rids[i] = vec_get(rids, i - 1);
+            i = i - 1;
+        }
+    }
+    keys[q] = new_id;
+    rids[q] = row;
+    true
+}
+
+// Copy of row `base` (cell position of its first column) of cc cells with
+// column scol set to new_id, for computing the row's new constraint keys.
+fn row_with(d: &DB, base: i32, cc: i32, scol: i32, new_id: i32) -> Vec<i32> {
+    let mut tmp: Vec<i32> = vec![];
+    let mut c = 0;
+    while c < cc {
+        if c == scol { vec_push(tmp, new_id); } else { vec_push(tmp, vec_get(d.cells, base + c)); }
+        c = c + 1;
+    }
+    tmp
+}
+
+// Check the constraints on column scol of table t for an UPDATE that sets
+// rows[i] (table row numbers) to new_ids[i]. The rule is the one the whole-
+// table check had: the table as it would be after the UPDATE must hold every
+// constraint. Unique keys go through the key map: a new key fails when
+// another row that keeps its key holds it, or when two changed rows share
+// it. Returns the error text, or "". On success the map is brought up to
+// date (or marked for a rebuild when an INTEGER PRIMARY KEY changed).
+fn con_check_update(d: &mut DB, t: i32, rs: i32, cc: i32, scol: i32, rows: Vec<i32>, new_ids: Vec<i32>) -> String {
+    let n = vec_len(rows);
+    let mut map_fix = false;
+    let mut ipk_moved = false;
+    let mut k = 0;
+    while k < vec_len(d.con_tbl) {
+        let mut on = false;
+        if vec_get(d.con_tbl, k) == t {
+            let st = vec_get(d.con_cs, k);
+            let mut j = 0;
+            while j < vec_get(d.con_cn, k) { if vec_get(d.con_cols, st + j) == scol { on = true; } j = j + 1; }
+        }
+        if on {
+            if vec_get(d.con_kind, k) == 2 {
+                let mut i = 0;
+                while i < n {
+                    if is_null(sp_get(d, vec_get(new_ids, i))) { return con_fail_text(d, k, t); }
+                    i = i + 1;
+                }
+            } else {
+                if !d.con_map_ok { con_map_build(d); }
+                if con_is_ipk(d, k) { ipk_moved = true; }
+                let olds: HashMap<String, f64> = map_new();
+                let news: HashMap<String, f64> = map_new();
+                let mut i = 0;
+                while i < n {
+                    let ok = con_key(d, k, d.cells, rs + vec_get(rows, i) * cc);
+                    if ok.len() > 0 { map_insert(olds, ok, 1.0); }
+                    i = i + 1;
+                }
+                i = 0;
+                while i < n {
+                    let tmp = row_with(d, rs + vec_get(rows, i) * cc, cc, scol, vec_get(new_ids, i));
+                    let nk = con_key(d, k, tmp, 0);
+                    if nk.len() > 0 {
+                        if map_contains(d.con_map, nk) && !map_contains(olds, nk) { return con_fail_text(d, k, t); }
+                        if map_contains(news, nk) { return con_fail_text(d, k, t); }
+                        map_insert(news, nk, 1.0);
+                    }
+                    i = i + 1;
+                }
+                map_fix = true;
+            }
+        }
+        k = k + 1;
+    }
+    if !map_fix { return ""; }
+    // The largest INTEGER PRIMARY KEY may have moved down: rebuild on next use.
+    if ipk_moved { d.con_map_ok = false; return ""; }
+    // Every constraint holds: swap the changed rows' old keys for the new.
+    k = 0;
+    while k < vec_len(d.con_tbl) {
+        if vec_get(d.con_tbl, k) == t && vec_get(d.con_kind, k) != 2 {
+            let mut i = 0;
+            while i < n {
+                let ok = con_key(d, k, d.cells, rs + vec_get(rows, i) * cc);
+                if ok.len() > 0 { map_remove(d.con_map, ok); }
+                i = i + 1;
+            }
+            i = 0;
+            while i < n {
+                let tmp = row_with(d, rs + vec_get(rows, i) * cc, cc, scol, vec_get(new_ids, i));
+                let nk = con_key(d, k, tmp, 0);
+                if nk.len() > 0 { map_insert(d.con_map, nk, 1.0); }
+                i = i + 1;
+            }
+        }
+        k = k + 1;
+    }
+    ""
+}
+
 fn exec_update(d: &mut DB) ~ Console {
     let tname = sp_get(d, d.p_table);
     let tidx = find_table(d, tname);
@@ -6441,66 +6658,88 @@ fn exec_update(d: &mut DB) ~ Console {
         }
     }
 
+    // P20: find the rows, compute every new value and check the constraints
+    // before any cell changes; then write the changed cells in place and move
+    // their entries in the indexes on the SET column.
+    let rows = where_rows(d, tidx, cs, cc, rs, rc, tname);
+    let n = vec_len(rows);
+    if n == 0 { return; }
     let new_val_id = sp_add(d, set_val_text);
-    let total_cells = vec_len(d.cells);
-    let mut new_cells: Vec<i32> = vec![];
-    let mut updated = 0;
+    let mut new_ids: Vec<i32> = vec![];
     let mut arith_err = false;
-    let mut ci: i64 = 0;
-    while ci < total_cells {
-        let mut cell_id = vec_get(d.cells, ci);
-        if ci >= rs {
-            let offset = ci - rs;
-            if offset < rc * cc {
-                let row_in_tbl = offset / cc;
-                let col_in_row = offset - row_in_tbl * cc;
-                if col_in_row == scol {
-                    let do_update = eval_compound_where(d, cs, cc, rs, row_in_tbl, tname, d.alias1);
-                    if do_update {
-                        if d.set_op >= 0 {
-                            let cur = sp_get(d, cell_id);
-                            if is_int_str(cur) {
-                                let a = parse_int_str(cur);
-                                let mut r = 0;
-                                if d.set_op == 0 { r = a + operand_int; }
-                                else if d.set_op == 1 { r = a - operand_int; }
-                                else if d.set_op == 2 { r = a * operand_int; }
-                                else { r = a / operand_int; }
-                                cell_id = sp_add(d, int_to_str(r));
-                            } else {
-                                arith_err = true;
-                            }
-                        } else {
-                            cell_id = new_val_id;
-                        }
-                        updated = updated + 1;
-                    }
-                }
+    let mut i = 0;
+    while i < n {
+        let mut cell_id = new_val_id;
+        if d.set_op >= 0 {
+            let cur = sp_get(d, vec_get(d.cells, rs + vec_get(rows, i) * cc + scol));
+            if is_int_str(cur) {
+                let a = parse_int_str(cur);
+                let mut r = 0;
+                if d.set_op == 0 { r = a + operand_int; }
+                else if d.set_op == 1 { r = a - operand_int; }
+                else if d.set_op == 2 { r = a * operand_int; }
+                else { r = a / operand_int; }
+                cell_id = sp_add(d, int_to_str(r));
+            } else {
+                arith_err = true;
             }
         }
-        vec_push(new_cells, cell_id);
-        ci = ci + 1;
+        vec_push(new_ids, cell_id);
+        i = i + 1;
     }
     if arith_err {
         d.stmt_failed = true;
         println!("Error: UPDATE arithmetic on a non-integer value in column '{}'", set_col_name);
         return;
     }
-    if updated > 0 {
-        let err = con_check_table(d, tidx, new_cells, rs, rc, cc, scol);
-        if err.len() > 0 {
-            d.stmt_failed = true;
-            println!("Error: {}", err);
-            return;
-        }
+    let err = con_check_update(d, tidx, rs, cc, scol, rows, new_ids);
+    if err.len() > 0 {
+        d.stmt_failed = true;
+        println!("Error: {}", err);
+        return;
     }
-    d.cells = new_cells;
-    update_indexes_for_table(d, tidx);
+    let mut old_ids: Vec<i32> = vec![];
+    let cells = d.cells;
+    i = 0;
+    while i < n {
+        let pos = rs + vec_get(rows, i) * cc + scol;
+        vec_push(old_ids, vec_get(cells, pos));
+        cells[pos] = vec_get(new_ids, i);
+        i = i + 1;
+    }
+    // A stale index is rebuilt from the cells on its next read, and rows past
+    // an index's count are folded in from the cells by merge_new_rows; only
+    // entries already in a current index move.
+    if d.idx_stale { return; }
+    let ctype = vec_get(d.col_types, cs + scol);
+    let mut ix = 0;
+    while ix < d.idx_count {
+        if vec_get(d.idx_tables, ix) == tidx && vec_get(d.idx_col_indices, ix) == scol {
+            let kc = vec_get(d.idx_key_counts, ix);
+            if n > 64 && n * 8 > kc {
+                rebuild_index(d, ix);
+            } else {
+                let mut ok = true;
+                i = 0;
+                while i < n && ok {
+                    let r = vec_get(rows, i);
+                    if r < kc {
+                        if vec_get(old_ids, i) != vec_get(new_ids, i) {
+                            ok = ix_move(d, ix, r, vec_get(old_ids, i), vec_get(new_ids, i), ctype);
+                        }
+                    }
+                    i = i + 1;
+                }
+                if !ok { rebuild_index(d, ix); }
+            }
+        }
+        ix = ix + 1;
+    }
 }
 
-// Execute DELETE FROM. Rebuilds the cells array, skipping rows that match
-// the WHERE condition. Adjusts row counts and row starts for all tables.
-// Rebuilds affected indexes afterward.
+// Execute DELETE FROM in place (P20): compact the table's rows and every
+// later cell down over the deleted ones, truncate the array, and renumber
+// the row ids in the table's indexes in one integer pass (no sort).
 fn exec_delete(d: &mut DB) ~ Console {
     let tname = sp_get(d, d.p_table);
     let tidx = find_table(d, tname);
@@ -6518,79 +6757,100 @@ fn exec_delete(d: &mut DB) ~ Console {
     // unknown column deletes nothing instead of silently matching zero rows.
     if !where_cols_ok(d, cs, cc, tname, d.alias1) { return; }
 
-    // Find rows to keep using compound WHERE
-    let mut keep_rows: Vec<i32> = vec![];
-    let mut keep_count = 0;
+    let del = where_rows(d, tidx, cs, cc, rs, rc, tname);
+    let deleted = vec_len(del);
+    if deleted == 0 { return; }
+
+    // newid[r]: row r's number after the delete, or -1 when it goes.
+    let mut newid: Vec<i32> = vec![];
     let mut r = 0;
+    let mut di = 0;
+    let mut kept = 0;
     while r < rc {
-        let should_delete = eval_compound_where(d, cs, cc, rs, r, tname, d.alias1);
-        if !should_delete {
-            vec_push(keep_rows, r);
-            keep_count = keep_count + 1;
+        if di < deleted && vec_get(del, di) == r {
+            vec_push(newid, 0 - 1);
+            di = di + 1;
+        } else {
+            vec_push(newid, kept);
+            kept = kept + 1;
         }
         r = r + 1;
     }
 
-    let deleted = rc - keep_count;
-    if deleted == 0 { return; }
-
-    // Rebuild cells: copy non-table cells, then kept rows, then rest
-    let total_cells = vec_len(d.cells);
-    let mut new_cells: Vec<i32> = vec![];
-
-    // Copy cells before this table's rows
-    let mut ci: i64 = 0;
-    while ci < rs {
-        vec_push(new_cells, vec_get(d.cells, ci));
-        ci = ci + 1;
-    }
-
-    // Copy kept rows
-    let mut ki = 0;
-    while ki < keep_count {
-        let row = vec_get(keep_rows, ki);
-        let mut col = 0;
-        while col < cc {
-            vec_push(new_cells, vec_get(d.cells, rs + row * cc + col));
-            col = col + 1;
+    // Compact: kept rows from the first deleted one on, then every later cell.
+    let cells = d.cells;
+    let total_cells = vec_len(cells);
+    let first = vec_get(del, 0);
+    let mut w: i64 = rs + first * cc;
+    r = first;
+    while r < rc {
+        if vec_get(newid, r) >= 0 {
+            let src = rs + r * cc;
+            let mut c = 0;
+            while c < cc { cells[w] = vec_get(cells, src + c); w = w + 1; c = c + 1; }
         }
-        ki = ki + 1;
+        r = r + 1;
     }
-
-    // Copy cells after this table's rows
-    let after = rs + rc * cc;
-    ci = after;
-    while ci < total_cells {
-        vec_push(new_cells, vec_get(d.cells, ci));
-        ci = ci + 1;
-    }
-    d.cells = new_cells;
-
-    // Update row count
-    let mut new_rc: Vec<i32> = vec![];
-    let mut ri = 0;
-    while ri < d.tbl_count {
-        if ri == tidx { vec_push(new_rc, keep_count); }
-        else { vec_push(new_rc, vec_get(d.tbl_row_counts, ri)); }
-        ri = ri + 1;
-    }
-    d.tbl_row_counts = new_rc;
-
-    // Update row_starts for tables after this one
+    let mut ci: i64 = rs + rc * cc;
+    while ci < total_cells { cells[w] = vec_get(cells, ci); w = w + 1; ci = ci + 1; }
     let shift = deleted * cc;
-    let mut new_rs: Vec<i32> = vec![];
-    let mut si = 0;
+    let mut p = 0;
+    while p < shift { vec_pop(cells); p = p + 1; }
+
+    let trc = d.tbl_row_counts;
+    trc[tidx] = kept;
+    let trs = d.tbl_row_starts;
+    let mut si = tidx + 1;
     while si < d.tbl_count {
-        if si > tidx {
-            vec_push(new_rs, vec_get(d.tbl_row_starts, si) - shift);
-        } else {
-            vec_push(new_rs, vec_get(d.tbl_row_starts, si));
-        }
+        trs[si] = vec_get(trs, si) - shift;
         si = si + 1;
     }
-    d.tbl_row_starts = new_rs;
 
-    update_indexes_for_table(d, tidx);
+    if d.idx_stale { return; }
+    // Renumber the table's indexes: drop the deleted rows' entries, map the
+    // rest through newid (order kept, since newid is increasing), and close
+    // the gap in the flattened arrays.
+    let keys = d.idx_keys;
+    let rids = d.idx_rowids;
+    let kcs = d.idx_key_counts;
+    let kss = d.idx_key_starts;
+    let mut ix = 0;
+    while ix < d.idx_count {
+        if vec_get(d.idx_tables, ix) == tidx {
+            let ks = vec_get(kss, ix);
+            let kc = vec_get(kcs, ix);
+            let mut out = ks;
+            let mut e = ks;
+            while e < ks + kc {
+                let nr = vec_get(newid, vec_get(rids, e));
+                if nr >= 0 {
+                    keys[out] = vec_get(keys, e);
+                    rids[out] = nr;
+                    out = out + 1;
+                }
+                e = e + 1;
+            }
+            let gone = ks + kc - out;
+            if gone > 0 {
+                let mut m = ks + kc;
+                let end = vec_len(keys);
+                while m < end {
+                    keys[m - gone] = vec_get(keys, m);
+                    rids[m - gone] = vec_get(rids, m);
+                    m = m + 1;
+                }
+                let mut q = 0;
+                while q < gone { vec_pop(keys); vec_pop(rids); q = q + 1; }
+                kcs[ix] = kc - gone;
+                let mut j = ix + 1;
+                while j < d.idx_count {
+                    kss[j] = vec_get(kss, j) - gone;
+                    j = j + 1;
+                }
+            }
+        }
+        ix = ix + 1;
+    }
 }
 
 fn exec_drop(d: &mut DB) ~ Console {
@@ -7361,7 +7621,8 @@ fn index_scan(d: &DB, ix_id: i32, op: i32, rval: String) -> Vec<i32> {
 }
 
 // Mark indexes for a full rebuild after a mutation that moves or rewrites
-// existing rows (UPDATE, DELETE, ALTER). The rebuild runs on the next index
+// existing rows (ALTER TABLE).
+// UPDATE and DELETE keep the indexes current in place instead (P20). The rebuild runs on the next index
 // read, so a run of mutations pays for one rebuild, not one per statement.
 // tidx is kept for the call sites; every index is invalidated, which is the
 // simple safe choice because row ids are table-relative and DELETE shifts them.
@@ -9317,48 +9578,12 @@ fn con_check_insert(d: &mut DB, t: i32, rows: Vec<i32>, nrows: i32) -> String {
     ""
 }
 
-// Check table t as it would be after an UPDATE of column scol (cells holds
-// the whole array, the table's rows at rs). Only constraints on scol run.
-fn con_check_table(d: &DB, t: i32, cells: Vec<i32>, rs: i32, rc: i32, cc: i32, scol: i32) -> String {
-    let mut k = 0;
-    while k < vec_len(d.con_tbl) {
-        if vec_get(d.con_tbl, k) == t {
-            let n = vec_get(d.con_cn, k);
-            let st = vec_get(d.con_cs, k);
-            let mut on = false;
-            let mut j = 0;
-            while j < n { if vec_get(d.con_cols, st + j) == scol { on = true; } j = j + 1; }
-            if on {
-                if vec_get(d.con_kind, k) == 2 {
-                    let mut r = 0;
-                    while r < rc {
-                        if is_null(sp_get(d, vec_get(cells, rs + r * cc + scol))) { return con_fail_text(d, k, t); }
-                        r = r + 1;
-                    }
-                } else {
-                    let seen: HashMap<String, f64> = map_new();
-                    let mut a = 0;
-                    while a < rc {
-                        let key = con_key(d, k, cells, rs + a * cc);
-                        if key.len() > 0 {
-                            if map_contains(seen, key) { return con_fail_text(d, k, t); }
-                            map_insert(seen, key, 1.0);
-                        }
-                        a = a + 1;
-                    }
-                }
-            }
-        }
-        k = k + 1;
-    }
-    ""
-}
-
 fn exec_sql_no_wal(d: &mut DB, input: String) ~ Console + FileSystem + Process {
     reset_parser(d, input);
     parse_sql(d);
     let st = d.stmt_type;
-    if st != 0 && st != 20 && st != 1 { d.con_map_ok = false; }
+    // INSERT and UPDATE keep the key map current themselves (P17, P20).
+    if st != 0 && st != 20 && st != 1 && st != 3 { d.con_map_ok = false; }
     if st == 0 { exec_select(d); }
     else if st == 20 { exec_xselect(d); }
     else if st == 1 { exec_insert(d); }
@@ -9608,7 +9833,8 @@ fn exec_sql(d: &mut DB, input: String) ~ Console + FileSystem + Process {
     // printed an error and changed nothing (P16).
     d.state_sha = "";
     d.stmt_failed = false;
-    if st != 1 { d.con_map_ok = false; }
+    // INSERT and UPDATE keep the key map current themselves (P17, P20).
+    if st != 1 && st != 3 { d.con_map_ok = false; }
     if st == 1 { exec_insert(d); }
     else if st == 2 { exec_create(d); }
     else if st == 3 { exec_update(d); }

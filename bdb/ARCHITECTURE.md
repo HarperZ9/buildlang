@@ -54,7 +54,7 @@ The struct fields are grouped into:
 | Parser | `input`, `pos`, `tk_type`, `tk_val`, `stmt_type`, `p_table`, `p_cols`, ... | Tokenizer + AST state |
 | WHERE | `has_where`, `w_left`, `w_op`, `w_right`, `w_logic`, `w_in_vals1`, ... | Parsed WHERE conditions |
 | WAL | `wal_path`, `in_transaction`, `txn_id`, `wal_bytes`, `db_bytes` | WAL state and checkpoint policy inputs |
-| Index upkeep | `idx_stale` | Set when a mutation moved or rewrote rows; the next index read rebuilds |
+| Index upkeep | `idx_stale` | Set by ALTER and ROLLBACK; the next index read rebuilds. UPDATE and DELETE keep indexes current in place (P20) |
 | Snapshot | `snap_cells`, `snap_row_starts`, `snap_tbl_names`, ... | Rollback snapshot |
 
 ### String Pool Pattern
@@ -109,7 +109,7 @@ Every write opens the file in append mode (`append_file`); nothing already writt
 
 **Recovery**: On startup, `wal_replay()` reads the WAL in one pass. A `TXID` line opens a transaction, and a `COMMIT` record whose hash matches replays that transaction's `OP` lines. A transaction without a matching `COMMIT` (a crash, a torn record, a record lost to a power cut before the WAL was flushed, a ROLLBACK, a process that exited inside BEGIN) is skipped. A bare `COMMIT` written by a build before the hash counts only when its line break survived. Replay then checkpoints and clears the WAL.
 
-**Transactions**: `BEGIN` takes a snapshot and appends `TXID`. `COMMIT` appends the marker. `ROLLBACK` restores from snapshot and checkpoints. A clean exit inside `BEGIN` appends `HOLD <txid>`; the next process replays the committed records, snapshots, applies the held transaction's statements, appends `RESUME <txid>` and carries on inside the transaction, so `BEGIN`, the statements and `COMMIT` or `ROLLBACK` can each be their own process. An exit that is not clean leaves no `HOLD` at the end of the WAL, and the transaction is dropped.
+**Transactions**: `BEGIN` takes a snapshot. Its `TXID` line and each statement's `OP` line are held in memory (`wal_pend`) and `COMMIT` appends them with its marker in one write (P21); nothing in an open transaction was durable before its `COMMIT`, so holding them loses nothing. `ROLLBACK` restores from snapshot and checkpoints. A clean exit inside `BEGIN` appends the held lines and `HOLD <txid>`; the next process replays the committed records, snapshots, applies the held transaction's statements, appends `RESUME <txid>` and carries on inside the transaction, so `BEGIN`, the statements and `COMMIT` or `ROLLBACK` can each be their own process. An exit that is not clean leaves no `HOLD` at the end of the WAL, and the transaction is dropped.
 
 **Auto-commit**: A mutation outside an explicit transaction appends one `TXID / OP / COMMIT` record in a single write.
 
@@ -117,7 +117,7 @@ Every write opens the file in append mode (`append_file`); nothing already writt
 
 **Durability**: A statement is durable once its `COMMIT` line is in the WAL, the same point as before. The old code rewrote the whole WAL for every line and the whole .db after every statement; both truncate a file, so a crash during either could lose committed data. An append can only tear the last record, and a torn record has no `COMMIT`, so it is skipped. No write calls fsync. `bdb/tests/test_qdb_wal_recovery.py` truncates a crash-left WAL at every byte offset and checks the recovered rows against this rule.
 
-**Checkpoint safety**: a checkpoint writes the new state to `<db>.tmp`, flushes it (`fsync_file`) and renames it over the `.db` (`rename_file`, one step), then clears the WAL; a commit flushes the WAL after appending it (P14; `QDB_SYNC=off` skips the flushes). Builds before P14 wrote the state twice, to `<db>.ckpt` ending in `QDB CHECKPOINT COMPLETE` and then to the `.db`; a complete `.ckpt` from such a build still wins at load and is cleared at the next checkpoint. The `.db` starts with `QDB 1 <txid>`, the last transaction it holds, and replay skips WAL transactions at or below it, so a crash between the rewrite and the WAL clear does not apply them twice. `bdb/tests/test_qdb_crash.py` stops each statement of a workload at every durable write, before it and halfway through it, and checks the recovered committed state (194 crash points, 0 violations after P14 on 2026-11-09; 170 and 0 with the `.ckpt` design; 24 violations of 104 before it). The crash test stops the process; a power cut, which can drop or reorder unflushed writes, is not simulated.
+**Checkpoint safety**: a checkpoint writes the new state to `<db>.tmp`, flushes it (`fsync_file`) and renames it over the `.db` (`rename_file`, one step), then clears the WAL; a commit flushes the WAL after appending it (P14; `QDB_SYNC=off` skips the flushes). Builds before P14 wrote the state twice, to `<db>.ckpt` ending in `QDB CHECKPOINT COMPLETE` and then to the `.db`; a complete `.ckpt` from such a build still wins at load and is cleared at the next checkpoint. The `.db` starts with `QDB 1 <txid>`, the last transaction it holds, and replay skips WAL transactions at or below it, so a crash between the rewrite and the WAL clear does not apply them twice. `bdb/tests/test_qdb_crash.py` stops each statement of a workload at every durable write, before it and halfway through it, and checks the recovered committed state (176 crash points, 0 violations after P21 on 2026-11-09; 194 after P14; 170 and 0 with the `.ckpt` design; 24 violations of 104 before it). The crash test stops the process; a power cut, which can drop or reorder unflushed writes, is not simulated.
 
 ## Query Execution Flow
 
@@ -139,8 +139,8 @@ dispatch by d.stmt_type:
          |-> basic scan     -> filter, sort, limit, distinct, print
   1 -> exec_insert()        [add row to cells array]
   2 -> exec_create()        [add table metadata]
-  3 -> exec_update()        [rebuild cells with new values]
-  4 -> exec_delete()        [rebuild cells, skip deleted rows]
+  3 -> exec_update()        [changed cells in place; index entries moved]
+  4 -> exec_delete()        [compact in place; index row ids renumbered]
   5 -> exec_drop()          [remove table + adjust arrays]
   6 -> exec_create_index()  [register + rebuild sorted pairs]
   7 -> wal_begin()
