@@ -537,6 +537,37 @@ harness unchanged. Before: 1,251 of 2,000 on this branch, re-run before the chan
   treats a completed rename as durable. 10,000 seeds cover 35 to 38 distinct outcomes of one
   18-step workload, so the count of seeds overstates the variety.
 
+## After P16: history, AS OF and receipts (2026-11-09, feat/bdb-history)
+
+- **Reproduction:** 1,000 of 1,000 results reproduced by a second process with `AS OF` (P2 seeds 1
+  to 5, 200 queries each, a mutation after every 10 queries, so 21 states per seed), on Windows
+  and on Linux (WSL Ubuntu 24.04). Prediction held.
+- **Overhead of receipts: 44 percent on Linux, 347 percent on Windows. The bar (under 5 percent)
+  and the prediction (2 to 15 percent) both missed.** Linux: 0.049 s for the 1,000 queries with
+  receipts off, 0.071 s on (median of 5 per seed). Windows: 0.209 s off, 0.933 s on. These
+  queries are small (about 50 microseconds each on Linux), and SHA-256 written in BuildLang costs
+  about 6 microseconds per 64-byte block (every add is a checked call, every block allocates), so
+  hashing a result of a few hundred bytes costs more than the query. The next step is a SHA-256
+  builtin in the BuildLang runtime, measured again as P16b.
+- **Cost of AS OF:** process B, which rebuilds the state from the history for every query, took
+  0.51 s on Linux against 1.38 s for process A (which also ran the 62 setup statements and 100
+  mutations, each flushed); 1.94 s against 2.61 s on Windows.
+- **Cost of history on writes** (`bench_qdb_load.py`, Windows, WAL flushed): autocommit 3.97 to
+  4.14 ms per row at 16,000 rows (4 percent), one transaction 0.72 to 0.75 ms per row. A first
+  build kept the open transaction's text as one growing string, which made a 16,000-row
+  transaction quadratic (0.72 ms per row against 0.34 on main, with history off); it now keeps
+  parts, and the same load takes 0.338 ms per row (main 0.335).
+- **Planted checks:** (a) one altered receipt: counted as not reproduced, caught. (b) history
+  rewritten consistently at txid 63 (one UPDATE of row 13 with another value and a recomputed
+  hash): 190 of 190 later receipts not reproduced and none before, caught. Every later receipt
+  fails, more than the queries that read row 13, because the state hash covers the whole state.
+- **Guards:** test_qdb.sh 290 pass, 0 fail; crash test 194 points, 0 violations; P15 0 of 10,000
+  with the digest unchanged (Windows and Linux); P2 2,000 of 2,000; text 0 changed; WAL 0
+  failures with the reference engine; library 0 failures; reference differential 16 of 16.
+- Limits: the crash and power-cut tests do not run with history on; `AS OF` replays the history
+  from the base on every query; a receipt covers the state, the query text and the printed result,
+  and says nothing about who ran it.
+
 ## Stage 1: a correct, durable single-file engine
 
 | Row | Check (fails if) | Status | Evidence |
@@ -547,6 +578,7 @@ harness unchanged. Before: 1,251 of 2,000 on this branch, re-run before the chan
 | 1d Cross-process transaction | either P4 case misses | PASS | four checks in test_qdb.sh (`xproc_*`), differential process mode equals REPL mode on 8 seeds |
 | 1e Text round trip | any P5 value changes | PASS | 2,000 of 2,000 (`test_qdb_text.py`); format 0 files still load |
 | 1f NULL apart from '' | `INSERT (NULL)` and `INSERT ('')` are indistinguishable by `IS NULL`, or `NOT (NULL = x)` is true | PASS | P7: NULL is its own value with three-valued logic; 19 checks in test_qdb.sh; P2 null_vs_empty 519 to 0. Before: both stored an empty cell |
+| 1h History, AS OF and receipts | a second process with `AS OF` fails to reproduce any of the P16 results, or receipts cost 5 percent of query time or more | FAIL | P16: 1,000 of 1,000 reproduced on Windows and Linux; overhead 44 percent (Linux) and 347 percent (Windows) with SHA-256 written in BuildLang |
 | 1g JOIN gaps that fail closed | a secondary ORDER BY key over a grouped JOIN, DISTINCT over a grouped JOIN, or COUNT(DISTINCT) over any JOIN is refused | FAIL | each refused with a specific message (`bdb/README.md`, Known limitations) |
 
 ## Stage 2: SQL coverage against the outside corpus
