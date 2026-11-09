@@ -623,6 +623,9 @@ static int32_t build_string_byte_at(BuildString s, size_t i) {
 // serves as both an rvalue and a store target; `bl_index_oob` is the shared
 // abort the Vec runtime calls, where the index is already a size_t (a negative
 // source index has wrapped, so it prints back through the signed cast).
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((noreturn, cold))
+#endif
 static void bl_index_oob(long long index, size_t len) {
     fprintf(stderr, "index out of bounds: the len is %llu but the index is %lld\n",
             (unsigned long long)len, index);
@@ -662,9 +665,47 @@ static void build_vec_push(BuildVec* v, const void* elem) {
     v->len++;
 }
 
+// The check stays on every access; it is marked unlikely so the compiler
+// lays the abort out of the hot path.
+#if defined(__GNUC__) || defined(__clang__)
+#define BL_UNLIKELY(c) __builtin_expect(!!(c), 0)
+#else
+#define BL_UNLIKELY(c) (c)
+#endif
 static void* build_vec_get(BuildVec* v, size_t index) {
-    if (index >= v->len) bl_index_oob((long long)index, v->len);
+    if (BL_UNLIKELY(index >= v->len)) bl_index_oob((long long)index, v->len);
     return (char*)v->ptr + index * v->elem_size;
+}
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((noreturn, cold))
+#endif
+static void bl_vec_layout_fail(size_t got, size_t want) {
+    fprintf(stderr, "internal error: a vector holds %zu-byte elements where its type needs %zu bytes\n", got, want);
+    exit(101);
+}
+// A vector element at a hoisted buffer (see the C backend's vec_hoist). The
+// hoisted length is 0 when the vector's element size is not `es`, so every
+// access then fails here and `bl_vat_fail` names the layout fault; otherwise
+// the abort and its message are the ones `build_vec_get` and the
+// element-sized setters print.
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((noreturn, cold))
+#endif
+static void bl_vat_fail(const BuildVec* v, size_t es, size_t i, int set_msg) {
+    if (v->elem_size != es) bl_vec_layout_fail(v->elem_size, es);
+    if (set_msg) {
+        fprintf(stderr, "Vec index out of bounds: %zu >= %zu\n", i, v->len);
+        exit(101);
+    }
+    bl_index_oob((long long)i, v->len);
+}
+static inline char* bl_vat(const BuildVec* v, char* p, size_t n, size_t es, size_t i) {
+    if (BL_UNLIKELY(i >= n)) bl_vat_fail(v, es, i, 0);
+    return p + i * es;
+}
+static inline char* bl_vat_set(const BuildVec* v, char* p, size_t n, size_t es, size_t i) {
+    if (BL_UNLIKELY(i >= n)) bl_vat_fail(v, es, i, 1);
+    return p + i * es;
 }
 
 static void build_vec_free(BuildVec* v) {
