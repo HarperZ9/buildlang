@@ -328,11 +328,31 @@ harness unchanged. Before: 1,251 of 2,000 on this branch, re-run before the chan
   them, among them the `|` row-key collision); text 0 changed; crash 0 of 170; WAL 0; library 0;
   reference differential 16 of 16 with `--no-null --no-float-agg`.
 
+## After P11: expressions (2026-11-09, feat/bdb-expr)
+
+- **P1 sqllogictest** (A6: 16 files run, `select5.test` counted at its P10 score of 0): 8,186 of
+  9,202 query records pass (88.96 percent), 9 wrong, 1,007 rejected (275 in the 16 files run plus
+  `select5.test`'s 732). Before (P10): 1,084, 68, 8,050. `select1` to `select3` pass 5,320 of
+  5,320; `select4` 2,829 of 2,832 (2,830 in an earlier run of the same build: one record sits near
+  the 60 s limit). Statements 1,214 of 1,289 in the 16 files. Prediction (2,500 to 6,000) missed
+  on the high side. Wrong answers are 9 of the 8,195 answered (0.11 percent; bar 2 percent): two in
+  `slt_lang_aggfunc` (MIN over mixed text and numbers; `sum` overflow), seven in `slt_lang_replace`
+  and `slt_lang_update` (statements qdb does not run: REPLACE, UPDATE forms), none on the new path.
+- **Planted check, split result.** The build whose integer division returns a real fails two new
+  test_qdb.sh checks (`x_int_div`, `x_agg_expr`): caught. On P1 it passes 8,187, one more than the
+  real build: not caught. The runner prints an `I` column as `int(float(v))`, which truncates a
+  real quotient to the integer one, so P1 cannot see this fault; the one-record difference is the
+  record near the time limit. Kept as a null for P1's power over integer arithmetic.
+- **P2:** 2,000 of 2,000, unchanged: none of its queries takes the new path.
+- **Guards:** test_qdb.sh 274 pass, 0 fail (`where_arith_plus_closed` and `where_arith_pct_closed`
+  asserted a refusal and now assert answers; 17 checks added); text 0 changed; crash 0 of 170;
+  WAL 0; library 0; reference differential 16 of 16 with `--no-null --no-float-agg`.
+
 ## Stage 1: a correct, durable single-file engine
 
 | Row | Check (fails if) | Status | Evidence |
 |---|---|---|---|
-| 1a Regression gate | `bdb/tests/test_qdb.sh` reports any FAIL | PASS | 257 pass, 0 fail after P10; 250 after P9; 244 after P8; 241 after P7; 222 after the completion changes (214/0/1 at the move) |
+| 1a Regression gate | `bdb/tests/test_qdb.sh` reports any FAIL | PASS | 274 pass, 0 fail after P11; 257 after P10; 250 after P9; 244 after P8; 241 after P7; 222 after the completion changes (214/0/1 at the move) |
 | 1b SQLite differential | any of the P2 queries disagrees, with numbers compared as numbers | PASS | 2,000 of 2,000 after P8, a CI gate; 1,944 after P7; 1,251 at the move (519 null_vs_empty, 230 rows, 46 number_text) |
 | 1c Crash recovery | any P3 crash point breaks the rule | PASS | 0 violations of 170 (24 of 104 at the move); two mutants caught |
 | 1d Cross-process transaction | either P4 case misses | PASS | four checks in test_qdb.sh (`xproc_*`), differential process mode equals REPL mode on 8 seeds |
@@ -344,11 +364,11 @@ harness unchanged. Before: 1,251 of 2,000 on this branch, re-run before the chan
 
 | Row | Check (fails if) | Status | Evidence |
 |---|---|---|---|
-| 2a sqllogictest queries | any P1 query record does not pass | FAIL | 1,084 of 9,202 (11.78 percent) after P10; 199 after P9; 33 after P7 and P8; 32 at the move; `bdb/tests/slt_run.py` |
-| 2b Expressions in the select list | `SELECT a+1, a*b-c FROM t` refused or wrong | FAIL | refused: "expected keyword 'FROM'"; the largest single cause of P1 rejections |
+| 2a sqllogictest queries | any P1 query record does not pass | FAIL | 8,186 of 9,202 (88.96 percent) after P11, `select5.test` not run (A6); 1,084 after P10; 32 at the move; `bdb/tests/slt_run.py` |
+| 2b Expressions in the select list | `SELECT a+1, a*b-c FROM t` refused or wrong | PASS | P11: arithmetic, CASE, functions, correlated subqueries; `select1` to `select3` 5,320 of 5,320 |
 | 2c Column types with arguments and constraints | `VARCHAR(30)`, `INTEGER PRIMARY KEY`, `UNIQUE` refused | FAIL | P9: type arguments are read (`VARCHAR(30)`, `DECIMAL(10, 2)`), statements 134 to 1,918 of 1,993; `PRIMARY KEY` is parsed and not enforced; `UNIQUE` is refused |
-| 2d CASE, scalar functions (abs, coalesce) | refused or wrong | NOT BUILT | |
-| 2e Correlated subqueries, EXISTS | refused or wrong | NOT BUILT | |
+| 2d CASE, scalar functions (abs, coalesce) | refused or wrong | PASS | P11: searched and simple CASE, `abs`, `coalesce`, `ifnull`, `nullif` |
+| 2e Correlated subqueries, EXISTS | refused or wrong | PASS | P11: scalar, EXISTS and IN subqueries naming outer columns (`x_corr_subq`, `x_exists`) |
 
 ## Stage 3: scale
 
