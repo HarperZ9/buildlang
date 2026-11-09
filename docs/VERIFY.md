@@ -76,6 +76,36 @@ No SMT solver is required. An external solver may be added as an optional execut
 cvc5 (BSD-3-Clause) fit AGPL-3.0 distribution because nothing is linked or bundled. No Lean or TeX
 toolchain is used.
 
+## V2: a bit-precise solver inside `buildc` (preregistered 2026-11-09, before the run)
+
+The change: when the linear prover cannot close an obligation, it goes to a bit-precise decision
+procedure that ships in `buildc` (`compiler/src/verify/smt`): the obligation is bit-blasted to CNF
+with a width at which no arithmetic wraps, and solved by a CDCL SAT solver. An UNSAT answer counts
+as a proof only after an independent checker replays the solver's learned clauses (reverse unit
+propagation). A SAT answer is only a candidate input: the concrete evaluator runs it, and only a
+run that makes the claim false is reported as a counterexample. No outside solver is downloaded,
+linked or run.
+
+Baseline on main (88ede1e), measured before the change:
+
+- `tests/verify/smt_false.bld`, 24 false claims: 6 refuted, 18 unknown, 0 proved.
+- `tests/verify/smt_true.bld`, 14 true claims: 5 proved, 9 unknown, 0 refuted.
+
+Bounds and predictions, each a merge condition unless marked as a prediction:
+
+- S1 (condition). The false set: 0 proved, 0 inconsistent. Prediction: all 24 refuted.
+- S2 (condition). The true set: 0 refuted, 0 inconsistent. Prediction: at least 12 of 14 proved;
+  `inverse_round_trip` (two chained 64-bit multiplications) may stay unknown within the conflict
+  budget.
+- S3 (condition). The existing verdicts in `compiler/tests/verify_laws.rs` and the false-accept set
+  in `src/verify/tests.rs` are unchanged.
+- S4 (condition). A planted encoder fault (`drop-carry`: every adder drops its carry) is caught by the
+  differential check that compares the encoder with the concrete bit semantics on random terms. The
+  same check passes without the fault.
+- S5 (condition). The replay checker refuses a forged learned clause and a proof that stops short.
+- S6 (condition). The SAT solver agrees with brute force on 300 random 3-SAT formulas, and every
+  UNSAT answer among them replays.
+
 ## Laws in the repository
 
 `tests/verify` holds three files whose expected verdicts are fixed in `compiler/tests/verify_laws.rs`.

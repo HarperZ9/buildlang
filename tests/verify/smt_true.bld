@@ -1,0 +1,33 @@
+// The V2 acceptance set: true claims over domains too large to run in full.
+
+law lowbit_lt(x: i64) requires x > 0 { (x & (x - 1)) < x }
+
+law xor_twice(a: u64, b: u64) { ((a ^ b) ^ b) == a }
+
+law mul_div(a: i64, b: i64) requires b != 0 && a > -1000000000 && a < 1000000000 && b > -1000000000 && b < 1000000000 {
+    (a * b) / b == a
+}
+
+law shl_is_mul(x: i64) requires x >= 0 && x < 1000000000000 { (x << 3) == x * 8 }
+
+law square_nonneg(x: i64) requires x > -3000000000 && x < 3000000000 { x * x >= 0 }
+
+law inverse_round_trip(x: u64) { x.wrapping_mul(3).wrapping_mul(12297829382473034411) == x }
+
+law abs_nonneg(x: i64) requires x > -9223372036854775807 { x.abs() >= 0 }
+
+law max_ge(a: i64, b: i64) { let m = if a > b { a } else { b }; m >= a && m >= b }
+
+law rem_range(a: i64, b: i64) requires b > 0 { a % b < b && a % b > 0 - b }
+
+law mask_low(x: u64) { (x & 255) <= 255 }
+
+law or_ge(x: u32, y: u32) { (x | y) >= x }
+
+law and_le(x: u32, y: u32) { (x & y) <= y }
+
+law xor_self(x: i64) { (x ^ x) == 0 }
+
+law avg_no_overflow(a: u32, b: u32) { ((a & b) as u64) + (((a ^ b) >> 1) as u64) == ((a as u64) + (b as u64)) / 2 }
+
+fn main() {}
