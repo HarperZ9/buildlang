@@ -181,6 +181,26 @@ Bounds and predictions, each a merge condition unless marked as a prediction:
   divisibility check. Under it the extended false set must show at least one proved or inconsistent
   verdict, so the refusal set is shown to catch a wrong division rule.
 
+### V3 results (2026-11-09)
+
+| Set | Before (main ee630a1) | After |
+|---|---|---|
+| `smt_false.bld`, 29 false claims (24 from V2, 5 new) | 28 refuted, 1 unknown (`sum_sq`), 0 proved | 29 refuted, 0 proved |
+| `smt_true.bld`, 16 true claims (14 from V2, 2 new) | 12 proved, 4 unknown | 16 proved, 0 refuted |
+
+- V1 held: 0 proved, 0 inconsistent, and the prediction of 29 of 29 refuted held. `sum_sq` is refuted
+  at `a = 500000000, b = 0`, an input from the root search that the concrete evaluator re-ran.
+- V2 held: 0 refuted, and 16 of 16 proved as predicted. `mul_div`, `div_exact_scaled` and
+  `rem_exact` close by M1, `inverse_round_trip` by M2, with no SAT call.
+- V3 held: `verify_laws.rs`, the V2 tests and the unit tests in `src/verify` pass unchanged.
+- V4 held: under `BUILDLANG_PLANT_POLY=div-inexact` the false set shows 2 proved (`div_needle`,
+  `rem_needle`) and 6 inconsistent (`div_plus_one` and `rem_plus_one` among them), so a wrong
+  division rule does not pass the refusal set.
+- Cost: the true set runs in about 2 s (48 s under V2, most of it the two multiplier claims that
+  hit the conflict budget); the false set in about 26 s.
+- Not attempted: a new multiplier encoding. The open claims closed without it; a claim that needs
+  bit-level reasoning about products (a nonlinear inequality, say) still goes to V2's solver.
+
 ## Laws in the repository
 
 `tests/verify` holds three files whose expected verdicts are fixed in `compiler/tests/verify_laws.rs`.

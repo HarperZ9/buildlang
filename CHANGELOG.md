@@ -14,6 +14,12 @@ tracked in `STATUS.md`, `README.md`, and
 
 - `fn f(x: f64) -> i32 { floor(x) }` passed `buildc check`, and the C converted with a plain assignment (truncation, undefined out of range). `floor`, `sqrt`, `abs`, `min` and the other free maths builtins now take their float argument's type when no unit decides it, so the check reports BL0354 and asks for `as i32`. `tests/programs/80_icc_profile.bld` now says `floor(fixed) as i32`; its output is unchanged. `tests/reject/float_builtin_as_int_return.bld`.
 
+## Unreleased
+
+### Word-level rules in buildc verify (V3)
+
+- Exact division (`(a * b) / b` is `a` when the divisor is a monomial that divides every term), the wrapping identity (`x.wrapping_mul(1)` is `x`, a folded 0 makes the product 0), and a root search that proposes counterexample inputs for polynomial (dis)equalities, each re-run on the concrete evaluator. `tests/verify/smt_true.bld`: 16 of 16 proved (12 of 16 before); `smt_false.bld`: 29 of 29 refuted (28 before), none proved. A planted inexact division rule is caught by the refusal set. `docs/VERIFY.md`, V3.
+
 ## 1.12.0 - 2026-11-09 - translation validation for floats, a bit-precise verifier, BuildDB in the repository
 
 ### Translation validation for floats and named constants (#176, #180)
