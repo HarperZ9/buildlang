@@ -54,3 +54,20 @@ variant printed the same bytes.
 Reproduce: `sh mk.sh nbody 1000 && sh mk.sh sn 100` (builds the four variants and prints their
 output hashes), then `python run.py --runs 10 --out results/run.json nbody:5000000 sn:3000`.
 Toolchain versions and hashes are recorded outside the repository.
+
+## Second run: checked arithmetic through the overflow builtins (2026-11-09, `results/run-2026-11-09-builtins.json`)
+
+The integer helpers keep every overflow check but use `__builtin_add_overflow`, `__builtin_sub_overflow`
+and `__builtin_mul_overflow` under gcc and clang. Before any run, a hand edit of the emitted C put
+spectral-norm at 954 ms against 1774 ms, and at 834 ms with the checks removed (C: 828 ms), so the old
+multiply check, which divides, was nearly the whole gap there.
+
+| Benchmark | `bl_O2` | `bl_O3` | `rust` | `c_O2` |
+|---|---|---|---|---|
+| n-body, 5,000,000 steps | 1.090 s, 3.35x (3.19-3.55) | 1.066 s, 3.27x | 0.330 s, 1.01x | 0.326 s |
+| spectral-norm, n = 3000 | 0.925 s, 1.20x (1.17-1.22) | 0.773 s, 1.01x (1.00-1.02) | 0.756 s, 0.99x | 0.768 s |
+
+- spectral-norm: from 2.25x to 1.20x of C at -O2 and 1.01x at -O3, with the same traps. Rust stays
+  at 0.99x, so BuildLang at -O3 is level with Rust while still checking every overflow Rust wraps.
+- n-body did not move: its cost is the generic vector (runtime calls through a `void*` with the
+  element size read at run time), not arithmetic.
