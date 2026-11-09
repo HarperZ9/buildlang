@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- 2026-11-09: PRIMARY KEY and UNIQUE checks go through a key map instead of a scan of the table, so
+  a keyed bulk load is linear: 8,000 rows in one transaction 44.1 s to 2.72 s, and an UPDATE of a
+  key column checks the table in one pass. NULL keys stay distinct and `1` still equals `1.0`.
+
 - 2026-11-09: receipts hash with the runtime's `String.sha256()` and print as one string: their
   cost falls from 44 to 13.0 percent of query time on Linux and from 347 to 5.7 percent on
   Windows (target under 5). Receipt bytes unchanged.
