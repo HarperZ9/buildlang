@@ -16,6 +16,11 @@ tracked in `STATUS.md`, `README.md`, and
 - A temporary computed from an integer limit now has the limit's width. `u64::MAX - 9223372036854775807` was stored in an `int32_t` and truncated to 0, so `mul(2^63, 2)` printed 0 instead of trapping (#215).
 - An integer-literal local that the type checker unified with a float (`let mut x = 0; ... x = h;` with `h: f64`) was a `double` in C but added through the 32-bit integer helper, which truncated it: `x + 1` with `x = 0.5` printed 1. A float operand now keeps the operation in floating point, and it prints 1.5 (#203).
 - `compiler/tests/int_limits_and_float_ops.rs`: 4 of 4 fail before the fix and pass after. `buildc tv` coverage of `tests/programs` is unchanged at 247 of 437 certified.
+### Vector accesses as plain C array reads, bounds checks kept
+
+- A function that cannot resize or replace a vector (every call is a maths routine, an element store or a user function that cannot reach a vector) loads each vector parameter's buffer and length once and indexes them with a constant stride. Each access keeps its bounds check, message and exit code 101. A vector whose runtime element size differs from its type stops at its first access with a layout message instead of being read at the wrong offsets.
+- The struct-element setter stores through a typed pointer instead of `memcpy`, and the index abort is marked cold.
+- n-body (`bench/speed-2026-11`): 3.35x to 0.98x of C at gcc -O2 (Rust 1.02x); spectral-norm 1.20x to 1.06x (-O3: 1.01x, Rust 1.00x). `compiler/tests/vec_hoist.rs`.
 
 ### Checked integer arithmetic through the overflow builtins
 

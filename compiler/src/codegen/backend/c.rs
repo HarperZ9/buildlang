@@ -23,6 +23,8 @@ use crate::codegen::{GeneratedCode, OutputFormat};
 
 mod header;
 mod parallel;
+mod vec_hoist;
+mod vec_hoist_emit;
 
 /// Floating-point pragmas at the top of every generated C file (DETMATH): each
 /// `a * b + c` rounds twice, as written, under gcc, clang and MSVC alike, even
@@ -98,6 +100,10 @@ pub struct CBackend {
     /// from `current_fn_freeable`/`current_fn_block_frees`. Empty unless the
     /// experimental path is enabled.
     current_fn_flag_owners: Vec<LocalId>,
+    /// Vector accesses hoisted to plain C array reads in the current function.
+    current_vec_hoist: Option<vec_hoist::VecHoist>,
+    /// User functions that cannot resize any vector (see `c/vec_hoist.rs`).
+    vector_free_fns: std::collections::HashSet<String>,
     /// Increment 5: guarded frees at block START for flag owners, keyed by
     /// the block's `bb<id>`. Same key space as `current_fn_block_frees`, but
     /// emitted through the flag guard (`if (__bl_live_N) { ...; __bl_live_N =
@@ -134,6 +140,8 @@ impl CBackend {
             module_mut_global_alias_risk: false,
             current_fn_block_frees: std::collections::HashMap::new(),
             current_fn_flag_owners: Vec::new(),
+            current_vec_hoist: None,
+            vector_free_fns: std::collections::HashSet::new(),
             current_fn_flag_block_frees: std::collections::HashMap::new(),
             experimental_free_override_for_test: None,
         }
@@ -1235,7 +1243,11 @@ impl CBackend {
                     write!(self.output, "static BuildVecHandle build_hvec_new_{suffix}(void) {{ BuildVecHandle h; h.inner = (BuildVec*)malloc(sizeof(BuildVec)); *h.inner = build_vec_new(sizeof({elem_c})); return h; }}\n").unwrap();
                     write!(self.output, "static void build_hvec_push_{suffix}(BuildVecHandle h, {elem_c} val) {{ build_vec_push(h.inner, &val); }}\n").unwrap();
                     write!(self.output, "static {elem_c} build_hvec_get_{suffix}(BuildVecHandle h, size_t index) {{ return *({elem_c}*)build_vec_get(h.inner, index); }}\n").unwrap();
-                    write!(self.output, "static void build_hvec_set_{suffix}(BuildVecHandle h, size_t i, {elem_c} val) {{ if (i >= h.inner->len) {{ fprintf(stderr, \"Vec index out of bounds: %zu >= %zu\\n\", i, h.inner->len); exit(101); }} memcpy((char*)h.inner->ptr + i * h.inner->elem_size, &val, sizeof({elem_c})); }}\n").unwrap();
+                    // The store goes through the typed element pointer, as the scalar
+                    // setters do: a `memcpy` through `char*` may alias any object, so
+                    // the C compiler reloaded the vector's pointer and length after every
+                    // store (most of n-body's time went there).
+                    write!(self.output, "static void build_hvec_set_{suffix}(BuildVecHandle h, size_t i, {elem_c} val) {{ if (BL_UNLIKELY(i >= h.inner->len)) {{ fprintf(stderr, \"Vec index out of bounds: %zu >= %zu\\n\", i, h.inner->len); exit(101); }} *({elem_c}*)((char*)h.inner->ptr + i * h.inner->elem_size) = val; }}\n").unwrap();
                     write!(self.output, "static {elem_c} build_hvec_pop_{suffix}(BuildVecHandle h) {{ {elem_c} __z; memset(&__z, 0, sizeof(__z)); if (h.inner->len == 0) return __z; h.inner->len--; return *({elem_c}*)((char*)h.inner->ptr + h.inner->len * h.inner->elem_size); }}\n").unwrap();
                 }
                 self.output.push('\n');
@@ -1247,6 +1259,7 @@ impl CBackend {
         self.generate_par_wrappers(module);
 
         // Function definitions
+        self.vector_free_fns = vec_hoist::vector_free_functions(module);
         for func in &module.functions {
             if !func.is_declaration() {
                 self.generate_function(func)?;
@@ -2264,6 +2277,13 @@ impl CBackend {
             }
         }
 
+        // Vector buffers and lengths loaded once, when nothing in the function
+        // can resize or replace a vector (see `c/vec_hoist.rs`).
+        self.current_vec_hoist = vec_hoist::VecHoist::plan(func, &self.vector_free_fns);
+        if let Some(plan) = self.current_vec_hoist.clone() {
+            self.emit_vec_hoist_decls(&plan, &func.locals);
+        }
+
         if !func.locals.iter().filter(|l| !l.is_param).next().is_none() {
             self.output.push('\n');
         }
@@ -3000,13 +3020,17 @@ impl CBackend {
                     _ => false,
                 };
                 if base_is_vec {
-                    let suffix = Self::hvec_elem_suffix(elem_ty);
-                    write!(
-                        self.output,
-                        "build_hvec_set_{}({}, {}, {});\n",
-                        suffix, base_str, index_str, rvalue
-                    )
-                    .unwrap();
+                    if let Some(w) = self.hoisted_vec_write(base, &index_str, elem_ty, &rvalue) {
+                        self.output.push_str(&w);
+                    } else {
+                        let suffix = Self::hvec_elem_suffix(elem_ty);
+                        write!(
+                            self.output,
+                            "build_hvec_set_{}({}, {}, {});\n",
+                            suffix, base_str, index_str, rvalue
+                        )
+                        .unwrap();
+                    }
                 } else if let Some(target) =
                     Self::slice_element_access(base, &base_str, &index_str, locals)
                 {
@@ -3124,6 +3148,16 @@ impl CBackend {
                     } else {
                         self.local_string_literals.remove(dest_local);
                     }
+                }
+
+                // An element store into a hoisted vector (see `c/vec_hoist.rs`).
+                if let Some(code) = self.hoisted_set_call(&func_str, args, dest.is_some(), locals) {
+                    self.output.push_str(&code);
+                    if let Some(target) = target {
+                        self.write_indent();
+                        write!(self.output, "goto bb{};\n", target.0).unwrap();
+                    }
+                    return Ok(());
                 }
 
                 // Handle vtable dispatch: __vtable_dispatch_TraitName_methodName_idx
@@ -4795,6 +4829,9 @@ impl CBackend {
                     _ => false,
                 };
                 if base_is_vec {
+                    if let Some(read) = self.hoisted_vec_read(base, &index_str, elem_ty) {
+                        return Ok(read);
+                    }
                     // Scalar/string elements use the typed getters; aggregate elements
                     // (structs, tuples) use the generic pointer getter + cast/deref so
                     // Vec<struct> / Vec<tuple> indexing reads the element by value.
