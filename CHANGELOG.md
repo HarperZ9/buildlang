@@ -10,6 +10,13 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+### Miscompiles fixed: integer limits and a float local added as an integer (#212, #215, #203)
+
+- `i8::MAX`, `u16::MAX`, `isize::MIN` and every other integer limit now compile. Only five were mapped before; the rest lowered to an undeclared name such as `i8_MAX` and failed in the C compiler after `buildc check` passed (#212).
+- A temporary computed from an integer limit now has the limit's width. `u64::MAX - 9223372036854775807` was stored in an `int32_t` and truncated to 0, so `mul(2^63, 2)` printed 0 instead of trapping (#215).
+- An integer-literal local that the type checker unified with a float (`let mut x = 0; ... x = h;` with `h: f64`) was a `double` in C but added through the 32-bit integer helper, which truncated it: `x + 1` with `x = 0.5` printed 1. A float operand now keeps the operation in floating point, and it prints 1.5 (#203).
+- `compiler/tests/int_limits_and_float_ops.rs`: 4 of 4 fail before the fix and pass after. `buildc tv` coverage of `tests/programs` is unchanged at 247 of 437 certified.
+
 ### Checked integer arithmetic through the overflow builtins
 
 - Plain `+`, `-` and `*` still trap on overflow, but under gcc and clang the C helpers use `__builtin_*_overflow` instead of comparisons and, for `*`, a division. spectral-norm (`bench/speed-2026-11`): 2.25x to 1.20x of C at gcc -O2, 1.01x at -O3; Rust 0.99x. Other compilers keep the portable helpers. `compiler/tests/checked_arith_builtins.rs` holds the edge results and traps for every width from `i8` to `u64`.
