@@ -466,6 +466,22 @@ B update 0.8 to 1.3 and mixed 0.8 to 1.2, with at most one of them settled faste
 settings, 7 pairs). A planted interval that excludes 1.0 means the interval method or the machine
 cannot support a claim, and no claim is made. Guards: the full set, on the unchanged engine.
 
+**P27. Typed key array in each index (speed item 2, first step), written 2026-11-09 before the
+measured runs below.** An index holds pool ids of its keys (`idx_keys`); an equality search on a
+numeric index reads each probed key's number from `pool_num` at that id, and since pool ids of keys
+are spread over the whole pool, most of the 14 probes of a 10,000-key search miss the cache (P25's
+profile). The change adds `idx_num`, an f64 array parallel to `idx_keys` holding each entry's key
+number (NULL as minus infinity, which sorts first and equals no number), and the numeric search
+runs over it alone. `ix_move` (UPDATE of an indexed column) keeps it current; every other write of
+the index arrays (splice_index, which every rebuild and merge uses, DELETE's renumbering, ROLLBACK's
+restore) clears a flag and the next numeric search rebuilds it from the pool cache in one pass. No
+.db, WAL or output byte changes, so the power-cut digest stays 77a49282.... Measurement: P26's run
+B settings (prep API, 10,000 rows, 200,000 statements, 11 pairs) and the same at 100,000 rows.
+Predictions: select ratio falls by 10 to 35 percent against P26 run B; update and mixed fall by 5 to
+25 percent; at 100,000 rows the select gain is at least as large as at 10,000. Planted check: a
+build whose `ix_move` leaves `idx_num` unchanged must fail test_qdb_rows.py (the keyed workload
+updates an indexed column and then searches it). Guards: the full set.
+
 ### Amendments
 
 - **A1 (2026-11-08 17:45, before the first qdb run of P1).** The SQLite self-check scored 9,198 of
