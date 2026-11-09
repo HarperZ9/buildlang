@@ -951,6 +951,43 @@ median of 3).
   receipts overhead that run printed (-27.7 percent, one repetition while sqllogictest ran beside
   it) shows that single-repetition overhead figures on a loaded machine carry no information.
 
+## After P25: prepared statements and a row API in bdb/lib (2026-11-09, feat/bdb-rowapi)
+
+Windows, one core, `bench_qdb_throughput.py --apis text,prep`, 10,000 rows, 2,000 statements in one
+transaction, median of 3; SQLite 3.49.1 from the amalgamation. Another agent's compiler builds ran
+on the same machine during the run.
+
+| API, mode | qdb (statements per second) | SQLite | qdb's time against SQLite's | Before |
+|---|---|---|---|---|
+| text, select | 21,751 | 305,764 | 14.06 times | 12.9 (P21) |
+| text, update | 37,284 | 275,406 | 7.39 times | 7.5 |
+| text, mixed | 28,575 | 237,051 | 8.30 times | 8.3 |
+| prep, select | 1,607,717 | 2,624,672 | 1.63 times | none (no API) |
+| prep, update | 753,012 | 728,863 | 0.97 times | none |
+| prep, mixed | 1,044,386 | 959,233 | 0.92 times | none |
+
+- Both engines end in the same state under both APIs (SUM(v) 499,600).
+- Predictions: text held (select 14.06 within 10 to 15; update and mixed within 5 to 10). Prep
+  select MISSED (1.63 against 0.8 to 1.6, the slow side). Prep update (0.97 against 1.2 to 2.5)
+  and mixed (0.92 against 1.0 to 2.0) also fell outside their ranges, on the fast side. Target
+  (below 1): met by update and mixed in this run, missed by select. The margins are inside this
+  machine's run-to-run spread: in exploratory single runs SQLite's prepared update ran between
+  0.73 and 1.43 million per second, so "faster than SQLite" on update and mixed is not settled by
+  one median of 3.
+- Where qdb's time goes (exploratory, cycle counts on the prepared update): the WAL line (one
+  logical OP line, hashed and held, about a third), the index search (pool ids of keys spread over
+  the string pool, so most probes miss the cache), and one new pool string per changed cell. These
+  are the targets of the storage work (speed item 2): typed key arrays in the index, and cells that
+  are updated in place instead of appended to the pool.
+- Correctness: `test_qdb_rows.py`, seeds 1 to 3, differential and keyed workloads (1,029
+  statements, 540 bound parameters): bound against literal 0 differences, .db and .wal identical,
+  literal rows against the CLI 0 differences. Planted (index search accepts larger keys): 186
+  differences, caught.
+- Guards: test_qdb.sh 314 pass, 0 fail; crash test 176 points, 0 violations; seeded power cuts 0
+  of 10,000, digest 77a49282... unchanged; P2 2,000 of 2,000; text 0 changed; WAL recovery 0
+  failures; reference differential 16 of 16; library 0 failures; receipts reproduced; mutations 0
+  disagreements.
+
 ## Stage 1: a correct, durable single-file engine
 
 | Row | Check (fails if) | Status | Evidence |
