@@ -93,6 +93,27 @@ gives about 3.3). The selection sort is replaced only if this measurement shows 
 replacement must leave the output of every differential seed byte-identical, since the current
 sort is stable.
 
+**P7. NULL apart from the empty string (row 1f), written 2026-11-08 21:19 PT before the change.** qdb stores SQL
+NULL as its own value, distinct from `''`: `IS NULL` matches only NULL; a comparison, LIKE, IN or
+BETWEEN with a NULL operand is unknown, NOT of unknown is unknown, and WHERE and HAVING keep a
+row only when the condition is true (SQL's three-valued logic); COUNT(col), SUM, AVG, MIN and MAX
+skip NULL, and SUM, AVG, MIN and MAX over no non-NULL value are NULL; ORDER BY puts NULL first
+ascending and last descending, as SQLite does; a LEFT JOIN null-extended column and a column left
+out of an INSERT or added by ALTER TABLE are NULL; query output renders NULL as `NULL` and `''` as an
+empty cell. The file format becomes 2: a NULL cell is written `\N`, an empty cell is `''`; a
+format 0 or 1 file loads its empty cells as NULL, which is what they meant there.
+Measured on the P2 harness unchanged (seeds 1 to 10, 2,000 queries), against the baseline 1,251
+of 2,000 re-run on this branch before the change. Prediction: agreement with numbers compared as
+numbers rises to between 1,800 and 1,960; null_vs_empty falls from 519 to 0; the disagreements
+left are mostly AVG, which qdb renders with two decimals (`float_to_str`), a separate gap. The P2
+bar (every query agrees) stays FAIL if any remain. Guards, each must hold after the change:
+test_qdb.sh has no FAIL (assertions that encoded NULL as a blank cell are rewritten to the SQL
+answer and listed in the commit); test_qdb_text.py 2,000 of 2,000; test_qdb_crash.py 0
+violations; a format 1 file with an empty cell loads it as NULL; a format 2 file keeps NULL and
+`''` apart through a checkpoint and through WAL replay. Planted check: a build whose `IS NULL`
+also matches `''` must lose at least 20 agreements on P2. P1 (sqllogictest) is re-run and
+reported; no prediction beyond "not lower than 32".
+
 ### Amendments
 
 - **A1 (2026-11-08 17:45, before the first qdb run of P1).** The SQLite self-check scored 9,198 of
