@@ -60,10 +60,39 @@ jobs:
           workspaces: compiler
       - name: Run tests
         working-directory: compiler
+        env:
+          # A fuzz run skipped for want of a C compiler fails on Linux.
+          BUILDLANG_FUZZ_REQUIRE_CC: ${{ runner.os == 'Linux' && '1' || '0' }}
         run: cargo test -- --skip spirv::tests::test_triangle --skip spirv::tests::test_write
       - name: Build release
         working-directory: compiler
         run: cargo build --release
+      - name: Lint the examples and benchmark sources
+        shell: bash
+        run: |
+          BUILDC="compiler/target/release/buildc"
+          if [ "$RUNNER_OS" = "Windows" ]; then BUILDC="${BUILDC}.exe"; fi
+          export BUILDLANG_STDLIB="$PWD/stdlib"
+          # Planted faults among the held-out controls: lint must refuse both.
+          PLANTED="bench/heldout-2026-10-15/controls/gen/bits.bld bench/heldout-2026-11-08/controls/gen/binary.bld"
+          FAIL=0; COUNT=0
+          for f in $(git ls-files 'examples/*.bld' 'bench/*.bld'); do
+            case " $PLANTED " in *" $f "*) continue ;; esac
+            COUNT=$((COUNT + 1))
+            if ! "$BUILDC" lint "$f" > lint.log 2>&1; then
+              echo "LINT FAIL: $f"; cat lint.log; FAIL=$((FAIL + 1))
+            fi
+          done
+          REFUSED=0
+          for f in $PLANTED; do
+            if "$BUILDC" lint "$f" > lint.log 2>&1; then
+              echo "LINT ACCEPTED A PLANTED FAULT: $f"
+            else
+              REFUSED=$((REFUSED + 1))
+            fi
+          done
+          echo "linted $COUNT files, $FAIL failed, $REFUSED of 2 planted faults refused"
+          [ "$COUNT" -gt 0 ] && [ "$FAIL" -eq 0 ] && [ "$REFUSED" -eq 2 ]
       - name: Compile .bld test programs (end-to-end proof)
         shell: bash
         run: |
