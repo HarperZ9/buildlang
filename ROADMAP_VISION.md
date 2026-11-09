@@ -35,7 +35,7 @@ when a row here already has it.
 
 | Piece | Where | State | Evidence |
 |---|---|---|---|
-| **qdb, the BuildDB engine** | Build Universe repo, `programs/db.bld` | Built and tested. The published main branch holds the 4,559-line version. A newer line of 39 commits (34 of them to `db.bld`, which grows to 6,913 lines) sits on unpublished branches the author holds; it is not merged or released. | Rebuilt on 2026-11-02 from the newest branch with buildc 1.10.0 from this repo's main and gcc: the qdb regression gate printed `pass=214 fail=0 xfail=1 xpass=0`. The one expected failure is a cross-process ROLLBACK, a known design limit. |
+| **qdb, the BuildDB engine** | this repo, `bdb/db.bld` (moved from Build Universe `programs/db.bld` on 2026-11-09, history kept) | Built and tested in this repo's CI (`.github/workflows/bdb.yml`) with the buildc of each checkout. The unpublished line the earlier row described was merged into Build Universe main on 2026-11-02 (HarperZ9/build-universe#35, #36) before the move. | Rebuilt on 2026-11-08 with buildc 1.11.0 from this repo's main (3c7cc54) and gcc: the qdb regression gate printed `pass=214 fail=0 xfail=1 xpass=0`. The one expected failure is a cross-process ROLLBACK, a known design limit. |
 | What qdb runs | same file | Built and tested | CREATE, INSERT, SELECT, UPDATE, DELETE, DROP, ALTER TABLE ADD COLUMN; WHERE trees with LIKE, IN, BETWEEN, IS NULL and scalar subqueries; GROUP BY, HAVING, COUNT, COUNT DISTINCT, SUM, AVG, MIN, MAX; INNER and LEFT JOIN, including grouped joins; UNION and UNION ALL; DISTINCT; ORDER BY with aliases and ordinals; LIMIT and OFFSET; sorted-array indexes; a write-ahead log, snapshots and BEGIN/COMMIT/ROLLBACK; a REPL. |
 | **BuildQL, the query language** | qdb's SQL dialect; `programs/sql.bld` is a standalone parser demo | Built (dialect); demo only (sql.bld) | sql.bld parses and prints, and never executes. The dialect of record is the one qdb executes. |
 | qkv, qjq, qcsv | Build Universe `programs/` | Built | A key-value store, a JSON query tool and a CSV converter, the earlier steps of the same line. |
@@ -176,9 +176,9 @@ plan: a document's IR (`buildlang.doc/v0`) becomes BuildDB tables like a program
 
 ## 8. Decisions for the author
 
-1. **Home for qdb.** Move `programs/db.bld` into this repo as `bdb/` so CI builds it with
-   the compiler, or keep it in Build Universe and pin a revision. Its newest 39 commits are
-   on unpublished branches; publishing them comes first either way.
+1. **Home for qdb.** Decided 2026-11-09: "Move into BuildLang". qdb is `bdb/` in this repo,
+   with its history, and CI builds it with the compiler. Licence decided 2026-11-09 ("for the
+   license, I think AGPL is good."): `bdb/` is AGPL-3.0-only like the rest of the repository.
 2. **The name.** The author said "BDB, not qdb" on 2026-10-29. A rename of the engine, its
    binary and its docs needs a written checklist. BDF (Build Data Format) and BDB are one
    letter apart; keep both or rename one.

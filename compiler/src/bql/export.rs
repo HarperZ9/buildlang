@@ -3,7 +3,7 @@
 
 //! Store tables as rows, and the qdb checkpoint file format.
 //!
-//! qdb (`programs/db.bld`) saves a database as text: `TABLE name`, a
+//! qdb (`bdb/db.bld`) saves a database as text: `TABLE name`, a
 //! `SCHEMA col:TYPE ...` line, one `ROW a|b|c` line per row and `END`. An empty
 //! cell reads back as NULL. The format has no escape for `|` or a line break,
 //! so a cell holding either is refused rather than written.
