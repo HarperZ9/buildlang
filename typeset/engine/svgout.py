@@ -72,7 +72,11 @@ def page_svg(page, registry, defs_cache):
         else:
             out.append(_gfx(g))
     for y, ln in lines:
-        for rx, ry, rw, rh in ln.graphics:
+        for g in ln.graphics:
+            if isinstance(g, dict):
+                out.append(_gfx(dict(g, x=left + g["x"], y=y - g["ry"] - g["h"])))
+                continue
+            rx, ry, rw, rh = g
             out.append(f'<rect x="{left + rx:.2f}" y="{y - ry - rh:.2f}" width="{rw:.2f}" height="{rh:.2f}"/>')
         for x, dy, pc, hs in ln.runs:
             font = registry[pc.font]

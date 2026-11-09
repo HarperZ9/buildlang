@@ -37,15 +37,18 @@ def facts(pdf_path, result, doc):
         data = fh.read()
     pdf = PDF(data)
     pages = [pdf.page_text(p) for p in pdf.pages()]
-    flat = words(" ".join(pages))
+    flat = _letters(" ".join(pages))
     diag = result["layout"].diag
-    # Reading order: every block's words appear in the PDF text, each block after the one before.
+    doc = getattr(result["layout"], "doc", doc)   # the laid-out copy, with references and citations resolved
+    # Reading order: every block's letters and digits appear in the PDF text, each block after the one before.
+    # Letters, not words: a hyphenated line end, an inline variable before a suffix ("{m:n}th") and implicit
+    # products in math ("b n") all join or split words without changing the characters a reader gets.
     pos, order_ok, lost = 0, True, []
     for block in doc.blocks:
-        want = words(block.plain)
+        want = _letters(_plain_for_text(block))
         if not want:
             continue
-        k = _find(flat, want, pos)
+        k = flat.find(want, pos)
         if k < 0:
             order_ok = False
             lost.append(block.index)
@@ -64,6 +67,41 @@ def facts(pdf_path, result, doc):
         "blocks_missing_from_text": lost,
         "pdf_bytes": len(data),
     }
+
+
+def _plain_for_text(block):
+    """A block's text as a reader extracts it: math source loses its commands (frac, sum and the rest), which
+    print as layout or symbols rather than letters."""
+    return "".join(re.sub(r"\\([A-Za-z]+)", _command_text, s.text) if s.style == "m" else s.text
+                   for s in block.spans)
+
+
+def _command_text(m):
+    """A math command that prints as letters (ln, log) keeps them; the rest print as symbols or layout."""
+    from engine.mathparse import SYMBOLS
+    sym = SYMBOLS.get(m.group(1))
+    return " " + sym[0] + " " if sym and sym[0].isalpha() else " "
+
+
+def _letters(text):
+    return "".join(words(text))
+
+
+def same_text(pdf_a, pdf_b):
+    """The words of two PDFs, page by page, compared: an embellished build and a plain build of one source must
+    extract to the same text. Returns (equal, first difference or None)."""
+    def pages(path):
+        with open(path, "rb") as fh:
+            pdf = PDF(fh.read())
+        return [words(pdf.page_text(p)) for p in pdf.pages()]
+    a, b = pages(pdf_a), pages(pdf_b)
+    if len(a) != len(b):
+        return False, f"{len(a)} pages against {len(b)}"
+    for n, (wa, wb) in enumerate(zip(a, b), 1):
+        if wa != wb:
+            k = next((i for i, (x, y) in enumerate(zip(wa, wb)) if x != y), min(len(wa), len(wb)))
+            return False, f"page {n}, word {k}: {wa[k:k + 6]} against {wb[k:k + 6]}"
+    return True, None
 
 
 def _find(hay, needle, start):

@@ -54,6 +54,8 @@ class PDF:
     def page_text(self, page):
         fonts = self.fonts(page)
         content = self.stream(self.ref(page, b"Contents")).decode("latin-1")
+        # artifacts (decoration, running footers) are not the document's text
+        content = re.sub(r"/Artifact (?:BMC|<<.*?>> BDC)\n.*?\nEMC", "", content, flags=re.S)
         out, font = [], None
         last_y = None
         for tok in re.finditer(r"/(F\d+) [\d.]+ Tf|1 0 0 1 [-\d.]+ ([-\d.]+) Tm|\[(.*?)\] TJ|<([0-9a-fA-F]+)> Tj", content):

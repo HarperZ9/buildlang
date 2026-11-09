@@ -1,7 +1,10 @@
 """Reader for buildlang.doc/v0, the IR a BuildLang document program saves."""
+import os
 from dataclasses import dataclass, field
 
 HEADER = "#buildlang.doc/v0"
+ROW_KINDS = ("row", "thead")      # table rows; cells are separated by CELL_SEP
+CELL_SEP = "¦"               # broken bar, which no cell text needs
 
 
 @dataclass
@@ -18,6 +21,8 @@ class Block:
     spans: list
     label: str = ""
     index: int = 0
+    attrs: dict = field(default_factory=dict)   # block attributes (figure src and width, table columns)
+    cells: list = field(default_factory=list)   # table rows: one span list per cell
 
     @property
     def plain(self):
@@ -53,6 +58,7 @@ class Document:
     blocks: list = field(default_factory=list)
     marks: list = field(default_factory=list)
     rels: list = field(default_factory=list)
+    base: str = ""             # folder of the IR file; figure sources resolve against it
 
 
 class IRError(ValueError):
@@ -100,12 +106,22 @@ def parse_inline(text, outer=""):
     return spans
 
 
+def parse_attrs(text):
+    """Block attributes, the fifth field: key=value pairs separated by ';'."""
+    out = {}
+    for part in text.split(";"):
+        if part.strip():
+            k, _, v = part.partition("=")
+            out[k.strip()] = v.strip()
+    return out
+
+
 def load(path):
     with open(path, encoding="utf-8") as fh:
         lines = fh.read().split("\n")
     if not lines or lines[0].strip() != HEADER:
         raise IRError(f"{path}: not {HEADER}")
-    doc = Document()
+    doc = Document(base=os.path.dirname(os.path.abspath(path)))
     for n, line in enumerate(lines[1:], 2):
         if not line:
             continue
@@ -117,15 +133,25 @@ def load(path):
         elif f[0] == "block":
             text = f[2] if len(f) > 2 else ""
             label = f[3] if len(f) > 3 else ""
+            attrs = parse_attrs(f[4]) if len(f) > 4 else {}
+            cells = []
             try:
-                spans = [Span(text, "m")] if f[1] == "eq" else parse_inline(text)
+                if f[1] == "eq":
+                    spans = [Span(text, "m")]
+                elif f[1] in ROW_KINDS:
+                    cells = [parse_inline(c.strip()) for c in text.split(CELL_SEP)]
+                    spans = []
+                    for k, c in enumerate(cells):
+                        spans += ([Span(" ")] if k else []) + c
+                else:
+                    spans = parse_inline(text)
             except IRError as e:
                 raise IRError(f"{path}:{n}: {e}") from e
             off = 0
             for sp in spans:
                 sp.start = off
                 off += len(sp.text)
-            doc.blocks.append(Block(f[1], spans, label, len(doc.blocks)))
+            doc.blocks.append(Block(f[1], spans, label, len(doc.blocks), attrs, cells))
         elif f[0] == "mark":
             doc.marks.append(Mark(f[1], f[2], int(f[3]), int(f[4]), int(f[5]),
                                   float(f[6]), float(f[7]), f[8], f[9]))

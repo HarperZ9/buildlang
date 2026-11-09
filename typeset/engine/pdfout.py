@@ -39,10 +39,12 @@ def source_date():
     return time.strftime("D:%Y%m%d%H%M%SZ", t), time.strftime("%Y-%m-%dT%H:%M:%SZ", t)
 
 
-def _info(title, date):
-    """The document information dictionary: title and producer, no author or creator."""
+def _info(title, date, author="", subject=""):
+    """The document information dictionary: title and producer. An author and a subject only when the
+    document names them on purpose (meta pdf_author, meta subject), as a published paper does."""
     stamp = f" /CreationDate ({date[0]}) /ModDate ({date[0]})" if date else ""
-    return f"<< /Title {_pdfstr(title)} /Producer (buildlang typeset){stamp} >>"
+    extra = (f" /Author {_pdfstr(author)}" if author else "") + (f" /Subject {_pdfstr(subject)}" if subject else "")
+    return f"<< /Title {_pdfstr(title)}{extra} /Producer (buildlang typeset){stamp} >>"
 
 
 class Writer:
@@ -104,7 +106,8 @@ def write_pdf(path, pages, registry, meta, plates=None, graphics_only=False, pdf
                 ops.append(_line_ops(line, y, page, registry, uses))
         for g in page.furniture:
             drawn = pdfgfx.draw(g, page.height, registry, uses, _line_ops)
-            ops.append(drawn if g.get("type") == "line" else _artifact(drawn))
+            # running heads and page numbers are pagination artifacts: readers and extraction skip them
+            ops.append(_artifact(drawn, "/Pagination") if g.get("type") == "line" else _artifact(drawn))
         contents.append("\n".join(o for o in ops if o))
     pages_n = w.reserve()
     font_refs = {}
@@ -127,7 +130,7 @@ def write_pdf(path, pages, registry, meta, plates=None, graphics_only=False, pdf
     date = source_date()
     metadata = ""
     if pdfa:
-        xmp = _xmp(title, date).encode("utf-8")
+        xmp = _xmp(title, date, meta.get("pdf_author", "")).encode("utf-8")
         metadata = f" /Metadata {w.stream(xmp, ' /Type /Metadata /Subtype /XML', compress=False)} 0 R"
     icc = srgb_profile()
     icc_n = w.stream(icc, " /N 3")
@@ -135,7 +138,7 @@ def write_pdf(path, pages, registry, meta, plates=None, graphics_only=False, pdf
                    f"/Info (sRGB IEC61966-2.1) /DestOutputProfile {icc_n} 0 R >>")
     root = w.add(f"<< /Type /Catalog /Pages {pages_n} 0 R{metadata} /OutputIntents [{intent} 0 R] "
                  f"/MarkInfo << /Marked false >> /Lang (en-US) >>")
-    info = w.add(_info(title, date))
+    info = w.add(_info(title, date, meta.get("pdf_author", ""), meta.get("subject", "")))
     ident = hashlib.md5("\n".join(contents).encode("latin-1", "replace")).hexdigest()
     data = w.serialize(root, info, ident)
     with open(path, "wb") as fh:
@@ -143,9 +146,13 @@ def write_pdf(path, pages, registry, meta, plates=None, graphics_only=False, pdf
     return data
 
 
-def _artifact(ops):
-    """Mark decoration as a PDF artifact so text extraction and assistive technology skip it."""
-    return "/Artifact BMC\n" + ops + "\nEMC" if ops else ops
+def _artifact(ops, kind=""):
+    """Mark decoration (or, with kind "/Pagination", a footer) as a PDF artifact so text extraction and
+    assistive technology skip it."""
+    if not ops:
+        return ops
+    head = f"/Artifact << /Type {kind} >> BDC" if kind else "/Artifact BMC"
+    return head + "\n" + ops + "\nEMC"
 
 
 def _line_ops(line, y, page, registry, uses, left=None):
@@ -189,11 +196,15 @@ def _line_ops(line, y, page, registry, uses, left=None):
         if buf:
             parts.append(_hex(buf))
         out.append("[" + " ".join(parts) + "] TJ")
-        prev_end = x + pc.width * hs
+        prev_end = x + (pc.width - getattr(pc, "trail", 0.0)) * hs
     if getattr(line, "blind", False):
         out.append("0 Tr")  # the render mode is graphics state and outlives ET
     out.append("ET")
-    for rx, ry, rw, rh in line.graphics:
+    for g in line.graphics:
+        if isinstance(g, dict):          # a figure: its lower edge sits on the line's baseline
+            out.append(pdfgfx.draw(dict(g, x=pg_left + g["x"], y=page.height - base_y - g["ry"] - g["h"]), page.height))
+            continue
+        rx, ry, rw, rh = g
         out.append(f"0 0 0 rg {pg_left + rx:.3f} {base_y + ry:.3f} {rw:.3f} {rh:.3f} re f")
     return "\n".join(out)
 
@@ -242,16 +253,17 @@ def _tounicode(used):
     return "\n".join(lines)
 
 
-def _xmp(title, date):
+def _xmp(title, date, author=""):
     """The PDF/A identification packet: title, producer and, with SOURCE_DATE_EPOCH, the date."""
     esc = lambda s: s.replace("&", "&amp;").replace("<", "&lt;")
+    creator = f"<dc:creator><rdf:Seq><rdf:li>{esc(author)}</rdf:li></rdf:Seq></dc:creator>" if author else ""
     created = f"<xmp:CreateDate>{date[1]}</xmp:CreateDate><xmp:ModifyDate>{date[1]}</xmp:ModifyDate>" if date else ""
     return f"""<?xpacket begin="﻿" id="W5M0MpCehiHzreSzNTczkc9d"?>
 <x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
 <rdf:Description rdf:about="" xmlns:pdfaid="http://www.aiim.org/pdfa/ns/id/" xmlns:dc="http://purl.org/dc/elements/1.1/"
  xmlns:pdf="http://ns.adobe.com/pdf/1.3/" xmlns:xmp="http://ns.adobe.com/xap/1.0/">
 <pdfaid:part>2</pdfaid:part><pdfaid:conformance>B</pdfaid:conformance>
-<dc:title><rdf:Alt><rdf:li xml:lang="x-default">{esc(title)}</rdf:li></rdf:Alt></dc:title>
+<dc:title><rdf:Alt><rdf:li xml:lang="x-default">{esc(title)}</rdf:li></rdf:Alt></dc:title>{creator}
 <pdf:Producer>buildlang typeset</pdf:Producer>{created}
 </rdf:Description></rdf:RDF></x:xmpmeta>
 <?xpacket end="w"?>"""
