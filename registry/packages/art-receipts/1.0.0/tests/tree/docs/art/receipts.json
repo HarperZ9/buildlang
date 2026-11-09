@@ -1,0 +1,23 @@
+{
+ "receipts": {
+  "z-scene": {
+   "outputs": {
+    "z-render.png": "332066930d7aceea8fb8ca1ff39e1aafb6bc0434418f07551fb2cf9012aa92bb",
+    "d.svg": "bc3da732e38e568a3544637d92e809aae0fe665b5ffe993adfef4fe7dc7579b0",
+    "sub/c.bin": "29840e0b1e1d7a71008b125cf24a74215e23e93cb11e19c11c51b48d93558a54"
+   }
+  },
+  "a-scene": {
+   "outputs": {
+    "b.txt": "0000000000000000000000000000000000000000000000000000000000000000",
+    "a.svg": "45a9f3721f69a889466408ab904067182657a954091fe1af8021a0a54ce8c1cd",
+    "b.txt": "1395b3ef269e301ce5250e54b42a874b6d10e9b86d41eb9bab81fd7e00199df0",
+    "a-render.png": "9fae6efadc4743b2e7ee4564ce16b0911c016cb5d0ad8b83fbedbb06ab0cf853"
+   },
+   "seed": "fixture"
+  },
+  "shared": {
+   "outputs": {"a.svg": "45a9f3721f69a889466408ab904067182657a954091fe1af8021a0a54ce8c1cd"}
+  }
+ }
+}

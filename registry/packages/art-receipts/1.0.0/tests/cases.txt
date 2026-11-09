@@ -1,0 +1,8 @@
+# mode golden args... (run from the package folder). Cases whose output prints a path with the platform separator (no-receipts-key, no-outputs-key, the default path) were checked on Windows against the original and are left out here, so the goldens hold on every platform.
+exact tests/golden-root.txt tests/tree
+exact tests/golden-receipts.txt tests/tree/docs/art/receipts.json
+exact tests/golden-clean.txt tests/tree/docs/art/clean.json
+exact tests/golden-disagree.txt tests/tree/docs/art/disagree.json
+exact tests/golden-none-committed.txt tests/tree/docs/art/none-committed.json
+exact tests/golden-empty-receipts.txt tests/tree/docs/art/empty-receipts.json
+exact tests/golden-absent.txt absent.json

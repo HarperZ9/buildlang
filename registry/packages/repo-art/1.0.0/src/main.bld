@@ -1,0 +1,63 @@
+// =============================================================================
+// repo-art: print one named artwork from a repository-art spec as SVG
+// =============================================================================
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (c) 2022-2026 Zain Dana Harper.
+// =============================================================================
+//
+// Usage: repo-art SPEC.json FACE-METRICS.json NAME
+//
+// NAME is the `file` of a flow or card in the spec (".svg" may be left off).
+// The SVG goes to stdout with one trailing newline: the bytes
+// tools/render_repo_art.py writes to docs/art/NAME. The identity header
+// (<stem>-header.svg) is not ported: it needs Python's Mersenne Twister,
+// sha256 and libm sin/cos to match byte for byte.
+
+mod json;
+
+fn ra_match_name(file: str, name: str) -> bool {
+    file == name || file == name + ".svg"
+}
+
+/// The SVG for artwork `name`, or an Err naming what went wrong.
+fn ra_render(spec_text: str, metrics_text: str, name: str) -> Result<str, str> {
+    let spec = json_parse(spec_text)?;
+    if json_has(spec, "flows") {
+        let flows = field_items(spec, "flows")?;
+        let mut i: usize = 0;
+        while i < vec_len(flows) {
+            if ra_match_name(field_str(flows[i], "file")?, name) {
+                return ra_flow_svg(flows[i]);
+            }
+            i = i + 1;
+        }
+    }
+    if json_has(spec, "cards") {
+        let cards = field_items(spec, "cards")?;
+        let mut i: usize = 0;
+        while i < vec_len(cards) {
+            if ra_match_name(field_str(cards[i], "file")?, name) {
+                let metrics = json_parse(metrics_text)?;
+                return ra_card_svg(cards[i], metrics);
+            }
+            i = i + 1;
+        }
+    }
+    Err(format!("repo-art: no flow or card named `{}` in the spec (the identity header is not ported)", name))
+}
+
+fn main() ~ Console + FileSystem + Process + Environment {
+    if args_count() != 4 {
+        println!("usage: repo-art SPEC.json FACE-METRICS.json NAME");
+        exit(2);
+    }
+    let spec_text = read_file(args_get(1));
+    let metrics_text = read_file(args_get(2));
+    match ra_render(spec_text, metrics_text, args_get(3)) {
+        Ok(svg) => println!("{}", svg),
+        Err(e) => {
+            println!("{}", e);
+            exit(1);
+        },
+    }
+}

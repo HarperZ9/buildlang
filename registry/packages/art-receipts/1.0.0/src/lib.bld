@@ -1,0 +1,327 @@
+// =============================================================================
+// art-receipts: check docs/art/receipts.json against the committed art bytes
+// =============================================================================
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (c) 2022-2026 Zain Dana Harper.
+// =============================================================================
+//
+// A port of BuildLang's scripts/check_art_receipts.py. Every file a receipt
+// lists under `outputs` is looked up beside receipts.json; a present file must
+// hash (SHA-256) to its recorded digest, an absent one is reported as not
+// committed. The output lines and exit codes are the original's.
+//
+// Read failures print the original's `FAIL cannot read PATH: <repr>` for a
+// missing file and a missing `receipts` or `outputs` key. Other malformed
+// input (bad JSON, wrong kinds) also fails with exit 1 and the same prefix,
+// but the text after it is this port's own, not Python's exception repr.
+
+/// The `want` table of the original: names with their digests, in insertion
+/// order, or the line for a name the receipts disagree on.
+struct ArWant {
+    names: Vec<str>,
+    digests: Vec<str>,
+    disagree: str,
+}
+
+/// What ar_check found: the lines to print and the exit code.
+struct ArResult {
+    lines: Vec<str>,
+    code: i64,
+}
+
+/// True when running on Windows, where Python's pathlib prints `\`.
+fn ar_windows() -> bool ~ Environment {
+    getenv("OS") == "Windows_NT"
+}
+
+/// str(Path(p)) as Python prints it: separators unified (`\` on Windows),
+/// repeats collapsed, `.` parts dropped, no trailing separator. Drive-relative
+/// and UNC forms are not modelled.
+fn ar_py_path(p: str, windows: bool) -> str {
+    let b = p.as_bytes();
+    let n = p.len();
+    let sep = if windows { "\\" } else { "/" };
+    let mut parts: Vec<str> = Vec::new();
+    let mut rooted = false;
+    if n > 0 && (b[0] == 47_u8 || (windows && b[0] == 92_u8)) {
+        rooted = true;
+    }
+    let mut start: usize = 0;
+    let mut i: usize = 0;
+    while i <= n {
+        let at_sep = i == n || b[i] == 47_u8 || (windows && b[i] == 92_u8);
+        if at_sep {
+            if i > start {
+                let part = p.substring(start, i - start);
+                if part != "." {
+                    parts.push(part);
+                }
+            }
+            start = i + 1;
+        }
+        i = i + 1;
+    }
+    let mut out = "";
+    if rooted {
+        out = sep;
+    }
+    let mut k: usize = 0;
+    while k < vec_len(parts) {
+        if k > 0 {
+            out = out + sep;
+        }
+        out = out + parts[k];
+        k = k + 1;
+    }
+    if out == "" {
+        out = ".";
+    }
+    out
+}
+
+/// The folder holding `path` (Path.parent), `.` when there is none.
+fn ar_parent(path: str) -> str {
+    let b = path.as_bytes();
+    let mut i = path.len();
+    while i > 0 {
+        if b[i - 1] == 47_u8 || b[i - 1] == 92_u8 {
+            if i == 1 {
+                return path.substring(0, 1);
+            }
+            return path.substring(0, i - 1);
+        }
+        i = i - 1;
+    }
+    "."
+}
+
+/// parent / name: an absolute name (leading separator or a drive) stands alone.
+fn ar_join(parent: str, name: str) -> str {
+    let b = name.as_bytes();
+    if name.len() > 0 && (b[0] == 47_u8 || b[0] == 92_u8) {
+        return name;
+    }
+    if name.len() > 1 && b[1] == 58_u8 {
+        return name;
+    }
+    parent + "/" + name
+}
+
+/// Path.is_file(): it opens and it is not a folder.
+fn ar_is_file(p: str) -> bool ~ FileSystem {
+    file_exists(p) && !is_dir(p)
+}
+
+/// a < b in Python's str order (code points; for UTF-8 that is byte order).
+fn ar_less(a: str, b: str) -> bool {
+    let x = a.as_bytes();
+    let y = b.as_bytes();
+    let mut i: usize = 0;
+    while i < a.len() && i < b.len() {
+        if x[i] != y[i] {
+            return x[i] < y[i];
+        }
+        i = i + 1;
+    }
+    a.len() < b.len()
+}
+
+/// An object's members as Python's json gives them: a repeated key keeps its
+/// first position and its last value. Returns the kept indexes into keys.
+fn ar_members(keys: Vec<str>) -> Vec<usize> {
+    let mut out: Vec<usize> = Vec::new();
+    let mut i: usize = 0;
+    while i < vec_len(keys) {
+        let mut seen = false;
+        let mut k: usize = 0;
+        while k < vec_len(out) {
+            if keys[out[k]] == keys[i] {
+                seen = true;
+            }
+            k = k + 1;
+        }
+        if !seen {
+            let mut last = i;
+            let mut j = i + 1;
+            while j < vec_len(keys) {
+                if keys[j] == keys[i] {
+                    last = j;
+                }
+                j = j + 1;
+            }
+            out.push(last);
+        }
+        i = i + 1;
+    }
+    out
+}
+
+/// Python's `{}` repr of a missing key: KeyError('NAME').
+fn ar_key_error(key: str) -> str {
+    format!("KeyError('{}')", key)
+}
+
+/// The member `key` of object `j`; Err carries the text after "cannot read P: ".
+fn ar_member(j: Json, key: str) -> Result<Json, str> {
+    match j {
+        Json::Obj(keys, vals) => {
+            let idx = ar_members(keys);
+            let mut k: usize = 0;
+            while k < vec_len(idx) {
+                if keys[idx[k]] == key {
+                    return Ok(vals[idx[k]]);
+                }
+                k = k + 1;
+            }
+            Err(ar_key_error(key))
+        },
+        other => Err(format!("expected an object holding `{}`, found {}", key, json_kind(other))),
+    }
+}
+
+/// Add one receipt's outputs to `want`; a digest that differs from the one
+/// already recorded for the name sets `disagree`.
+fn ar_add_outputs(want: ArWant, outputs: Json) -> Result<ArWant, str> {
+    let mut names = want.names;
+    let mut digests = want.digests;
+    match outputs {
+        Json::Obj(okeys, ovals) => {
+            let oidx = ar_members(okeys);
+            let mut o: usize = 0;
+            while o < vec_len(oidx) {
+                let name = okeys[oidx[o]];
+                let digest = match json_str(ovals[oidx[o]]) {
+                    Ok(s) => s,
+                    Err(e) => return Err(format!("{} (digest of `{}`)", e, name)),
+                };
+                let mut found = false;
+                let mut k: usize = 0;
+                while k < vec_len(names) {
+                    if names[k] == name {
+                        found = true;
+                        if digests[k] != digest {
+                            let line = format!("FAIL {}: receipts disagree on its digest", name);
+                            return Ok(ArWant { names: names, digests: digests, disagree: line });
+                        }
+                    }
+                    k = k + 1;
+                }
+                if !found {
+                    names.push(name);
+                    digests.push(digest);
+                }
+                o = o + 1;
+            }
+        },
+        other => return Err(format!("`outputs` is {}, not an object", json_kind(other))),
+    }
+    Ok(ArWant { names: names, digests: digests, disagree: "" })
+}
+
+/// The original's `want`, built receipt by receipt; Err carries the text that
+/// follows "FAIL cannot read PATH: ".
+fn ar_collect(data: Json) -> Result<ArWant, str> {
+    let receipts = ar_member(data, "receipts")?;
+    let mut want = ArWant { names: Vec::new(), digests: Vec::new(), disagree: "" };
+    match receipts {
+        Json::Obj(rkeys, rvals) => {
+            let ridx = ar_members(rkeys);
+            let mut r: usize = 0;
+            while r < vec_len(ridx) {
+                let outputs = ar_member(rvals[ridx[r]], "outputs")?;
+                want = ar_add_outputs(want, outputs)?;
+                if want.disagree != "" {
+                    return Ok(want);
+                }
+                r = r + 1;
+            }
+        },
+        other => return Err(format!("`receipts` is {}, not an object", json_kind(other))),
+    }
+    Ok(want)
+}
+
+/// Indexes of `names` in sorted order (insertion sort; the lists are short).
+fn ar_sorted(names: Vec<str>) -> Vec<usize> {
+    let mut order: Vec<usize> = Vec::new();
+    let mut i: usize = 0;
+    while i < vec_len(names) {
+        order.push(i);
+        let mut j = vec_len(order) - 1;
+        while j > 0 && ar_less(names[order[j]], names[order[j - 1]]) {
+            let t = order[j];
+            order[j] = order[j - 1];
+            order[j - 1] = t;
+            j = j - 1;
+        }
+        i = i + 1;
+    }
+    order
+}
+
+/// The receipts file for a command-line argument: a folder means a
+/// repository root, whose receipts are docs/art/receipts.json.
+fn ar_receipts_path(arg: str) -> str ~ FileSystem {
+    if is_dir(arg) {
+        return ar_join(arg, "docs/art/receipts.json");
+    }
+    arg
+}
+
+/// Run the check on the receipts file at `path`.
+fn ar_check(path: str, windows: bool) -> ArResult ~ FileSystem {
+    let mut lines: Vec<str> = Vec::new();
+    let shown = ar_py_path(path, windows);
+    if !ar_is_file(path) {
+        lines.push(format!("FAIL cannot read {}: FileNotFoundError(2, 'No such file or directory')", shown));
+        return ArResult { lines: lines, code: 1 };
+    }
+    let text = read_file(path);
+    let want = match json_parse(text) {
+        Ok(data) => match ar_collect(data) {
+            Ok(w) => w,
+            Err(e) => {
+                lines.push(format!("FAIL cannot read {}: {}", shown, e));
+                return ArResult { lines: lines, code: 1 };
+            },
+        },
+        Err(e) => {
+            lines.push(format!("FAIL cannot read {}: {}", shown, e));
+            return ArResult { lines: lines, code: 1 };
+        },
+    };
+    if want.disagree != "" {
+        lines.push(want.disagree);
+        return ArResult { lines: lines, code: 1 };
+    }
+    let parent = ar_parent(path);
+    let order = ar_sorted(want.names);
+    let mut ok: i64 = 0;
+    let mut bad: i64 = 0;
+    let mut skipped: i64 = 0;
+    let mut k: usize = 0;
+    while k < vec_len(order) {
+        let name = want.names[order[k]];
+        let digest = want.digests[order[k]];
+        let f = ar_join(parent, name);
+        if !ar_is_file(f) {
+            skipped = skipped + 1;
+        } else {
+            let got = bytes_hex(sha256_digest(str_bytes(read_bytes(f))));
+            if got == digest {
+                ok = ok + 1;
+            } else {
+                bad = bad + 1;
+                lines.push(format!("FAIL {}: receipt {} stored bytes {}", name, digest, got));
+            }
+        }
+        k = k + 1;
+    }
+    lines.push(format!("art receipts: {} match, {} mismatch, {} not committed", ok, bad, skipped));
+    if ok == 0 && bad == 0 {
+        lines.push("FAIL no listed file was checked");
+        return ArResult { lines: lines, code: 1 };
+    }
+    let code = if bad > 0 { 1 } else { 0 };
+    ArResult { lines: lines, code: code }
+}

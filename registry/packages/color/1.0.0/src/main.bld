@@ -1,0 +1,113 @@
+// =============================================================================
+// color: colour differences and conversions from the command line
+// =============================================================================
+// SPDX-License-Identifier: FSL-1.1-MIT
+// Copyright 2026 Zain Dana Harper.
+// =============================================================================
+//
+// Usage:
+//   color de FILE        FILE holds lines "L1 a1 b1 L2 a2 b2" (extra tokens and
+//                        lines starting with # are ignored). Prints one line per
+//                        pair: CIE76 CIE94-graphic-arts CIE94-textiles CIEDE2000
+//                        CMC(2:1) CMC(1:1) HyAB.
+//   color convert FILE   FILE holds sRGB triples "r g b" (0-1). Prints, per
+//                        triple, labelled lines for each conversion.
+//
+// Numbers print with `{}`: the shortest digits that round-trip, written out
+// positionally with no exponent, and no ".0" on whole numbers.
+
+fn color_rows(path: str, want: usize) -> Vec<Vec<f64>> ~ FileSystem {
+    let text = read_file(path);
+    let lines = text.lines();
+    let mut rows: Vec<Vec<f64>> = Vec::new();
+    let mut i: usize = 0;
+    while i < vec_len(lines) {
+        let words = lines[i].split_whitespace();
+        if vec_len(words) >= want && !words[0].starts_with("#") {
+            let mut row: Vec<f64> = Vec::new();
+            let mut j: usize = 0;
+            while j < want {
+                row.push(words[j].parse_float());
+                j = j + 1;
+            }
+            rows.push(row);
+        }
+        i = i + 1;
+    }
+    rows
+}
+
+fn color_show(label: str, v: ColorV3) ~ Console {
+    println!("{} {} {} {}", label, v.x, v.y, v.z);
+}
+
+fn color_cmd_de(path: str) ~ Console + FileSystem {
+    let rows = color_rows(path, 6);
+    let mut i: usize = 0;
+    while i < vec_len(rows) {
+        let r = rows[i];
+        let p = color_v3(r[0], r[1], r[2]);
+        let q = color_v3(r[3], r[4], r[5]);
+        println!(
+            "{} {} {} {} {} {} {}",
+            color_delta_e_76(p, q),
+            color_delta_e_94(p, q, false),
+            color_delta_e_94(p, q, true),
+            color_delta_e_2000(p, q),
+            color_delta_e_cmc(p, q, 2.0, 1.0),
+            color_delta_e_cmc(p, q, 1.0, 1.0),
+            color_delta_e_hyab(p, q)
+        );
+        i = i + 1;
+    }
+}
+
+fn color_cmd_convert(path: str) ~ Console + FileSystem {
+    let rows = color_rows(path, 3);
+    let white_ok = color_srgb_to_oklab(color_v3(1.0, 1.0, 1.0));
+    let mut i: usize = 0;
+    while i < vec_len(rows) {
+        let r = rows[i];
+        let s = color_v3(r[0], r[1], r[2]);
+        let lin = color_srgb_to_linear(s);
+        let xyz = color_srgb_to_xyz(s);
+        let xyy = color_xyz_to_xyy(xyz);
+        let lab = color_xyz_to_lab(xyz);
+        let lch = color_lab_to_lch(lab);
+        let ok = color_srgb_to_oklab(s);
+        let okch = color_oklab_to_oklch(ok);
+        color_show("lin", lin);
+        color_show("enc", color_linear_to_srgb(lin));
+        color_show("xyz", xyz);
+        color_show("rgb", color_xyz_to_srgb(xyz, true));
+        color_show("rgbu", color_xyz_to_srgb(xyz, false));
+        color_show("xyy", xyy);
+        color_show("xyyxyz", color_xyy_to_xyz(xyy));
+        color_show("lab", lab);
+        color_show("labxyz", color_lab_to_xyz(lab));
+        color_show("lch", lch);
+        color_show("lchlab", color_lch_to_lab(lch));
+        color_show("oklab", ok);
+        color_show("oklin", color_oklab_to_linear_srgb(ok));
+        color_show("okrgb", color_oklab_to_srgb(ok, true));
+        color_show("oklch", okch);
+        color_show("oklchlab", color_oklch_to_oklab(okch));
+        let lum = color_luminance(s);
+        println!("lum {} {} {}", lum, color_contrast_ratio(lum, 1.0), color_delta_e_oklab(ok, white_ok));
+        i = i + 1;
+    }
+}
+
+fn main() ~ Console + FileSystem + Process + Environment {
+    let cmd = args_get(1);
+    if cmd == "de" {
+        color_cmd_de(args_get(2));
+        return;
+    }
+    if cmd == "convert" {
+        color_cmd_convert(args_get(2));
+        return;
+    }
+    println!("usage: color de FILE | color convert FILE");
+    exit(2);
+}

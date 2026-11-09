@@ -1,0 +1,194 @@
+// =============================================================================
+// color: colour difference metrics
+// =============================================================================
+// SPDX-License-Identifier: FSL-1.1-MIT
+// Copyright 2026 Zain Dana Harper.
+// =============================================================================
+//
+// A BuildLang port of build_color/difference.py for one pair of colours.
+// The Python functions take numpy arrays; here a colour is a ColorV3 (from
+// src/spaces.bld) holding L, a, b (or Oklab L, a, b). The operation order
+// follows the Python expressions term by term. `x**2` in numpy is x*x;
+// other powers (`**4`, `**7`) go through pow, as here.
+//
+// delta_e_94 takes the application as a flag: textiles = true selects
+// kL, K1, K2 = 2, 0.048, 0.014; false is graphic arts (the Python default).
+
+fn color_delta_e_76(lab1: ColorV3, lab2: ColorV3) -> f64 {
+    let d0 = lab1.x - lab2.x;
+    let d1 = lab1.y - lab2.y;
+    let d2 = lab1.z - lab2.z;
+    (d0 * d0 + d1 * d1 + d2 * d2).sqrt()
+}
+
+fn color_delta_e_94(lab1: ColorV3, lab2: ColorV3, textiles: bool) -> f64 {
+    let dl = lab1.x - lab2.x;
+    let c1 = (lab1.y * lab1.y + lab1.z * lab1.z).sqrt();
+    let c2 = (lab2.y * lab2.y + lab2.z * lab2.z).sqrt();
+    let dc = c1 - c2;
+    let da = lab1.y - lab2.y;
+    let db = lab1.z - lab2.z;
+    let mut dh_sq = da * da + db * db - dc * dc;
+    if dh_sq < 0.0 {
+        dh_sq = 0.0;
+    }
+    let mut kl = 1.0;
+    let mut k1 = 0.045;
+    let mut k2 = 0.015;
+    if textiles {
+        kl = 2.0;
+        k1 = 0.048;
+        k2 = 0.014;
+    }
+    let sl = 1.0;
+    let sc = 1.0 + k1 * c1;
+    let sh = 1.0 + k2 * c1;
+    let t1 = dl / (kl * sl);
+    let t2 = dc / sc;
+    (t1 * t1 + t2 * t2 + dh_sq / (sh * sh)).sqrt()
+}
+
+fn color_de2000_dhp(c1p: f64, c2p: f64, h1p: f64, h2p: f64) -> f64 {
+    if c1p * c2p == 0.0 {
+        return 0.0;
+    }
+    if (h2p - h1p).abs() <= 180.0 {
+        return h2p - h1p;
+    }
+    if h2p - h1p > 180.0 {
+        return h2p - h1p - 360.0;
+    }
+    h2p - h1p + 360.0
+}
+
+fn color_de2000_hp_avg(c1p: f64, c2p: f64, h1p: f64, h2p: f64) -> f64 {
+    if c1p * c2p == 0.0 {
+        return h1p + h2p;
+    }
+    if (h1p - h2p).abs() <= 180.0 {
+        return (h1p + h2p) / 2.0;
+    }
+    if h1p + h2p < 360.0 {
+        return (h1p + h2p + 360.0) / 2.0;
+    }
+    (h1p + h2p - 360.0) / 2.0
+}
+
+fn color_delta_e_2000_k(lab1: ColorV3, lab2: ColorV3, kl: f64, kc: f64, kh: f64) -> f64 {
+    let l1 = lab1.x;
+    let a1 = lab1.y;
+    let b1 = lab1.z;
+    let l2 = lab2.x;
+    let a2 = lab2.y;
+    let b2 = lab2.z;
+    let c1 = (a1 * a1 + b1 * b1).sqrt();
+    let c2 = (a2 * a2 + b2 * b2).sqrt();
+    let c_avg = (c1 + c2) / 2.0;
+    let c_avg7 = c_avg.powf(7.0);
+    // 25.0**7 is exact in binary64.
+    let g = 0.5 * (1.0 - (c_avg7 / (c_avg7 + 6103515625.0)).sqrt());
+    let a1p = a1 * (1.0 + g);
+    let a2p = a2 * (1.0 + g);
+    let c1p = (a1p * a1p + b1 * b1).sqrt();
+    let c2p = (a2p * a2p + b2 * b2).sqrt();
+    let h1p = color_floor_mod(color_degrees(atan2(b1, a1p)), 360.0);
+    let h2p = color_floor_mod(color_degrees(atan2(b2, a2p)), 360.0);
+
+    let dlp = l2 - l1;
+    let dcp = c2p - c1p;
+    let dhp = color_de2000_dhp(c1p, c2p, h1p, h2p);
+    let dhp_big = 2.0 * (c1p * c2p).sqrt() * color_radians(dhp / 2.0).sin();
+
+    let l_avg = (l1 + l2) / 2.0;
+    let cp_avg = (c1p + c2p) / 2.0;
+    let hp_avg = color_de2000_hp_avg(c1p, c2p, h1p, h2p);
+
+    let t = 1.0
+        - 0.17 * color_radians(hp_avg - 30.0).cos()
+        + 0.24 * color_radians(2.0 * hp_avg).cos()
+        + 0.32 * color_radians(3.0 * hp_avg + 6.0).cos()
+        - 0.20 * color_radians(4.0 * hp_avg - 63.0).cos();
+
+    let lm = l_avg - 50.0;
+    let sl = 1.0 + 0.015 * (lm * lm) / (20.0 + lm * lm).sqrt();
+    let sc = 1.0 + 0.045 * cp_avg;
+    let sh = 1.0 + 0.015 * cp_avg * t;
+
+    let cp_avg7 = cp_avg.powf(7.0);
+    let rc = 2.0 * (cp_avg7 / (cp_avg7 + 6103515625.0)).sqrt();
+    let hq = (hp_avg - 275.0) / 25.0;
+    let d_theta = 30.0 * (-(hq * hq)).exp();
+    let rt = -(color_radians(2.0 * d_theta).sin()) * rc;
+
+    let tl = dlp / (kl * sl);
+    let tc = dcp / (kc * sc);
+    let th = dhp_big / (kh * sh);
+    (tl * tl + tc * tc + th * th + rt * tc * th).sqrt()
+}
+
+fn color_delta_e_2000(lab1: ColorV3, lab2: ColorV3) -> f64 {
+    color_delta_e_2000_k(lab1, lab2, 1.0, 1.0, 1.0)
+}
+
+fn color_cmc_t(h1: f64) -> f64 {
+    if h1 >= 164.0 && h1 <= 345.0 {
+        return 0.56 + (0.2 * color_radians(h1 + 168.0).cos()).abs();
+    }
+    0.36 + (0.4 * color_radians(h1 + 35.0).cos()).abs()
+}
+
+// CMC(l:c). The Python default is l = 2, c = 1. Order matters.
+fn color_delta_e_cmc(lab1: ColorV3, lab2: ColorV3, l: f64, c: f64) -> f64 {
+    let l1 = lab1.x;
+    let a1 = lab1.y;
+    let b1 = lab1.z;
+    let c1 = (a1 * a1 + b1 * b1).sqrt();
+    let c2 = (lab2.y * lab2.y + lab2.z * lab2.z).sqrt();
+    let dc = c1 - c2;
+    let dl = l1 - lab2.x;
+    let da = a1 - lab2.y;
+    let db = b1 - lab2.z;
+    let mut dh_sq = da * da + db * db - dc * dc;
+    if dh_sq < 0.0 {
+        dh_sq = 0.0;
+    }
+    let mut sl = 0.511;
+    if !(l1 < 16.0) {
+        sl = 0.040975 * l1 / (1.0 + 0.01765 * l1);
+    }
+    let sc = 0.0638 * c1 / (1.0 + 0.0131 * c1) + 0.638;
+    let c1_4 = c1.powf(4.0);
+    let f = (c1_4 / (c1_4 + 1900.0)).sqrt();
+    let h1 = color_floor_mod(color_degrees(atan2(b1, a1)), 360.0);
+    let t = color_cmc_t(h1);
+    let sh = sc * (f * t + 1.0 - f);
+    let tl = dl / (l * sl);
+    let tc = dc / (c * sc);
+    (tl * tl + tc * tc + dh_sq / (sh * sh)).sqrt()
+}
+
+// Oklab difference: Euclidean distance between two Oklab colours.
+fn color_delta_e_oklab(ok1: ColorV3, ok2: ColorV3) -> f64 {
+    color_delta_e_76(ok1, ok2)
+}
+
+// HyAB: |dL| + sqrt(da^2 + db^2).
+fn color_delta_e_hyab(lab1: ColorV3, lab2: ColorV3) -> f64 {
+    let dl = (lab1.x - lab2.x).abs();
+    let da = lab1.y - lab2.y;
+    let db = lab1.z - lab2.z;
+    dl + (da * da + db * db).sqrt()
+}
+
+// WCAG contrast ratio between two relative luminances.
+fn color_contrast_ratio(l1: f64, l2: f64) -> f64 {
+    let mut lighter = l1;
+    let mut darker = l2;
+    if l2 > l1 {
+        lighter = l2;
+    }
+    if l2 > l1 {
+        darker = l1;
+    }
+    (lighter + 0.05) / (darker + 0.05)
+}

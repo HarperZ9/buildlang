@@ -1,0 +1,15 @@
+Inputs for the readability cases.
+
+flywheel-readme.md   Flywheel README.md at origin/main 681810fe (FSL-1.1-MIT), public repo HarperZ9/flywheel
+metr-interop.md      Flywheel docs/METR-INTEROP.md at the same revision
+getting-started.md   BuildLang docs/GETTING_STARTED.md at origin/main 585ed281 (AGPL-3.0-only), public repo HarperZ9/buildlang
+security.md          BuildLang SECURITY.md at the same revision
+edge-cases.txt       written for this package: Python's Unicode whitespace (U+0085, U+00A0, U+1680,
+                     U+2000..200A, U+2028, U+2029, U+202F, U+205F, U+3000, U+001C..001F, VT, FF, CRLF),
+                     U+200B and U+FEFF (not whitespace), non-ASCII letters, ' and - inside and around
+                     words, -le/-ee/silent-e words, runs of stops, no final newline
+short.txt            under 30 words: ease none
+empty.txt            no words, no sentences: ease none
+no-stop.txt          32 words and no sentence stop: one sentence
+
+The corpus files are UTF-8; Unicode whitespace is handled exactly, not just ASCII whitespace.

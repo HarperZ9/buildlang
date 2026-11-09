@@ -1,0 +1,11 @@
+# mode golden args... (run from the package folder; see docs/PACKAGES.md)
+exact tests/golden-effect-lane.svg tests/buildlang.art.json tests/face-metrics.json effect-lane.svg
+exact tests/golden-receipt-lane.svg tests/buildlang.art.json tests/face-metrics.json receipt-lane.svg
+exact tests/golden-backend-maturity.svg tests/buildlang.art.json tests/face-metrics.json backend-maturity.svg
+exact tests/golden-stress-flow-1.svg tests/stress.art.json tests/face-metrics.json flow-1.svg
+exact tests/golden-stress-flow-5.svg tests/stress.art.json tests/face-metrics.json flow-5.svg
+exact tests/golden-stress-flow-9.svg tests/stress.art.json tests/face-metrics.json flow-9.svg
+exact tests/golden-stress-flow-12.svg tests/stress.art.json tests/face-metrics.json flow-12.svg
+exact tests/golden-stress-flow-3.svg tests/stress.art.json tests/face-metrics.json flow-3.svg
+exact tests/golden-stress-card-a.svg tests/stress.art.json tests/face-metrics.json card-a.svg
+exact tests/golden-stress-card-b.svg tests/stress.art.json tests/face-metrics.json card-b.svg

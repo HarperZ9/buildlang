@@ -1,0 +1,224 @@
+// =============================================================================
+// canonical-record: value parser and canonical serialiser
+// =============================================================================
+// SPDX-License-Identifier: FSL-1.1-MIT
+// Copyright 2026 Zain Dana Harper.
+// =============================================================================
+//
+// Each value yields its canonical text plus two error lines: `perr`, the
+// first parse-phase failure in text order (the json module stops there), and
+// `cerr`, the first serialise-phase refusal in the order Python's text()
+// would meet it. A perr ends the walk at once. Containers are handled by the
+// iterative walk in object.bld, so nesting depth costs heap, not C stack.
+
+/// True when `b` is strict UTF-8 as Python's codec reads it: no overlong
+/// forms, no encoded surrogates, nothing above U+10FFFF.
+fn cr_utf8_ok(b: Vec<u8>) -> bool {
+    let n = vec_len(b);
+    let mut i: usize = 0;
+    while i < n {
+        let c = b[i];
+        let mut len: usize = 1;
+        let mut lo: u8 = 128_u8;
+        let mut hi: u8 = 191_u8;
+        if c < 128_u8 {
+            len = 1;
+        } else if c >= 194_u8 && c <= 223_u8 {
+            len = 2;
+        } else if c >= 224_u8 && c <= 239_u8 {
+            len = 3;
+            if c == 224_u8 {
+                lo = 160_u8;
+            }
+            if c == 237_u8 {
+                hi = 159_u8;
+            }
+        } else if c >= 240_u8 && c <= 244_u8 {
+            len = 4;
+            if c == 240_u8 {
+                lo = 144_u8;
+            }
+            if c == 244_u8 {
+                hi = 143_u8;
+            }
+        } else {
+            return false;
+        }
+        if i + len > n {
+            return false;
+        }
+        let mut k: usize = 1;
+        while k < len {
+            let t = b[i + k];
+            if k == 1 && (t < lo || t > hi) {
+                return false;
+            }
+            if t < 128_u8 || t > 191_u8 {
+                return false;
+            }
+            k = k + 1;
+        }
+        i = i + len;
+    }
+    true
+}
+
+/// A value: canonical text, end position, and the two error lines.
+struct CrVal {
+    perr: str,
+    cerr: str,
+    out: str,
+    pos: usize,
+}
+
+fn cr_perr(msg: str, pos: usize) -> CrVal {
+    CrVal { perr: msg, cerr: "", out: "", pos: pos }
+}
+
+fn cr_refuse(what: str) -> str {
+    format!("no canonical form: {}", what)
+}
+
+/// True when the decimal magnitude `digits` exceeds 2**53 - 1.
+fn cr_unsafe_int(digits: str) -> bool {
+    let max = "9007199254740991";
+    if digits.len() != 16 {
+        return digits.len() > 16;
+    }
+    let mut k: usize = 0;
+    while k < 16 {
+        let a = digits.as_bytes()[k];
+        let m = max.as_bytes()[k];
+        if a != m {
+            return a > m;
+        }
+        k = k + 1;
+    }
+    false
+}
+
+/// Python's json NUMBER grammar at `start`; returns the end index, or `start`
+/// when there is no number. `is_float` comes back through the second result.
+fn cr_number_end(b: Vec<u8>, start: usize) -> Vec<usize> {
+    let n = vec_len(b);
+    let mut i = start;
+    let mut is_float: usize = 0;
+    let mut res: Vec<usize> = Vec::new();
+    if i < n && b[i] == 45_u8 {
+        i = i + 1;
+    }
+    if i >= n || !cr_is_digit(b[i]) {
+        res.push(start);
+        res.push(0);
+        return res;
+    }
+    if b[i] == 48_u8 {
+        i = i + 1;
+    } else {
+        while i < n && cr_is_digit(b[i]) {
+            i = i + 1;
+        }
+    }
+    if i + 1 < n && b[i] == 46_u8 && cr_is_digit(b[i + 1]) {
+        i = i + 2;
+        while i < n && cr_is_digit(b[i]) {
+            i = i + 1;
+        }
+        is_float = 1;
+    }
+    if i < n && (b[i] == 101_u8 || b[i] == 69_u8) {
+        let mut j = i + 1;
+        if j < n && (b[j] == 43_u8 || b[j] == 45_u8) {
+            j = j + 1;
+        }
+        if j < n && cr_is_digit(b[j]) {
+            while j < n && cr_is_digit(b[j]) {
+                j = j + 1;
+            }
+            i = j;
+            is_float = 1;
+        }
+    }
+    res.push(i);
+    res.push(is_float);
+    res
+}
+
+/// True when the f64 is +/-infinity (JSON text cannot spell a NaN number).
+fn cr_is_inf(f: f64) -> bool {
+    (f.to_bits() & 9218868437227405312_u64) == 9218868437227405312_u64
+}
+
+fn cr_number(src: str, b: Vec<u8>, start: usize) -> CrVal {
+    let r = cr_number_end(b, start);
+    let end = r[0];
+    if end == start {
+        return cr_perr(cr_err_json(), start);
+    }
+    let lex = src.substring(start, end - start);
+    if r[1] == 1 {
+        let f = lex.parse_float();
+        if cr_is_inf(f) {
+            let mut name = "inf";
+            if f < 0.0 {
+                name = "-inf";
+            }
+            return CrVal { perr: "", cerr: cr_refuse(format!("{} has no canonical form", name)), out: "", pos: end };
+        }
+        return CrVal { perr: "", cerr: "", out: cr_es_number(f), pos: end };
+    }
+    let mut digits = lex;
+    if b[start] == 45_u8 {
+        digits = lex.substring(1, lex.len() - 1);
+    }
+    if digits.len() > 4300 {
+        // Python's int() refuses decimal strings longer than 4300 digits.
+        return cr_perr("error: integer has more than 4300 digits", start);
+    }
+    let mut norm = lex;
+    if lex == "-0" {
+        norm = "0";
+    }
+    if cr_unsafe_int(digits) {
+        return CrVal { perr: "", cerr: cr_refuse(format!("integer {} is outside +/-(2**53 - 1)", norm)), out: "", pos: end };
+    }
+    CrVal { perr: "", cerr: "", out: norm, pos: end }
+}
+
+/// A scalar at `i` (whitespace already skipped): string, literal or number.
+fn cr_scalar(src: str, b: Vec<u8>, i: usize) -> CrVal {
+    let n = vec_len(b);
+    if i >= n {
+        return cr_perr(cr_err_json(), i);
+    }
+    if b[i] == 34_u8 {
+        let s = cr_scan_string(src, b, i);
+        if !s.ok {
+            return cr_perr(cr_err_json(), s.pos);
+        }
+        let mut cerr = "";
+        if s.lone {
+            cerr = cr_refuse("lone surrogate in a string");
+        }
+        return CrVal { perr: "", cerr: cerr, out: s.out, pos: s.pos };
+    }
+    if cr_match(b, i, "null") {
+        return CrVal { perr: "", cerr: "", out: "null", pos: i + 4 };
+    }
+    if cr_match(b, i, "true") {
+        return CrVal { perr: "", cerr: "", out: "true", pos: i + 4 };
+    }
+    if cr_match(b, i, "false") {
+        return CrVal { perr: "", cerr: "", out: "false", pos: i + 5 };
+    }
+    if cr_match(b, i, "NaN") {
+        return cr_perr(cr_refuse("NaN has no canonical form"), i);
+    }
+    if cr_match(b, i, "Infinity") {
+        return cr_perr(cr_refuse("Infinity has no canonical form"), i);
+    }
+    if cr_match(b, i, "-Infinity") {
+        return cr_perr(cr_refuse("-Infinity has no canonical form"), i);
+    }
+    cr_number(src, b, i)
+}

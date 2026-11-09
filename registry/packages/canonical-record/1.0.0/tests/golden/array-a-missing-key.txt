@@ -1,0 +1,1 @@
+error: array file needs {"dtype": str, "shape": [int, ...], "values": [...]}

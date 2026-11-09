@@ -1,0 +1,265 @@
+// =============================================================================
+// canonical-record: the cr1 numeric-array digest
+// =============================================================================
+// SPDX-License-Identifier: FSL-1.1-MIT
+// Copyright 2026 Zain Dana Harper.
+// =============================================================================
+//
+// array_sha256(dtype, shape, values) from the Python module, driven from a
+// JSON file {"dtype": "f64", "shape": [3], "values": [1.0, -0.5, 3.25]}.
+// Bytes: b"cr1-array" 0x00 dtype 0x00 dims-joined-by-comma 0x00, then the
+// values in C order as little-endian items.
+//
+// Python refusals keep their wording ("no canonical form: ..."). A value that
+// struct.pack or float() rejects (TypeError, OverflowError, struct.error)
+// prints "error: values do not pack as DTYPE". One case is not ported: a JSON
+// string inside a float array, where Python's float(str) grammar decides the
+// outcome; this port refuses it with its own line.
+
+fn cr_skip_string(b: Vec<u8>, i: usize) -> usize {
+    let mut j = i + 1;
+    while b[j] != 34_u8 {
+        if b[j] == 92_u8 {
+            j = j + 2;
+        } else {
+            j = j + 1;
+        }
+    }
+    j + 1
+}
+
+/// End of the (already validated) value at `i`.
+fn cr_skip_value(b: Vec<u8>, i: usize) -> usize {
+    let n = vec_len(b);
+    let c = b[i];
+    if c == 34_u8 {
+        return cr_skip_string(b, i);
+    }
+    if c == 123_u8 || c == 91_u8 {
+        let mut depth: i64 = 0;
+        let mut j = i;
+        while j < n {
+            let d = b[j];
+            if d == 34_u8 {
+                j = cr_skip_string(b, j);
+            } else {
+                if d == 123_u8 || d == 91_u8 {
+                    depth = depth + 1;
+                } else if d == 125_u8 || d == 93_u8 {
+                    depth = depth - 1;
+                    if depth == 0 {
+                        return j + 1;
+                    }
+                }
+                j = j + 1;
+            }
+        }
+        return j;
+    }
+    let mut j = i;
+    while j < n && b[j] != 44_u8 && b[j] != 93_u8 && b[j] != 125_u8 && !cr_is_ws(b[j]) {
+        j = j + 1;
+    }
+    j
+}
+
+/// Leaf kinds: 0 null, 1 false, 2 true, 3 int, 4 float, 5 string, 6 object.
+fn cr_leaf_kind(b: Vec<u8>, start: usize, end: usize) -> i64 {
+    let c = b[start];
+    if c == 110_u8 {
+        return 0;
+    }
+    if c == 102_u8 {
+        return 1;
+    }
+    if c == 116_u8 {
+        return 2;
+    }
+    if c == 34_u8 {
+        return 5;
+    }
+    if c == 123_u8 {
+        return 6;
+    }
+    let mut k = start;
+    while k < end {
+        if b[k] == 46_u8 || b[k] == 101_u8 || b[k] == 69_u8 {
+            return 4;
+        }
+        k = k + 1;
+    }
+    3
+}
+
+/// Python truthiness of a leaf (the '?' struct code).
+fn cr_truthy(src: str, b: Vec<u8>, kind: i64, start: usize, end: usize) -> bool {
+    if kind == 0 || kind == 1 {
+        return false;
+    }
+    if kind == 2 {
+        return true;
+    }
+    let lex = src.substring(start, end - start);
+    if kind == 3 {
+        return lex != "0" && lex != "-0";
+    }
+    if kind == 4 {
+        return lex.parse_float() != 0.0;
+    }
+    if kind == 5 {
+        return end - start > 2;
+    }
+    b[cr_ws(b, start + 1)] != 125_u8
+}
+
+/// Leaves of the validated array at `start`, flattened in C order:
+/// [kind, start, end] triples.
+fn cr_flatten(b: Vec<u8>, start: usize) -> Vec<usize> {
+    let mut leaves: Vec<usize> = Vec::new();
+    let mut depth: i64 = 0;
+    let mut i = start;
+    while true {
+        i = cr_ws(b, i);
+        let c = b[i];
+        if c == 91_u8 {
+            depth = depth + 1;
+            i = i + 1;
+        } else if c == 93_u8 {
+            depth = depth - 1;
+            i = i + 1;
+            if depth == 0 {
+                break;
+            }
+        } else if c == 44_u8 {
+            i = i + 1;
+        } else {
+            let end = cr_skip_value(b, i);
+            leaves.push(cr_leaf_kind(b, i, end) as usize);
+            leaves.push(i);
+            leaves.push(end);
+            i = end;
+        }
+    }
+    leaves
+}
+
+/// Item size of a dtype, or 0 when the name is not one.
+fn cr_dtype_size(dtype: str) -> usize {
+    if dtype == "bool" || dtype == "i8" || dtype == "u8" {
+        return 1;
+    }
+    if dtype == "i16" || dtype == "u16" {
+        return 2;
+    }
+    if dtype == "i32" || dtype == "u32" || dtype == "f32" {
+        return 4;
+    }
+    if dtype == "i64" || dtype == "u64" || dtype == "f64" {
+        return 8;
+    }
+    0
+}
+
+fn cr_bad_array_file() -> CrDoc {
+    CrDoc { ok: false, text: "error: array file needs {\"dtype\": str, \"shape\": [int, ...], \"values\": [...]}" }
+}
+
+/// The digest line for an array file, or a refusal line.
+fn cr_array_file(src: str) -> CrDoc {
+    let b = str_bytes(src);
+    if !cr_utf8_ok(b) {
+        return CrDoc { ok: false, text: "error: input is not UTF-8" };
+    }
+    let n = vec_len(b);
+    let top = cr_ws(b, 0);
+    let v = cr_parse(src, b, top, cr_frame_budget(true));
+    if v.perr != "" {
+        return CrDoc { ok: false, text: v.perr };
+    }
+    if cr_ws(b, v.pos) != n {
+        return CrDoc { ok: false, text: cr_err_json() };
+    }
+    if b[top] != 123_u8 {
+        return cr_bad_array_file();
+    }
+    // Last occurrence of each key wins, as in a Python dict.
+    let mut dpos = n;
+    let mut spos = n;
+    let mut vpos = n;
+    let mut i = cr_ws(b, top + 1);
+    while b[i] == 34_u8 {
+        let ks = cr_scan_string(src, b, i);
+        i = cr_ws(b, cr_ws(b, ks.pos) + 1);
+        if ks.out == "\"dtype\"" {
+            dpos = i;
+        } else if ks.out == "\"shape\"" {
+            spos = i;
+        } else if ks.out == "\"values\"" {
+            vpos = i;
+        }
+        i = cr_ws(b, cr_skip_value(b, i));
+        if b[i] == 44_u8 {
+            i = cr_ws(b, i + 1);
+        }
+    }
+    if dpos == n || spos == n || vpos == n || b[dpos] != 34_u8 || b[spos] != 91_u8 || b[vpos] != 91_u8 {
+        return cr_bad_array_file();
+    }
+    let ds = cr_scan_string(src, b, dpos);
+    let mut dtype = "";
+    let mut k: usize = 0;
+    while k < vec_len(ds.u16) {
+        let unit = ((ds.u16[k] as u32) << 8) | (ds.u16[k + 1] as u32);
+        if unit < 32_u32 || unit > 126_u32 {
+            return cr_bad_array_file();
+        }
+        dtype = format!("{}{}", dtype, unit as char);
+        k = k + 2;
+    }
+    let shape = cr_flatten(b, spos);
+    let mut dims: Vec<str> = Vec::new();
+    k = 0;
+    while k < vec_len(shape) {
+        let s = shape[k + 1];
+        let e = shape[k + 2];
+        // Only a flat list of integers is a shape.
+        if shape[k] != 3 {
+            return cr_bad_array_file();
+        }
+        let mut d = src.substring(s, e - s);
+        if d == "-0" {
+            d = "0";
+        }
+        dims.push(d);
+        k = k + 3;
+    }
+    if cr_max_depth(b, spos) > 1 {
+        return cr_bad_array_file();
+    }
+    cr_array_digest(src, b, dtype, dims, vpos)
+}
+
+/// Deepest bracket nesting of the validated array at `start`.
+fn cr_max_depth(b: Vec<u8>, start: usize) -> i64 {
+    let end = cr_skip_value(b, start);
+    let mut depth: i64 = 0;
+    let mut most: i64 = 0;
+    let mut j = start;
+    while j < end {
+        let c = b[j];
+        if c == 34_u8 {
+            j = cr_skip_string(b, j);
+        } else {
+            if c == 91_u8 || c == 123_u8 {
+                depth = depth + 1;
+                if depth > most {
+                    most = depth;
+                }
+            } else if c == 93_u8 || c == 125_u8 {
+                depth = depth - 1;
+            }
+            j = j + 1;
+        }
+    }
+    most
+}
