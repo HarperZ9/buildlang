@@ -288,6 +288,41 @@ Planted checks, each must hold or the change does not merge. Each is a rewrite o
   can expand to C loops the source does not show, which first surfaced as "0 source loops but 2
   loop heads". Such a function is now reported outside the subset, by name of the macro.
 
+## Widening 4: structs (preregistered 2026-11-09, before the run)
+
+After effects, `tests/programs` stands at 194 of 437 certified. 120 of the functions outside the
+subset are refused by signature, about 44 of them for a struct whose fields are integers, floats,
+bools or such structs; most of the 108 remaining `main` functions build struct values.
+
+The change: a struct whose fields are all scalars or such structs (no generics, no tuple structs,
+no enums) is a value of the subset. A struct value is a term `agg$Name` over its fields in source
+declaration order, and two struct values are equal when every field is. On the source side a struct
+literal evaluates its fields in the order written and builds the value in declaration order; a field
+read selects a component; a field assignment (also nested, also compound) rebuilds the value; a
+struct parameter, local or loop-carried variable is a value of fresh field variables. On the C side
+the checker reads each `struct Name { ... };` definition from the C file: a compound literal
+`(Name){ a, b }` assigns fields in the C declaration order, `x.f` reads a member and `x.f = e`
+writes one, and a whole-struct assignment copies. A C struct whose fields differ from the source
+struct by name or type makes its functions mismatch. A call returning a struct is a value of one
+uninterpreted term per field, the same on both sides. Field order in C is read, never assumed.
+
+Prediction: `tests/programs` from 194 to between 215 and 260 of 437; the 50 % target is 219. 0 not
+certified on corpus programs; any not-certified function is investigated first.
+
+Planted checks, each must hold or the change does not merge (rewrites of the emitted C of
+`tests/tv/structs.bld` with the function hash rewritten, except where the edit is outside a
+function):
+
+- S1. Two fields of the same type swapped in a compound literal.
+- S2. A member read of the wrong field of the same type.
+- S3. A member write to the wrong field.
+- S4. The C struct definition with two fields of the same type swapped in declaration order, the
+  functions unchanged (a positional literal then fills the other field).
+- S5. A struct argument replaced by another struct value of the same type.
+- S6. A field of a returned struct left as the parameter's value instead of the computed one.
+- S7. `add-to-sub` on the struct fixture: every function that adds becomes not certified.
+- S8. The effects, float, constant and integer plants are still caught.
+
 ## Verified
 
 - `compiler/tests/tv_c.rs`, `compiler/tests/tv_float.rs` and `compiler/tests/tv_consts.rs`: the
