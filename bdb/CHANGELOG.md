@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- 2026-11-09: the REPL ends at end of input. A script piped to `qdb` with no `.quit` used to loop
+  forever on the prompt; it now leaves the way `.quit` does (exit 0, the WAL folded into the `.db`,
+  `HOLD` inside an open BEGIN). New test `bdb/tests/test_qdb_eof.py`, in CI.
+
+- 2026-11-09: memory follows the data. A checkpoint and a COMMIT build their text with one join,
+  the parser reuses its lists, the tokenizer reads bytes, and a single-row constraint check no
+  longer builds a map. Through `bdb/lib`, loading 8,000 rows peaks at 9.7 MB where it took 953.8 MB;
+  100,000 rows peak at 89.1 MB (SQLite 3.54.1: 2.0 MB, so 44.6 times; the 10 times target is
+  missed). Output, `.db` and WAL bytes are unchanged. New test `bdb/tests/test_qdb_memory.py`
+  bounds memory growth per row and per statement and must catch a planted leak; it runs in CI.
+
 - 2026-11-09: `bdb/lib` has prepared statements and a row API (`qdb_prepare`, `qdb_bind_*`,
   `qdb_step`, `qdb_column_*`, `qdb_reset`, `qdb_finalize`). Point selects on an indexed column and
   single-equality updates skip the parser; numeric index searches compare cached numbers. With

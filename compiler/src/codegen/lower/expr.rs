@@ -5395,7 +5395,7 @@ impl<'ctx> MirLowerer<'ctx> {
                     );
                     return Ok(values::local(result));
                 }
-                "clear" => (Some("build_hvec_free".to_string()), MirType::Void),
+                "clear" => (Some("build_hvec_clear".to_string()), MirType::Void),
                 // `v.join(sep)` on a Vec<String>: the parts and separators in one
                 // allocation (see build_hvec_join_str).
                 "join" if type_suffix == "str" && args.len() == 1 => (

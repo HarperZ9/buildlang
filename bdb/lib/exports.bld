@@ -35,6 +35,53 @@ fn qdb_from_c(p: *const u8) -> String ~ Foreign {
     out
 }
 
+// A statement's text from the host, with one lasting allocation (P29).
+// qdb_from_c grows the String a byte at a time, and each step is a new
+// buffer the runtime never frees: about 16 bytes of garbage per byte of SQL
+// squared. Here the bytes index a table of one-byte strings, one join makes
+// the text, and the list of parts is returned to the allocator.
+fn qdb_text(d: &mut DB, p: *const u8) -> String ~ Foreign {
+    if p as usize == 0 {
+        return "";
+    }
+    if vec_len(d.byte_strs) == 0 {
+        let mut k: i32 = 0;
+        while k < 256 {
+            let mut one = String::new();
+            one.push((k as u8) as char);
+            vec_push(d.byte_strs, one);
+            k = k + 1;
+        }
+    }
+    let n = unsafe { strlen(p) };
+    let bytes = unsafe { slice::from_raw_parts(p, n) };
+    let mut parts: Vec<String> = vec![];
+    let mut i: usize = 0;
+    while i < n {
+        vec_push(parts, vec_get(d.byte_strs, bytes[i] as i32));
+        i = i + 1;
+    }
+    let out = parts.join("");
+    parts.clear();
+    out
+}
+
+// The statement without one trailing ';' and without blank ends. A copy is
+// made only when there is something to strip.
+fn qdb_clean(text: String) -> String {
+    let slen = text.len();
+    let tb = text.as_bytes();
+    let mut clean_sql = text;
+    if slen > 0 {
+        if tb[slen - 1] == 59 { clean_sql = text.substring(0, slen - 1); }
+    }
+    let cl = clean_sql.len();
+    if cl == 0 { return clean_sql; }
+    let cb = clean_sql.as_bytes();
+    if cb[0] <= 32 || cb[cl - 1] <= 32 { return clean_sql.trim(); }
+    clean_sql
+}
+
 extern "C" fn qdb_open(path: *const u8) -> *mut DB ~ Foreign + Console + FileSystem + Process {
     let mut d = db_new(qdb_from_c(path));
     db_load(&mut d);
@@ -47,13 +94,7 @@ extern "C" fn qdb_exec(h: *mut DB, sql: *const u8) -> i32 ~ Foreign + Console + 
     if h as usize == 0 {
         return 1;
     }
-    let text = qdb_from_c(sql);
-    let slen = text.len();
-    let mut clean_sql = text;
-    if slen > 0 {
-        if text.char_at(slen - 1) == ";" { clean_sql = text.substring(0, slen - 1); }
-    }
-    let trimmed = clean_sql.trim();
+    let trimmed = unsafe { qdb_clean(qdb_text(&mut *h, sql)) };
     if trimmed.len() > 0 {
         unsafe { exec_sql(&mut *h, trimmed); }
     }
@@ -87,13 +128,7 @@ extern "C" fn qdb_close(h: *mut DB) ~ Foreign + Console + FileSystem + Process {
 // -------------------------------------------------------------------------
 
 extern "C" fn qdb_prepare(h: *mut DB, sql: *const u8) -> *mut QStmt ~ Foreign + Console + Process {
-    let text = qdb_from_c(sql);
-    let slen = text.len();
-    let mut clean_sql = text;
-    if slen > 0 {
-        if text.char_at(slen - 1) == ";" { clean_sql = text.substring(0, slen - 1); }
-    }
-    let st = unsafe { stmt_new(&mut *h, clean_sql.trim()) };
+    let st = unsafe { stmt_new(&mut *h, qdb_clean(qdb_text(&mut *h, sql))) };
     let b = Box::new(st);
     b as *mut QStmt
 }
