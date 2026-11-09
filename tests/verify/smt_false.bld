@@ -1,0 +1,62 @@
+// The V2 refusal set: claims that are false, most at inputs a sampler is
+// unlikely to draw. `buildc verify` must prove none of them.
+
+law needle_eq(x: i64) { x != 4611686018427375000 }
+
+law needle_pair(x: i64, y: i64) { x + y != 123456789012 || x != 98765 }
+
+law mul_needle(x: i64) requires x > 0 && x < 3037000499 { x * x != 9000000000000000000 }
+
+law bad_avg(a: i64, b: i64) requires a >= 0 && b >= 0 && a <= 1000000000000 && b <= 1000000000000 {
+    (a + b) / 2 >= a
+}
+
+law lowbit_half(x: u64) requires x > 0 { (x & (x - 1)) < x / 2 }
+
+law xor_needle(x: u64) { (x ^ 6148914691236517205) != 1085102592571150095 }
+
+law shl_needle(x: u64) requires x < 1000000000000 { (x << 3) != 987654312984 }
+
+fn spike(x: i64) -> i64 ensures result != 77 {
+    if x == 1234567 { 77 } else { 0 }
+}
+
+law cube_needle(x: i64) requires x > 1000 && x < 2000000 { x * x * x != 1000000000000000000 }
+
+law sum_sq(a: i64, b: i64) requires a >= 0 && a < 1000000000 && b >= 0 && b < 1000000000 {
+    a * a + b * b != 250000000000000000
+}
+
+law div_needle(a: i64) requires a > 0 { a / 7 != 1000000000000 }
+
+law rem_needle(a: u64) { a % 1000003 != 999999 || a < 5000000000000 }
+
+law and_needle(x: u32, y: u32) { (x & y) != 2863311530 || x != y }
+
+fn pred(x: i64) -> i64 requires x >= 0 ensures result >= 0 { x - 1 }
+
+law inverse_needle(x: u64) { x.wrapping_mul(3) != 1 }
+
+law odd_square(x: i64) requires x > 0 && x < 3000000000 { (x * x) % 8 != 1 || x % 2 == 0 }
+
+law abs_needle(x: i64) requires x > -1000000000000 { x.abs() != 999999999999 }
+
+law max_needle(a: i64, b: i64) { (if a > b { a } else { b }) != 31337 }
+
+law flag_needle(x: i64, p: bool) { !(p && x == 4242424242) }
+
+law branch_needle(x: i64) { if x > 5000000000000 { x != 5000000000123 } else { true } }
+
+law match_needle(x: i64) requires x > -1000000000000 && x < 1000000000000 {
+    match x { 0 => true, _ => x * 2 != 900000000000 }
+}
+
+fn halve(x: i64) -> i64 requires x % 2 == 0 { x / 2 }
+
+law odd_call(x: i64) requires x > 0 && x < 1000000000000 { halve(x * 3) != 0 || true }
+
+law shr_needle(x: i64) { (x >> 40) != -123456 }
+
+law sub_needle(a: u32, b: u32) requires a >= b { a - b != 3141592653 }
+
+fn main() {}

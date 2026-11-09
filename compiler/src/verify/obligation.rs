@@ -7,7 +7,7 @@ use super::eval::{Eval, Stop, Val};
 use super::sym::{Out, St, Sym};
 use super::term::{self, Term};
 use super::ty::Ty;
-use super::{prove, Kind};
+use super::{prove, smt, Kind};
 use crate::parser::{ENSURES_PREFIX, REQUIRES_PREFIX};
 
 /// `Ok(None)`: outside the `requires`. `Ok(Some(b))`: the claim's value.
@@ -40,13 +40,79 @@ pub(super) fn run_concrete(
     }
 }
 
-/// `Ok(engine)` when every path's goal and every side obligation is valid.
+/// The symbolic look: `proved` is `Ok(engine)` when every path's goal and
+/// every side obligation is valid; `candidates` are inputs the bit-precise
+/// solver found for obligations it could not close, for the concrete side
+/// to run.
+pub(super) struct Symbolic {
+    pub proved: Result<String, String>,
+    pub candidates: Vec<Vec<(String, i128)>>,
+}
+
+/// The test-only encoder fault, from `BUILDLANG_PLANT_SMT=drop-carry`.
+fn planted() -> bool {
+    std::env::var("BUILDLANG_PLANT_SMT").as_deref() == Ok("drop-carry")
+}
+
 pub(super) fn prove_symbolic(
     sym: &mut Sym<'_>,
     kind: Kind,
     name: &str,
     params: &[(String, Ty)],
-) -> Result<String, String> {
+) -> Symbolic {
+    let obligations = match collect(sym, kind, name, params) {
+        Ok(o) => o,
+        Err(why) => {
+            return Symbolic {
+                proved: Err(why),
+                candidates: Vec::new(),
+            }
+        }
+    };
+    let (side, goals, list) = obligations;
+    let mut by_smt = 0;
+    let mut failed: Option<String> = None;
+    let mut candidates = Vec::new();
+    for (label, hyps, goal) in &list {
+        let why = match prove::valid(hyps, goal) {
+            prove::Proof::Valid => continue,
+            prove::Proof::NotShown(why) => why,
+        };
+        match smt::decide(hyps, goal, planted()) {
+            smt::Answer::Valid => by_smt += 1,
+            smt::Answer::Candidate(m) => {
+                candidates.push(m);
+                failed.get_or_insert(format!(
+                    "{label}: {why}; the bit-precise solver found a candidate input"
+                ));
+            }
+            smt::Answer::Unknown(u) => {
+                failed.get_or_insert(format!("{label}: {why}; bit-precise solver: {u}"));
+            }
+        }
+    }
+    let proved = match failed {
+        Some(f) => Err(f),
+        None if by_smt == 0 => Ok(format!(
+            "symbolic: {goals} path(s), {side} call-site requires, linear arithmetic over Z"
+        )),
+        None => Ok(format!(
+            "symbolic: {goals} path(s), {side} call-site requires; {by_smt} obligation(s) by \
+             bit-blasting and SAT, the UNSAT proof replayed"
+        )),
+    };
+    Symbolic { proved, candidates }
+}
+
+type Obligations = (usize, usize, Vec<(String, Vec<Term>, Term)>);
+
+/// Every obligation of one claim: the side obligations, then each path's goal.
+fn collect(
+    sym: &mut Sym<'_>,
+    kind: Kind,
+    name: &str,
+    params: &[(String, Ty)],
+) -> Result<Obligations, String> {
     let args: Vec<Term> = params
         .iter()
         .map(|(n, t)| Term::Var(n.clone(), *t))
@@ -91,19 +157,15 @@ pub(super) fn prove_symbolic(
         }
     }
     let side = std::mem::take(&mut sym.side);
-    for ob in &side {
-        if let prove::Proof::NotShown(why) = prove::valid(&ob.hyps, &ob.goal) {
-            return Err(format!("{} not shown: {why}", ob.label));
-        }
-    }
-    for (hyps, goal) in &goals {
-        if let prove::Proof::NotShown(why) = prove::valid(hyps, goal) {
-            return Err(format!("symbolic: {why}"));
-        }
-    }
-    Ok(format!(
-        "symbolic: {} path(s), {} call-site requires, linear arithmetic over Z",
-        goals.len(),
-        side.len()
-    ))
+    let (n_side, n_goals) = (side.len(), goals.len());
+    let mut list: Vec<(String, Vec<Term>, Term)> = side
+        .into_iter()
+        .map(|ob| (format!("{} not shown", ob.label), ob.hyps, ob.goal))
+        .collect();
+    list.extend(
+        goals
+            .into_iter()
+            .map(|(h, g)| ("symbolic".to_string(), h, g)),
+    );
+    Ok((n_side, n_goals, list))
 }
