@@ -711,17 +711,19 @@ impl<'ctx> MirLowerer<'ctx> {
             self.note_pending_vec_use(local);
             Ok(values::local(local))
         } else {
-            // Check for math constants
+            // Built-in math constants, unless the program defines a global of
+            // the same name: a user `const PI` shadows the built-in (#177).
+            let user_global = self.module.find_global(ident.name.as_ref()).is_some();
             match ident.name.as_ref() {
-                "PI" => Ok(MirValue::Const(MirConst::Float(
+                "PI" if !user_global => Ok(MirValue::Const(MirConst::Float(
                     std::f64::consts::PI,
                     MirType::f64(),
                 ))),
-                "E" => Ok(MirValue::Const(MirConst::Float(
+                "E" if !user_global => Ok(MirValue::Const(MirConst::Float(
                     std::f64::consts::E,
                     MirType::f64(),
                 ))),
-                "TAU" => Ok(MirValue::Const(MirConst::Float(
+                "TAU" if !user_global => Ok(MirValue::Const(MirConst::Float(
                     std::f64::consts::TAU,
                     MirType::f64(),
                 ))),

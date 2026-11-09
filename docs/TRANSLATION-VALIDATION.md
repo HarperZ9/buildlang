@@ -191,7 +191,8 @@ Planted checks:
 - K1 held: the four constant readers in `tests/tv/consts.bld` are certified.
 - K2 held as predicted: `area` in `tests/tv/shadow_pi.bld` is not certified ("a source path and a C
   path disagree"): the source multiplies by 3.0, the C by 3.141592653589793. The checker now
-  catches issue #177.
+  catches issue #177. After the fix (a user global shadows `PI`, `E` and `TAU` in
+  `lower_ident`), `area` is certified and the test expects that.
 - K3 held: changing `SCALE`, `HALF` or `ENABLED` in the C makes its reader not certified
   (`compiler/tests/tv_consts.rs`).
 

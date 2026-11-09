@@ -1,8 +1,8 @@
 //! Translation validation with named constants (preregistered in
 //! docs/TRANSLATION-VALIDATION.md, "Widening 2: named constants", before the
 //! run). Every function of `tests/tv/consts.bld` is certified; a changed
-//! constant initializer in the C is refused; a user `PI` that the backend
-//! replaced with the built-in value is refused until issue #177 is fixed.
+//! constant initializer in the C is refused; a user `PI` is certified against
+//! its own value (the backend used the built-in value before issue #177 was fixed).
 
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -92,8 +92,8 @@ fn a_changed_constant_initializer_is_refused() {
 
 #[test]
 fn a_user_pi_is_checked_against_its_own_value() {
-    // Issue #177: the backend compiled a user `PI` to the built-in value.
-    // Flip the expectation to "certified" in the change that fixes it.
+    // Issue #177: the backend compiled a user `PI` to the built-in value,
+    // and this function was not certified. Fixed: the user value is used.
     let doc = tv(&fixture("shadow_pi.bld"), None);
-    assert_eq!(status_of(&doc, "area"), "not-certified", "{doc}");
+    assert_eq!(status_of(&doc, "area"), "certified", "{doc}");
 }
