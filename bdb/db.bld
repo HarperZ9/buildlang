@@ -282,6 +282,10 @@ struct DB {
     // P16 history: the open transaction's TXID and OP lines as written, the
     // history file and whether it has appends not yet flushed.
     txn_parts: Vec<String>,
+    // WAL lines of the open explicit transaction not yet appended (P21):
+    // TXID and OP lines wait here and go to the WAL in one append, with
+    // the COMMIT record or with HOLD at a clean exit.
+    wal_pend: Vec<String>,
     hist_on: bool,
     hist_path: String,
     hist_dirty: bool,
@@ -418,6 +422,7 @@ fn db_new(db_path: String) -> DB {
     let pool0: Vec<String> = vec![];
     let parts0: Vec<String> = vec![];
     let txp0: Vec<String> = vec![];
+    let wpd0: Vec<String> = vec![];
     DB {
         db_path: db_path,
         pool: pool0, pn: 0,
@@ -461,6 +466,7 @@ fn db_new(db_path: String) -> DB {
         txn_id: 0,
         txn_hash: 0,
         txn_parts: txp0,
+        wal_pend: wpd0,
         hist_on: false,
         hist_path: db_path + ".hist",
         hist_dirty: false,
@@ -1126,6 +1132,23 @@ fn wal_write(d: &mut DB, line: String, tag: String) ~ Console + FileSystem + Pro
     wal_append(d, line + "\n", tag);
 }
 
+// Hold a line of the open explicit transaction for its closing append (P21).
+// Nothing in a transaction is durable before its COMMIT record, and replay
+// drops a transaction without one, so holding the lines in memory loses
+// nothing a crash could have kept; it saves one file append per statement.
+fn wal_hold_line(d: &mut DB, line: String) {
+    vec_push(d.wal_pend, line + "\n");
+}
+
+// Append the held lines and the closing line in one write.
+fn wal_flush_pend(d: &mut DB, last: String, tag: String) ~ Console + FileSystem + Process {
+    vec_push(d.wal_pend, last + "\n");
+    let text = concat_parts(d.wal_pend);
+    let fresh: Vec<String> = vec![];
+    d.wal_pend = fresh;
+    wal_append(d, text, tag);
+}
+
 // Checkpoint: merge WAL into main .db file, then clear WAL
 fn wal_checkpoint(d: &mut DB) ~ Console + FileSystem + Process {
     // Every transaction this checkpoint folds into the .db must be durable
@@ -1167,7 +1190,7 @@ fn maybe_checkpoint(d: &mut DB) ~ Console + FileSystem + Process {
 // is discarded at the next start, as before.
 fn wal_close(d: &mut DB) ~ Console + FileSystem + Process {
     if d.in_transaction {
-        wal_write(d, "HOLD " + to_string_i32(d.txn_id), "wal_hold");
+        wal_flush_pend(d, "HOLD " + to_string_i32(d.txn_id), "wal_hold");
         return;
     }
     if d.wal_bytes > 0 { wal_checkpoint(d); }
@@ -1445,7 +1468,9 @@ fn wal_begin(d: &mut DB) ~ Console + FileSystem + Process {
     let fresh: Vec<String> = vec![];
     d.txn_parts = fresh;
     if d.hist_on { vec_push(d.txn_parts, tl + "\n"); }
-    wal_write(d, tl, "wal_begin");
+    let fresh2: Vec<String> = vec![];
+    d.wal_pend = fresh2;
+    wal_hold_line(d, tl);
 }
 
 // COMMIT — finalize the current transaction
@@ -1454,7 +1479,7 @@ fn wal_commit(d: &mut DB) ~ Console + FileSystem + Process {
         println!("Error: no transaction in progress");
         return;
     }
-    wal_write(d, commit_line(d.txn_hash), "wal_commit");
+    wal_flush_pend(d, commit_line(d.txn_hash), "wal_commit");
     durable_sync(d, d.wal_path, "wal_sync");
     if d.hist_on {
         hist_append(d, concat_parts(d.txn_parts) + commit_line(d.txn_hash) + "\n");
@@ -1473,6 +1498,8 @@ fn wal_rollback(d: &mut DB) ~ Console + FileSystem + Process {
     }
     restore_snapshot(d);
     d.in_transaction = false;
+    let fresh: Vec<String> = vec![];
+    d.wal_pend = fresh;
     // Discard WAL entries for this txn by checkpointing restored state
     wal_checkpoint(d);
 }
@@ -1499,7 +1526,7 @@ fn wal_log_mutation(d: &mut DB, sql: String) ~ Console + FileSystem + Process {
         let ol = wal_op_line(sql);
         d.txn_hash = fnv_extend(d.txn_hash, ol + "\n");
         if d.hist_on { vec_push(d.txn_parts, ol + "\n"); }
-        wal_write(d, ol, "wal_op");
+        wal_hold_line(d, ol);
     } else {
         // Auto-commit: wrap in a single-statement transaction, written as one
         // append so a torn write cannot leave a COMMIT without its OP.
