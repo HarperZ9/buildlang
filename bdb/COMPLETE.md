@@ -132,6 +132,21 @@ library tests unchanged. Planted check: a build that keeps the integer division 
 least 40 agreements on P2. The compiler fault (float divided by `i32` lowered as integer
 division) is filed as a BuildLang issue; qdb works around it with an explicit cast.
 
+**P9. sqllogictest setup and literal-first comparisons (rows 2a, 2c), written 2026-11-08 21:47 PT before
+the change.** Two parser gaps block whole sqllogictest files. `CREATE TABLE t1(..., x1
+VARCHAR(30))` is refused at the `(` after the type, so `select4.test` and `select5.test` lose
+their tables and every later record (1,729 statements and 3,564 queries); and a comparison with
+the literal first, `WHERE 272=e3`, is refused because a condition must start with a column.
+Change: a column type may carry arguments, `(n)` or `(p, s)`, which are read and dropped (the
+type keeps its storage class); a comparison `literal op column` is read as `column op' literal`
+with `<` and `>`, `<=` and `>=` swapped. A literal on both sides stays refused. Measured on P1
+unchanged against the P8 result. Prediction: statements as expected rise from 134 to at least
+1,800 of 1,993; query records passing rise from 33 to between 45 and 300, since most of the
+unblocked queries still use INTERSECT, EXCEPT, expressions in the select list or more than two
+tables in FROM, which qdb refuses. Guards: test_qdb.sh no FAIL; P2 2,000 of 2,000; text, crash,
+WAL, library and reference-differential tests unchanged. Planted check: a build that reads
+`5 < a` as `a < 5` (no swap) fails the new test_qdb.sh assertions.
+
 ### Amendments
 
 - **A1 (2026-11-08 17:45, before the first qdb run of P1).** The SQLite self-check scored 9,198 of
