@@ -10,6 +10,12 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+### `buildc build-hash`: the emitted C is the same bytes on every run
+
+- `buildc build-hash FILE [--runs N] [--json]` compiles FILE to C in N fresh compiler processes (default 3), prints one SHA-256 when every run emitted the same bytes, and exits 1 with the run and first differing line when one did not. `--json` prints a `buildlang-build-hash/v1` record with the source hash, compiler version and per-run hashes.
+- Fixed: programs with trait objects emitted their vtable types and instances in hash-map order, so two compiler runs could print different C for one source. 6 of 148 programs in `tests/programs` differed between two runs; after sorting, 147 of 147 that compile on this branch hash the same over 8 runs each.
+- `compiler/tests/build_hash.rs` holds the six programs at 8 runs each; unit tests plant a run counter, a late reordering and a truncation, and the comparison must name each.
+
 ### Miscompiles fixed: integer limits and a float local added as an integer (#212, #215, #203)
 
 - `i8::MAX`, `u16::MAX`, `isize::MIN` and every other integer limit now compile. Only five were mapped before; the rest lowered to an undeclared name such as `i8_MAX` and failed in the C compiler after `buildc check` passed (#212).
