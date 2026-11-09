@@ -54,17 +54,13 @@ const FLOAT_ADDS: [&str; 6] = ["fadd2", "poly2", "lerp", "sum_n", "hyp", "assoc"
 fn every_float_function_is_certified() {
     let (doc, code) = tv(None, None);
     assert_eq!(code, 0, "{doc}");
+    // `main` prints; since widening 3 (effects) it is certified too.
     let mut certified = 0;
     for (name, status) in statuses(&doc) {
-        let want = if name == "main" {
-            "outside-subset"
-        } else {
-            "certified"
-        };
-        assert_eq!(status, want, "{name}: {doc}");
+        assert_eq!(status, "certified", "{name}: {doc}");
         certified += (status == "certified") as usize;
     }
-    assert_eq!(certified, 17, "{doc}");
+    assert_eq!(certified, 18, "{doc}");
 }
 
 #[test]
@@ -74,8 +70,6 @@ fn the_planted_float_miscompilation_is_caught() {
     for (name, status) in statuses(&doc) {
         let want = if FLOAT_ADDS.contains(&name.as_str()) {
             "not-certified"
-        } else if name == "main" {
-            "outside-subset"
         } else {
             "certified"
         };
