@@ -482,6 +482,20 @@ Predictions: select ratio falls by 10 to 35 percent against P26 run B; update an
 build whose `ix_move` leaves `idx_num` unchanged must fail test_qdb_rows.py (the keyed workload
 updates an indexed column and then searches it). Guards: the full set.
 
+**P28. Update path costs with no byte change (speed item 2), written 2026-11-09 before the measured
+runs below.** After P27 a prepared UPDATE takes 2.3 to 2.4 times SQLite's time. Three per-statement
+costs in it, none of which changes a byte on disk: (1) the WAL line's FNV hash takes a 64-bit
+remainder by 2^32 per byte; the value is non-negative and below 2^56, so a mask by 2^32 - 1 gives the
+same number without a division; (2) every changed cell gets a new string and pool entry
+(`sp_add(to_string_i32(r))`); integers 0 to 65,535 written by the fast UPDATE now share one pool
+entry per value through a cache (`sp_int`), which is safe because no pool entry is changed after
+`sp_add`; (3) `update_apply` allocates its old-id vector per call; it now reuses one. Measurement:
+P27's runs (prep API, 200,000 statements, 11 pairs, 10,000 and 100,000 rows) against the P27 tip.
+Predictions: update falls 10 to 30 percent and mixed 5 to 20 percent at both sizes; select changes
+by less than 10 percent. Planted checks: a build whose FNV mask is 2^32 - 2 must change the
+power-cut digest (the fault test's expected-digest check fails); a build whose `sp_int` returns the
+entry of r - 1 must fail test_qdb_rows.py. Guards: the full set; digest 77a49282... unchanged.
+
 ### Amendments
 
 - **A1 (2026-11-08 17:45, before the first qdb run of P1).** The SQLite self-check scored 9,198 of
