@@ -370,6 +370,18 @@ checks: a build that writes the held lines at COMMIT but not at HOLD fails the c
 transaction checks of test_qdb.sh; a build that drops the held lines and writes only the COMMIT
 record shows violations in the crash test. Guards as in P20, and test_qdb_mutations.py.
 
+**P22. `INSERT ... SELECT` (item 2), written 2026-11-09 before the change.** qdb refuses `INSERT INTO t
+SELECT ...` ("expected keyword 'VALUES'"), so the 7 statement records of that form in the corpus fail
+and the tables they fill stay short: most of the 65 wrong P1 answers after P18 read such a table
+(A10). The change: after the table name and optional column list, a SELECT is parsed by the
+expression path (P11) and run before the insert; its rows go through the same checks as VALUES
+rows (column count, constraints, the key map). A SELECT of zero rows inserts nothing. Measured on
+P1. Predictions: statements from 1,931 to at least 1,938; query records from 9,087 to between
+9,120 and 9,145; wrong answers from 65 to under 20; no file loses a record. Planted check: a build
+that drops the last row of the SELECT keeps most of those records wrong (at least 30 fewer passes
+than the change). Guards as in P21, and new test_qdb.sh checks: rows copied, a column list, a
+SELECT of zero rows, a SELECT from the table itself, a constraint failure that inserts nothing.
+
 ### Amendments
 
 - **A1 (2026-11-08 17:45, before the first qdb run of P1).** The SQLite self-check scored 9,198 of
