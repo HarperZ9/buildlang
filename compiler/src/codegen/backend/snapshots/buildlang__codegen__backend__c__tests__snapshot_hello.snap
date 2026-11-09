@@ -2518,11 +2518,26 @@ static BuildString build_args_get(int64_t index) {
 // --- Stdin reading ---
 
 static BuildString build_read_line(void) {
-    char buf[4096];
-    if (fgets(buf, sizeof(buf), stdin) == NULL) {
-        return build_string_new("");
+    /* One whole line, however long: fgets fills 4 KB pieces until one ends
+       in a line feed or input ends. A single fgets cut a longer line into
+       several "lines", so a caller saw fragments of it as separate input. */
+    char piece[4096];
+    size_t cap = sizeof(piece);
+    size_t len = 0;
+    char* buf = (char*)malloc(cap);
+    buf[0] = '\0';
+    while (fgets(piece, sizeof(piece), stdin) != NULL) {
+        size_t n = strlen(piece);
+        if (len + n + 1 > cap) {
+            while (len + n + 1 > cap) cap *= 2;
+            buf = (char*)realloc(buf, cap);
+        }
+        memcpy(buf + len, piece, n + 1);
+        len += n;
+        if (n > 0 && piece[n - 1] == '\n') break;
     }
-    return build_string_from_cstr(buf);
+    BuildString qs; qs.ptr = buf; qs.len = len; qs.cap = cap;
+    return qs;
 }
 
 static BuildString build_read_all(void) {
