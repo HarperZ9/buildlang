@@ -73,6 +73,10 @@ Text-layer rules a paper build keeps:
 - Reading order is checked against the laid-out document, after references and citations are numbered.
 - `buildtex.check.same_text(a, b)` compares the words of two PDFs page by page. A paper's embossed build and its
   `paper-plain` build must agree; the papers on the site report that check.
+- A math box writes its glyph runs in source order: base, subscript, superscript (`e_1^2` extracts as `e12`), and
+  operator, lower limit, upper limit (`\sum_{j=1}^{m}` extracts as `∑ j=1 m`). The reading-order check counts
+  letters and digits only; `×` and `÷` are symbols, so `1.6 \times 10^{-15}` compares as `1 6 10 15`.
+  `tests/test_math_text.py` holds these cases.
 - The PDF names an author (`/Author`, and `dc:creator` with `--pdfa`) and a subject only when the document sets
   `meta pdf_author` and `meta subject`. Without them the PDF carries the title and producer alone, as before.
 
