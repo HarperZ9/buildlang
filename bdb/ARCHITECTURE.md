@@ -107,13 +107,15 @@ Every write opens the file in append mode (`append_file`); nothing already writt
 
 **Recovery**: On startup, `wal_replay()` reads the WAL in one pass. A `TXID` line opens a transaction, and a `COMMIT` line replays that transaction's `OP` lines. A transaction without a `COMMIT` (a crash, a torn final record, a ROLLBACK, a process that exited inside BEGIN) is skipped. Replay then checkpoints and clears the WAL.
 
-**Transactions**: `BEGIN` takes a snapshot and appends `TXID`. `COMMIT` appends the marker. `ROLLBACK` restores from snapshot and checkpoints.
+**Transactions**: `BEGIN` takes a snapshot and appends `TXID`. `COMMIT` appends the marker. `ROLLBACK` restores from snapshot and checkpoints. A clean exit inside `BEGIN` appends `HOLD <txid>`; the next process replays the committed records, snapshots, applies the held transaction's statements, appends `RESUME <txid>` and carries on inside the transaction, so `BEGIN`, the statements and `COMMIT` or `ROLLBACK` can each be their own process. An exit that is not clean leaves no `HOLD` at the end of the WAL, and the transaction is dropped.
 
 **Auto-commit**: A mutation outside an explicit transaction appends one `TXID / OP / COMMIT` record in a single write.
 
 **Checkpoints**: The .db is rewritten when the WAL holds more bytes than the .db plus 64 KB, never inside an open transaction, and at a clean exit (after a single statement, or at `.quit`). Each checkpoint costs at most the bytes appended since the last one, so saving a load of N rows costs O(N) in total.
 
-**Durability**: A statement is durable once its `COMMIT` line is in the WAL, the same point as before. The old code rewrote the whole WAL for every line and the whole .db after every statement; both truncate a file, so a crash during either could lose committed data. An append can only tear the last record, and a torn record has no `COMMIT`, so it is skipped. No write calls fsync, before or after this change. `programs/tests/test_qdb_wal_recovery.py` truncates a crash-left WAL at every byte offset and checks the recovered rows against this rule.
+**Durability**: A statement is durable once its `COMMIT` line is in the WAL, the same point as before. The old code rewrote the whole WAL for every line and the whole .db after every statement; both truncate a file, so a crash during either could lose committed data. An append can only tear the last record, and a torn record has no `COMMIT`, so it is skipped. No write calls fsync. `bdb/tests/test_qdb_wal_recovery.py` truncates a crash-left WAL at every byte offset and checks the recovered rows against this rule.
+
+**Checkpoint safety**: the `.db` rewrite truncates the file, so a checkpoint writes the new state to `<db>.ckpt` first, ending in `QDB CHECKPOINT COMPLETE`, then the `.db`, then clears the WAL and empties the `.ckpt`. At load a complete `.ckpt` wins over the `.db`. The `.db` starts with `QDB 1 <txid>`, the last transaction it holds, and replay skips WAL transactions at or below it, so a crash between the rewrite and the WAL clear does not apply them twice. `bdb/tests/test_qdb_crash.py` stops each statement of a workload at every durable write, before it and halfway through it, and checks the recovered committed state (170 crash points, 0 violations on 2026-11-08; 24 violations of 104 before this design).
 
 ## Query Execution Flow
 

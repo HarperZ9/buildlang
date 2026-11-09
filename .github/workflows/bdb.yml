@@ -4,6 +4,10 @@ name: bdb
 #   - bdb/tests/test_qdb.sh                 SQL regression harness
 #   - bdb/tests/test_qdb_differential.py    randomized old-vs-new differential
 #   - bdb/tests/test_qdb_wal_recovery.py    truncated-WAL crash recovery
+#   - bdb/tests/test_qdb_crash.py           stop at every durable write and recover
+#   - bdb/tests/test_qdb_text.py            text with | \ and line breaks round-trips
+#   - bdb/tests/test_qdb_sqlite_oracle.py   2,000 generated queries against SQLite
+#                                           (reported; it fails until NULL is apart from '')
 #   - bql::tests::in_process_subset_matches_qdb, the compiler's in-process BuildQL
 #     subset checked against this qdb binary (QDB_BIN)
 # A change to compiler/ runs it too: a codegen regression that breaks qdb fails here.
@@ -12,7 +16,9 @@ name: bdb
 # last db.bld before the write-path rewrite (append-only WAL, lazy indexes), which was
 # build-universe 577abe4 before the move. A change to the engine must keep its query
 # output and its recovery behaviour byte-identical to that reference, or update the
-# ref with a stated reason.
+# ref with a stated reason. Stated 2026-11-08: file format 1 adds a header line, which
+# the differential strips before comparing .db files, and transactions now span
+# processes, so its process mode compares the new build with its own REPL run.
 
 on:
   pull_request:
@@ -83,6 +89,16 @@ jobs:
       - name: bql in-process subset against this qdb
         working-directory: compiler
         run: QDB_BIN="$GITHUB_WORKSPACE/bdb/qdb.exe" cargo test --release --locked --lib bql::tests::in_process_subset_matches_qdb
+
+      - name: Crash test (stop at every durable write)
+        run: python3 bdb/tests/test_qdb_crash.py bdb/qdb.exe
+
+      - name: Text round trip
+        run: python3 bdb/tests/test_qdb_text.py bdb/qdb.exe
+
+      - name: SQLite differential (measurement, not yet a gate; see bdb/COMPLETE.md row 1b)
+        continue-on-error: true
+        run: python3 bdb/tests/test_qdb_sqlite_oracle.py bdb/qdb.exe
 
       - name: WAL truncation recovery test
         run: python3 bdb/tests/test_qdb_wal_recovery.py bdb/qdb.exe --old "$RUNNER_TEMP/qdb_oracle"

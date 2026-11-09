@@ -73,13 +73,17 @@
 //   qdb test.db "CREATE INDEX idx_age ON users (age)"
 //   qdb test.db                         — interactive REPL mode
 //
-// Storage format:
+// Storage format (format 1; a file without the QDB line is format 0, read
+// the same way except that its cells are taken literally):
+//   QDB 1 <txid>          every transaction up to <txid> is in this file
 //   TABLE users
 //   SCHEMA id:INTEGER name:TEXT age:INTEGER
 //   ROW 1|Zain|25
-//   ROW 2|Harper|30
+//   ROW 2|a\|b|30          a cell escapes \\ \| \n \r
 //   END
 //   INDEX idx_age ON users (age)
+// The checkpoint writes the same text to <db>.ckpt first, ending in
+// "QDB CHECKPOINT COMPLETE"; a complete .ckpt wins over the .db at load.
 // =============================================================================
 
 // =========================================================================
@@ -278,6 +282,14 @@ struct DB {
     // QDB_CRASH_MODE=torn the first half of that write lands first,
     // otherwise none of it does. QDB_TRACE_WRITES=1 prints one line per
     // durable write to stderr. Unset, every write goes straight through.
+    // File format and recovery state. fmt_escaped is true when the .db
+    // began with a "QDB 1 <txid>" header (format 1: cells escaped); a file
+    // with no header is format 0 and is read as before. applied_txid is the
+    // <txid> of that header: every transaction with an id at or below it is
+    // already in the .db, so replay skips it.
+    fmt_escaped: bool,
+    applied_txid: i32,
+    ckpt_path: String,
     crash_at: i32,
     crash_torn: bool,
     trace_writes: bool,
@@ -323,6 +335,7 @@ struct DB {
 // id) starts at 0. The WAL path is derived by appending ".wal" to the db path.
 fn db_new(db_path: String) -> DB {
     let wp = db_path + ".wal";
+    let cp = db_path + ".ckpt";
     // Typed local: a bare vec![] in the struct literal is built as a Vec<i32>
     // by the C backend, and pushing strings into that corrupts memory.
     let pool0: Vec<String> = vec![];
@@ -369,6 +382,7 @@ fn db_new(db_path: String) -> DB {
         txn_id: 0,
         wal_buf: "",
         wal_bytes: 0, db_bytes: 0,
+        fmt_escaped: false, applied_txid: 0, ckpt_path: cp,
         crash_at: 0, crash_torn: false, trace_writes: false, write_seq: 0,
         idx_stale: false,
         snap_cells: vec![], snap_row_starts: vec![], snap_row_counts: vec![],
@@ -422,6 +436,61 @@ fn sp_get(d: &DB, id: i32) -> String {
 // Join strings pairwise, round by round, so each byte is copied O(log parts)
 // times. Appending every line to one growing String copied the whole output
 // per line, O(size^2) per save.
+// --- Escaped text (file format 1) ---
+// A cell is written with four escapes: a backslash as \\, a pipe as \|, a
+// line feed as \n and a carriage return as \r. A WAL statement that holds a
+// line break is written as an OPX line with the same escapes, minus the pipe.
+// A string with none of these characters is written unchanged, so a file
+// with no special text reads the same in either format.
+fn needs_escape(s: String, pipe: bool) -> bool {
+    if s.index_of("\\") >= 0 { return true; }
+    if s.index_of("\n") >= 0 { return true; }
+    if s.index_of("\r") >= 0 { return true; }
+    if pipe { if s.index_of("|") >= 0 { return true; } }
+    false
+}
+
+fn escape_text(s: String, pipe: bool) -> String {
+    if !needs_escape(s, pipe) { return s; }
+    let mut parts: Vec<String> = vec![];
+    let n = s.len();
+    let mut i: i64 = 0;
+    while i < n {
+        let c = s.char_at(i);
+        if c == "\\" { vec_push(parts, "\\\\"); }
+        else if c == "\n" { vec_push(parts, "\\n"); }
+        else if c == "\r" { vec_push(parts, "\\r"); }
+        else if pipe && c == "|" { vec_push(parts, "\\|"); }
+        else { vec_push(parts, c); }
+        i = i + 1;
+    }
+    concat_parts(parts)
+}
+
+// Inverse of escape_text. An unknown escape keeps both characters.
+fn unescape_text(s: String) -> String {
+    if s.index_of("\\") < 0 { return s; }
+    let mut parts: Vec<String> = vec![];
+    let n = s.len();
+    let mut i: i64 = 0;
+    while i < n {
+        let c = s.char_at(i);
+        if c == "\\" && i + 1 < n {
+            let e = s.char_at(i + 1);
+            if e == "n" { vec_push(parts, "\n"); }
+            else if e == "r" { vec_push(parts, "\r"); }
+            else if e == "\\" { vec_push(parts, "\\"); }
+            else if e == "|" { vec_push(parts, "|"); }
+            else { vec_push(parts, c + e); }
+            i = i + 2;
+        } else {
+            vec_push(parts, c);
+            i = i + 1;
+        }
+    }
+    concat_parts(parts)
+}
+
 fn concat_parts(parts: Vec<String>) -> String {
     let mut cur: Vec<String> = parts;
     let mut n = vec_len(cur);
@@ -452,7 +521,8 @@ fn concat_parts(parts: Vec<String>) -> String {
 // Output is built in chunks of about 64 KB, joined once by concat_parts.
 fn db_text(d: &DB) -> String {
     let mut parts: Vec<String> = vec![];
-    let mut out = "";
+    // Format 1 header: every transaction up to txn_id is in this file.
+    let mut out = "QDB 1 " + to_string_i32(d.txn_id) + "\n";
     let mut t = 0;
     while t < d.tbl_count {
         let tname = sp_get(d, vec_get(d.tbl_names, t));
@@ -480,7 +550,7 @@ fn db_text(d: &DB) -> String {
             while ci < cc {
                 if ci > 0 { row_str = row_str + "|"; }
                 let cell = sp_get(d, vec_get(d.cells, rs + r * cc + ci));
-                row_str = row_str + cell;
+                row_str = row_str + escape_text(cell, true);
                 ci = ci + 1;
             }
             out = out + row_str + "\n";
@@ -514,8 +584,16 @@ fn db_text(d: &DB) -> String {
 
 // Rewrite the .db from memory. Returns the bytes written, which the
 // checkpoint policy compares the WAL against.
+// The rewrite is made crash-safe with a checkpoint file: the whole new
+// state goes to <db>.ckpt first, ending in a completion line, then to the
+// .db, and wal_checkpoint empties the .ckpt after the WAL is cleared. A
+// torn .ckpt lacks its completion line and is ignored (the .db and WAL are
+// untouched); a torn .db is ignored in favour of the complete .ckpt.
+fn ckpt_marker() -> String { "QDB CHECKPOINT COMPLETE\n" }
+
 fn db_save(d: &mut DB) -> i64 ~ Console + FileSystem + Process {
     let all = db_text(d);
+    durable_write(d, d.ckpt_path, all + ckpt_marker(), false, "ckpt");
     durable_write(d, d.db_path, all, false, "db");
     all.len()
 }
@@ -526,8 +604,22 @@ fn db_save(d: &mut DB) -> i64 ~ Console + FileSystem + Process {
 // After loading, the caller should also call wal_replay() to recover any
 // committed transactions from the WAL that haven't been checkpointed.
 fn db_load(d: &mut DB) ~ FileSystem {
-    if !file_exists(d.db_path) { return; }
-    let content = read_file(d.db_path);
+    let mut content = "";
+    let mut have = false;
+    if file_exists(d.ckpt_path) {
+        let ck = read_file(d.ckpt_path);
+        let mk = ckpt_marker();
+        if ck.len() >= mk.len() {
+            if ck.substring(ck.len() - mk.len(), mk.len()) == mk {
+                content = ck.substring(0, ck.len() - mk.len());
+                have = true;
+            }
+        }
+    }
+    if !have {
+        if !file_exists(d.db_path) { return; }
+        content = read_file(d.db_path);
+    }
     let clen = content.len();
     if clen == 0 { return; }
 
@@ -554,6 +646,10 @@ fn db_load(d: &mut DB) ~ FileSystem {
             let clen2 = clean.len();
             if clen2 == 0 {
                 // skip empty
+            } else if clean.starts_with("QDB 1 ") {
+                d.fmt_escaped = true;
+                d.applied_txid = parse_int_str(clean.substring(6, clen2 - 6));
+                d.txn_id = d.applied_txid;
             } else if clean.starts_with("TABLE ") {
                 let tname = clean.substring(6, clen2 - 6);
                 let tid = sp_add(d, tname);
@@ -637,10 +733,15 @@ fn db_load(d: &mut DB) ~ FileSystem {
                             else {
                                 let rc = row_str.char_at(rp);
                                 if rc == "|" { rp = rp + 1; cgo = false; }
+                                else if rc == "\\" && d.fmt_escaped && rp + 1 < rlen {
+                                    cell_val = cell_val + rc + row_str.char_at(rp + 1);
+                                    rp = rp + 2;
+                                }
                                 else { cell_val = cell_val + rc; rp = rp + 1; }
                             }
                         }
-                        let cid = sp_add(d, cell_val);
+                        let cell_text = if d.fmt_escaped { unescape_text(cell_val) } else { cell_val };
+                        let cid = sp_add(d, cell_text);
                         vec_push(d.cells, cid);
                         cell_count_in_row = cell_count_in_row + 1;
                     }
@@ -723,14 +824,21 @@ fn db_load(d: &mut DB) ~ FileSystem {
 // WAL file format (append-only; every write opens the file in append mode):
 //   TXID <n>        — start of transaction n
 //   OP <sql>        — a mutation SQL statement within the transaction
+//   OPX <sql>       — the same, escaped (\\ \n \r), for a statement that
+//                     holds a line break or a backslash
 //   COMMIT          — marks transaction n as committed
+//   HOLD <n>        — a clean exit inside BEGIN; the next process resumes n
+//   RESUME <n>      — a process resumed n (so an unclean exit drops it)
 //
 // Recovery flow (wal_replay):
 //   1. Read the WAL in one pass. A TXID line opens a transaction; a COMMIT
 //      line replays that transaction's OP lines via exec_sql_no_wal.
 //      A transaction with no COMMIT (a crash mid-transaction, a torn final
-//      record, a ROLLBACK, or a process that exited inside BEGIN) is skipped.
-//   2. Checkpoint (save + clear WAL)
+//      record, a ROLLBACK, or a process that ended inside BEGIN without a
+//      clean exit) is skipped. A transaction whose id is at or below the
+//      .db header's <txid> is already in the .db and is skipped too.
+//   2. If the WAL ends in HOLD for the open transaction, resume it (see
+//      wal_close) and keep the WAL. Otherwise checkpoint (save + clear WAL).
 //
 // Transaction flow:
 //   BEGIN    -> take_snapshot() + append TXID
@@ -749,9 +857,12 @@ fn db_load(d: &mut DB) ~ FileSystem {
 // writes truncate and refill a file, so a crash during either could lose
 // committed data. An append never touches bytes already written, so a crash
 // can at worst tear the last record, and a torn record lacks its COMMIT and
-// is skipped. The .db rewrite in db_save is still truncate-and-write, as
-// before; it now runs far less often. No write calls fsync, before or after:
-// durability is to the OS file cache.
+// is skipped. The .db rewrite is truncate-and-write, so db_save writes the
+// .ckpt first (see SECTION 2), and the .db header's <txid> stops a replay of
+// records the .db already holds after a crash between the rewrite and the
+// WAL clear. bdb/tests/test_qdb_crash.py stops every statement at each of its
+// durable writes, before the write and halfway through it, and checks the
+// recovered state. No write calls fsync: durability is to the OS file cache.
 //
 // Checkpoint policy. maybe_checkpoint rewrites the .db only once the WAL
 // holds more bytes than the .db plus wal_checkpoint_slack(), and never inside
@@ -798,6 +909,7 @@ fn wal_checkpoint(d: &mut DB) ~ Console + FileSystem + Process {
     if file_exists(d.wal_path) {
         durable_write(d, d.wal_path, "", false, "wal_clear");
     }
+    durable_write(d, d.ckpt_path, "", false, "ckpt_clear");
     d.wal_bytes = 0;
 }
 
@@ -813,8 +925,17 @@ fn maybe_checkpoint(d: &mut DB) ~ Console + FileSystem + Process {
 
 // Checkpoint at a clean exit so the .db file is current between processes.
 // Skipped inside an open transaction, which stays uncommitted as before.
+// A clean exit inside BEGIN appends "HOLD <txid>": the next process resumes
+// the transaction, so BEGIN, the statements and COMMIT or ROLLBACK can each
+// run as their own process. An exit that is not clean (a crash, or a
+// statement rejected with exit code 1) leaves no HOLD as the WAL's last
+// line (a resuming process appends RESUME first), and the open transaction
+// is discarded at the next start, as before.
 fn wal_close(d: &mut DB) ~ Console + FileSystem + Process {
-    if d.in_transaction { return; }
+    if d.in_transaction {
+        wal_write(d, "HOLD " + to_string_i32(d.txn_id), "wal_hold");
+        return;
+    }
     if d.wal_bytes > 0 { wal_checkpoint(d); }
 }
 
@@ -853,27 +974,55 @@ fn wal_replay(d: &mut DB) ~ Console + FileSystem + Process {
     let lines: Vec<String> = content.lines();
     let n = vec_len(lines);
     let mut txn_start: i64 = 0 - 1;
+    let mut txn_open_id = 0;
+    let mut max_id = d.txn_id;
+    let mut last_line = "";
     let mut li: i64 = 0;
     while li < n {
         let wl = strip_cr(vec_get(lines, li));
+        if wl.len() > 0 { last_line = wl; }
         if wl.starts_with("TXID ") {
-            txn_start = li + 1;
+            let id = parse_int_str(wl.substring(5, wl.len() - 5));
+            if id > max_id { max_id = id; }
+            // A transaction at or below the .db's applied id is already in
+            // the .db: a crash came after the checkpoint and before the WAL
+            // was cleared. Replaying it again would apply it twice.
+            if id > d.applied_txid { txn_start = li + 1; txn_open_id = id; }
+            else { txn_start = 0 - 1; }
         } else if wl.starts_with("COMMIT") {
             if txn_start >= 0 {
                 let mut j = txn_start;
                 while j < li {
-                    let rl = strip_cr(vec_get(lines, j));
-                    if rl.starts_with("OP ") {
-                        let rlen = rl.len();
-                        let sql: String = rl.substring(3, rlen - 3);
-                        exec_sql_no_wal(d, sql);
-                    }
+                    let sql = wal_op_sql(strip_cr(vec_get(lines, j)));
+                    if sql.len() > 0 { exec_sql_no_wal(d, sql); }
                     j = j + 1;
                 }
                 txn_start = 0 - 1;
             }
         }
         li = li + 1;
+    }
+    d.txn_id = max_id;
+
+    // A transaction left open by a clean exit ends the WAL with its HOLD
+    // line. Resume it: snapshot the committed state for ROLLBACK, apply the
+    // transaction's statements, and keep the WAL as it is, since its open
+    // records are the transaction's only durable copy.
+    if txn_start >= 0 && last_line == "HOLD " + to_string_i32(txn_open_id) {
+        take_snapshot(d);
+        let mut j = txn_start;
+        while j < n {
+            let sql = wal_op_sql(strip_cr(vec_get(lines, j)));
+            if sql.len() > 0 { exec_sql_no_wal(d, sql); }
+            j = j + 1;
+        }
+        d.in_transaction = true;
+        d.txn_id = txn_open_id;
+        d.wal_bytes = clen;
+        // Mark the resume, so the WAL no longer ends in HOLD: if this
+        // process does not exit cleanly, the transaction is dropped.
+        wal_write(d, "RESUME " + to_string_i32(txn_open_id), "wal_resume");
+        return;
     }
 
     // After replay, checkpoint to merge into .db and clear WAL
@@ -1042,16 +1191,31 @@ fn wal_rollback(d: &mut DB) ~ Console + FileSystem + Process {
     wal_checkpoint(d);
 }
 
+// One WAL line for a statement: "OP <sql>", or "OPX <escaped sql>" when the
+// statement holds a line break or a backslash.
+fn wal_op_line(sql: String) -> String {
+    if needs_escape(sql, false) { return "OPX " + escape_text(sql, false); }
+    "OP " + sql
+}
+
+// The statement of an OP or OPX line, or "" for any other line.
+fn wal_op_sql(line: String) -> String {
+    let n = line.len();
+    if line.starts_with("OP ") { return line.substring(3, n - 3); }
+    if line.starts_with("OPX ") { return unescape_text(line.substring(4, n - 4)); }
+    ""
+}
+
 // Write a mutation to WAL and optionally auto-commit
 fn wal_log_mutation(d: &mut DB, sql: String) ~ Console + FileSystem + Process {
     if d.in_transaction {
         // In explicit transaction — just append OP to WAL
-        wal_write(d, "OP " + sql, "wal_op");
+        wal_write(d, wal_op_line(sql), "wal_op");
     } else {
         // Auto-commit: wrap in a single-statement transaction, written as one
         // append so a torn write cannot leave a COMMIT without its OP.
         d.txn_id = d.txn_id + 1;
-        wal_append(d, "TXID " + to_string_i32(d.txn_id) + "\nOP " + sql + "\nCOMMIT\n", "wal_auto");
+        wal_append(d, "TXID " + to_string_i32(d.txn_id) + "\n" + wal_op_line(sql) + "\nCOMMIT\n", "wal_auto");
         maybe_checkpoint(d);
     }
 }
@@ -1076,7 +1240,7 @@ fn cmd_wal(d: &DB) ~ Console + FileSystem {
     let mut li: i64 = 0;
     while li < n {
         let clean = strip_cr(vec_get(lines, li));
-        if clean.starts_with("OP ") { op_count = op_count + 1; }
+        if clean.starts_with("OP ") || clean.starts_with("OPX ") { op_count = op_count + 1; }
         if clean.starts_with("TXID ") { in_txn = true; }
         if clean == "COMMIT" { in_txn = false; }
         li = li + 1;
