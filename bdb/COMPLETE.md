@@ -554,6 +554,22 @@ harness unchanged. Before: 1,251 of 2,000 on this branch, re-run before the chan
   treats a completed rename as durable. 10,000 seeds cover 35 to 38 distinct outcomes of one
   18-step workload, so the count of seeds overstates the variety.
 
+## After P16b: receipts on the runtime SHA-256, printed as one string (2026-11-09)
+
+- **Overhead of receipts: 13.0 percent on Linux, 5.7 percent on Windows** (0.050 s off, 0.057 s
+  on; 0.202 s off, 0.214 s on; 1,000 queries, median of 5 per seed). P16: 44 and 347 percent.
+  The bar (under 5 percent) is still missed on both; the A8 prediction for Linux (3 to 12
+  percent) missed by 1 point. What is left is about 7 microseconds per query on Linux against a
+  query of about 50: two SHA-256 passes (the result, a few hundred bytes, and the query text), the
+  captured lines joined into one string, and the receipt line itself.
+- **Reproduction:** 1,000 of 1,000 on Windows and Linux; receipt lines byte-identical to the P16
+  build on the same workload (sha256 of process A's output equal). Planted checks (a) and (b)
+  caught as in P16. **Guards:** test_qdb.sh 290 pass, 0 fail; P15 digest unchanged; P2 2,000 of
+  2,000.
+- Found on the way (A9): a `println!` with several arguments is one `printf` with several `%s`
+  conversions, and on Windows with stdout unbuffered that cost about 0.3 ms per receipt line.
+  Every multi-argument print in a BuildLang program pays it.
+
 ## After P16: history, AS OF and receipts (2026-11-09, feat/bdb-history)
 
 - **Reproduction:** 1,000 of 1,000 results reproduced by a second process with `AS OF` (P2 seeds 1
@@ -595,7 +611,7 @@ harness unchanged. Before: 1,251 of 2,000 on this branch, re-run before the chan
 | 1d Cross-process transaction | either P4 case misses | PASS | four checks in test_qdb.sh (`xproc_*`), differential process mode equals REPL mode on 8 seeds |
 | 1e Text round trip | any P5 value changes | PASS | 2,000 of 2,000 (`test_qdb_text.py`); format 0 files still load |
 | 1f NULL apart from '' | `INSERT (NULL)` and `INSERT ('')` are indistinguishable by `IS NULL`, or `NOT (NULL = x)` is true | PASS | P7: NULL is its own value with three-valued logic; 19 checks in test_qdb.sh; P2 null_vs_empty 519 to 0. Before: both stored an empty cell |
-| 1h History, AS OF and receipts | a second process with `AS OF` fails to reproduce any of the P16 results, or receipts cost 5 percent of query time or more | FAIL | P16: 1,000 of 1,000 reproduced on Windows and Linux; overhead 44 percent (Linux) and 347 percent (Windows) with SHA-256 written in BuildLang |
+| 1h History, AS OF and receipts | a second process with `AS OF` fails to reproduce any of the P16 results, or receipts cost 5 percent of query time or more | FAIL | P16b: 1,000 of 1,000 reproduced on Windows and Linux; overhead 13.0 percent (Linux) and 5.7 percent (Windows) with the runtime SHA-256; P16: 44 and 347 percent with SHA-256 written in BuildLang |
 | 1g JOIN gaps that fail closed | a secondary ORDER BY key over a grouped JOIN, DISTINCT over a grouped JOIN, or COUNT(DISTINCT) over any JOIN is refused | FAIL | each refused with a specific message (`bdb/README.md`, Known limitations) |
 
 ## Stage 2: SQL coverage against the outside corpus
