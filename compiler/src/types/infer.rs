@@ -3543,6 +3543,10 @@ impl<'ctx> TypeInfer<'ctx> {
             _ => {}
         }
         if let Some(ty) = self.ctx.lookup_var(name) {
+            if self.ctx.binds_at_module_scope(name) {
+                self.ctx.record_module_ref(name, span.start.0, span.end.0);
+            }
+            self.ctx.set_ref_in_call(false);
             if self.ctx.is_foreign_static(name) {
                 self.current_effects
                     .add(super::effects::Effect::new(super::capabilities::FOREIGN));
@@ -5141,7 +5145,10 @@ impl<'ctx> TypeInfer<'ctx> {
         }
 
         let call_sources = self.call_sources(func);
+        self.ctx
+            .set_ref_in_call(matches!(func.kind, ExprKind::Ident(_)));
         let func_ty = self.infer_expr(func);
+        self.ctx.set_ref_in_call(false);
         let func_ty = self.apply(&func_ty);
 
         // Auto-deref a reference (or chain of references) to a function

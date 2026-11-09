@@ -18,7 +18,7 @@ format, extends the dialect's reach to compiler data, and adds transforms.
 
 ## The tables
 
-A compiled program becomes these tables. Version 0 (shipped) has the first four.
+A compiled program becomes these tables. Version 0 shipped the first four; version 1 adds `refs`.
 
 | Table | Columns | Source |
 |---|---|---|
@@ -34,7 +34,7 @@ A compiled program becomes these tables. Version 0 (shipped) has the first four.
 | `topology` (hardware, H7) | to be designed | a machine probe |
 
 Rows are sorted, so the JSON form and its SHA-256 digest are deterministic. The schema tag
-is `buildlang.bdb/v0`.
+is `buildlang.bdb/v1` (a v0 store reads with an empty `refs` table).
 
 ## Queries
 
@@ -107,7 +107,7 @@ as a language construct.
 | Point | qdb today | The new direction needs | Proposal |
 |---|---|---|---|
 | Home | moved to `bdb/` in this repo, 2026-11-09 (author: "Move into BuildLang") | built and tested with the compiler | Done: `.github/workflows/bdb.yml` builds qdb with this checkout's buildc |
-| File format | text with no escaping | arbitrary symbol and path text | Escaped text v1, or BDF as the storage encoding |
+| File format | escaped text, format 1 (2026-11-08) | arbitrary symbol and path text | Done: `QDB 1 <txid>` header, cells escape backslash, pipe, LF and CR; `bql export` writes it and no longer refuses a cell |
 | Process model | one process per statement; cross-process ROLLBACK is a known limit | many queries per compile | A library entry point the compiler links through the C ABI |
 | Sorting | selection sort, O(n^2) | whole-program stores of 10^5 rows | Replace with merge sort once a measured store shows the cost |
 | Transforms | UPDATE on rows | checked rewrites of programs | Transform statements dispatched to the compiler, with receipts |
@@ -137,9 +137,18 @@ unshifted) must be caught by the diff, so the check is shown to see a wrong stor
 missing or extra row, and exits 1 on any drift, header digests included. A stale store
 (one exported before the source changed) is drift.
 
-## Known limits of version 0
+## Known limits of version 1
 
-Single-file programs only; a program with `use`, `mod name;` or an include is refused. No
-`refs` table yet, so the rename relies on the MIR check, not on resolved references.
-The call graph lists runtime calls under their lowered names (`println!` appears as
-`printf`).
+Single-file programs only; a program with `use`, `mod name;` or an include is refused.
+Module resolution (`resolve_modules` in `compiler/src/main.rs`) runs in the binary, not the
+library the store is built in, and the merged AST mixes spans from several files; a multi-file
+store needs that resolver in the library and a file column on every span. The call graph lists
+runtime calls under their lowered names (`println!` appears as `printf`).
+
+`refs` holds the uses of module-scope names that the type checker binds through `infer_ident`:
+calls and values naming a top-level function, constant, static or extern. A local, parameter or
+pattern that shadows the name is not a reference to it. Not yet covered: type names in
+signatures and struct literals, method calls, and calls resolved by multiple dispatch (they
+bypass `infer_ident`). Check: for every function in `tests/programs` whose rename is accepted,
+its `refs` equal the identifier tokens spelled its name, less its definition (290 of 290 on
+2026-11-08, 139 programs); a checker that drops call references gives 19 of 289.

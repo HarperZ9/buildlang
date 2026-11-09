@@ -23,7 +23,7 @@ use crate::types::{FunctionEffectSummary, TypeChecker, TypeContext};
 use super::BqlError;
 
 /// Schema tag of the serialized store.
-pub const BDB_SCHEMA: &str = "buildlang.bdb/v0";
+pub const BDB_SCHEMA: &str = "buildlang.bdb/v1";
 
 /// A function defined or declared in the module.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -62,6 +62,17 @@ pub struct ItemRow {
     pub kind: String,
 }
 
+/// One resolved use of a module-scope name: a top-level function, constant,
+/// static or extern, as the type checker bound it. A use that a local,
+/// parameter or pattern shadows is a use of that binding and is not here.
+/// `role` is `call` for the callee of a call and `value` otherwise.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct RefRow {
+    pub symbol: String,
+    pub span: (u32, u32),
+    pub role: String,
+}
+
 /// The program as a database.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Store {
@@ -73,6 +84,9 @@ pub struct Store {
     pub effects: Vec<EffectRow>,
     pub calls: Vec<CallRow>,
     pub items: Vec<ItemRow>,
+    /// Added in `buildlang.bdb/v1`; a v0 store reads with none.
+    #[serde(default)]
+    pub refs: Vec<RefRow>,
 }
 
 /// The compiler products a store is built from.
@@ -81,6 +95,8 @@ pub struct Lowered {
     pub ast: Module,
     pub summaries: Vec<FunctionEffectSummary>,
     pub mir: MirModule,
+    /// Resolved module-scope references from the type checker.
+    pub refs: Vec<RefRow>,
 }
 
 pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
@@ -145,6 +161,16 @@ pub fn lower_source(name: &str, source: &str) -> Result<Lowered, BqlError> {
         )));
     }
     let summaries = checker.function_effect_summaries().to_vec();
+    drop(checker);
+    let refs: BTreeSet<RefRow> = ctx
+        .module_refs()
+        .iter()
+        .map(|(name, start, end, call)| RefRow {
+            symbol: name.to_string(),
+            span: (*start, *end),
+            role: if *call { "call" } else { "value" }.to_string(),
+        })
+        .collect();
     let text: Arc<str> = Arc::from(source_file.source());
     let mir = MirLowerer::with_source(&ctx, text.clone())
         .lower_module(&ast)
@@ -154,6 +180,7 @@ pub fn lower_source(name: &str, source: &str) -> Result<Lowered, BqlError> {
         ast,
         summaries,
         mir,
+        refs: refs.into_iter().collect(),
     })
 }
 
@@ -261,6 +288,7 @@ impl Store {
             effects: effects.into_iter().collect(),
             calls: calls.into_iter().collect(),
             items: items.into_iter().collect(),
+            refs: lowered.refs.clone(),
         })
     }
 

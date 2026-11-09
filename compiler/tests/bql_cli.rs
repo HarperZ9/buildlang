@@ -73,7 +73,7 @@ fn export_writes_qdb_tables() {
         String::from_utf8_lossy(&out.stderr)
     );
     let text = std::fs::read_to_string(&db).unwrap();
-    assert!(text.starts_with("TABLE functions\nSCHEMA name:TEXT kind:TEXT"));
+    assert!(text.starts_with("QDB 1 0\nTABLE functions\nSCHEMA name:TEXT kind:TEXT"));
     assert!(text.contains("ROW main|add_month\n"), "{text}");
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -31,6 +31,8 @@ pub mod store;
 #[cfg(test)]
 mod drift_tests;
 #[cfg(test)]
+mod refs_tests;
+#[cfg(test)]
 mod tests;
 
 pub use drift::{diff_stores, verify_against_source, DriftReport};

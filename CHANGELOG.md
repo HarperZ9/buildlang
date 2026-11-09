@@ -11,6 +11,9 @@ tracked in `STATUS.md`, `README.md`, and
 ## Unreleased: BuildDB (qdb) moves into bdb/
 
 - qdb, the SQL engine in BuildLang, moved from HarperZ9/build-universe `programs/db.bld` to `bdb/db.bld` with its 46-commit history (author decision 2026-11-09, "Move into BuildLang"). `.github/workflows/bdb.yml` builds it with the buildc of each checkout and runs its regression harness (214 pass, 1 expected failure), the differential and WAL recovery tests against the pre-rewrite reference engine, and `bql::tests::in_process_subset_matches_qdb` with `QDB_BIN` set. `bdb/` keeps its FSL-1.1-MIT licence (`bdb/LICENSE`, `NOTICE`).
+- BuildDB completion, stage by stage, in `bdb/COMPLETE.md`, with outside references: sqllogictest (qdb passes 32 of 9,202 query records) and SQLite on 2,000 generated queries (1,251 agree; NULL stored as '' is the main gap). qdb's checkpoints are crash-safe (0 violations of 170 crash points, 24 of 104 before), transactions span processes, text with `|` or line breaks round-trips (file format 1), single-table ORDER BY is a merge sort (30,000 rows in 0.048 s, 28.3 s before), and qdb builds as a static library with a C interface (`bdb/lib`).
+- `bql` store schema `buildlang.bdb/v1` adds the `refs` table: the uses of module-scope names the type checker binds, as calls or values. For every accepted rename in `tests/programs` the refs equal the name's tokens (290 of 290). `bql export` writes qdb's format 1 and no longer refuses a cell holding `|` or a line break.
+- Runtime: `read_line` returns a whole line of any length; it cut lines longer than 4,095 bytes into pieces (`compiler/tests/read_line_long.rs`).
 
 ## Unreleased: canonical-record, color, repo-art, readability and art-receipts as BuildLang packages
 

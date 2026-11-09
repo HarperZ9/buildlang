@@ -201,7 +201,7 @@ cells)); UPDATE and DELETE (they rebuild arrays, as before); and ORDER BY
 | Single flat struct | Retained pattern; buildc 1.2.0 now supports local struct field assignment |
 | String pool in a `Vec<String>` | O(1) intern and lookup; ids keep cells as `Vec<i32>` |
 | Text file format | Human-readable, simple parsing, adequate for target scale |
-| Selection sort for ORDER BY | O(n^2) but trivial to implement correctly without stdlib sort; index builds use a merge sort |
+| Selection sort for UNION, grouped and JOIN ORDER BY | O(n^2); single-table ORDER BY (sort_rows) and index builds use a stable merge sort, measured in benchmarks/bench_qdb_sort.py |
 | Append-only WAL, deferred checkpoint | A write costs O(statement); the .db rewrite is amortized against WAL growth |
 | Full array rebuilds | Most mutations rebuild their arrays; INSERT into the last table appends in place (`vec_push` and index assignment work on the runtime's heap vectors) |
 | No B-tree | Sorted arrays sufficient; B-tree in flat arrays not justified |
