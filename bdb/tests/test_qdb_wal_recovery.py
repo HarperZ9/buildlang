@@ -9,8 +9,9 @@ transaction. The test then truncates that WAL at every byte offset (a torn
 write), restores the .db, reopens qdb, and checks the recovered rows against
 a reference model of the recovery rule:
 
-  a transaction's OP lines are applied if and only if its COMMIT line is
-  present in the surviving prefix; nothing else is applied.
+  a transaction's OP lines are applied if and only if its whole COMMIT
+  record (COMMIT and its 8-digit hash, bdb/COMPLETE.md P15b) is present in
+  the surviving prefix; nothing else is applied.
 
 Cases:
   small     a few autocommit INSERTs, one committed BEGIN block, one open
@@ -19,7 +20,9 @@ Cases:
             recovered state is .db rows plus WAL rows; 200 random offsets.
 
 With --old OLD_QDB the small case's truncated WALs also go through the old
-build, whose recovery output must match the new build's exactly.
+build, whose recovery output must match the new build's exactly, except at
+offsets that cut inside a COMMIT record: the old build took any line starting
+with COMMIT as a commit, which P15b removed.
 
   python test_qdb_wal_recovery.py NEW_QDB [--old OLD_QDB]
 """
@@ -33,6 +36,17 @@ import sys
 import tempfile
 
 ROW_RE = re.compile(r"INSERT INTO t VALUES \((\d+),")
+COMMIT_RE = re.compile(r"COMMIT [0-9a-f]{8}")
+
+
+def whole_commit(line):
+    return COMMIT_RE.fullmatch(line) is not None
+
+
+def torn_commit(prefix):
+    """The prefix ends inside a COMMIT record."""
+    last = prefix.rsplit(b"\n", 1)[-1].decode(errors="replace")
+    return last.startswith("COMMIT") and not whole_commit(last)
 
 
 def session(qdb, db, stmts):
@@ -56,7 +70,7 @@ def expected_ids(db_bytes, wal_bytes):
         if line.startswith("TXID "):
             pending, open_txn = [], True
         elif line.startswith("COMMIT"):
-            if open_txn:
+            if open_txn and whole_commit(line):
                 for op in pending:
                     if op.startswith("CREATE TABLE t"):
                         table = True
@@ -110,7 +124,7 @@ def run_case(name, qdb, old, stmts, offsets_fn, wd):
                 missing = sorted(set(want[1]) - set(got[1]))[:5]
                 print("FAIL %s cut=%d/%d rc=%d table want/got=%s/%s rows want/got=%d/%d extra=%s missing=%s"
                       % (name, cut, len(wal), rc, want[0], got[0], len(want[1]), len(got[1]), extra, missing))
-        if old:
+        if old and not torn_commit(prefix):
             orc, oout = recover(old, work, db_bytes, prefix)
             if (orc, oout) != (rc, out):
                 fails += 1

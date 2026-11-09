@@ -225,6 +225,32 @@ reported. Guards: test_qdb.sh no FAIL, P1 8,921, P2 2,000, text, WAL, library an
 differential unchanged. Planted check: a build that renames before the `.tmp` write completes
 (rename, then write) shows violations in the crash test. Power loss itself (dropped or reordered
 unflushed writes) is not simulated here; that is the seeded-fault work that follows.
+**P15. Seeded power cuts (scoreboard target 2), written 2026-11-09 04:10 PT before any run.** A new
+harness, `bdb/tests/test_qdb_faults.py`, simulates a power cut in the operating system's file cache,
+seeded, with no change to the engine. It learns each step of the `test_qdb_crash.py` workload (18
+steps) by stopping the step at every durable operation (`QDB_CRASH_AT=k`) and comparing the files
+before and after: a whole-file write, an append at an offset, a flush of one file, or a rename. A
+seed then picks a step, a cut point c in 0..n (operations 1..c were issued; c = n is a cut after the
+process exited and before the cache was written back), and for every issued write that no flush of
+its file follows before the cut: dropped (probability 1/2) or kept, and a kept write is torn with
+probability 1/4 (a seeded prefix of its bytes lands). Kept writes land in issue order at their
+recorded offsets; a range left by a dropped earlier append is zero-filled, which is the outcome of a
+later write reaching the device before an earlier one (reordering). Flushed writes always land. A
+completed rename always lands (the runtime's `rename_file` flushes the directory on Linux and
+writes through on Windows). Each step starts from a fully written-back image of the state before it,
+so a cut never loses an earlier step's unflushed writes; that is a stated limit of this model. One
+qdb process then opens the image, issues ROLLBACK, reads both tables and quits. Rule: the process
+exits 0, and the state read equals the state after the step if a commit-tagged write (`wal_auto`,
+`wal_commit`) was followed by a `wal_sync` before the cut (the commit was acknowledged as durable),
+and equals the state before or after the step otherwise. Determinism: the sha256 of every file left
+after recovery (`.db`, `.wal`, `.tmp`, `.ckpt`), per seed, and one digest over seeds 1 to 10,000.
+The same generated `qdb.c` is compiled on Windows (gcc, MinGW) and on Linux (WSL Ubuntu 24.04,
+gcc), and CI on ubuntu-latest checks the digest against the one committed from the Windows run.
+Predictions: 0 violations of 10,000 seeds; the per-seed hashes equal on Windows and Linux for 10,000
+of 10,000. Planted checks: (a) with `--plant-ignore-flush` every unflushed and flushed write alike
+may be dropped, and the harness must report violations (acknowledged commits lost), or it cannot see
+a lost commit; (b) one per-seed hash altered in the Linux manifest must be reported as a difference.
+Cost (seeds per second on each platform) is reported; no bound.
 
 ### Amendments
 
@@ -271,6 +297,23 @@ unflushed writes) is not simulated here; that is the seeded-fault work that foll
   was stopped in `select5.test`; P11 is reported for the other 16 files with `select5.test` counted
   at its P10 score (0 queries pass), and the planted check runs on the same 16 files. Ordering
   the joins is P12, which measures all 17 files again.
+- **A7 (2026-11-09 04:40, after the first P15 run, before any change to the engine).** The P15 run
+  on main 3aa051c found 2 violations in 10,000 seeds (9,351 and 9,570), the same on Windows and
+  Linux. Both cut the explicit transaction step before its `wal_sync`: one OP record torn, a later
+  record kept beyond a zero-filled hole, and the COMMIT record torn to `COMMIT` with no line break.
+  Replay took the prefix as a commit and ran the torn OP; the recovering process exited 1. The
+  commit was never acknowledged, so the rule allowed the state before or after, and neither came
+  out. The fix, P15b: a commit record becomes `COMMIT <h>`, where h is the FNV-1a 32-bit hash, in
+  8 hex digits, of the transaction's `TXID` line and each of its OP and OPX lines, each with its
+  line break. Replay applies a transaction only when h matches; a bare `COMMIT` from an older
+  build counts only when its line break survived. Prediction: 0 violations in seeds 1 to 10,000,
+  hashes still equal on Windows and Linux. Planted check: a build that accepts any line starting
+  with `COMMIT` (the old rule) shows the violations again on seeds 1 to 10,000. Guards: test_qdb.sh
+  no FAIL, crash test 0 violations, P2 2,000, text, library and reference differential unchanged.
+  `test_qdb_wal_recovery.py` truncates the WAL at every byte; its reference model now counts a
+  COMMIT line only when the whole record survived, and its comparison with the reference engine
+  skips offsets that cut inside a COMMIT record, where the reference engine accepts the torn
+  prefix (the behaviour this fix removes).
 
 ## Baseline (qdb at the move, 2026-11-08, buildc 1.11.0)
 
@@ -443,13 +486,34 @@ harness unchanged. Before: 1,251 of 2,000 on this branch, re-run before the chan
 - Not covered: a power cut can drop or reorder writes that were never flushed; this run stops
   processes only. The seeded-fault simulation is next.
 
+## After P15: seeded power cuts (2026-11-09, feat/bdb-faults)
+
+- **First run, main 3aa051c (no engine change):** 10,000 seeds, 2 violations (seeds 9,351 and
+  9,570; amendment A7), 38 distinct recovered images. The per-seed hashes are equal on Windows
+  (MinGW gcc) and Linux (WSL Ubuntu 24.04, gcc) for 10,000 of 10,000, both from one generated
+  `qdb.c`; digest `913f72f4...`. Prediction 0 violations: missed. Prediction equal hashes: held.
+- **After P15b (the COMMIT record carries a hash):** 0 violations in 10,000 seeds, 35 distinct
+  recovered images; Windows and Linux equal for 10,000 of 10,000, digest `cd3ccf9f...`, now a CI
+  gate on ubuntu-latest. 97 durable operations learned over the 18 steps. Speed: 78 seeds per
+  second on Windows, 232 on Linux (2 workers each).
+- **Planted checks:** flushes ignored, 79 violations in 300 seeds: caught. One altered hash in
+  the compared manifest: reported. The build that accepts any line starting with `COMMIT`: 1
+  violation in 10,000 (seed 9,570): caught, at a lower count than the 2 of the first run.
+- **Guards:** test_qdb.sh 290 pass, 0 fail; crash test 194 points, 0 violations; WAL truncation
+  0 failures with the reference engine compared (no offset needed the COMMIT skip); text 0
+  changed; library 0 failures; reference differential 16 of 16; P2 2,000 of 2,000.
+- Limits: each step starts from a fully written-back image, so a cut never reaches back into an
+  earlier step's unflushed writes; a lost range reads as zeros, never as stale bytes; the model
+  treats a completed rename as durable. 10,000 seeds cover 35 to 38 distinct outcomes of one
+  18-step workload, so the count of seeds overstates the variety.
+
 ## Stage 1: a correct, durable single-file engine
 
 | Row | Check (fails if) | Status | Evidence |
 |---|---|---|---|
 | 1a Regression gate | `bdb/tests/test_qdb.sh` reports any FAIL | PASS | 290 pass, 0 fail after P13; 277 after P12; 274 after P11; 257 after P10; 250 after P9; 244 after P8; 241 after P7; 222 after the completion changes (214/0/1 at the move) |
 | 1b SQLite differential | any of the P2 queries disagrees, with numbers compared as numbers | PASS | 2,000 of 2,000 after P8, a CI gate; 1,944 after P7; 1,251 at the move (519 null_vs_empty, 230 rows, 46 number_text) |
-| 1c Crash recovery | any P3 crash point breaks the rule | PASS | 0 violations of 194 after P14 (checkpoint by rename, WAL flushed at commit); 0 of 170 with `.ckpt`; 24 of 104 at the move. Process stops only; power cuts are not simulated |
+| 1c Crash recovery | any P3 crash point breaks the rule, or any P15 seed does | PASS | P15: 0 violations in 10,000 seeded power cuts (dropped, torn and reordered unflushed writes) after P15b, 2 before; hashes equal on Windows and Linux for 10,000 of 10,000. Process stops: 0 violations of 194 after P14; 0 of 170 with `.ckpt`; 24 of 104 at the move |
 | 1d Cross-process transaction | either P4 case misses | PASS | four checks in test_qdb.sh (`xproc_*`), differential process mode equals REPL mode on 8 seeds |
 | 1e Text round trip | any P5 value changes | PASS | 2,000 of 2,000 (`test_qdb_text.py`); format 0 files still load |
 | 1f NULL apart from '' | `INSERT (NULL)` and `INSERT ('')` are indistinguishable by `IS NULL`, or `NOT (NULL = x)` is true | PASS | P7: NULL is its own value with three-valued logic; 19 checks in test_qdb.sh; P2 null_vs_empty 519 to 0. Before: both stored an empty cell |

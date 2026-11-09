@@ -100,12 +100,14 @@ Append-only log at `<db_path>.wal`:
 TXID 1
 OP INSERT INTO users VALUES (3, 'Alice', 28)
 OP INSERT INTO users VALUES (4, 'Bob', 32)
-COMMIT
+COMMIT 8b328072
 ```
+
+The commit record carries the FNV-1a 32-bit hash, in 8 hex digits, of its transaction's `TXID` line and each `OP` or `OPX` line, each with its line break.
 
 Every write opens the file in append mode (`append_file`); nothing already written is rewritten.
 
-**Recovery**: On startup, `wal_replay()` reads the WAL in one pass. A `TXID` line opens a transaction, and a `COMMIT` line replays that transaction's `OP` lines. A transaction without a `COMMIT` (a crash, a torn final record, a ROLLBACK, a process that exited inside BEGIN) is skipped. Replay then checkpoints and clears the WAL.
+**Recovery**: On startup, `wal_replay()` reads the WAL in one pass. A `TXID` line opens a transaction, and a `COMMIT` record whose hash matches replays that transaction's `OP` lines. A transaction without a matching `COMMIT` (a crash, a torn record, a record lost to a power cut before the WAL was flushed, a ROLLBACK, a process that exited inside BEGIN) is skipped. A bare `COMMIT` written by a build before the hash counts only when its line break survived. Replay then checkpoints and clears the WAL.
 
 **Transactions**: `BEGIN` takes a snapshot and appends `TXID`. `COMMIT` appends the marker. `ROLLBACK` restores from snapshot and checkpoints. A clean exit inside `BEGIN` appends `HOLD <txid>`; the next process replays the committed records, snapshots, applies the held transaction's statements, appends `RESUME <txid>` and carries on inside the transaction, so `BEGIN`, the statements and `COMMIT` or `ROLLBACK` can each be their own process. An exit that is not clean leaves no `HOLD` at the end of the WAL, and the transaction is dropped.
 

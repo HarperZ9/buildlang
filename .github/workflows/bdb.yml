@@ -5,6 +5,7 @@ name: bdb
 #   - bdb/tests/test_qdb_differential.py    randomized old-vs-new differential
 #   - bdb/tests/test_qdb_wal_recovery.py    truncated-WAL crash recovery
 #   - bdb/tests/test_qdb_crash.py           stop at every durable write and recover
+#   - bdb/tests/test_qdb_faults.py          seeded power cuts: dropped, torn, reordered writes
 #   - bdb/tests/test_qdb_text.py            text with | \ and line breaks round-trips
 #   - bdb/tests/test_qdb_sqlite_oracle.py   2,000 generated queries against SQLite
 #                                           (reported; it fails until NULL is apart from '')
@@ -45,6 +46,7 @@ concurrency:
 
 env:
   QDB_ORACLE_REF: 7efcedd935467fc298e20035ebd3468099164f54  # build-universe 577abe4
+  QDB_FAULTS_DIGEST: cd3ccf9f60f3ccabca7ab742c62388d93618458db638565fa2e7b321b8807c92
 
 jobs:
   qdb:
@@ -96,6 +98,13 @@ jobs:
 
       - name: Crash test (stop at every durable write)
         run: python3 bdb/tests/test_qdb_crash.py bdb/qdb.exe
+
+      - name: Seeded power cuts (10,000 seeds; digest must equal the Windows run, bdb/COMPLETE.md P15)
+        # QDB_FAULTS_DIGEST is the digest of seeds 1 to 10,000 from the same qdb on Windows.
+        # A change to the .db or WAL bytes changes it; update it with a stated reason.
+        run: |
+          python3 bdb/tests/test_qdb_faults.py bdb/qdb.exe --seeds 10000 --expect-digest "$QDB_FAULTS_DIGEST"
+          python3 bdb/tests/test_qdb_faults.py bdb/qdb.exe --seeds 2000 --plant-ignore-flush
 
       - name: Text round trip
         run: python3 bdb/tests/test_qdb_text.py bdb/qdb.exe
