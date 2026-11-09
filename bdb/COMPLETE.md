@@ -251,6 +251,36 @@ of 10,000. Planted checks: (a) with `--plant-ignore-flush` every unflushed and f
 may be dropped, and the harness must report violations (acknowledged commits lost), or it cannot see
 a lost commit; (b) one per-seed hash altered in the Linux manifest must be reported as a difference.
 Cost (seeds per second on each platform) is reported; no bound.
+**P16. History, `AS OF` and receipts (scoreboard target 1), written 2026-11-09 05:20 PT before the
+change.** A database keeps an append-only history when `<db>.hist` exists. The first process run
+with `QDB_HISTORY=1` creates it: a `BASE <txid>` line, and when the database already holds tables,
+a copy of its state as `<db>.hist.base`. Every transaction that commits after that is appended to
+the history as the same `TXID`, OP and `COMMIT <hash>` record the WAL holds, after the WAL flush; a
+checkpoint flushes the history before it replaces the `.db`, and WAL replay appends the
+transactions it recovers, so a record lost from the history's cache comes back from the WAL. The
+history reader keeps the first record per txid whose hash matches and skips the rest.
+`SELECT ... AS OF <txid>` rebuilds the state at that txid from the base and the history in a
+separate in-memory database and runs the SELECT there. With `QDB_RECEIPTS=1` every SELECT result
+is followed by `RECEIPT <txid> <state> <query> <result>`: the txid the state reflects, and SHA-256
+of the state (the `.db` text without its header line), of the query (without the `AS OF` suffix)
+and of the printed result lines. A mutation that fails (constraint, missing table) no longer
+reaches the WAL, so neither replay nor history runs it again. Benchmark: a new
+`bdb/tests/test_qdb_receipts.py` on the P2 workload, seeds 1 to 5 (1,000 SELECTs), with a seeded
+mutation (UPDATE, DELETE or INSERT on `a` or `b`) after every 10 queries. Process A runs each seed
+in one REPL with history and receipts on; process B, started after A exits, runs every query as
+`<query> AS OF <txid from A's receipt>`. A query is reproduced when B's receipt line and result
+lines equal A's. Prediction: 1,000 of 1,000. Overhead: the same 1,000 queries against each seed's
+final state in one REPL per seed, receipts off and on, median of 5 runs; the bar is under 5
+percent, and the prediction is 2 to 15 percent (SHA-256 is written in BuildLang and hashes every
+result byte). The cost of `AS OF` (B's time against A's) and of history on a write load
+(`bench_qdb_load.py` with and without `QDB_HISTORY=1`) is reported with no bound. Planted checks:
+(a) the harness alters one of A's receipts and must count it as not reproduced; (b) one UPDATE in
+the history file gets another value and a recomputed hash (a history rewritten consistently), and
+B must then fail to reproduce every receipt at or after that txid that reads the changed row,
+with the count reported. Guards: test_qdb.sh no FAIL; crash test 0 violations; P15 0 violations
+with the digest unchanged (history is off by default); P2 2,000; text, WAL, library and reference
+differential unchanged. Limits stated in advance: the crash and power-cut tests do not run with
+history on; `AS OF` replays the history from the base on every query.
 
 ### Amendments
 
