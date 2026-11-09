@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-only
 """Measure how qdb's write cost scales with the number of rows loaded.
 
 Each scenario pipes one SQL script through a single qdb REPL process, so the

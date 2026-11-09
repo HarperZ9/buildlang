@@ -37,8 +37,9 @@ that repository.
 
 ## Licence
 
-The files in `bdb/` keep the licence they had in Build Universe, FSL-1.1-MIT (`bdb/LICENSE`). The
-rest of this repository is AGPL-3.0-only.
+The files in `bdb/` are AGPL-3.0-only, like the rest of this repository (`bdb/LICENSE`, `NOTICE`).
+The author relicensed them on 2026-11-09, when they moved. Copies taken from Build Universe up to
+its commit 4a296c1 keep the FSL-1.1-MIT licence they were published under there.
 
 ## What it runs
 

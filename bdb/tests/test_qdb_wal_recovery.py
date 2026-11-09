@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: AGPL-3.0-only
 """Crash-recovery test for qdb's append-only WAL.
 
 A REPL session that ends in a statement qdb rejects exits through

@@ -10,7 +10,7 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased: BuildDB (qdb) moves into bdb/
 
-- qdb, the SQL engine in BuildLang, moved from HarperZ9/build-universe `programs/db.bld` to `bdb/db.bld` with its 46-commit history (author decision 2026-11-09, "Move into BuildLang"). `.github/workflows/bdb.yml` builds it with the buildc of each checkout and runs its regression harness (214 pass, 1 expected failure), the differential and WAL recovery tests against the pre-rewrite reference engine, and `bql::tests::in_process_subset_matches_qdb` with `QDB_BIN` set. `bdb/` keeps its FSL-1.1-MIT licence (`bdb/LICENSE`, `NOTICE`).
+- qdb, the SQL engine in BuildLang, moved from HarperZ9/build-universe `programs/db.bld` to `bdb/db.bld` with its 46-commit history (author decision 2026-11-09, "Move into BuildLang"). `.github/workflows/bdb.yml` builds it with the buildc of each checkout and runs its regression harness (214 pass, 1 expected failure), the differential and WAL recovery tests against the pre-rewrite reference engine, and `bql::tests::in_process_subset_matches_qdb` with `QDB_BIN` set. `bdb/` is relicensed from FSL-1.1-MIT to AGPL-3.0-only, the licence of the rest of the repository (author decision 2026-11-09; `bdb/LICENSE`, `NOTICE`).
 
 ## Unreleased: unannotated integer `let` takes the checked type (#159)
 
