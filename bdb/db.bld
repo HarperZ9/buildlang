@@ -360,6 +360,23 @@ struct DB {
     q_limit: Vec<i32>,
     q_offset: Vec<i32>,
     q_distinct: Vec<i32>,
+    // Table constraints (P13): kind 0 UNIQUE, 1 PRIMARY KEY, 2 NOT NULL, on
+    // table con_tbl, columns con_cols[con_cs .. con_cs + con_cn]. The p_con_*
+    // fields hold a CREATE TABLE's parsed constraints, by column name.
+    con_tbl: Vec<i32>,
+    con_kind: Vec<i32>,
+    con_cs: Vec<i32>,
+    con_cn: Vec<i32>,
+    con_cols: Vec<i32>,
+    snap_con_tbl: Vec<i32>,
+    snap_con_kind: Vec<i32>,
+    snap_con_cs: Vec<i32>,
+    snap_con_cn: Vec<i32>,
+    snap_con_cols: Vec<i32>,
+    p_con_kind: Vec<i32>,
+    p_con_cs: Vec<i32>,
+    p_con_cn: Vec<i32>,
+    p_con_names: Vec<i32>,
     xn: i32,
     xq_n: i32,
     xq_root: i32,
@@ -430,6 +447,7 @@ fn db_new(db_path: String) -> DB {
         union_ncol: -1, union_rows: 0, union_started: 0,
         x_kind: vec![], x_a: vec![], x_b: vec![], x_c: vec![], x_s: vec![], x_as: vec![], x_an: vec![], x_args: vec![], qf_tbl: vec![], qf_alias: vec![], qs_expr: vec![], qs_name: vec![], qo_expr: vec![], qo_desc: vec![], q_fs: vec![], q_fn: vec![], q_ss: vec![], q_sn: vec![], q_where: vec![], q_os: vec![], q_on: vec![], q_limit: vec![], q_offset: vec![], q_distinct: vec![],
         xn: 0, xq_n: 0, xq_root: -1, x_ncol: 0,
+        con_tbl: vec![], con_kind: vec![], con_cs: vec![], con_cn: vec![], con_cols: vec![], snap_con_tbl: vec![], snap_con_kind: vec![], snap_con_cs: vec![], snap_con_cn: vec![], snap_con_cols: vec![], p_con_kind: vec![], p_con_cs: vec![], p_con_cn: vec![], p_con_names: vec![],
     }
 }
 
@@ -605,6 +623,7 @@ fn db_text(d: &DB) -> String {
             c = c + 1;
         }
         out = out + schema + "\n";
+        out = out + con_text(d, t, cs);
         // Rows
         let rs = vec_get(d.tbl_row_starts, t);
         let rc = vec_get(d.tbl_row_counts, t);
@@ -725,6 +744,8 @@ fn db_load(d: &mut DB) ~ FileSystem {
                 vec_push(d.tbl_row_starts, vec_len(d.cells));
                 vec_push(d.tbl_row_counts, 0);
                 d.tbl_count = d.tbl_count + 1;
+            } else if clean.starts_with("UNIQUE ") || clean.starts_with("PRIMARY KEY ") || clean.starts_with("NOT NULL ") {
+                con_load_line(d, clean);
             } else if clean.starts_with("SCHEMA ") {
                 let schema_str = clean.substring(7, clen2 - 7);
                 let slen = schema_str.len();
@@ -1104,7 +1125,20 @@ fn wal_replay(d: &mut DB) ~ Console + FileSystem + Process {
 // Take a deep copy of all mutable DB state into snap_* fields.
 // Called at BEGIN to enable ROLLBACK. Copies: cells, row starts/counts,
 // table names/count, column names/types/starts/counts, and all index arrays.
+fn copy_vec(v: Vec<i32>) -> Vec<i32> {
+    let mut out: Vec<i32> = vec![];
+    let n = vec_len(v);
+    let mut i = 0;
+    while i < n { vec_push(out, vec_get(v, i)); i = i + 1; }
+    out
+}
+
 fn take_snapshot(d: &mut DB) {
+    d.snap_con_tbl = copy_vec(d.con_tbl);
+    d.snap_con_kind = copy_vec(d.con_kind);
+    d.snap_con_cs = copy_vec(d.con_cs);
+    d.snap_con_cn = copy_vec(d.con_cn);
+    d.snap_con_cols = copy_vec(d.con_cols);
     // Copy cells
     d.snap_cells = vec![];
     let nc = vec_len(d.cells);
@@ -1206,6 +1240,11 @@ fn take_snapshot(d: &mut DB) {
 
 // Restore state from snapshot (for ROLLBACK)
 fn restore_snapshot(d: &mut DB) {
+    d.con_tbl = copy_vec(d.snap_con_tbl);
+    d.con_kind = copy_vec(d.snap_con_kind);
+    d.con_cs = copy_vec(d.snap_con_cs);
+    d.con_cn = copy_vec(d.snap_con_cn);
+    d.con_cols = copy_vec(d.snap_con_cols);
     d.cells = d.snap_cells;
     d.tbl_row_starts = d.snap_row_starts;
     d.tbl_row_counts = d.snap_row_counts;
@@ -1620,6 +1659,10 @@ fn reset_select_fields(d: &mut DB) {
     d.p_cols = vec![];
     d.p_col_count = 0;
     d.p_types = vec![];
+    d.p_con_kind = vec![];
+    d.p_con_cs = vec![];
+    d.p_con_cn = vec![];
+    d.p_con_names = vec![];
     d.p_vals = vec![];
     d.p_val_count = 0;
     d.p_row_count = 0;
@@ -2048,35 +2091,91 @@ fn parse_create_table(d: &mut DB) ~ Console + Process {
     expect_punct(d, "(");
     let mut go = true;
     while go {
-        let cname = d.tk_val;
-        let cid = sp_add(d, cname);
-        vec_push(d.p_cols, cid);
-        d.p_col_count = d.p_col_count + 1;
-        next_token(d);
-        let ctype = d.tk_val;
-        let tid = sp_add(d, ctype);
-        vec_push(d.p_types, tid);
-        next_token(d);
-        // Type arguments, as in VARCHAR(30) or DECIMAL(10, 2), are read and
-        // dropped: the type keeps its storage class.
-        if tk_is_punct(d, "(") == 1 {
+        let w = tk_word(d);
+        if w == "CONSTRAINT" {
             next_token(d);
-            let mut targ = true;
-            while targ {
-                if d.tk_type != 3 {
-                    println!("Error: expected a number in the arguments of type '{}', got '{}'", ctype, d.tk_val);
+            next_token(d);
+        }
+        let w2 = tk_word(d);
+        if w2 == "PRIMARY" || w2 == "UNIQUE" {
+            // Table constraint: PRIMARY KEY (a, b) or UNIQUE (a, b).
+            let kind = if w2 == "PRIMARY" { 1 } else { 0 };
+            next_token(d);
+            if kind == 1 { expect_kw(d, "KEY"); }
+            expect_punct(d, "(");
+            let st = vec_len(d.p_con_names);
+            let mut n = 0;
+            let mut cgo = true;
+            while cgo {
+                if d.tk_type != 1 && d.tk_type != 0 {
+                    println!("Error: expected a column name in the table constraint, got '{}'", d.tk_val);
                     process_exit(1);
                 }
+                vec_push(d.p_con_names, sp_add(d, d.tk_val));
+                n = n + 1;
                 next_token(d);
-                if tk_is_punct(d, ",") == 1 { next_token(d); }
-                else { targ = false; }
+                if tk_word(d) == "ASC" || tk_word(d) == "DESC" { next_token(d); }
+                if tk_is_punct(d, ",") == 1 { next_token(d); } else { cgo = false; }
             }
             expect_punct(d, ")");
-        }
-        // Skip optional PRIMARY KEY
-        if tk_is_kw(d, "PRIMARY") == 1 {
+            vec_push(d.p_con_kind, kind);
+            vec_push(d.p_con_cs, st);
+            vec_push(d.p_con_cn, n);
+        } else {
+            let cname = d.tk_val;
+            let cid = sp_add(d, cname);
+            vec_push(d.p_cols, cid);
+            d.p_col_count = d.p_col_count + 1;
             next_token(d);
-            expect_kw(d, "KEY");
+            let ctype = d.tk_val;
+            let tid = sp_add(d, ctype);
+            vec_push(d.p_types, tid);
+            next_token(d);
+            // Type arguments, as in VARCHAR(30) or DECIMAL(10, 2), are read and
+            // dropped: the type keeps its storage class.
+            if tk_is_punct(d, "(") == 1 {
+                next_token(d);
+                let mut targ = true;
+                while targ {
+                    if d.tk_type != 3 {
+                        println!("Error: expected a number in the arguments of type '{}', got '{}'", ctype, d.tk_val);
+                        process_exit(1);
+                    }
+                    next_token(d);
+                    if tk_is_punct(d, ",") == 1 { next_token(d); }
+                    else { targ = false; }
+                }
+                expect_punct(d, ")");
+            }
+            // Column constraints: PRIMARY KEY [ASC|DESC], UNIQUE, NOT NULL, NULL.
+            let mut kgo = true;
+            while kgo {
+                let kw = tk_word(d);
+                let mut kind = -1;
+                if kw == "PRIMARY" {
+                    next_token(d);
+                    expect_kw(d, "KEY");
+                    if tk_word(d) == "ASC" || tk_word(d) == "DESC" { next_token(d); }
+                    kind = 1;
+                } else if kw == "UNIQUE" {
+                    next_token(d);
+                    kind = 0;
+                } else if kw == "NOT" {
+                    next_token(d);
+                    expect_kw(d, "NULL");
+                    kind = 2;
+                } else if kw == "NULL" {
+                    next_token(d);
+                } else {
+                    kgo = false;
+                }
+                if kind >= 0 {
+                    vec_push(d.p_con_kind, kind);
+                    vec_push(d.p_con_cs, vec_len(d.p_con_names));
+                    vec_push(d.p_con_cn, 1);
+                    vec_push(d.p_con_names, cid);
+                }
+            }
         }
         if tk_is_punct(d, ",") == 1 { next_token(d); }
         else { go = false; }
@@ -3018,6 +3117,36 @@ fn exec_create(d: &mut DB) ~ Console {
         println!("Error: table '{}' already exists", tname);
         return;
     }
+    // Constraint columns must name columns of this table (checked first).
+    let mut cidx: Vec<i32> = vec![];
+    let mut k = 0;
+    while k < vec_len(d.p_con_names) {
+        let nm = sp_get(d, vec_get(d.p_con_names, k));
+        let mut found = -1;
+        let mut j = 0;
+        while j < d.p_col_count {
+            if sp_get(d, vec_get(d.p_cols, j)) == nm { found = j; }
+            j = j + 1;
+        }
+        if found < 0 {
+            println!("Error: no such column: {}", nm);
+            return;
+        }
+        vec_push(cidx, found);
+        k = k + 1;
+    }
+    k = 0;
+    while k < vec_len(d.p_con_kind) {
+        vec_push(d.con_tbl, d.tbl_count);
+        vec_push(d.con_kind, vec_get(d.p_con_kind, k));
+        vec_push(d.con_cs, vec_len(d.con_cols));
+        let n = vec_get(d.p_con_cn, k);
+        vec_push(d.con_cn, n);
+        let st = vec_get(d.p_con_cs, k);
+        let mut j = 0;
+        while j < n { vec_push(d.con_cols, vec_get(cidx, st + j)); j = j + 1; }
+        k = k + 1;
+    }
     let tid = sp_add(d, tname);
     vec_push(d.tbl_names, tid);
     let col_start = vec_len(d.col_names);
@@ -3116,6 +3245,13 @@ fn exec_insert(d: &mut DB) ~ Console {
             c2 = c2 + 1;
         }
         r = r + 1;
+    }
+
+    // Constraints (P13), before any cell changes.
+    let err = con_check_insert(d, tidx, row_cells, nrows);
+    if err.len() > 0 {
+        println!("Error: {}", err);
+        return;
     }
 
     // Splice row_cells into the flat cells array after this table's rows.
@@ -6156,6 +6292,13 @@ fn exec_update(d: &mut DB) ~ Console {
         println!("Error: UPDATE arithmetic on a non-integer value in column '{}'", set_col_name);
         return;
     }
+    if updated > 0 {
+        let err = con_check_table(d, tidx, new_cells, rs, rc, cc, scol);
+        if err.len() > 0 {
+            println!("Error: {}", err);
+            return;
+        }
+    }
     d.cells = new_cells;
     update_indexes_for_table(d, tidx);
 }
@@ -6327,6 +6470,25 @@ fn exec_drop(d: &mut DB) ~ Console {
     d.tbl_row_starts = new_trs;
     d.tbl_row_counts = new_trc;
     d.tbl_count = d.tbl_count - 1;
+    let mut nt: Vec<i32> = vec![];
+    let mut nk: Vec<i32> = vec![];
+    let mut ns: Vec<i32> = vec![];
+    let mut nn: Vec<i32> = vec![];
+    let mut k = 0;
+    while k < vec_len(d.con_tbl) {
+        let t = vec_get(d.con_tbl, k);
+        if t != tidx {
+            vec_push(nt, if t > tidx { t - 1 } else { t });
+            vec_push(nk, vec_get(d.con_kind, k));
+            vec_push(ns, vec_get(d.con_cs, k));
+            vec_push(nn, vec_get(d.con_cn, k));
+        }
+        k = k + 1;
+    }
+    d.con_tbl = nt;
+    d.con_kind = nk;
+    d.con_cs = ns;
+    d.con_cn = nn;
 }
 
 // =============================================================================
@@ -8649,6 +8811,211 @@ fn exec_xselect(d: &mut DB) ~ Console + Process {
         println!("{}", line);
         r = r + 1;
     }
+}
+
+
+// =========================================================================
+// SECTION 6i: CONSTRAINTS (P13)
+// =========================================================================
+// UNIQUE, PRIMARY KEY and NOT NULL, checked by INSERT and UPDATE before a
+// cell changes. NULLs in a UNIQUE or PRIMARY KEY column never collide, as in
+// SQLite; a NULL in a single INTEGER PRIMARY KEY column takes the largest key
+// plus one (SQLite's rowid alias). Keys compare as values (1 equals 1.0).
+
+fn con_kind_name(k: i32) -> String {
+    if k == 1 { return "PRIMARY KEY"; }
+    if k == 2 { return "NOT NULL"; }
+    "UNIQUE"
+}
+
+// The constraint lines of table t for the .db file.
+fn con_text(d: &DB, t: i32, cs: i32) -> String {
+    let mut out = "";
+    let mut k = 0;
+    while k < vec_len(d.con_tbl) {
+        if vec_get(d.con_tbl, k) == t {
+            let mut line = con_kind_name(vec_get(d.con_kind, k)) + " ";
+            let n = vec_get(d.con_cn, k);
+            let st = vec_get(d.con_cs, k);
+            let mut j = 0;
+            while j < n {
+                if j > 0 { line = line + ","; }
+                line = line + sp_get(d, vec_get(d.col_names, cs + vec_get(d.con_cols, st + j)));
+                j = j + 1;
+            }
+            out = out + line + "\n";
+        }
+        k = k + 1;
+    }
+    out
+}
+
+// Load one constraint line for the table being read (the last one).
+fn con_load_line(d: &mut DB, line: String) {
+    let mut kind = 0;
+    let mut rest = "";
+    if line.starts_with("UNIQUE ") { kind = 0; rest = line.substring(7, line.len() - 7); }
+    else if line.starts_with("PRIMARY KEY ") { kind = 1; rest = line.substring(12, line.len() - 12); }
+    else { kind = 2; rest = line.substring(9, line.len() - 9); }
+    let t = d.tbl_count - 1;
+    if t < 0 { return; }
+    let cs = vec_get(d.tbl_col_starts, t);
+    let cc = vec_get(d.tbl_col_counts, t);
+    let st = vec_len(d.con_cols);
+    let mut n = 0;
+    let mut cur = "";
+    let mut i: i64 = 0;
+    let len = rest.len();
+    while i <= len {
+        let c = if i < len { rest.char_at(i) } else { "," };
+        if c == "," {
+            let ci = find_col(d, cs, cc, cur.trim());
+            if ci >= 0 { vec_push(d.con_cols, ci); n = n + 1; }
+            cur = "";
+        } else { cur = cur + c; }
+        i = i + 1;
+    }
+    if n == 0 { return; }
+    vec_push(d.con_tbl, t);
+    vec_push(d.con_kind, kind);
+    vec_push(d.con_cs, st);
+    vec_push(d.con_cn, n);
+}
+
+fn con_fail_text(d: &DB, k: i32, t: i32) -> String {
+    let cs = vec_get(d.tbl_col_starts, t);
+    let tn = sp_get(d, vec_get(d.tbl_names, t));
+    let kind = vec_get(d.con_kind, k);
+    let mut out = if kind == 2 { "NOT NULL constraint failed: " } else { "UNIQUE constraint failed: " };
+    let n = vec_get(d.con_cn, k);
+    let st = vec_get(d.con_cs, k);
+    let mut j = 0;
+    while j < n {
+        if j > 0 { out = out + ", "; }
+        out = out + tn + "." + sp_get(d, vec_get(d.col_names, cs + vec_get(d.con_cols, st + j)));
+        j = j + 1;
+    }
+    out
+}
+
+// Do rows a and b (cell positions of their first column) have equal,
+// non-NULL keys under constraint k?
+fn con_same_key(d: &DB, k: i32, ca: Vec<i32>, a: i32, cb: Vec<i32>, b: i32) -> bool {
+    let n = vec_get(d.con_cn, k);
+    let st = vec_get(d.con_cs, k);
+    let mut j = 0;
+    while j < n {
+        let c = vec_get(d.con_cols, st + j);
+        let va = sp_get(d, vec_get(ca, a + c));
+        let vb = sp_get(d, vec_get(cb, b + c));
+        if is_null(va) || is_null(vb) { return false; }
+        if xv_cmp_nn(va, vb) != 0 { return false; }
+        j = j + 1;
+    }
+    true
+}
+
+// Check nrows new rows (row-major in rows) against table t and each other.
+// Fills a NULL single INTEGER PRIMARY KEY with the largest key plus one.
+// Returns the error text, or "" when every constraint holds.
+fn con_check_insert(d: &mut DB, t: i32, rows: Vec<i32>, nrows: i32) -> String {
+    let cs = vec_get(d.tbl_col_starts, t);
+    let cc = vec_get(d.tbl_col_counts, t);
+    let rs = vec_get(d.tbl_row_starts, t);
+    let rc = vec_get(d.tbl_row_counts, t);
+    let mut k = 0;
+    while k < vec_len(d.con_tbl) {
+        if vec_get(d.con_tbl, k) == t {
+            let kind = vec_get(d.con_kind, k);
+            let st = vec_get(d.con_cs, k);
+            let c0 = vec_get(d.con_cols, st);
+            if kind == 1 && vec_get(d.con_cn, k) == 1 && vec_get(d.col_types, cs + c0) == 0 {
+                // INTEGER PRIMARY KEY: number NULLs after the largest key.
+                let mut mx = 0.0;
+                let mut r = 0;
+                while r < rc {
+                    let v = sp_get(d, vec_get(d.cells, rs + r * cc + c0));
+                    if is_numeric_str(v) && v.parse_float() > mx { mx = v.parse_float(); }
+                    r = r + 1;
+                }
+                r = 0;
+                while r < nrows {
+                    let v = sp_get(d, vec_get(rows, r * cc + c0));
+                    if is_numeric_str(v) && v.parse_float() > mx { mx = v.parse_float(); }
+                    r = r + 1;
+                }
+                r = 0;
+                while r < nrows {
+                    let v = sp_get(d, vec_get(rows, r * cc + c0));
+                    if is_null(v) {
+                        mx = mx + 1.0;
+                        rows[r * cc + c0] = sp_add(d, xv_int(mx));
+                    }
+                    r = r + 1;
+                }
+            }
+            if kind == 2 {
+                let mut r = 0;
+                while r < nrows {
+                    if is_null(sp_get(d, vec_get(rows, r * cc + c0))) { return con_fail_text(d, k, t); }
+                    r = r + 1;
+                }
+            } else {
+                let mut r = 0;
+                while r < nrows {
+                    let mut e = 0;
+                    while e < rc {
+                        if con_same_key(d, k, rows, r * cc, d.cells, rs + e * cc) { return con_fail_text(d, k, t); }
+                        e = e + 1;
+                    }
+                    let mut q = 0;
+                    while q < r {
+                        if con_same_key(d, k, rows, r * cc, rows, q * cc) { return con_fail_text(d, k, t); }
+                        q = q + 1;
+                    }
+                    r = r + 1;
+                }
+            }
+        }
+        k = k + 1;
+    }
+    ""
+}
+
+// Check table t as it would be after an UPDATE of column scol (cells holds
+// the whole array, the table's rows at rs). Only constraints on scol run.
+fn con_check_table(d: &DB, t: i32, cells: Vec<i32>, rs: i32, rc: i32, cc: i32, scol: i32) -> String {
+    let mut k = 0;
+    while k < vec_len(d.con_tbl) {
+        if vec_get(d.con_tbl, k) == t {
+            let n = vec_get(d.con_cn, k);
+            let st = vec_get(d.con_cs, k);
+            let mut on = false;
+            let mut j = 0;
+            while j < n { if vec_get(d.con_cols, st + j) == scol { on = true; } j = j + 1; }
+            if on {
+                if vec_get(d.con_kind, k) == 2 {
+                    let mut r = 0;
+                    while r < rc {
+                        if is_null(sp_get(d, vec_get(cells, rs + r * cc + scol))) { return con_fail_text(d, k, t); }
+                        r = r + 1;
+                    }
+                } else {
+                    let mut a = 0;
+                    while a < rc {
+                        let mut b = 0;
+                        while b < a {
+                            if con_same_key(d, k, cells, rs + a * cc, cells, rs + b * cc) { return con_fail_text(d, k, t); }
+                            b = b + 1;
+                        }
+                        a = a + 1;
+                    }
+                }
+            }
+        }
+        k = k + 1;
+    }
+    ""
 }
 
 fn exec_sql_no_wal(d: &mut DB, input: String) ~ Console + FileSystem + Process {
