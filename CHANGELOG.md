@@ -8,19 +8,36 @@ tracked in `STATUS.md`, `README.md`, and
 `docs/COMPILER_WIND_DOWN_ASSESSMENT_2026-06-15.md`; historical counts such as
 `108/108` or `132/132` are not the current release gate.
 
-## Unreleased: rename_file and fsync_file (#166)
+## 1.12.0 - 2026-11-09 - translation validation for floats, a bit-precise verifier, BuildDB in the repository
+
+### Translation validation for floats and named constants (#176, #180)
+
+- `buildc tv` certifies functions with `f32` and `f64` parameters, locals and returns. Each float operation is an uninterpreted IEEE function named by operator and width, each comparison an uninterpreted predicate, each literal its exact bit pattern; maths methods and builtins map through one table to the C function each lowers to. No real-number identity is assumed, so a rewrite that is wrong under IEEE 754 (`x == x` to `true`, reassociation, `x * 0.0` to `0.0`) is refused.
+- Named constants with a literal value, and the built-in `PI`, `E` and `TAU`, are their values; the checker reads the C side's constants from the C file.
+- Coverage, functions certified out of functions compiled: `tests/programs` 31 to 159 of 435 (37 %), `stdlib` 22 to 58 of 139 (42 %), 0 not certified. A planted float miscompilation (`BUILDLANG_PLANT_MISCOMPILE=fadd-to-fsub`) fails every function that adds floats. `docs/TRANSLATION-VALIDATION.md`.
+
+### A user constant named PI, E or TAU shadows the built-in (#177, #184)
+
+- `const PI: f64 = 3.0;` compiled to 3.141592653589793 at every use: lowering matched the built-in name before user globals. Found by `buildc tv`. `compiler/tests/user_math_const.rs`.
+
+### A bit-precise solver in buildc verify (#186)
+
+- An obligation the linear prover cannot close is bit-blasted at a width where no arithmetic wraps and solved by a CDCL SAT solver inside `buildc`. UNSAT counts as a proof only after an independent checker replays the learned clauses; SAT gives an input the concrete evaluator must re-run. The encoder checks itself at each width. No outside solver is downloaded, linked or run.
+- `tests/verify/smt_false.bld`, 24 false claims: 0 proved, 23 refuted (6 before), 1 unknown. `tests/verify/smt_true.bld`, 14 true claims: 12 proved (5 before), 0 refuted. `docs/VERIFY.md`, V2.
+
+### `rename_file` and `fsync_file` (#166)
 
 - `rename_file(from, to) -> bool` replaces `to` with `from` in one step (MoveFileExA with MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH on Windows; rename(2) and an fsync of the directory elsewhere). `fsync_file(path) -> bool` flushes a file to the device (FlushFileBuffers / fsync). Both need the FileSystem effect and return false on failure. `compiler/tests/rename_fsync.rs`.
 
-## Unreleased: an integer literal meeting a float is a float (#167)
+### An integer literal meeting a float is a float (#167)
 
 - `let s = 60.3; let mut c = 0; s / c` checked with the float literal's variable bound to the integer one, so the division was emitted as `bl_idiv_i32` and printed 60. The unifier now makes an integer literal that meets a float literal a float, and lowering takes the float type the checker inferred for an unannotated `let`, as #159 did for wide integers. `compiler/tests/float_let_inference.rs`: two programs print the truncated value on main before the fix (60 and 3 where 60.3 and 3.5 are right); a control keeps `7 / 2` at 3.
 
-## Unreleased: BuildDB checkpoints by rename and flushes its WAL
+### BuildDB checkpoints by rename and flushes its WAL
 
 - A checkpoint writes `<db>.tmp`, flushes it and renames it over `<db>` (`rename_file`, `fsync_file`, #166), half the bytes of the old `.ckpt`-then-`.db` double write; a commit flushes the WAL. Crash test 194 points, 0 violations. Flushing costs an autocommit INSERT process 4.24 ms per row against 0.43 ms; `QDB_SYNC=off` skips the flushes (`bdb/COMPLETE.md` P14).
 
-## Unreleased: BuildDB (qdb) moves into bdb/
+### BuildDB (qdb) moves into bdb/
 
 - qdb, the SQL engine in BuildLang, moved from HarperZ9/build-universe `programs/db.bld` to `bdb/db.bld` with its 46-commit history (author decision 2026-11-09, "Move into BuildLang"). `.github/workflows/bdb.yml` builds it with the buildc of each checkout and runs its regression harness (214 pass, 1 expected failure), the differential and WAL recovery tests against the pre-rewrite reference engine, and `bql::tests::in_process_subset_matches_qdb` with `QDB_BIN` set. `bdb/` is relicensed from FSL-1.1-MIT to AGPL-3.0-only, the licence of the rest of the repository (author decision 2026-11-09; `bdb/LICENSE`, `NOTICE`).
 - BuildDB completion, stage by stage, in `bdb/COMPLETE.md`, with outside references: sqllogictest (qdb passes 32 of 9,202 query records) and SQLite on 2,000 generated queries (1,251 agree; NULL stored as '' is the main gap). qdb's checkpoints are crash-safe (0 violations of 170 crash points, 24 of 104 before), transactions span processes, text with `|` or line breaks round-trips (file format 1), single-table ORDER BY is a merge sort (30,000 rows in 0.048 s, 28.3 s before), and qdb builds as a static library with a C interface (`bdb/lib`).
@@ -34,29 +51,29 @@ tracked in `STATUS.md`, `README.md`, and
 - BuildDB: comma-separated FROM tables are joined in a greedy order (equality links first), so a 40-table join runs in milliseconds instead of building cross products. sqllogictest 8,921 of 9,202 query records, `select5.test` 732 of 732 (`bdb/COMPLETE.md` P12).
 - BuildDB: PRIMARY KEY, UNIQUE and NOT NULL (column and table constraints) are enforced by INSERT and UPDATE, written to the .db and restored by ROLLBACK; a NULL in an INTEGER PRIMARY KEY takes the next key. sqllogictest statements 1,918 to 1,931 of 1,993 (`bdb/COMPLETE.md` P13).
 
-## Unreleased: unannotated integer `let` takes the checked type (#159)
+### Unannotated integer `let` takes the checked type (#159)
 
 - An unannotated `let` whose integer type the checker infers as `i64`, `i128` or `isize` from its uses (a comparison, an assignment, the function's return) is now emitted at that type. Before, lowering typed it from the initializer alone, so `let mut i = 0;` compared with an `i64` became `int32_t`, passed `buildc check`, and trapped with an overflow at run time once it passed 2^31. `buildc tv` now certifies the `lp` example. Narrower and unsigned inferred types keep the old lowering for now; annotate those (`let i: usize = 0;`) where the width matters. Tests: `compiler/tests/int_let_inference.rs`.
 
-## Unreleased: the Low Water kernels as BuildLang packages
+### The Low Water kernels as BuildLang packages
 
 - `lw-hash`, `lw-codec`, `lw-cbegin` and `lw-moves` 0.1.0 (AGPL-3.0-only): Low Water's world hash, lw-trace/1 codec, corpus run selection with its cbegin records, and move-table expansion, in pure `.bld`. Against the game at origin/dev 8b49bdd: 611 of 611 world-hash states, 40 of 40 trace round trips, the 40 cbegin records and the 168,234-byte expanded move table, all byte-identical. Each package's `tests/SOURCES.txt` lists its fixtures with their SHA-256 and origin.
 
-## Unreleased: translation validation for the C backend
+### Translation validation for the C backend
 
 - `buildc tv FILE [--out DIR] [--json]`: compile through the C backend, write a `buildlang-tv-cert/v1` certificate per function (source and C hashes, loop heads, variable map), and check it. `buildc tv-check SOURCE C CERT` runs the checker alone.
 - The checker parses the emitted C itself and imports nothing from the code generator or the MIR. It runs source and C symbolically between loop heads and proves that both trap on the same inputs and end each segment with equal variables or return values. Subset: integers up to 64 bits and bool, branches, `match`, `while`, `loop`, `break`, `continue`, `return`, calls.
 - Coverage, functions certified out of functions compiled: `tests/programs` 31 of 435, `stdlib` 22 of 139, none refused; most functions print or use strings, floats or structs. A planted miscompilation (`BUILDLANG_PLANT_MISCOMPILE=add-to-sub`) is caught in every function that adds; forged certificates and tampered C are refused. Details: `docs/TRANSLATION-VALIDATION.md`.
 - Found: an unannotated integer `let` used against an `i64` is emitted as `int32_t` (#159).
 
-## Unreleased: laws and contracts
+### Laws and contracts
 
 - `law name(params) requires P { body }` and `fn f(..) -> T requires P ensures Q { .. }`: claims beside the code, type-checked like any function. `law`, `requires`, `ensures` and `result` are contextual words.
 - `buildc verify FILE [--json]`: each claim is proved, refuted with a counterexample the evaluator re-ran, or unknown with the reason. Two looks per claim: a concrete run (every input of a domain up to 2^20 points, else boundary values and a fixed sample) and a symbolic proof (path-by-path execution, polynomial normal form over Z, case splitting with Fourier-Motzkin and integer tightening). Trapping inputs are listed apart from the verdict.
 - `buildc check` fails on a refuted claim (BL0801) and on a verifier that disagrees with itself (BL0802).
 - `tests/verify`: Bend 2's published numeric, parallel-sum and Pong laws ported, BuildLang's own DETMATH integer, trace-codec and conservation laws, and planted checks. Details and limits: `docs/VERIFY.md`.
 
-## Unreleased: canonical-record, color, repo-art, readability and art-receipts as BuildLang packages
+### `canonical-record`, `color`, repo-art, readability and art-receipts as BuildLang packages
 
 - `canonical-record` 1.0.0 ports Flywheel's RFC 8785 canonical JSON, its SHA-256 and the array digest (FSL-1.1-MIT): 190 of 190 cases byte-identical with the original. `color` 1.0.0 ports build-color's colour differences and colour spaces (FSL-1.1-MIT): the 34 Sharma CIEDE2000 pairs identical, the rest within 6.42e-12. `repo-art` 1.0.0 ports this repository's flow and card renderers: the committed artworks byte-identical. `readability` 1.0.0 ports Flywheel's Flesch reading ease (FSL-1.1-MIT) and `art-receipts` 1.0.0 ports `scripts/check_art_receipts.py`; both byte-identical on every case. All five are pure `.bld`, built with `buildc pkg build`.
 - `registry/SURVEY.md`: every tool considered, why these were picked, and the language gaps found (issues #139 to #153 and #157).

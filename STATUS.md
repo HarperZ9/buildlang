@@ -1,11 +1,11 @@
 # BuildLang Project Status
 
-Release verification: 2026-11-08 for 1.11.0. The broader architecture audit remains
+Release verification: 2026-11-09 for 1.12.0. The broader architecture audit remains
 2026-06-15; dated findings below retain their original scope. Current direction:
 `docs/STRATEGY-2026-10.md`; what finished means and how far it is: `docs/LANGUAGE-COMPLETE.md`.
 
 The full local `cargo test --manifest-path compiler/Cargo.toml --no-fail-fast` run with
-`RUSTFLAGS=-Dwarnings` on the release head passed: 1,987 passed, 0 failed, 11 ignored. 1.11.0 adds `par_for` and `par_map` (M5, checked by the effect row), `buildc pkg` (a package manager with a lockfile and offline builds), opaque handles
+`RUSTFLAGS=-Dwarnings` (release profile) on the 1.12.0 head passed: 2,034 passed, 0 failed, 11 ignored. 1.12.0 adds translation validation of float functions and named constants (`buildc tv` certifies 159 of 435 functions in `tests/programs` and 58 of 139 in `stdlib`), a bit-precise SAT solver inside `buildc verify` whose UNSAT answers are replayed by an independent checker, the fix for a user `PI`, `E` or `TAU` being replaced by the built-in, and BuildDB in `bdb/` (CHANGELOG 1.12.0). 1.11.0 added `par_for` and `par_map` (M5, checked by the effect row), `buildc pkg` (a package manager with a lockfile and offline builds), opaque handles
 across the C ABI and a stateful C library written in BuildLang (raw-native's Low Water rules,
 M4's C ABI check), Vec insert and remove, string push, methods through borrowed vectors, units
 through roots and powers, measured constants, BuildTeX, the mmk proof kernel and BQL
