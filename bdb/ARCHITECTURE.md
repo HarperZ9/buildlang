@@ -54,7 +54,7 @@ The struct fields are grouped into:
 | Parser | `input`, `pos`, `tk_type`, `tk_val`, `stmt_type`, `p_table`, `p_cols`, ... | Tokenizer + AST state |
 | WHERE | `has_where`, `w_left`, `w_op`, `w_right`, `w_logic`, `w_in_vals1`, ... | Parsed WHERE conditions |
 | WAL | `wal_path`, `in_transaction`, `txn_id`, `wal_bytes`, `db_bytes` | WAL state and checkpoint policy inputs |
-| Index upkeep | `idx_stale` | Set when a mutation moved or rewrote rows; the next index read rebuilds |
+| Index upkeep | `idx_stale` | Set by ALTER and ROLLBACK; the next index read rebuilds. UPDATE and DELETE keep indexes current in place (P20) |
 | Snapshot | `snap_cells`, `snap_row_starts`, `snap_tbl_names`, ... | Rollback snapshot |
 
 ### String Pool Pattern
@@ -139,8 +139,8 @@ dispatch by d.stmt_type:
          |-> basic scan     -> filter, sort, limit, distinct, print
   1 -> exec_insert()        [add row to cells array]
   2 -> exec_create()        [add table metadata]
-  3 -> exec_update()        [rebuild cells with new values]
-  4 -> exec_delete()        [rebuild cells, skip deleted rows]
+  3 -> exec_update()        [changed cells in place; index entries moved]
+  4 -> exec_delete()        [compact in place; index row ids renumbered]
   5 -> exec_drop()          [remove table + adjust arrays]
   6 -> exec_create_index()  [register + rebuild sorted pairs]
   7 -> wal_begin()

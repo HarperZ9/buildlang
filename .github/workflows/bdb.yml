@@ -10,6 +10,7 @@ name: bdb
 #   - bdb/tests/test_qdb_sqlite_oracle.py   2,000 generated queries against SQLite
 #                                           (reported; it fails until NULL is apart from '')
 #   - bdb/tests/test_qdb_lib.py             the static library (bdb/lib) against the CLI
+#   - bdb/tests/test_qdb_mutations.py       INSERT, UPDATE and DELETE on indexed tables against SQLite
 #   - bql::tests::in_process_subset_matches_qdb, the compiler's in-process BuildQL
 #     subset checked against this qdb binary (QDB_BIN)
 # A change to compiler/ runs it too: a codegen regression that breaks qdb fails here.
@@ -121,6 +122,9 @@ jobs:
 
       - name: SQLite differential (2,000 queries must agree; bdb/COMPLETE.md row 1b)
         run: python3 bdb/tests/test_qdb_sqlite_oracle.py bdb/qdb.exe
+
+      - name: Mutations on indexed tables against SQLite (bdb/COMPLETE.md P20)
+        run: python3 bdb/tests/test_qdb_mutations.py bdb/qdb.exe
 
       - name: WAL truncation recovery test
         run: python3 bdb/tests/test_qdb_wal_recovery.py bdb/qdb.exe --old "$RUNNER_TEMP/qdb_oracle"
