@@ -23,6 +23,7 @@ use crate::codegen::{GeneratedCode, OutputFormat};
 
 mod header;
 mod parallel;
+mod proved_checks;
 mod vec_hoist;
 mod vec_hoist_emit;
 
@@ -102,6 +103,10 @@ pub struct CBackend {
     current_fn_flag_owners: Vec<LocalId>,
     /// Vector accesses hoisted to plain C array reads in the current function.
     current_vec_hoist: Option<vec_hoist::VecHoist>,
+    /// `x + 1` / `x - 1` steps proved not to overflow (see `c/proved_checks.rs`).
+    proved_steps: std::collections::HashSet<proved_checks::Site>,
+    /// The (block, statement) being emitted.
+    current_site: Option<proved_checks::Site>,
     /// User functions that cannot resize any vector (see `c/vec_hoist.rs`).
     vector_free_fns: std::collections::HashSet<String>,
     /// Increment 5: guarded frees at block START for flag owners, keyed by
@@ -141,6 +146,8 @@ impl CBackend {
             current_fn_block_frees: std::collections::HashMap::new(),
             current_fn_flag_owners: Vec::new(),
             current_vec_hoist: None,
+            proved_steps: std::collections::HashSet::new(),
+            current_site: None,
             vector_free_fns: std::collections::HashSet::new(),
             current_fn_flag_block_frees: std::collections::HashMap::new(),
             experimental_free_override_for_test: None,
@@ -2280,6 +2287,7 @@ impl CBackend {
         // Vector buffers and lengths loaded once, when nothing in the function
         // can resize or replace a vector (see `c/vec_hoist.rs`).
         self.current_vec_hoist = vec_hoist::VecHoist::plan(func, &self.vector_free_fns);
+        self.proved_steps = proved_checks::proved_steps(func);
         if let Some(plan) = self.current_vec_hoist.clone() {
             self.emit_vec_hoist_decls(&plan, &func.locals);
         }
@@ -2326,9 +2334,11 @@ impl CBackend {
                 }
 
                 // Generate statements
-                for stmt in &block.stmts {
+                for (si, stmt) in block.stmts.iter().enumerate() {
+                    self.current_site = Some((i, si));
                     self.generate_statement(stmt, &func.locals)?;
                 }
+                self.current_site = None;
 
                 // Generate terminator
                 if let Some(term) = &block.terminator {
@@ -4377,6 +4387,28 @@ impl CBackend {
                     }
                     if let Some(stem) = Self::checked_int_binop_helper(*op, signed) {
                         let suffix = Self::int_runtime_suffix(size, signed);
+                        // A step proved not to overflow takes the wrapping helper,
+                        // which `buildc tv` models as never trapping.
+                        let proved = self
+                            .current_site
+                            .is_some_and(|site| self.proved_steps.contains(&site));
+                        let stem = match (proved, op) {
+                            (true, BinOp::Add) => {
+                                if signed {
+                                    "bl_iadd_wrapping_"
+                                } else {
+                                    "bl_uadd_wrapping_"
+                                }
+                            }
+                            (true, BinOp::Sub) => {
+                                if signed {
+                                    "bl_isub_wrapping_"
+                                } else {
+                                    "bl_usub_wrapping_"
+                                }
+                            }
+                            _ => stem,
+                        };
                         return Ok(format!("{}{}({}, {})", stem, suffix, l, r));
                     }
                 }

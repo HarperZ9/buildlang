@@ -3292,7 +3292,7 @@ bb1:
     _3 = 1;
     goto bb3;
 bb2:
-    _4 = bl_isub_i32(n, 1);
+    _4 = bl_isub_wrapping_i32(n, 1);
     _5 = factorial(_4);
     goto bb4;
 bb3:

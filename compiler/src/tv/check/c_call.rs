@@ -33,11 +33,24 @@ impl CExec<'_> {
                     r
                 }
                 (H::Bin(b), [x, y]) => apply(b, ty, x.clone(), y.clone(), s)?,
-                (H::Wrap(BOp::WAdd), [x, y]) => bits(BOp::WAdd, ty, x.clone(), y.clone()),
+                (H::Wrap(BOp::WAdd), [x, y]) => {
+                    let t = bits(BOp::WAdd, ty, x.clone(), y.clone());
+                    s.fact(exact_when_in_range(
+                        &t,
+                        arith(AOp::Add, x.clone(), y.clone()),
+                        ty,
+                    ));
+                    t
+                }
                 (H::Wrap(BOp::WMul), [x, y]) => bits(BOp::WMul, ty, x.clone(), y.clone()),
                 (H::WSub, [x, y]) => {
                     let t = Term::App(format!("wrapping_sub_{ty}"), vec![x.clone(), y.clone()]);
                     s.fact(in_range(&t, ty));
+                    s.fact(exact_when_in_range(
+                        &t,
+                        arith(AOp::Sub, x.clone(), y.clone()),
+                        ty,
+                    ));
                     t
                 }
                 _ => return Err(format!("helper `{name}` arity")),
@@ -114,6 +127,15 @@ enum H {
     Neg,
     Wrap(BOp),
     WSub,
+}
+
+/// A wrapping step equals the exact result whenever the exact result fits
+/// the type. The C backend emits the wrapping helper for a step it proved
+/// cannot overflow (`codegen/backend/c/proved_checks.rs`); with this fact the
+/// checker can prove the step equal to the source's trapping one on every
+/// path where the source does not trap, and refuse it on any other.
+fn exact_when_in_range(t: &Term, exact: Term, ty: Ty) -> Term {
+    or(not(in_range(&exact, ty)), cmp(COp::Eq, t.clone(), exact))
 }
 
 /// The runtime helpers the model knows, by name: `bl_{i,u}{op}_{T}`.
