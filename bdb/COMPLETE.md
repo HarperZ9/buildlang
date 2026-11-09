@@ -193,6 +193,22 @@ their P11 counts exactly. Guards: test_qdb.sh no FAIL, P2 2,000 of 2,000, the ot
 unchanged. Planted check: a build that keeps FROM order times out on `select5.test` (fewer than
 100 passes inside the 60 s limit on its first 100 queries).
 
+**P13. PRIMARY KEY, UNIQUE and NOT NULL enforced (row 2c), written 2026-11-09 01:59 PT before the change.**
+`PRIMARY KEY` is parsed and dropped, so `INSERT INTO t VALUES (1), (1)` into a key column keeps
+both rows, and `UNIQUE` is refused. Change: column constraints `PRIMARY KEY`, `UNIQUE` and
+`NOT NULL`, and table constraints `PRIMARY KEY (a, b)` and `UNIQUE (a, b)`, are stored with the
+table, written to the file as `PRIMARY KEY a,b`, `UNIQUE a,b` and `NOT NULL a` lines after
+SCHEMA (an older reader skips them), restored by ROLLBACK, and checked by INSERT and UPDATE
+before any cell changes: a duplicate key prints `Error: UNIQUE constraint failed: t.a` and the
+statement changes nothing. NULLs in a UNIQUE key are distinct, as in SQLite; a NULL inserted
+into a single `INTEGER PRIMARY KEY` column takes the largest key plus one, as SQLite's rowid
+alias does. Measured on P1 unchanged against P12. Prediction: query records unchanged at 8,921
+(no query in the corpus depends on a rejected duplicate); statements as expected rise from 1,918
+by 0 to 30, from `statement error` records that expect a constraint failure. Guards: test_qdb.sh
+no FAIL; P2 2,000 of 2,000; text, crash, WAL, library and reference differential unchanged; bulk
+load slope (row 3a) is unchanged for a table with no constraint. Planted check: a build that
+skips the check on UPDATE fails a new test_qdb.sh assertion.
+
 ### Amendments
 
 - **A1 (2026-11-08 17:45, before the first qdb run of P1).** The SQLite self-check scored 9,198 of
