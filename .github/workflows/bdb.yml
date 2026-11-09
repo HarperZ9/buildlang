@@ -1,0 +1,88 @@
+name: bdb
+
+# Builds BuildDB (qdb, bdb/db.bld) with the buildc of this checkout and runs its tests:
+#   - bdb/tests/test_qdb.sh                 SQL regression harness
+#   - bdb/tests/test_qdb_differential.py    randomized old-vs-new differential
+#   - bdb/tests/test_qdb_wal_recovery.py    truncated-WAL crash recovery
+#   - bql::tests::in_process_subset_matches_qdb, the compiler's in-process BuildQL
+#     subset checked against this qdb binary (QDB_BIN)
+# A change to compiler/ runs it too: a codegen regression that breaks qdb fails here.
+#
+# QDB_ORACLE_REF is the reference engine for the differential and recovery tests: the
+# last db.bld before the write-path rewrite (append-only WAL, lazy indexes), which was
+# build-universe 577abe4 before the move. A change to the engine must keep its query
+# output and its recovery behaviour byte-identical to that reference, or update the
+# ref with a stated reason.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "bdb/**"
+      - "compiler/**"
+      - ".github/workflows/bdb.yml"
+  push:
+    branches: [main]
+    paths:
+      - "bdb/**"
+      - "compiler/**"
+      - ".github/workflows/bdb.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bdb-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  QDB_ORACLE_REF: 7efcedd935467fc298e20035ebd3468099164f54  # build-universe 577abe4
+
+jobs:
+  qdb:
+    name: Build qdb with this buildc and run its tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: compiler
+
+      - name: Build buildc
+        working-directory: compiler
+        run: cargo build --release --locked
+
+      - name: Show compiler
+        run: compiler/target/release/buildc --version
+
+      - name: Build qdb and the reference engine
+        run: |
+          BUILDC=compiler/target/release/buildc
+          $BUILDC bdb/db.bld --target c -o "$RUNNER_TEMP/qdb.c"
+          gcc -O2 -w -o bdb/qdb.exe "$RUNNER_TEMP/qdb.c" -lm
+          test -x bdb/qdb.exe
+          git show "$QDB_ORACLE_REF:bdb/db.bld" > "$RUNNER_TEMP/oracle.bld"
+          $BUILDC "$RUNNER_TEMP/oracle.bld" --target c -o "$RUNNER_TEMP/oracle.c"
+          gcc -O2 -w -o "$RUNNER_TEMP/qdb_oracle" "$RUNNER_TEMP/oracle.c" -lm
+          test -x "$RUNNER_TEMP/qdb_oracle"
+
+      - name: SQL regression harness
+        run: bash bdb/tests/test_qdb.sh
+
+      - name: Differential test against the reference engine
+        run: python3 bdb/tests/test_qdb_differential.py "$RUNNER_TEMP/qdb_oracle" bdb/qdb.exe --seeds 1,2,3,4,5,6,7,8
+
+      - name: bql in-process subset against this qdb
+        working-directory: compiler
+        run: QDB_BIN="$GITHUB_WORKSPACE/bdb/qdb.exe" cargo test --release --locked --lib bql::tests::in_process_subset_matches_qdb
+
+      - name: WAL truncation recovery test
+        run: python3 bdb/tests/test_qdb_wal_recovery.py bdb/qdb.exe --old "$RUNNER_TEMP/qdb_oracle"

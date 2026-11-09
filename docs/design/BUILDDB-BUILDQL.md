@@ -5,8 +5,8 @@ Status: design, with the first slice built (`compiler/src/bql/`, `buildc bql`). 
 
 ## What already exists
 
-BuildDB is qdb, the SQL engine written in BuildLang (`programs/db.bld` in the Build
-Universe repository). BuildQL is the SQL dialect qdb executes. qdb has DDL and DML, WHERE
+BuildDB is qdb, the SQL engine written in BuildLang (`bdb/db.bld` in this repository; it
+lived in Build Universe as `programs/db.bld` until the move on 2026-11-09). BuildQL is the SQL dialect qdb executes. qdb has DDL and DML, WHERE
 trees, GROUP BY with HAVING, the five aggregates and COUNT DISTINCT, INNER and LEFT JOIN
 with grouping, UNION, DISTINCT, ORDER BY, LIMIT and OFFSET, sorted-array indexes, a
 write-ahead log with snapshots and transactions, and a REPL. Its regression gate passed
@@ -106,7 +106,7 @@ as a language construct.
 
 | Point | qdb today | The new direction needs | Proposal |
 |---|---|---|---|
-| Home | Build Universe, newest work unpublished | built and tested with the compiler | Move to this repo as `bdb/` after the author decides (ROADMAP_VISION section 8) |
+| Home | moved to `bdb/` in this repo, 2026-11-09 (author: "Move into BuildLang") | built and tested with the compiler | Done: `.github/workflows/bdb.yml` builds qdb with this checkout's buildc |
 | File format | text with no escaping | arbitrary symbol and path text | Escaped text v1, or BDF as the storage encoding |
 | Process model | one process per statement; cross-process ROLLBACK is a known limit | many queries per compile | A library entry point the compiler links through the C ABI |
 | Sorting | selection sort, O(n^2) | whole-program stores of 10^5 rows | Replace with merge sort once a measured store shows the cost |
