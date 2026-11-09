@@ -4234,7 +4234,19 @@ impl<'ctx> TypeInfer<'ctx> {
         let exponent = args
             .get(1)
             .and_then(super::unit_methods::literal_integer_exponent);
-        match super::unit_methods::float_method(method, dims[0], &dims[1..], exponent)? {
+        let Some(unit_result) =
+            super::unit_methods::float_method(method, dims[0], &dims[1..], exponent)
+        else {
+            // No unit decides the type. A float argument still does: `floor(x)` on
+            // an `f64` is an `f64`, never a fresh variable that an `i32` return
+            // could absorb (issue #178: the C then truncated with no check).
+            let first = self.apply(&arg_tys[0]);
+            return match first.kind {
+                TyKind::Float(_) => Some(first),
+                _ => None,
+            };
+        };
+        match unit_result {
             Ok(dim) => {
                 let first = self.apply(&arg_tys[0]);
                 let mut out = match (&first.kind, method) {
@@ -6102,7 +6114,8 @@ impl<'ctx> TypeInfer<'ctx> {
             // =================================================================
             "trim" | "trim_start" | "trim_end" | "trim_matches" | "trim_start_matches"
             | "trim_end_matches" | "to_uppercase" | "to_lowercase" | "to_ascii_uppercase"
-            | "to_ascii_lowercase" | "replace" | "replacen" | "char_at" | "substring" => {
+            | "to_ascii_lowercase" | "replace" | "replacen" | "char_at" | "substring"
+            | "sha256" => {
                 return Ty::str();
             }
             "index_of" => return Ty::int(IntTy::I64),

@@ -14,7 +14,7 @@ The engine in `typeset/engine` came out of the typeset field work (PR #115). Its
 | Hyphenation | Liang patterns from plain TeX `hyphen.tex` plus the TUGboat exception log; gives TeX's answers at `\lefthyphenmin=2 \righthyphenmin=3`. | `tests/test_engine.py` Hyphenation |
 | Inline rules | TeX space factors, url.sty break points, ligatures and kerning from GSUB, GPOS and `kern`. | `engine/hlist.py`, `engine/shape.py` |
 | Math | TeXbook Appendix G with OpenType MATH constants: scripts, fractions, radicals, display limits, accents. Not done: `\left`/`\right` sizing, matrices, MathVariants growth. | `tests/test_engine.py` MathBoxes; `tests/test_math_text.py`, `tests/test_math_vocab.py` |
-| Pages | TeX's page builder with club, widow and keep penalties, ragged or justified bottoms. | `engine/pages.py` |
+| Pages | TeX's page builder with club, widow and keep penalties, ragged or justified bottoms; figures and tables float. | `engine/pages.py`, `engine/floats.py`; `tests/test_floats.py` |
 | Fonts | TrueType parsing and subsetting, CID fonts with ToUnicode so text extracts, CFF passthrough for harvested Latin Modern. | PDF round trip test |
 | Output | PDF with an sRGB OutputIntent, SVG and HTML with a selectable text layer, all from one layout. The PDF has no author, creator or XMP packet and is dated only by `SOURCE_DATE_EPOCH`; `--pdfa` adds the PDF/A-2b packet (not validated by veraPDF). | `engine/pdfout.py`, `engine/svgout.py` |
 | Finishes | Emboss and deboss as a height map: the aperture rings rise, the name sinks, a lit relief render on a fibre normal map, gold foil from measured n and k when the materials library is present, and separate die, foil and spot plates for a press. | `engine/emboss.py` |
@@ -58,10 +58,25 @@ text layer is the paper alone. `paper-plain` is the same theme with every embell
 | `section`, `subsection` | label optional | Sections are numbered; `{ref:label}` gives the number |
 | `eq` | label optional | Display math, numbered `(n)` at the right margin |
 | `figure` | fifth field `src=chart.png;width=0.8;alt=...` | A PNG beside the IR, scaled to the width fraction, captioned "Figure n." and kept with its caption |
-| `tablecap`, `thead`, `row` | cells split by U+00A6; `cols=0.5,0.25,0.25` on the first row; `last=1` on the last | A table: caption "Table n.", a ruled header, wrapped cells, a closing rule |
+| `tablecap`, `thead`, `row` | cells split by U+00A6; `cols=0.5,0.25,0.25` and `align=l,r,r` on the first row; `last=1` on the last | A table: caption "Table n.", a ruled header, wrapped cells, a closing rule. `align` sets each column left (`l`), right (`r`) or centred (`c`) and holds for the rest of the table, as `cols` does; numbers go in `r` columns so their last digits line up |
 | `bib` | label is the cite key | Numbered references; `{cite:key}` gives `[n]` |
 
-In a BuildLang program, `attributed(&mut d, kind, label, text, attrs)` writes the fifth field. The PNG reader
+Figures and tables float, as in LaTeX. A float is a figure with its caption, or a table from its caption through
+the row marked `last=1`, and it is never broken. When it fits in the space left on the page it is set where it
+stands. When it does not, the text after it fills the page and the float goes at the top of the next page, so a
+page no longer ends half empty in front of a tall figure. Floats keep their order: one that arrives while others
+wait goes behind them. A float is never set before its first `{ref:..}`: one that comes earlier in the source moves
+to just after the paragraph that cites it. The theme sets `"floats": false` to turn this off and
+`page.float_sep` (12 pt) for the space between a top float and the text. A table caption is `unbreakable`, so a
+two-line caption never splits from its table.
+
+In the text layer a float reads where it is set. Floats at the top of a page read after the lines that finish a
+paragraph split from the page before, so that paragraph reads whole. The layout lists every float that reads
+later than its source position (`Layout.float_moves`), and the reading-order check reads the document in that
+order (`buildtex.check.reading_order`): only floats move, so a lost or misplaced paragraph still fails.
+
+In a BuildLang program, `attributed(&mut d, kind, label, text, attrs)` writes the fifth field; attributes are
+separated by `;`, as in `cols=0.5,0.25,0.25;align=l,r,r`. The PNG reader
 (`engine/pngread.py`) takes 8-bit grey, RGB, grey with alpha and RGBA, and lays alpha over the theme's paper.
 
 Text-layer rules a paper build keeps:
@@ -176,7 +191,9 @@ SOURCE_DATE_EPOCH=$(git log -1 --format=%ct) python -m buildtex resume.tex out/r
 ## Limits
 
 - The engine is Python; only line breaking also runs as BuildLang.
-- Figures are PNG only; tables do not break inside a row and have no right-aligned columns; figures do not float.
+- Figures are PNG only; tables do not break inside a row; a right-aligned column lines up last digits, not decimal points.
+- Floats go only where they stand or at the top of a later page: there are no bottom floats and no float-only
+  pages, and floats at the top of a page may fill it. A table taller than the page does not float.
 - Math needs an OpenType MATH font. The `paper` theme ships one (Noto Sans Math); the `press` and `ats` themes carry none, so they set math source as plain text and record a note in the receipt; a math-heavy document uses a theme with a MATH font, such as `latex-article` where Cambria Math is installed.
 - PDF/A-2b metadata is written only with `--pdfa`, and no validator has run. A publish-metadata check reports that packet even though it holds no author. Decoration is marked as `/Artifact` content so extraction and assistive technology skip it, but no structure tree (tagged PDF) is written.
 - The relief is a raster at the theme's dpi (150 for `press`); text and rules stay vector.

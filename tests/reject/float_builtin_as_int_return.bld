@@ -1,0 +1,10 @@
+// Issue #178: `floor(x)` on an f64 is an f64. Returning it from a function
+// declared `-> i32` must be a type error asking for `as i32`; before the fix
+// `buildc check` accepted it and the C truncated with a plain assignment.
+fn to_fixed(x: f64) -> i32 {
+    floor(x * 65536.0)
+}
+
+fn main() -> i32 {
+    to_fixed(1.5)
+}

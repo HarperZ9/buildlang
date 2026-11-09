@@ -157,6 +157,9 @@ Planted checks, each must hold or the change does not merge:
   `floor(fixed)`, an `f64`, from a function declared `-> i32`. `buildc check` accepts it and the C
   converts with a plain assignment (truncation, undefined out of range), not the saturating
   `bl_f2i_i32` that `as i32` uses. The type checker should reject the implicit conversion.
+  Filed as issue #178 and fixed: a maths builtin on a float argument now has that float type even
+  when no unit decides it, so `buildc check` reports BL0354, the program says `floor(fixed) as i32`,
+  and `to_fixed_16_16` is certified (`tests/reject/float_builtin_as_int_return.bld`).
 - Found while probing the backend, not by the checker (constants are outside the subset): a user
   `const PI: f64 = 3.0;` is ignored, and every use of `PI` compiles to the built-in
   3.141592653589793 (`lower_ident` checks `PI`, `E` and `TAU` before user constants). Modelling

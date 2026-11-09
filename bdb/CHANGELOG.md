@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- 2026-11-09: receipts hash with the runtime's `String.sha256()` and print as one string: their
+  cost falls from 44 to 13.0 percent of query time on Linux and from 347 to 5.7 percent on
+  Windows (target under 5). Receipt bytes unchanged.
+
 - 2026-11-09: history, `AS OF` and receipts. Run qdb once with `QDB_HISTORY=1` and the database
   keeps every committed transaction in `<db>.hist`; `SELECT ... AS OF <txid>` answers from the
   state at that transaction. With `QDB_RECEIPTS=1` each result is followed by

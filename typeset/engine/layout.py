@@ -5,9 +5,13 @@ from .breaker import Box, Glue, Penalty, Params, break_lines, Result, SP, EJECT,
 from .fonts import Registry
 from .hlist import ParagraphBuilder, sp
 from .hyph import Hyphenator
-from .pages import VLine, VGlue, VPenalty, Page, build_pages
+from . import floats as fl
+from .pages import VLine, VGlue, VPenalty, Page, build_pages, float_moves
 from .refs import resolve_refs
 from .shape import Shaper, Diagnostics
+
+
+CELL_ALIGN = {"l": "left", "r": "right", "c": "center"}
 
 
 def merged(base, over):
@@ -52,14 +56,14 @@ class Layout:
         hang = st.get("hang", 0.0)              # first-line offset relative to `left`
         width = self.text_width - left - right
         align = st.get("align", "justify")
-        items = self.pb.build(block.spans, st, lead, ragged=align in ("ragged", "center"))
+        items = self.pb.build(block.spans, st, lead, ragged=align in ("ragged", "center", "right"))
         first_w = width - hang
         lw = lambda n: sp(first_w if n == 1 else width)
         if align == "firstfit":
             res = first_fit(items, lw)
         else:
             params = self.params
-            if align in ("ragged", "center"):
+            if align in ("ragged", "center", "right"):
                 import dataclasses
                 params = dataclasses.replace(self.params, rightskip_stretch=sp(2 * st["size"]))
             res = break_lines(items, lw, params, has_hyphens=True)
@@ -73,6 +77,8 @@ class Layout:
             w = first_w if n == 1 else width
             if align == "center":
                 x0 += (w - nat) / 2
+            elif align == "right":
+                x0 += w - nat
             flat, gfx = [], []
             h, d = st.get("height", st["size"] * 0.72), st.get("depth", st["size"] * 0.25)
             for x, pc, hs in runs:
@@ -113,7 +119,7 @@ class Layout:
             return self.figure_lines(block, st, lead)
         if block.cells:
             return [self.row_line(block, st)]
-        self.cols = None
+        self.cols = self.aligns = None
         return self.lines_for(block, st, lead)
 
     def figure_lines(self, block, st, lead):
@@ -140,7 +146,11 @@ class Layout:
         n = len(block.cells)
         if block.attrs.get("cols"):
             self.cols = [float(c) for c in block.attrs["cols"].split(",")]
+        if block.attrs.get("align"):
+            # align=l,r,c on a row holds for the rest of the table, as cols= does
+            self.aligns = [CELL_ALIGN.get(a.strip(), "") for a in block.attrs["align"].split(",")]
         cols = self.cols if getattr(self, "cols", None) and len(self.cols) == n else [1.0 / n] * n
+        aligns = getattr(self, "aligns", None) or []
         total, gutter = sum(cols), st.get("gutter", 8.0)
         x, runs, gfx, height, depth = 0.0, [], [], 0.0, 0.0
         from .docir import Block
@@ -148,6 +158,8 @@ class Layout:
             w = self.text_width * frac / total
             right = self.text_width - x - w + (gutter if k < n - 1 else 0.0)
             cst = dict(st, left=x, right=right, hang=0.0)
+            if k < len(aligns) and aligns[k]:
+                cst["align"] = aligns[k] if aligns[k] != "left" else st.get("align", "ragged")
             cell = Block(block.kind, spans or [], index=block.index)
             lines = self.lines_for(cell, cst) if cell.plain.strip() else []
             for j, ln in enumerate(lines):
@@ -171,8 +183,11 @@ class Layout:
 
     # -- the whole document -----------------------------------------------
     def run(self):
+        refs = fl.first_refs(self.doc)
         resolve_refs(self.doc, self.theme)
         vlist, prev_after, prev_depth, prev_tail = [], None, 0.0, 0.0
+        floating = self.theme.get("floats", True)
+        grp, floats, labels, block_end = None, [], {}, {}     # grp: [kind, vlist start, blocks]
         mode = self.theme.get("spacing", "tex")
         blocks = self.doc.blocks
         pending_lead, kept = None, False
@@ -194,6 +209,12 @@ class Layout:
             lines = self.block_lines(block, st, lead)
             if not lines:
                 continue
+            if floating and grp and grp[0] == "table" and not block.cells:
+                self._close_float(vlist, grp, floats, labels)
+                grp = None
+            kind = fl.opens(block, st, grp and grp[0]) if floating else None
+            if kind:
+                grp = [kind, len(vlist), []]
             before = st.get("before", 0.0)
             if "first_before" in st and (i == 0 or blocks[i - 1].kind != block.kind):
                 before = st["first_before"]
@@ -232,11 +253,22 @@ class Layout:
             kept = bool(st.get("keep_next")) or bool(block.cells and st.get("keep_table") and not block.attrs.get("last"))
             if kept:
                 vlist.append(VPenalty(INF_PENALTY))
+            block_end[block.index] = len(vlist) - 1
+            if grp:
+                grp[2].append(block)
+                if fl.closes(block, grp[0]):
+                    self._close_float(vlist, grp, floats, labels)
+                    grp = None
             prev_after, prev_depth = st.get("after", 0.0), lines[-1].depth
             prev_tail = st["leading"] - st["size"]
+        if grp:
+            self._close_float(vlist, grp, floats, labels)
+        vlist = fl.after_first_reference(vlist, floats, labels, refs, block_end)
         pg = self.theme["page"]
         bodies = build_pages(vlist, self.text_height, pg.get("top_skip", 10.0), pg.get("ragged_bottom", True),
-                             pg.get("max_depth", 5.0))
+                             pg.get("max_depth", 5.0), pg.get("float_sep", 12.0))
+        # floats that read later than their source position; buildtex.check reads the document in this order
+        self.float_moves = float_moves(bodies, floats)
         pages = []
         for n, body in enumerate(bodies, 1):
             page = Page(pg["width"], pg["height"], body, n)
@@ -244,6 +276,14 @@ class Layout:
                 page.breaks.append((body[-1][1].block, body[-1][1].line_no))
             pages.append(page)
         return pages
+
+    def _close_float(self, vlist, grp, floats, labels):
+        f = fl.wrap(vlist, grp[1], [b.index for b in grp[2]], self.text_height)
+        if f is not None:
+            label = next((b.label for b in grp[2] if b.label), "")
+            if label:
+                labels[len(floats)] = label
+            floats.append(f)
 
     def interline_penalty(self, k, n, st):
         club = self.theme.get("club_penalty", 150)
