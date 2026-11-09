@@ -10601,6 +10601,9 @@ fn run_repl(d: &mut DB) ~ Console + FileSystem + Process {
         print!("qdb> ");
         let line = read_line();
         let llen = line.len();
+        // End of input: read_line gives "" there (a blank line is "\n"). Without
+        // this the loop spun forever on a script with no .quit. Leaves like .quit.
+        if llen == 0 { go = false; }
         // Strip trailing \n and \r
         let mut clean = line;
         let clen = clean.len();
