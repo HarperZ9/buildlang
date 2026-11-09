@@ -144,6 +144,13 @@ reported; no prediction beyond "not lower than 32".
   nothing: qdb's REPL read a 6 KB INSERT in 4,095-byte pieces, because the runtime's `read_line`
   made one `fgets` call into a 4 KB buffer. That is a compiler runtime fault, fixed in this branch
   (`compiler/tests/read_line_long.rs`); P6 ran on the fixed runtime.
+- **A5 (2026-11-08 21:35, before the P1 run after P7).** Since P7 qdb prints NULL as `NULL` and `''` as an
+  empty cell. `slt_run.py` read every empty qdb cell as NULL, which was right for the engine before
+  P7 and wrong after it. It now reads `NULL` as NULL and an empty cell as `''`; `--empty-is-null`
+  keeps the old reading for an engine from before P7, and the baseline is re-run with it. The
+  differential against the pre-rewrite reference engine (`test_qdb_differential.py`) gains
+  `--no-null`, a workload with no NULL and no `''`, because that engine stored both as one empty
+  cell; with NULL data it fails 8 of 16 checks by design, and without it 16 of 16 pass.
 
 ## Baseline (qdb at the move, 2026-11-08, buildc 1.11.0)
 

@@ -35,9 +35,14 @@ import sys
 import tempfile
 
 
-def gen_workload(seed, nops):
+def gen_workload(seed, nops, no_null=False):
     rnd = random.Random(seed)
     names = ["ann", "bob", "cy", "dee", "ed", "flo", "", "gus"]
+    if no_null:
+        # The reference engine predates NULL apart from '' (bdb/COMPLETE.md P7):
+        # it stored both as one empty cell. On data with neither, the two
+        # engines must still agree byte for byte.
+        names[names.index("")] = "hal"
     tags = ["x", "y", "z"]
     stmts = [
         "CREATE TABLE a (id INTEGER, name TEXT, score REAL)",
@@ -52,7 +57,7 @@ def gen_workload(seed, nops):
     def score():
         r = rnd.random()
         if r < 0.05:
-            return "NULL"
+            return "0" if no_null else "NULL"
         if r < 0.35:
             return str(rnd.randint(-3, 9))          # many duplicates
         return "%.1f" % rnd.uniform(-5, 50)
@@ -95,7 +100,10 @@ def gen_workload(seed, nops):
         elif r < 0.87:
             stmts.append("SELECT id, name, score FROM a ORDER BY score DESC, id LIMIT 7")
         elif r < 0.91:
-            stmts.append("SELECT COUNT(*), SUM(score), MIN(score), MAX(name) FROM a")
+            # SUM, MIN and MAX over no rows are NULL since P7 (0 and blank in the
+            # reference engine), so the no-null workload asks only once a has rows.
+            if not (no_null and next_id == 1):
+                stmts.append("SELECT COUNT(*), SUM(score), MIN(score), MAX(name) FROM a")
         elif r < 0.95:
             stmts.append("SELECT name, COUNT(*), AVG(score) FROM a GROUP BY name ORDER BY name")
         else:
@@ -141,8 +149,8 @@ def read_db(db):
 
 
 def body(db_bytes):
-    """The .db without a format-1 header line."""
-    if db_bytes.startswith(b"QDB 1 "):
+    """The .db without its format header line (format 1 or 2)."""
+    if db_bytes.startswith(b"QDB 1 ") or db_bytes.startswith(b"QDB 2 "):
         return db_bytes[db_bytes.index(b"\n") + 1:]
     return db_bytes
 
@@ -170,6 +178,8 @@ def main():
     ap.add_argument("--seeds", default="1,2,3,4,5")
     ap.add_argument("--ops", type=int, default=400)
     ap.add_argument("--process-ops", type=int, default=80)
+    ap.add_argument("--no-null", action="store_true",
+                    help="generate no NULL and no '' (for a reference engine older than P7)")
     a = ap.parse_args()
     for exe in (a.old, a.new):
         if not os.path.isfile(exe):
@@ -180,7 +190,7 @@ def main():
     with tempfile.TemporaryDirectory() as wd:
         for seed in [int(s) for s in a.seeds.split(",")]:
             for mode, runner, nops in (("repl", run_repl, a.ops), ("process", run_process, a.process_ops)):
-                stmts = gen_workload(seed, nops)
+                stmts = gen_workload(seed, nops, a.no_null)
                 if mode == "repl":
                     o_out, o_db = runner(a.old, os.path.join(wd, "old.db"), stmts)
                     n_out, n_db = runner(a.new, os.path.join(wd, "new.db"), stmts)

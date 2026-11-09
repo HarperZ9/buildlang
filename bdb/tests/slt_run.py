@@ -16,8 +16,9 @@ records SQLite is scored on), runs each record and classifies it:
 qdb runs one process per record on a database file in a temporary directory,
 the way its CLI is used. Values are rendered the corpus's way: NULL as NULL,
 the empty string as (empty), I columns as integers, R columns with three
-decimals. qdb stores NULL and '' as the same empty cell, so an empty cell is
-rendered NULL.
+decimals. Since P7 qdb prints NULL as `NULL` and '' as an empty cell; an
+engine from before P7 stored both as one empty cell, and --empty-is-null
+reads an empty cell as NULL for it.
 
 Two self-checks guard the runner itself:
   --engine sqlite   must score 100 percent of the records it runs, or the
@@ -159,7 +160,8 @@ class SqliteEngine:
 
 
 class QdbEngine:
-    def __init__(self, exe, wd):
+    def __init__(self, exe, wd, empty_is_null=False):
+        self.empty_is_null = empty_is_null
         self.exe = exe
         self.db = os.path.join(wd, "slt.db")
         for p in (self.db, self.db + ".wal", self.db + ".ckpt"):
@@ -196,7 +198,10 @@ class QdbEngine:
             if line == "":
                 continue
             cells = [c.strip() for c in line.split(" | ")]
-            rows.append(tuple(None if c == "" else c for c in cells))
+            if self.empty_is_null:
+                rows.append(tuple(None if c == "" else c for c in cells))
+            else:
+                rows.append(tuple(None if c == "NULL" else c for c in cells))
         return rows
 
 
@@ -261,6 +266,8 @@ def main():
     ap.add_argument("--engine", choices=["qdb", "sqlite"], default="qdb")
     ap.add_argument("--files", default=",".join(DEFAULT_FILES))
     ap.add_argument("--json")
+    ap.add_argument("--empty-is-null", action="store_true",
+                    help="read an empty qdb cell as NULL (qdb from before P7)")
     a = ap.parse_args()
     if a.engine == "qdb" and not (a.qdb and os.path.isfile(a.qdb)):
         print("SKIP: qdb binary not given or not found")
@@ -275,7 +282,7 @@ def main():
         st = new_stats()
         wd = tempfile.mkdtemp(prefix="slt_")
         try:
-            engine = SqliteEngine() if a.engine == "sqlite" else QdbEngine(a.qdb, wd)
+            engine = SqliteEngine() if a.engine == "sqlite" else QdbEngine(a.qdb, wd, a.empty_is_null)
             run_file(path, engine, st, first_pass)
         finally:
             shutil.rmtree(wd, ignore_errors=True)

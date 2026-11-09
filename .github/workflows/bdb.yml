@@ -85,7 +85,9 @@ jobs:
         run: bash bdb/tests/test_qdb.sh
 
       - name: Differential test against the reference engine
-        run: python3 bdb/tests/test_qdb_differential.py "$RUNNER_TEMP/qdb_oracle" bdb/qdb.exe --seeds 1,2,3,4,5,6,7,8
+        # The reference engine predates NULL apart from '' (bdb/COMPLETE.md P7), so
+        # this workload has no NULL and no ''; NULL is checked by test_qdb.sh and P2.
+        run: python3 bdb/tests/test_qdb_differential.py "$RUNNER_TEMP/qdb_oracle" bdb/qdb.exe --seeds 1,2,3,4,5,6,7,8 --no-null
 
       - name: bql in-process subset against this qdb
         working-directory: compiler
