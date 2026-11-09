@@ -344,6 +344,15 @@ history on; `AS OF` replays the history from the base on every query.
   COMMIT line only when the whole record survived, and its comparison with the reference engine
   skips offsets that cut inside a COMMIT record, where the reference engine accepts the torn
   prefix (the behaviour this fix removes).
+- **A8 (2026-11-09 05:30 PT, after the P16 results, before P16b runs).** P16 missed its overhead bar:
+  receipts cost 44 percent of query time on Linux and 347 percent on Windows, with SHA-256 written
+  in BuildLang. P16b swaps that function for the runtime's `String.sha256()` (buildlang #192, a C
+  implementation) and changes nothing else; the receipt bytes are the same SHA-256 digests.
+  Measured on the P16 benchmark unchanged. Predictions: 1,000 of 1,000 still reproduced, receipt
+  lines byte-identical to the P16 build on the same workload; overhead 3 to 12 percent on Linux
+  (a small query costs about 50 microseconds and its result is a few hundred bytes); Windows
+  reported, no prediction (its output path costs per byte). Planted checks as in P16. Guards:
+  test_qdb.sh no FAIL, P15 digest unchanged, P2 2,000.
 
 ## Baseline (qdb at the move, 2026-11-08, buildc 1.11.0)
 
