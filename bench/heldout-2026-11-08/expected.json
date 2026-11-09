@@ -1,0 +1,176 @@
+{
+ "fizzsum": {
+  "stdout": "201003",
+  "exit": 0,
+  "files": {}
+ },
+ "primes": {
+  "stdout": "669 4999",
+  "exit": 0,
+  "files": {}
+ },
+ "gcd_lcm": {
+  "stdout": "12 18 6 36\n17 5 1 85\n100 75 25 300\n270 192 6 8640",
+  "exit": 0,
+  "files": {}
+ },
+ "wordfreq": {
+  "stdout": "the 4\nand 2\nbat 1\ncat 1\nhat 1\nmat 1\non 1\nsat 1",
+  "exit": 0,
+  "files": {}
+ },
+ "reverse_words": {
+  "stdout": "five four three two one\neno owt eerht ruof evif",
+  "exit": 0,
+  "files": {}
+ },
+ "transpose": {
+  "stdout": "1 5 9\n2 6 10\n3 7 11\n4 8 12",
+  "exit": 0,
+  "files": {}
+ },
+ "bubble": {
+  "stdout": "1 3 8 15 17 29 42\nswaps 12",
+  "exit": 0,
+  "files": {}
+ },
+ "fib": {
+  "stdout": "2880067194370816120\n17710",
+  "exit": 0,
+  "files": {}
+ },
+ "brackets": {
+  "stdout": "yes\nno\nno\nyes\nyes",
+  "exit": 0,
+  "files": {}
+ },
+ "binary": {
+  "stdout": "100101\n11111111\n10000000000\n0",
+  "exit": 0,
+  "files": {}
+ },
+ "hex_parse": {
+  "stdout": "255\n419\n0\n32767",
+  "exit": 0,
+  "files": {}
+ },
+ "josephus": {
+  "stdout": "3 6 9 2 7 1 8 5 10 4",
+  "exit": 0,
+  "files": {}
+ },
+ "shapes": {
+  "stdout": "12 14\n25 20\n20 24\n1 4\ntotal area 58",
+  "exit": 0,
+  "files": {}
+ },
+ "stock": {
+  "stdout": "apple 8 400\npear 4 300\nplum 4 480\nrefused 1",
+  "exit": 0,
+  "files": {}
+ },
+ "compose": {
+  "stdout": "25 49 81 121 169",
+  "exit": 0,
+  "files": {}
+ },
+ "first_over": {
+  "stdout": "51\nnone",
+  "exit": 0,
+  "files": {}
+ },
+ "parse_sum": {
+  "stdout": "sum 56\nerrors 3",
+  "exit": 0,
+  "files": {}
+ },
+ "score_check": {
+  "stdout": "invalid 101",
+  "exit": 3,
+  "files": {}
+ },
+ "upper_file": {
+  "stdout": "lines 4",
+  "exit": 0,
+  "files": {
+   "upper.txt": "LAMP\nRIVER\nQUAY\nROPE"
+  }
+ },
+ "histogram": {
+  "stdout": "a ###\nb #######\nc ##\nd #####",
+  "exit": 0,
+  "files": {}
+ },
+ "prefix": {
+  "stdout": "inter\n(none)",
+  "exit": 0,
+  "files": {}
+ },
+ "isbn": {
+  "stdout": "0306406152 valid\n0306406153 invalid\n080442957X valid\n12345 invalid",
+  "exit": 0,
+  "files": {}
+ },
+ "wrap": {
+  "stdout": "the quick brown\nfox jumps over\nthe lazy dog and\nkeeps running\nfar away",
+  "exit": 0,
+  "files": {}
+ },
+ "hanoi": {
+  "stdout": "1023\nA C\nA B\nC B\nA C\nB A\nB C\nA C",
+  "exit": 0,
+  "files": {}
+ },
+ "expr_tree": {
+  "stdout": "25\n(((2 + 3) * (4 - 1)) + 10)",
+  "exit": 0,
+  "files": {}
+ },
+ "colors": {
+  "stdout": "red 3\nblue 2\ngreen 1\nyellow 1",
+  "exit": 0,
+  "files": {}
+ },
+ "projectile": {
+  "stdout": "landed 20\npeak 4610",
+  "exit": 0,
+  "files": {}
+ },
+ "particles": {
+  "stdout": "45 30 100 77 5\nbounces 19",
+  "exit": 0,
+  "files": {}
+ },
+ "units_table": {
+  "stdout": "brute mage 2\nscout mage 3\nwarden mage 3\nmage scout 2",
+  "exit": 0,
+  "files": {}
+ },
+ "duel_trace": {
+  "stdout": "winner B tick 12",
+  "exit": 0,
+  "files": {
+   "duel.trace": "{\"t\":2,\"by\":\"B\",\"hp\":25}\n{\"t\":3,\"by\":\"A\",\"hp\":33}\n{\"t\":4,\"by\":\"B\",\"hp\":20}\n{\"t\":6,\"by\":\"A\",\"hp\":26}\n{\"t\":6,\"by\":\"B\",\"hp\":15}\n{\"t\":8,\"by\":\"B\",\"hp\":10}\n{\"t\":9,\"by\":\"A\",\"hp\":19}\n{\"t\":10,\"by\":\"B\",\"hp\":5}\n{\"t\":12,\"by\":\"A\",\"hp\":12}\n{\"t\":12,\"by\":\"B\",\"hp\":0}"
+  }
+ },
+ "dice": {
+  "stdout": "1 176\n2 161\n3 147\n4 174\n5 166\n6 176",
+  "exit": 0,
+  "files": {}
+ },
+ "grid_path": {
+  "stdout": "14",
+  "exit": 0,
+  "files": {}
+ },
+ "life": {
+  "stdout": "........\n..#.....\n...#....\n.###....\n........\n........\n........\n........\nalive 5",
+  "exit": 0,
+  "files": {}
+ },
+ "inventory_log": {
+  "stdout": "lamp 1\nrope 2\nrefused 2",
+  "exit": 0,
+  "files": {}
+ }
+}

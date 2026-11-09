@@ -1,0 +1,21 @@
+fn main() ~ Console {
+    let text = "the quick brown fox jumps over the lazy dog and keeps running far away";
+    let width: usize = 16;
+    let mut line = "";
+    for w in text.split(" ") {
+        if w.len() == 0 {
+            continue;
+        }
+        if line.len() == 0 {
+            line = w;
+        } else if line.len() + 1 + w.len() <= width {
+            line = line + " " + w;
+        } else {
+            println!("{}", line);
+            line = w;
+        }
+    }
+    if line.len() > 0 {
+        println!("{}", line);
+    }
+}

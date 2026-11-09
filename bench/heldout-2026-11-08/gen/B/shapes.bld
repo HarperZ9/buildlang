@@ -1,0 +1,26 @@
+enum Shape {
+    Rect(i64, i64),
+    Square(i64),
+}
+
+fn measure(s: Shape) -> (i64, i64) {
+    match s {
+        Shape::Rect(w, h) => (w * h, 2 * (w + h)),
+        Shape::Square(a) => (a * a, 4 * a),
+    }
+}
+
+fn main() ~ Console {
+    let mut shapes: Vec<Shape> = vec_new();
+    shapes.push(Shape::Rect(3, 4));
+    shapes.push(Shape::Square(5));
+    shapes.push(Shape::Rect(2, 10));
+    shapes.push(Shape::Square(1));
+    let mut total: i64 = 0;
+    for s in shapes {
+        let (area, perim) = measure(s);
+        println!("{} {}", area, perim);
+        total = total + area;
+    }
+    println!("total area {}", total);
+}

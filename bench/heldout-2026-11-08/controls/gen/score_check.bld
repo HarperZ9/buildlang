@@ -1,0 +1,19 @@
+fn main() ~ Console + FileSystem + Process {
+    let text = read_file("scores.txt");
+    let lines = text.split("\n");
+    let mut i: usize = 0;
+    while i < lines.len() {
+        let l = lines[i];
+        let mut v = 0;
+        for c in l.chars() {
+            if c >= '0' && c <= '9' {
+                v = v * 10 + (c as i32 - '0' as i32);
+            }
+        }
+        if v > 100 {
+            println!("invalid {}", v);
+            exit(3);
+        }
+        i = i + 1;
+    }
+}

@@ -1,0 +1,31 @@
+fn first_over(v: &Vec<i64>, limit: i64) -> Option<i64> {
+    let mut i: i64 = 0;
+    while i < v.len() as i64 {
+        let x: i64 = v[i as usize];
+        if x > limit {
+            return Some(x);
+        }
+        i = i + 1;
+    }
+    None
+}
+
+fn report(r: Option<i64>) ~ Console {
+    match r {
+        Some(x) => println!("{}", x),
+        None => println!("none"),
+    }
+}
+
+fn main() ~ Console {
+    let mut v: Vec<i64> = vec_new();
+    v.push(12);
+    v.push(7);
+    v.push(33);
+    v.push(51);
+    v.push(8);
+    v.push(77);
+    v.push(64);
+    report(first_over(&v, 50));
+    report(first_over(&v, 100));
+}

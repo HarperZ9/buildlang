@@ -1,0 +1,4 @@
+fn main() ~ Console {
+    let x: i32 = "nope";
+    println!("{}", x);
+}

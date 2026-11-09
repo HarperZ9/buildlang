@@ -1,0 +1,27 @@
+fn is_prime(n: i64) -> bool {
+    if n < 2 {
+        return false;
+    }
+    let mut d: i64 = 2;
+    while d * d <= n {
+        if n % d == 0 {
+            return false;
+        }
+        d = d + 1;
+    }
+    true
+}
+
+fn main() ~ Console {
+    let mut count: i64 = 0;
+    let mut largest: i64 = 0;
+    let mut n: i64 = 2;
+    while n < 5000 {
+        if is_prime(n) {
+            count = count + 1;
+            largest = n;
+        }
+        n = n + 1;
+    }
+    println!("{} {}", count, largest);
+}

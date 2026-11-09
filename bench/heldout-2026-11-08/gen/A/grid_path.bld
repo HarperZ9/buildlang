@@ -1,0 +1,108 @@
+fn strip_cr(s: str) -> str {
+    let mut out = "";
+    for c in s.chars() {
+        if (c as i64) != 13 {
+            out.push(c);
+        }
+    }
+    out
+}
+
+fn main() ~ Console + FileSystem {
+    let text = read_file("map.txt");
+    let mut rows: Vec<str> = vec_new();
+    for raw in text.split("\n") {
+        let line = strip_cr(raw);
+        if line.len() > 0 {
+            rows.push(line);
+        }
+    }
+    let h: i64 = rows.len() as i64;
+    let mut w: i64 = 0;
+    let mut r: usize = 0;
+    while r < rows.len() {
+        let l = rows[r].len() as i64;
+        if l > w {
+            w = l;
+        }
+        r = r + 1;
+    }
+    // cell codes: 1 wall, 0 open
+    let mut walls: Vec<i64> = vec_new();
+    let mut start: i64 = -1;
+    let mut goal: i64 = -1;
+    let mut ri: usize = 0;
+    while ri < rows.len() {
+        let mut col: i64 = 0;
+        for c in rows[ri].chars() {
+            let id = (ri as i64) * w + col;
+            if c == '#' {
+                walls.push(1);
+            } else {
+                walls.push(0);
+                if c == 'S' {
+                    start = id;
+                }
+                if c == 'E' {
+                    goal = id;
+                }
+            }
+            col = col + 1;
+        }
+        while col < w {
+            walls.push(1);
+            col = col + 1;
+        }
+        ri = ri + 1;
+    }
+    if start < 0 || goal < 0 {
+        println!("unreachable");
+        return;
+    }
+    let total: i64 = h * w;
+    let mut dist: Vec<i64> = vec_new();
+    let mut t: i64 = 0;
+    while t < total {
+        dist.push(-1);
+        t = t + 1;
+    }
+    let mut queue: Vec<i64> = vec_new();
+    queue.push(start);
+    dist[start as usize] = 0;
+    let mut head: usize = 0;
+    while head < queue.len() {
+        let cur = queue[head];
+        head = head + 1;
+        let cr = cur / w;
+        let cc = cur % w;
+        let mut d: i64 = 0;
+        while d < 4 {
+            let mut nr = cr;
+            let mut nc = cc;
+            if d == 0 {
+                nr = cr - 1;
+            } else if d == 1 {
+                nr = cr + 1;
+            } else if d == 2 {
+                nc = cc - 1;
+            } else {
+                nc = cc + 1;
+            }
+            if nr >= 0 && nr < h && nc >= 0 && nc < w {
+                let nid = nr * w + nc;
+                let ni = nid as usize;
+                if walls[ni] == 0 && dist[ni] < 0 {
+                    dist[ni] = dist[cur as usize] + 1;
+                    queue.push(nid);
+                }
+            }
+            d = d + 1;
+        }
+    }
+    let result = dist[goal as usize];
+    if result < 0 {
+        println!("unreachable");
+    } else {
+        println!("{}", result);
+    }
+}

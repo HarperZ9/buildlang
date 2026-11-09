@@ -1,0 +1,77 @@
+fn alive_at(g: &Vec<i64>, r: i64, c: i64) -> i64 {
+    if r < 0 || r >= 8 || c < 0 || c >= 8 {
+        return 0;
+    }
+    g[(r * 8 + c) as usize]
+}
+
+fn step(g: &Vec<i64>) -> Vec<i64> {
+    let mut next: Vec<i64> = vec_new();
+    let mut r: i64 = 0;
+    while r < 8 {
+        let mut c: i64 = 0;
+        while c < 8 {
+            let mut n: i64 = 0;
+            let mut dr: i64 = -1;
+            while dr <= 1 {
+                let mut dc: i64 = -1;
+                while dc <= 1 {
+                    if dr != 0 || dc != 0 {
+                        n = n + alive_at(g, r + dr, c + dc);
+                    }
+                    dc = dc + 1;
+                }
+                dr = dr + 1;
+            }
+            let me: i64 = alive_at(g, r, c);
+            let mut v: i64 = 0;
+            if me == 1 && (n == 2 || n == 3) {
+                v = 1;
+            }
+            if me == 0 && n == 3 {
+                v = 1;
+            }
+            next.push(v);
+            c = c + 1;
+        }
+        r = r + 1;
+    }
+    next
+}
+
+fn main() ~ Console {
+    let mut grid: Vec<i64> = vec_new();
+    let mut k: i64 = 0;
+    while k < 64 {
+        grid.push(0);
+        k = k + 1;
+    }
+    grid[(0 * 8 + 1) as usize] = 1;
+    grid[(1 * 8 + 2) as usize] = 1;
+    grid[(2 * 8 + 0) as usize] = 1;
+    grid[(2 * 8 + 1) as usize] = 1;
+    grid[(2 * 8 + 2) as usize] = 1;
+    let mut gen: i64 = 0;
+    while gen < 4 {
+        grid = step(&grid);
+        gen = gen + 1;
+    }
+    let mut count: i64 = 0;
+    let mut r: i64 = 0;
+    while r < 8 {
+        let mut line: str = "";
+        let mut c: i64 = 0;
+        while c < 8 {
+            if grid[(r * 8 + c) as usize] == 1 {
+                line.push_str("#");
+                count = count + 1;
+            } else {
+                line.push_str(".");
+            }
+            c = c + 1;
+        }
+        println!("{}", line);
+        r = r + 1;
+    }
+    println!("alive {}", count);
+}

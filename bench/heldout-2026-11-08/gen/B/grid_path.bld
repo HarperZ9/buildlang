@@ -1,0 +1,100 @@
+fn strip_cr(s: str) -> str {
+    let mut out: str = "";
+    for c in s.chars() {
+        if (c as i64) != 13 {
+            out.push(c);
+        }
+    }
+    out
+}
+
+fn main() ~ Console + FileSystem {
+    let text = read_file("map.txt");
+    // Cells stored flat; each row has a start offset and a length.
+    let mut cells: Vec<i64> = vec_new();
+    let mut row_start: Vec<i64> = vec_new();
+    let mut row_len: Vec<i64> = vec_new();
+    let mut start: i64 = -1;
+    let mut goal: i64 = -1;
+    let mut cell_row: Vec<i64> = vec_new();
+    let mut cell_col: Vec<i64> = vec_new();
+    for raw in text.split("\n") {
+        let line = strip_cr(raw);
+        if line.len() > 0 {
+            let r: i64 = row_start.len() as i64;
+            row_start.push(cells.len() as i64);
+            let mut c: i64 = 0;
+            for ch in line.chars() {
+                let x: i64 = ch as i64;
+                let idx: i64 = cells.len() as i64;
+                if x == 83 {
+                    start = idx;
+                }
+                if x == 69 {
+                    goal = idx;
+                }
+                cells.push(x);
+                cell_row.push(r);
+                cell_col.push(c);
+                c = c + 1;
+            }
+            row_len.push(c);
+        }
+    }
+    if start < 0 || goal < 0 {
+        println!("unreachable");
+        return;
+    }
+    let total: i64 = cells.len() as i64;
+    let rows: i64 = row_start.len() as i64;
+    let mut dist: Vec<i64> = vec_new();
+    let mut k: i64 = 0;
+    while k < total {
+        dist.push(-1);
+        k = k + 1;
+    }
+    let mut queue: Vec<i64> = vec_new();
+    queue.push(start);
+    dist[start as usize] = 0;
+    let mut head: i64 = 0;
+    let mut dr: Vec<i64> = vec_new();
+    let mut dc: Vec<i64> = vec_new();
+    dr.push(-1);
+    dc.push(0);
+    dr.push(1);
+    dc.push(0);
+    dr.push(0);
+    dc.push(-1);
+    dr.push(0);
+    dc.push(1);
+    while head < queue.len() as i64 {
+        let cur: i64 = queue[head as usize];
+        head = head + 1;
+        if cur == goal {
+            break;
+        }
+        let r: i64 = cell_row[cur as usize];
+        let c: i64 = cell_col[cur as usize];
+        let mut d: i64 = 0;
+        while d < 4 {
+            let nr: i64 = r + dr[d as usize];
+            let nc: i64 = c + dc[d as usize];
+            if nr >= 0 && nr < rows {
+                if nc >= 0 && nc < row_len[nr as usize] {
+                    let ni: i64 = row_start[nr as usize] + nc;
+                    if cells[ni as usize] != 35 && dist[ni as usize] < 0 {
+                        dist[ni as usize] = dist[cur as usize] + 1;
+                        queue.push(ni);
+                    }
+                }
+            }
+            d = d + 1;
+        }
+    }
+    let result: i64 = dist[goal as usize];
+    if result < 0 {
+        println!("unreachable");
+    } else {
+        println!("{}", result);
+    }
+}

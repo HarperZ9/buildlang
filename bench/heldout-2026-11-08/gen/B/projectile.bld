@@ -1,0 +1,21 @@
+fn main() ~ Console {
+    let mut height: i64 = 0;
+    let mut speed: i64 = 1000;
+    let mut steps: i64 = 0;
+    let mut peak: i64 = 0;
+    let mut have_peak = false;
+    loop {
+        speed = speed - 98;
+        height = height + speed;
+        steps = steps + 1;
+        if !have_peak || height > peak {
+            peak = height;
+            have_peak = true;
+        }
+        if height < 0 {
+            break;
+        }
+    }
+    println!("landed {}", steps);
+    println!("peak {}", peak);
+}
