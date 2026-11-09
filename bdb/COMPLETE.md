@@ -647,6 +647,18 @@ without it. Written after that miss, before the after-measurements.
 change must recover under the new one. Added because P28's planted FNV change was invisible to the
 power-cut digest. Written after that miss, before the after-measurements.
 
+**A13 (2026-11-09, P29).** P29's planted `con_key` build (`;` for `|` between the constraint number
+and the length) was MISSED by every guard: the key is never stored, it is only compared with keys
+the same function made, so a consistent change of separator is an equivalent program and no test
+can tell it apart. Replacement plant, chosen after that miss: `con_key` leaves out the cell body.
+`test_qdb.sh` then fails 24 of 314 (caught). The miss stays in the P29 results.
+
+**A14 (2026-11-09, P29).** The speed script also ran the build before the change at 100,000 rows,
+against the preregistered limit of 8,000 rows for that build. It needs more than 7.6 GB there; the
+run was stopped when free memory fell under 4 GB, so no same-session pair exists at 100,000 rows.
+Two runs were added after the fact and are exploratory: the new build against SQLite 3.49.1 at
+100,000 rows, and an A/A run at 10,000 rows.
+
 ## Baseline (qdb at the move, 2026-11-08, buildc 1.11.0)
 
 These are the runs on the engine as it arrived (build-universe 4a296c1, here d39dfc1), with only
@@ -1159,6 +1171,87 @@ render job, 12.8 GB free. Paired median of qdb's time over SQLite's, with the 93
   cuts 0 of 10,000, digest 77a49282... equal (no byte change); P2 2,000 of 2,000; text 0 changed; WAL
   recovery 0; reference differential 16 of 16; library 0 failures; receipts reproduced; mutations
   0 disagreements.
+
+## After P29 and P30: memory that follows the data (2026-11-09, feat/bdb-memory)
+
+Run 13:36 to 14:20 PT on Windows, with other jobs on the machine (about a third of the CPU in
+use). Peak commit (PeakPagefileUsage) and peak working set of one `throughput` process: mixed,
+prepared API, the load and then 1,000 statements, median of 3 runs. "Before" is the P28 engine
+(main at f287cf1); SQLite is 3.54.1.
+
+| Rows | Before, commit | After, commit | After, working set | SQLite, commit | SQLite, working set | After over SQLite, commit |
+|---|---|---|---|---|---|---|
+| 1,000 | 22.1 MB | 2.1 MB | 6.1 MB | 0.77 MB | 5.4 MB | 2.8 |
+| 2,000 | 116.8 MB | 3.4 MB | 7.0 MB | 0.77 MB | 5.4 MB | 4.4 |
+| 4,000 | 437.6 MB | 5.4 MB | 8.8 MB | 0.77 MB | 5.4 MB | 7.0 |
+| 8,000 | 953.8 MB | 9.7 MB | 12.1 MB | 0.78 MB | 5.4 MB | 12.3 |
+| 10,000 | not run | 10.2 MB | 13.0 MB | 0.88 MB | 5.4 MB | 11.6 |
+| 50,000 | not run | 45.6 MB | 39.0 MB | 1.31 MB | 5.6 MB | 34.8 |
+| 100,000 | not run | 89.1 MB | 71.9 MB | 2.00 MB | 6.1 MB | 44.6 |
+
+- At 8,000 rows the peak fell from 953.8 MB to 9.7 MB (99 times less). The three runs of a cell
+  differ by under 5 percent.
+- Prediction 1 (linear in rows): 883 bytes per row from 10,000 to 50,000 and 871 from 50,000 to
+  100,000, 1.4 percent apart (bound 15): held.
+- Prediction 2 (within 10 times SQLite at 100,000 rows): MISSED, 44.6 times on commit (expected
+  about 45) and 11.7 times on working set. qdb keeps every row in memory as text cells plus the
+  string pool and index arrays, about 880 bytes per row here; SQLite keeps a page cache and reads
+  the rest from the file. Closing this needs the storage change (typed cells, pages on disk), which
+  is the next decision, and it is open.
+- CLI, same statements as a script (output and `.db` byte-equal before and after): 2,000 inserts
+  with no transaction 75.6 MB to 4.4 MB; 8,000 in one transaction 486 MB to 9.4 MB; 8,000 plus
+  1,000 mixed 950 MB to 12.4 MB.
+
+Speed, prediction 3: prepared API, 200,000 statements, 11 pairs, paired median of qdb's time over
+SQLite's with a 93.5 percent interval. The process ran at below-normal priority on a loaded
+machine; pairing holds the two engines to the same conditions within a pair.
+
+| Rows | Mode | P28 published (SQLite 3.49.1) | Before, this session (3.54.1) | After (3.54.1) | After (3.49.1, exploratory) |
+|---|---|---|---|---|---|
+| 10,000 | select | 0.56 | 0.56 (0.55 to 0.58) | 0.51 (0.50 to 0.54) | not run |
+| 10,000 | update | 1.32 | 1.19 (1.16 to 1.22) | 1.19 (1.17 to 1.21) | not run |
+| 10,000 | mixed | 1.00 | 1.01 (0.88 to 1.07) | 0.86 (0.85 to 0.91) | not run |
+| 100,000 | select | 1.13 | not run (A14) | 1.39 (1.34 to 1.48) | 1.24 (1.13 to 1.37) |
+| 100,000 | update | 1.74 | not run (A14) | 1.94 (1.83 to 2.02) | 1.96 (1.53 to 2.13) |
+| 100,000 | mixed | 1.34 | not run (A14) | 1.81 (1.67 to 1.97) | 1.55 (1.45 to 1.68) |
+
+- 10,000 rows: no ratio rose (held). Against the same-session before build, select is faster
+  (intervals apart), mixed is lower with overlapping intervals (0.85 to 0.91 against 0.88 to 1.07),
+  and update is level. Select and mixed on 10,000 rows are faster than SQLite 3.54.1; update is
+  slower.
+- 100,000 rows: MISSED on all three (23, 11 and 35 percent above P28's values). The cause is not
+  settled. qdb's own rate is higher than in P28's session (select 2.32 million per second against
+  1.86, update 1.64 against 1.30, mixed 1.70 against 1.58), and SQLite's rate is higher by more
+  (select 3.35 million per second, where P28's ratio implies about 2.1). SQLite 3.49.1 in this
+  session also runs at 3.5 million, so the release does not explain it; the session differs.
+  Whether P29 itself cost speed at 100,000 rows is unknown, because the build before cannot run
+  there inside the memory limit (A14). Everything at 100,000 rows is slower than SQLite.
+- A/A planted check (SQLite in both places, 10,000 rows): 1.02 (0.95 to 1.10), 1.00 (0.98 to
+  1.04), 0.95 (0.92 to 1.01); each interval holds 1.
+- Planted checks: parser lists emptied in place inside a subquery too: `test_qdb.sh` 313 pass, 1
+  fail (`subq_in`), caught. Held WAL line without its newline piece: WAL recovery 1 failure with
+  either writer, 242 violations in 10,000 power cuts, digest 040128cf..., `test_qdb.sh` 3 fail,
+  caught. `con_key` with `;`: MISSED (314 pass; A13); the replacement plant fails 24.
+- Guards: `test_qdb.sh` 314 pass, 0 fail; rows 0 differences; crash 176 points, 0 violations; power
+  cuts 0 of 10,000, digest 77a49282... equal; P2 2,000 of 2,000; text 0 changed; WAL recovery 0 (old
+  reference writer) and 0 (P28 build writer); reference differential 16 of 16; library 0 failures;
+  receipts reproduced; mutations 0 disagreements; sqllogictest 9,185 of 9,202.
+
+P30, `bdb/tests/test_qdb_memory.py` on the committed tree, Windows, 3 runs (slope of peak commit
+between 20,000 and 80,000 statements):
+
+| Workload | Slope, bytes per statement (3 runs) | Bound (1.5 times the median, next 100) |
+|---|---|---|
+| load | 990.3, 988.3, 987.8 | 1,500 |
+| select | 1,206.8, 1,206.3, 1,206.7 | 1,900 |
+| update | 1,039.4, 1,044.8, 1,046.1 | 1,600 |
+
+- Planted build (`reset_fresh` forced true): 4,434.8, 4,434.0 and 4,437.4 bytes per statement on
+  select, above the 1,900 bound in all 3 runs: caught. The test and the plant run in CI.
+- The CLI still keeps about 1.2 KB per SELECT and 1.0 KB per UPDATE for the life of the process
+  (statement text, tokens and result text that the runtime never frees), so a long-lived process
+  grows by that much per statement. The bounds catch a regression from here. Removing the growth
+  itself is open work.
 
 ## After P28: update path costs (2026-11-09, feat/bdb-updpath)
 
