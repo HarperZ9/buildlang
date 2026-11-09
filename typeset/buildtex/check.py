@@ -29,7 +29,7 @@ def fonts(pdf):
 
 
 def words(text):
-    return re.findall(r"[0-9A-Za-zÀ-ɏ]+", text)
+    return re.findall(r"[0-9A-Za-zÀ-ÖØ-öø-ɏ]+", text)
 
 
 def facts(pdf_path, result, doc):

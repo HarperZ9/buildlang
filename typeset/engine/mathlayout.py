@@ -147,14 +147,15 @@ class MathLayout:
                         v -= psi
         x = nuc.width
         w = 0.0
-        if sup is not None:
-            out.add(sup, x, u)
-            out.height = max(out.height, sup.height + u)
-            w = sup.width
+        # glyph runs go out in source order (base, subscript, superscript), so the text layer reads e_1^2 as e12
         if sub is not None:
             out.add(sub, x, -v)
             out.depth = max(out.depth, sub.depth + v)
-            w = max(w, sub.width)
+            w = sub.width
+        if sup is not None:
+            out.add(sup, x, u)
+            out.height = max(out.height, sup.height + u)
+            w = max(w, sup.width)
         out.width = x + w + self.k("SpaceAfterScript", style)
         return out
 
@@ -164,14 +165,15 @@ class MathLayout:
         w = max(nuc.width, sup.width if sup else 0, sub.width if sub else 0)
         out = MBox(w, nuc.height, nuc.depth)
         out.add(nuc, (w - nuc.width) / 2, 0)
-        if sup:
-            rise = max(self.k("UpperLimitBaselineRiseMin", style), self.k("UpperLimitGapMin", style) + sup.depth)
-            out.add(sup, (w - sup.width) / 2, nuc.height + rise)
-            out.height = nuc.height + rise + sup.height
+        # source order in the text layer: operator, lower limit, upper limit
         if sub:
             drop = max(self.k("LowerLimitBaselineDropMin", style), self.k("LowerLimitGapMin", style) + sub.height)
             out.add(sub, (w - sub.width) / 2, -(nuc.depth + drop))
             out.depth = nuc.depth + drop + sub.depth
+        if sup:
+            rise = max(self.k("UpperLimitBaselineRiseMin", style), self.k("UpperLimitGapMin", style) + sup.depth)
+            out.add(sup, (w - sup.width) / 2, nuc.height + rise)
+            out.height = nuc.height + rise + sup.height
         return out
 
     def fraction(self, num_atoms, den_atoms, style, cramped):
