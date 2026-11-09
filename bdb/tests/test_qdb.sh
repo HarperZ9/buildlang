@@ -634,8 +634,10 @@ chksel "lit_first_lt"     "SELECT a FROM ta WHERE 5 < a" "9"
 chksel "lit_first_ge"     "SELECT a FROM ta WHERE 5 >= a ORDER BY a" "$(printf '1
 5')"
 chksel "lit_first_eq_and" "SELECT a FROM ta WHERE 'q' = x AND 1 < a" "5"
-chk   "lit_both_sides"   "$($QDB "$DB" "SELECT a FROM ta WHERE 1 = 1" 2>&1 | tr -d '' | grep -ci 'column on one side')" "1"
-chk   "type_arg_not_num" "$($QDB "$DB" "CREATE TABLE tb (a VARCHAR(x))" 2>&1 | tr -d '' | grep -ci 'expected a number')" "1"
+chk   "lit_both_sides"   "$($QDB "$DB" "SELECT a FROM ta WHERE 1 = 1" 2>&1 | tr -d '
+' | grep -ci 'column on one side')" "1"
+chk   "type_arg_not_num" "$($QDB "$DB" "CREATE TABLE tb (a VARCHAR(x))" 2>&1 | tr -d '
+' | grep -ci 'expected a number')" "1"
 rm -f "$DB" "$DB".wal "$DB".ckpt 2>/dev/null
 
 echo "== INTERSECT and EXCEPT, left to right (P10) =="
@@ -655,7 +657,8 @@ chksel "union_then_except" "SELECT a FROM cp UNION SELECT a FROM cq EXCEPT SELEC
 chksel "union_then_all"   "SELECT a FROM cp WHERE a < 3 UNION SELECT a FROM cp WHERE a < 3 UNION ALL SELECT a FROM cq WHERE a = 2 ORDER BY 1" "$(printf '1
 2
 2')"
-chk   "intersect_all_closed" "$($QDB "$DB" "SELECT a FROM cp INTERSECT ALL SELECT a FROM cq" 2>&1 | tr -d '' | grep -ci 'not supported')" "1"
+chk   "intersect_all_closed" "$($QDB "$DB" "SELECT a FROM cp INTERSECT ALL SELECT a FROM cq" 2>&1 | tr -d '
+' | grep -ci 'not supported')" "1"
 $QDB "$DB" "CREATE TABLE cr (u TEXT, v TEXT)" >/dev/null
 $QDB "$DB" "INSERT INTO cr VALUES ('a|b','c'),('a','b|c')" >/dev/null
 chksel "union_key_pipe"   "SELECT COUNT(*) FROM cr" "2"
@@ -727,6 +730,26 @@ chk "map_numeric_key"    "$(echo "$km" | grep -c 'UNIQUE constraint failed: km.i
 chk "map_freed_keys"     "$(echo "$km" | grep -c 'constraint failed')" "1"
 chk "map_count"          "$(echo "$km" | grep -c '^ *3 *$')" "1"
 rm -f "$DB" "$DB".wal "$DB".ckpt 2>/dev/null
+
+echo "== INSERT ... SELECT (P22) =="
+reseed
+$QDB "$DB" "CREATE TABLE cp (id INTEGER PRIMARY KEY, name TEXT)" >/dev/null
+$QDB "$DB" "INSERT INTO cp SELECT id, name FROM emp WHERE dept = 'eng'" >/dev/null
+chksel "insel_rows"      "SELECT id, name FROM cp ORDER BY id" "$(printf '1 | alice
+2 | bob')"
+$QDB "$DB" "INSERT INTO cp (name, id) SELECT name, id + 10 FROM emp WHERE id > 3 ORDER BY id" >/dev/null
+chksel "insel_col_list"  "SELECT id, name FROM cp WHERE id > 10 ORDER BY id" "$(printf '14 | dave
+15 | eve')"
+$QDB "$DB" "INSERT INTO cp SELECT id, name FROM emp WHERE id > 99" >/dev/null
+chksel "insel_zero_rows" "SELECT count(*) FROM cp" "4"
+errk "insel_constraint"  "INSERT INTO cp SELECT 1, name FROM emp WHERE id = 3" "UNIQUE constraint failed: cp.id"
+$QDB "$DB" "INSERT INTO cp SELECT id + 50, name FROM cp" >/dev/null
+chksel "insel_self"      "SELECT count(*) FROM cp" "8"
+errk "insel_batch_dup"   "INSERT INTO cp SELECT 400 + id / 2, name FROM emp WHERE id < 4" "UNIQUE constraint failed: cp.id"
+chksel "insel_atomic"    "SELECT count(*) FROM cp" "8"
+errk "insel_width"       "INSERT INTO cp SELECT id FROM emp" "has 2 columns but 1 values"
+rm -f "$DB" "$DB".wal "$DB".ckpt 2>/dev/null
+
 
 echo "== ALTER / DROP =="
 reseed; $QDB "$DB" "ALTER TABLE emp ADD COLUMN active INTEGER" >/dev/null
