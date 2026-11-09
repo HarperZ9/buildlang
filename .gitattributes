@@ -7,3 +7,8 @@ compiler/tests/fixtures/tool-receipt-golden.json eol=lf
 # same whoever cloned the repository.
 docs/art/*.svg text eol=lf
 docs/art/*.json text eol=lf
+
+# Registry packages are hashed byte for byte (see docs/PACKAGES.md). Git must
+# not rewrite their line endings on checkout, or a Windows clone would hash
+# differently from a Linux one. `buildc pkg publish` writes text with LF.
+registry/** -text

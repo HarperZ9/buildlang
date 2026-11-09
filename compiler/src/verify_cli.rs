@@ -21,7 +21,7 @@ pub fn cmd_verify(file: &Path, json: bool) -> Result<(), i32> {
     // reported below, not as a check failure.
     let blocking: Vec<_> = check_buffer(&sf)
         .into_iter()
-        .filter(|d| d.code != "BL0701" && d.code != "BL0702")
+        .filter(|d| d.code != "BL0801" && d.code != "BL0802")
         .collect();
     if !blocking.is_empty() {
         for d in &blocking {

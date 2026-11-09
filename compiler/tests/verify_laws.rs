@@ -3,7 +3,7 @@
 //! The expected verdict of every obligation is written here, before the run
 //! it governs: the ported Bend laws, BuildLang's own laws and the planted
 //! checks. A planted false law must be refuted, a true one proved, and a law
-//! beyond the engine reported unknown. `check` fails (BL0701) only on a
+//! beyond the engine reported unknown. `check` fails (BL0801) only on a
 //! refutation.
 
 use serde_json::Value;
@@ -130,7 +130,7 @@ fn check_fails_on_a_refuted_law_and_passes_otherwise() {
     let bad = run("planted.bld");
     assert!(!bad.status.success());
     let text = String::from_utf8_lossy(&bad.stdout);
-    assert!(text.contains("BL0701"), "{text}");
+    assert!(text.contains("BL0801"), "{text}");
     assert!(text.contains("bad_sub_comm"), "{text}");
     let good = run("bend_laws.bld");
     assert!(

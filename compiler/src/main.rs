@@ -22,6 +22,7 @@ mod memory_layout;
 mod mir_representation;
 mod model_receipt;
 mod module_graph;
+mod pkg_cli;
 mod scientific_runtime;
 mod staticlib;
 mod stdlib_embed;
@@ -408,7 +409,7 @@ enum Commands {
     /// Package manager
     Pkg {
         #[command(subcommand)]
-        command: PkgCommands,
+        command: pkg_cli::PkgCommands,
     },
 
     /// Semantic corpus verification and receipt checks
@@ -558,35 +559,6 @@ enum MirCommands {
     Load {
         /// Input MIR JSON file written by `buildc mir emit`
         file: PathBuf,
-    },
-}
-
-#[derive(Subcommand)]
-enum PkgCommands {
-    /// Initialize a new Build.toml manifest
-    Init {
-        /// Project directory
-        #[arg(default_value = ".")]
-        path: PathBuf,
-    },
-    /// Add a dependency
-    Add {
-        /// Package name
-        name: String,
-        /// Version requirement (e.g., "^1.0")
-        #[arg(long)]
-        version: Option<String>,
-    },
-    /// Resolve dependencies and generate lockfile
-    Resolve {
-        /// Project directory
-        #[arg(default_value = ".")]
-        path: PathBuf,
-    },
-    /// Search the package registry
-    Search {
-        /// Search query
-        query: String,
     },
 }
 
@@ -882,7 +854,7 @@ fn run_cli(cli: Cli) -> Result<(), i32> {
         Some(Commands::Mcp) => mcp::serve(&mcp_check_path),
         Some(Commands::Watch { path, target }) => cmd_watch(&path, &target),
         Some(Commands::Fmt { file, check, write }) => cmd_fmt(&file, check, write),
-        Some(Commands::Pkg { command }) => cmd_pkg(command),
+        Some(Commands::Pkg { command }) => pkg_cli::cmd_pkg(command),
         Some(Commands::Corpus { command }) => cmd_corpus(command),
         Some(Commands::Policy { command }) => cmd_policy(command),
         Some(Commands::Receipt { command }) => cmd_receipt(command),
@@ -5437,6 +5409,22 @@ fn resolve_imports_recording_inputs(
     resolve_imports_inner(source, input_file, &mut ledger)
 }
 
+/// `src/lib.bld` of a registry package: the legacy `packages/<name>/` folder
+/// first, then the newest version the registry index lists.
+fn registry_lib_path(packages_dir: &Path, name: &str) -> PathBuf {
+    let legacy = packages_dir.join(name).join("src").join("lib.bld");
+    if legacy.exists() {
+        return legacy;
+    }
+    let newest = packages_dir.parent().and_then(|root| {
+        let registry = buildlang::pkg::local::index::Registry::load(root).ok()?;
+        let entry = registry.index.packages.get(name)?;
+        let version = entry.versions.get(&entry.version)?;
+        Some(registry.version_dir(version).join("src").join("lib.bld"))
+    });
+    newest.unwrap_or(legacy)
+}
+
 fn resolve_imports_inner(
     source: &str,
     input_file: &Path,
@@ -5492,7 +5480,7 @@ fn resolve_imports_inner(
             if let Some(ref reg) = registry_dir {
                 // Normalise: underscores -> hyphens for the directory name.
                 let pkg_dir_name = name.replace('_', "-");
-                let lib_path = reg.join(&pkg_dir_name).join("src").join("lib.bld");
+                let lib_path = registry_lib_path(reg, &pkg_dir_name);
                 if lib_path.exists() {
                     let bytes = std::fs::read(&lib_path).map_err(|e| {
                         eprintln!(
@@ -6339,7 +6327,7 @@ fn run_check_reporting(file: &Path, early: &mut Option<Diagnostic>) -> Result<Ch
             Err(_) => {}
         }
     }
-    // Laws and contracts: a counterexample fails the check (BL0701).
+    // Laws and contracts: a counterexample fails the check (BL0801).
     if parse_errors.is_empty() && type_errors.is_empty() {
         type_errors.extend(spec_errors(&ast, &source_file));
     }
@@ -9586,14 +9574,11 @@ fn cmd_fmt(file: &PathBuf, check: bool, write: bool) -> Result<(), i32> {
 /// An entry in the local registry index (registry/index.json).
 #[derive(Debug, serde::Deserialize)]
 struct LocalRegistryEntry {
+    #[allow(dead_code)]
     version: String,
+    #[allow(dead_code)]
+    #[serde(default)]
     description: String,
-    #[allow(dead_code)]
-    author: String,
-    #[allow(dead_code)]
-    checksum: String,
-    #[allow(dead_code)]
-    path: String,
 }
 
 /// Top-level shape of registry/index.json.
@@ -9630,121 +9615,6 @@ fn load_local_registry_index() -> HashMap<String, LocalRegistryEntry> {
         }
     }
     HashMap::new()
-}
-
-fn cmd_pkg(cmd: PkgCommands) -> Result<(), i32> {
-    match cmd {
-        PkgCommands::Init { path } => {
-            let manifest_path = path.join("Build.toml");
-            if manifest_path.exists() {
-                eprintln!("Build.toml already exists in {}", path.display());
-                return Err(1);
-            }
-            let dir_name = path
-                .canonicalize()
-                .ok()
-                .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
-                .unwrap_or_else(|| "my-project".to_string());
-            let manifest = format!(
-                "[package]\nname = \"{}\"\nversion = \"0.1.0\"\nedition = \"2026\"\n\n[dependencies]\n",
-                dir_name
-            );
-            std::fs::write(&manifest_path, &manifest).map_err(|e| {
-                eprintln!("Error creating Build.toml: {}", e);
-                1
-            })?;
-            println!("Created {}", manifest_path.display());
-            Ok(())
-        }
-        PkgCommands::Add { name, version } => {
-            let manifest_path = Path::new("Build.toml");
-            if !manifest_path.exists() {
-                eprintln!("No Build.toml found. Run `buildc pkg init` first.");
-                return Err(1);
-            }
-            let mut content = std::fs::read_to_string(manifest_path).map_err(|e| {
-                eprintln!("Error reading Build.toml: {}", e);
-                1
-            })?;
-            let ver = version.unwrap_or_else(|| "*".to_string());
-            content.push_str(&format!("{} = \"{}\"\n", name, ver));
-            std::fs::write(manifest_path, &content).map_err(|e| {
-                eprintln!("Error writing Build.toml: {}", e);
-                1
-            })?;
-            println!("Added {} = \"{}\"", name, ver);
-            Ok(())
-        }
-        PkgCommands::Resolve { path } => {
-            let manifest_path = path.join("Build.toml");
-            if !manifest_path.exists() {
-                eprintln!("No Build.toml found in {}", path.display());
-                return Err(1);
-            }
-            println!("Resolving dependencies from {}...", manifest_path.display());
-            let content = std::fs::read_to_string(&manifest_path).map_err(|e| {
-                eprintln!("Error reading manifest: {}", e);
-                1
-            })?;
-            println!("Manifest loaded ({} bytes)", content.len());
-
-            // Check dependencies against the local registry
-            let index = load_local_registry_index();
-            // Parse [dependencies] lines from the manifest
-            let mut in_deps = false;
-            for line in content.lines() {
-                let trimmed = line.trim();
-                if trimmed == "[dependencies]" {
-                    in_deps = true;
-                    continue;
-                }
-                if trimmed.starts_with('[') {
-                    in_deps = false;
-                    continue;
-                }
-                if in_deps {
-                    if let Some((name, _ver)) = trimmed.split_once('=') {
-                        let dep_name = name.trim();
-                        if dep_name.is_empty() {
-                            continue;
-                        }
-                        if let Some(entry) = index.get(dep_name) {
-                            println!(
-                                "  {} = {} ... found ({})",
-                                dep_name, entry.version, entry.description
-                            );
-                        } else {
-                            println!("  {} ... NOT FOUND in local registry", dep_name);
-                        }
-                    }
-                }
-            }
-            println!("Resolution complete.");
-            Ok(())
-        }
-        PkgCommands::Search { query } => {
-            let index = load_local_registry_index();
-            let query_lower = query.to_lowercase();
-            let mut found = 0u32;
-
-            println!("Searching local registry for '{}'...", query);
-            for (name, entry) in &index {
-                if name.to_lowercase().contains(&query_lower)
-                    || entry.description.to_lowercase().contains(&query_lower)
-                {
-                    println!("  {} v{} - {}", name, entry.version, entry.description);
-                    found += 1;
-                }
-            }
-
-            if found == 0 {
-                println!("No packages found matching '{}'.", query);
-            } else {
-                println!("{} package(s) found.", found);
-            }
-            Ok(())
-        }
-    }
 }
 
 // =============================================================================

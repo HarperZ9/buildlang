@@ -3,7 +3,7 @@
 BuildLang states what code must do beside the code, and `buildc` checks it. A `law` is a claim over
 all inputs; `requires` and `ensures` are a function's contract. `buildc verify` gives each claim one of
 three verdicts: proved, refuted with a concrete counterexample, or unknown with the reason. `buildc
-check` fails on a refuted claim (BL0701), so a code change that breaks a spec breaks the build.
+check` fails on a refuted claim (BL0801), so a code change that breaks a spec breaks the build.
 
 ```
 law add_comm(a: u64, b: u64) { a + b == b + a }
@@ -18,7 +18,7 @@ law damp_twice(e: i64) requires e >= 0 { damp(damp(e)) <= e }
 ```
 buildc verify laws.bld          # one line per claim
 buildc verify --json laws.bld   # the buildlang-verify/v1 report
-buildc check laws.bld           # fails with BL0701 on any counterexample
+buildc check laws.bld           # fails with BL0801 on any counterexample
 ```
 
 ## Syntax
@@ -64,7 +64,7 @@ Every claim gets two independent looks.
    incomplete. Recursive calls use the callee's `ensures` (induction over finishing runs) or stay
    uninterpreted.
 
-If the prover claims a goal that the concrete side refutes, the verdict is `inconsistent` (BL0702),
+If the prover claims a goal that the concrete side refutes, the verdict is `inconsistent` (BL0802),
 a defect in the verifier, and the claim is not proved.
 
 Scope today: integers up to 64 bits and `bool`; `let`, `if`, `match`, `return`, calls, casts and the
@@ -111,6 +111,6 @@ reported unknown, a false `ensures` refuted and a true one proved.
   ten false laws whose counterexamples are rare; the prover accepts none. A mutant prover (a
   Fourier-Motzkin step that treats `0 >= 0` as a contradiction) fails that set.
 - `compiler/tests/verify_laws.rs`: every verdict in the three files above, and `buildc check` failing
-  with BL0701 on the planted file and passing on the Bend file.
+  with BL0801 on the planted file and passing on the Bend file.
 
 Nothing here compares BuildLang with Bend or with any other verifier on a shared benchmark.
