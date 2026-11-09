@@ -8380,7 +8380,8 @@ fn x_eval(d: &mut DB, e: i32, fs: Vec<i32>, nf: i32, ag: Vec<i32>) -> String ~ C
         let a = x_eval(d, vec_get(d.x_a, e), fs, nf, ag);
         let n = vec_get(d.x_an, e);
         let mut r = 0;
-        if is_null(a) { r = 2; }
+        // x IN () is false and x NOT IN () true, NULL included (P18).
+        if is_null(a) && n > 0 { r = 2; }
         let mut i = 0;
         while i < n && r != 1 && !is_null(a) {
             let v = x_eval(d, x_arg(d, e, i), fs, nf, ag);
@@ -8421,6 +8422,10 @@ fn x_eval(d: &mut DB, e: i32, fs: Vec<i32>, nf: i32, ag: Vec<i32>) -> String ~ C
         let a = x_eval(d, vec_get(d.x_a, e), fs, nf, ag);
         let rows = xq_run(d, vec_get(d.x_c, e), fs, nf, -1);
         let w = d.x_ncol;
+        if w != 1 {
+            println!("Error: sub-select returns {} columns - expected 1", w);
+            process_exit(1);
+        }
         let nr = if w > 0 { vec_len(rows) / w } else { 0 };
         let mut r = 0;
         if is_null(a) && nr > 0 { r = 2; }

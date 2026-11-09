@@ -394,6 +394,15 @@ below 1,931.
   the receipt line as one string and prints it with one argument; the bytes printed are the same.
   The 2-seed pilot of that build gave 3.5 percent on Windows. The full P16b runs (5 seeds, 5
   repetitions, Windows and Linux) cover both changes; the A8 predictions stand.
+- **A10 (2026-11-09 07:20 PT, after the first P18 run, before the second).** First run: 9,084 of
+  9,202 query records (prediction 9,100 to 9,160: missed), `in1.test` 123 of 187 (prediction at
+  least 150: missed), `in2.test` 44 of 45 (held), and statements 1,927 of 1,993, below the 1,931
+  guard. Causes: on the expression path `NULL IN ()` was NULL where SQL gives false (an empty set
+  holds no match even for NULL); and `IN (SELECT 1, 2)` with two columns was accepted where SQLite
+  refuses it (the four `statement error` records of `in2.test`). Both are fixed in P18 before the
+  second run. Most of the 58 wrong `in1.test` records read tables filled by `INSERT INTO t SELECT
+  ...`, which qdb does not run (7 statement records), so they stay wrong. The predictions stand
+  for the second run.
 
 ## Baseline (qdb at the move, 2026-11-08, buildc 1.11.0)
 
