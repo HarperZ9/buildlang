@@ -824,6 +824,27 @@ median of 3).
   failures; reference differential 16 of 16; library 0 failures; receipts reproduced;
   test_qdb_mutations.py 0 disagreements.
 
+## After P22: INSERT ... SELECT (2026-11-09, feat/bdb-insert-select)
+
+| Measure | P18 | P22 | Prediction |
+|---|---|---|---|
+| P1 query records passing | 9,087 of 9,202 | 9,143 (99.36 percent) | 9,120 to 9,145: held |
+| wrong answers | 65 | 9 | under 20: held |
+| statements as expected | 1,931 of 1,993 | 1,938 | at least 1,938: held |
+
+- `in1.test` 125 to 181 of 187 (6 rejected); no file lost a record.
+- Planted check MISSED its bar: the build that drops the last row of each SELECT passes 9,127,
+  16 fewer than the change (bar: at least 30 fewer). It does separate (16 more wrong answers,
+  mostly in `in1.test`), but by less than predicted: many corpus queries read tables whose last
+  copied row does not change their answer.
+- INSERT ... SELECT takes the queries the expression path reads; a compound SELECT (UNION) or
+  GROUP BY in the inserted query is refused ("unexpected trailing input").
+- test_qdb.sh 301 pass, 0 fail (8 new checks: rows, column list, zero rows, a table copied into
+  itself, a key clash with the table, a key clash inside the batch, nothing inserted on failure,
+  column count). Guards: crash 176 points, 0 violations; power cuts 0 of 10,000, digest
+  77a49282... unchanged; P2 2,000 of 2,000; text 0 changed; WAL recovery 0; reference differential
+  16 of 16; library 0 failures; receipts reproduced; test_qdb_mutations.py 0 disagreements.
+
 ## Stage 1: a correct, durable single-file engine
 
 | Row | Check (fails if) | Status | Evidence |
@@ -841,7 +862,7 @@ median of 3).
 
 | Row | Check (fails if) | Status | Evidence |
 |---|---|---|---|
-| 2a sqllogictest queries | any P1 query record does not pass | FAIL | 9,087 of 9,202 (98.75 percent) after P18; 8,921 (96.95 percent) after P12; 8,186 after P11 (`select5` not run); 1,084 after P10; 32 at the move; `bdb/tests/slt_run.py` |
+| 2a sqllogictest queries | any P1 query record does not pass | FAIL | 9,143 of 9,202 (99.36 percent) after P22; 9,087 (98.75 percent) after P18; 8,921 (96.95 percent) after P12; 8,186 after P11 (`select5` not run); 1,084 after P10; 32 at the move; `bdb/tests/slt_run.py` |
 | 2b Expressions in the select list | `SELECT a+1, a*b-c FROM t` refused or wrong | PASS | P11: arithmetic, CASE, functions, correlated subqueries; `select1` to `select3` 5,320 of 5,320 |
 | 2c Column types with arguments and constraints | `VARCHAR(30)`, `INTEGER PRIMARY KEY`, `UNIQUE` refused | PASS | P9 type arguments; P13 PRIMARY KEY, UNIQUE and NOT NULL enforced on INSERT and UPDATE, kept in the file and through ROLLBACK; statements 1,931 of 1,993 |
 | 2d CASE, scalar functions (abs, coalesce) | refused or wrong | PASS | P11: searched and simple CASE, `abs`, `coalesce`, `ifnull`, `nullif` |
