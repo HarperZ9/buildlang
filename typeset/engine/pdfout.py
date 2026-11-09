@@ -106,7 +106,8 @@ def write_pdf(path, pages, registry, meta, plates=None, graphics_only=False, pdf
                 ops.append(_line_ops(line, y, page, registry, uses))
         for g in page.furniture:
             drawn = pdfgfx.draw(g, page.height, registry, uses, _line_ops)
-            ops.append(drawn if g.get("type") == "line" else _artifact(drawn))
+            # running heads and page numbers are pagination artifacts: readers and extraction skip them
+            ops.append(_artifact(drawn, "/Pagination") if g.get("type") == "line" else _artifact(drawn))
         contents.append("\n".join(o for o in ops if o))
     pages_n = w.reserve()
     font_refs = {}
@@ -145,9 +146,13 @@ def write_pdf(path, pages, registry, meta, plates=None, graphics_only=False, pdf
     return data
 
 
-def _artifact(ops):
-    """Mark decoration as a PDF artifact so text extraction and assistive technology skip it."""
-    return "/Artifact BMC\n" + ops + "\nEMC" if ops else ops
+def _artifact(ops, kind=""):
+    """Mark decoration (or, with kind "/Pagination", a footer) as a PDF artifact so text extraction and
+    assistive technology skip it."""
+    if not ops:
+        return ops
+    head = f"/Artifact << /Type {kind} >> BDC" if kind else "/Artifact BMC"
+    return head + "\n" + ops + "\nEMC"
 
 
 def _line_ops(line, y, page, registry, uses, left=None):

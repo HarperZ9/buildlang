@@ -138,8 +138,15 @@ class ParagraphBuilder:
         for m in re.finditer(r"[.:/\-_?&=#]" if url else r"[-–—/]", text):
             if url and text[m.end():m.end() + 1] == "/":
                 continue          # url.sty keeps // together
+            if not url and m.start() == 0 and text[1:2].isdigit():
+                continue          # a leading minus sign stays with its number (-0.157)
             if 0 < m.end() < len(text):
                 cuts.add(m.end())
+        long_hex = re.fullmatch(r"[0-9a-fA-F]{24,}[.,;:)]?", text) is not None
+        if long_hex:
+            # a hash or digest: break every 8 characters with no hyphen, as url.sty breaks a URL
+            url = True
+            cuts.update(range(8, len(text) - 1, 8))
         bounds, pos = [0], 0
         for i, c in enumerate(piece.clusters):
             pos += len(c)

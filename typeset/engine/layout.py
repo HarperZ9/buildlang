@@ -229,7 +229,7 @@ class Layout:
                     gap = st["leading"] - lines[k - 1].depth - ln.height
                     vlist.append(VGlue(gap if gap >= 0 else self.theme.get("lineskip", 1.0)))
                 vlist.append(ln)
-            kept = bool(st.get("keep_next"))
+            kept = bool(st.get("keep_next")) or bool(block.cells and st.get("keep_table") and not block.attrs.get("last"))
             if kept:
                 vlist.append(VPenalty(INF_PENALTY))
             prev_after, prev_depth = st.get("after", 0.0), lines[-1].depth
