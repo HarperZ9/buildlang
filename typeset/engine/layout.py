@@ -95,8 +95,79 @@ class Layout:
         gfx = [(x0 + rx, ry, rw, rh) for rx, ry, rw, rh in box.rules]
         ln = VLine(max(box.height, st["size"] * 0.72), max(box.depth, st["size"] * 0.25), runs, gfx,
                    block=block.index, line_no=1)
+        if st.get("number") and getattr(block, "number", None) is not None:
+            tag = st["number"].replace("{n}", str(block.number))
+            pieces = self.shaper.shape(st["fonts"]["rm"], st["size"], tag, st.get("color", ""))
+            x = self.text_width - st.get("right", 0.0) - sum(p.width for p in pieces)
+            for pc in pieces:
+                ln.runs.append((x, 0.0, pc, 1.0))
+                x += pc.width
         self.line_log.append((block.index, [block.plain]))
         return [ln]
+
+    # -- figures and table rows -------------------------------------------
+    def block_lines(self, block, st, lead):
+        if st.get("display_math"):
+            return self.display_math(block, st)
+        if st.get("figure"):
+            return self.figure_lines(block, st, lead)
+        if block.cells:
+            return [self.row_line(block, st)]
+        self.cols = None
+        return self.lines_for(block, st, lead)
+
+    def figure_lines(self, block, st, lead):
+        """The image as one line of its own height, then the caption, kept on one page."""
+        import os
+        from .pngread import read_png
+        src = block.attrs.get("src", "")
+        path = src if os.path.isabs(src) else os.path.join(self.doc.base, src)
+        pw, ph, rgb = read_png(path, tuple(int(self.theme.get("paper", "#ffffff").lstrip("#")[i:i + 2], 16)
+                                           for i in (0, 2, 4)))
+        w = self.text_width * float(block.attrs.get("width", st.get("figure_width", 1.0)))
+        h = w * ph / pw
+        cap = self.text_height * st.get("figure_max_height", 0.62)
+        if h > cap:
+            w, h = w * cap / h, cap
+        x0 = (self.text_width - w) / 2
+        img = {"type": "image", "x": x0, "ry": 0.0, "w": w, "h": h, "px": (pw, ph), "rgb": rgb,
+               "role": "figure", "alt": block.attrs.get("alt", "")}
+        pic = VLine(h, st.get("caption_gap", 8.0), [], [img], block=block.index, line_no=0)
+        return [pic] + self.lines_for(block, st, lead)
+
+    def row_line(self, block, st):
+        """A table row: each cell set in its own column, all cells side by side in one line of the page."""
+        n = len(block.cells)
+        if block.attrs.get("cols"):
+            self.cols = [float(c) for c in block.attrs["cols"].split(",")]
+        cols = self.cols if getattr(self, "cols", None) and len(self.cols) == n else [1.0 / n] * n
+        total, gutter = sum(cols), st.get("gutter", 8.0)
+        x, runs, gfx, height, depth = 0.0, [], [], 0.0, 0.0
+        from .docir import Block
+        for k, (frac, spans) in enumerate(zip(cols, block.cells)):
+            w = self.text_width * frac / total
+            right = self.text_width - x - w + (gutter if k < n - 1 else 0.0)
+            cst = dict(st, left=x, right=right, hang=0.0)
+            cell = Block(block.kind, spans or [], index=block.index)
+            lines = self.lines_for(cell, cst) if cell.plain.strip() else []
+            for j, ln in enumerate(lines):
+                shift = -j * st["leading"]
+                runs += [(rx, dy + shift, pc, hs) for rx, dy, pc, hs in ln.runs]
+                gfx += [(gx, gy + shift, gw, gh) for gx, gy, gw, gh in ln.graphics]
+            if lines:
+                height = max(height, lines[0].height)
+                depth = max(depth, (len(lines) - 1) * st["leading"] + lines[-1].depth)
+            x += w
+        height = height or st["size"] * 0.72
+        depth = max(depth, st["size"] * 0.25) + st.get("row_pad", 2.0)
+        below = st.get("rule_below") or (st.get("rule_last", 0.9) if block.attrs.get("last") else 0)
+        if below:
+            gfx.append((0.0, -depth, self.text_width, below))
+        if block.attrs.get("last"):
+            depth += st.get("table_after", 0.0)    # room under the closing rule
+        if st.get("rule_above"):
+            gfx.append((0.0, height + st.get("row_pad", 2.0), self.text_width, st["rule_above"]))
+        return VLine(height, depth, runs, gfx, block=block.index, line_no=1)
 
     # -- the whole document -----------------------------------------------
     def run(self):
@@ -120,7 +191,7 @@ class Layout:
             if pending_lead:
                 lead = pending_lead + (lead or [])
                 pending_lead = None
-            lines = self.display_math(block, st) if st.get("display_math") else self.lines_for(block, st, lead)
+            lines = self.block_lines(block, st, lead)
             if not lines:
                 continue
             before = st.get("before", 0.0)
@@ -140,8 +211,10 @@ class Layout:
                     dist = prev_after + before + st["leading"]
                 if st.get("penalty_before") is not None:
                     vlist.append(VPenalty(st["penalty_before"]))
-                vlist.append(VGlue(dist - prev_depth - lines[0].height, st.get("before_stretch", 0.0),
-                                   st.get("before_shrink", 0.0)))
+                gap = dist - prev_depth - lines[0].height
+                if gap < 0:   # a tall first line (a figure, a table row): baselines give way to lineskip
+                    gap = prev_after + before + self.theme.get("lineskip", 1.0)
+                vlist.append(VGlue(gap, st.get("before_stretch", 0.0), st.get("before_shrink", 0.0)))
             elif vlist:
                 vlist.append(VGlue(st["leading"] - prev_depth - lines[0].height))
             if st.get("null_before") is not None:
@@ -150,7 +223,7 @@ class Layout:
             whole =self.theme.get("keep_next_whole") and kept
             for k, ln in enumerate(lines):
                 if k:
-                    pen = INF_PENALTY if whole else self.interline_penalty(k, len(lines), st)
+                    pen = INF_PENALTY if whole or st.get("unbreakable") else self.interline_penalty(k, len(lines), st)
                     if pen:
                         vlist.append(VPenalty(pen))
                     gap = st["leading"] - lines[k - 1].depth - ln.height
@@ -196,6 +269,7 @@ class Layout:
             pad = gap
         if pieces:
             pieces[-1].advs[-1] += pad
+            pieces[-1].trail = pad      # blank space after the label; the PDF writer puts a real space there
         return pieces
 
     def lead_pieces(self, block, st):

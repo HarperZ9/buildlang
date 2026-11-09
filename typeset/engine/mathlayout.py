@@ -6,6 +6,7 @@ spacing table of Chapter 18), the four styles and cramping, scripts
 operators with display limits (Rule 13a). Not implemented: delimiters
 grown by \\left/\\right, accents, matrices, italic-correction kerning.
 """
+import unicodedata
 from dataclasses import dataclass, field
 
 from .mathfont import read_math_constants, glyph_bounds
@@ -57,7 +58,9 @@ class MathLayout:
                 g = self.font.glyph({"ℎ": "h"}.get(c, c))
             adv = self.font.advance(g) * size / self.u
             x0, y0, x1, y1 = glyph_bounds(self.font, g)
-            box.glyphs.append((box.width, 0.0, Piece(self.key, size, [g], [adv], c, [c])))
+            # the text layer carries the plain letter (NFKC folds mathematical italic B to B), so copy and search work
+            plain = unicodedata.normalize("NFKC", c)
+            box.glyphs.append((box.width, 0.0, Piece(self.key, size, [g], [adv], c, [plain])))
             box.width += adv
             box.height = max(box.height, y1 * size / self.u)
             box.depth = max(box.depth, -y0 * size / self.u)

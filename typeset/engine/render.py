@@ -45,7 +45,8 @@ def render(doc_path, out_base, theme_name=None, annotations=False, plates=False,
     if annotations and doc.marks:
         from .annotate import overlay
         overlay(lay, pages, doc, theme)
-    meta = {"title": doc.meta.get("title", ""), "author": doc.meta.get("author", "")}
+    meta = {"title": doc.meta.get("title", ""), "author": doc.meta.get("author", ""),
+            "pdf_author": doc.meta.get("pdf_author", ""), "subject": doc.meta.get("subject", "")}
     out = {"pages": len(pages), "diagnostics": lay.diag.report(), "files": []}
     if "pdf" in formats:
         write_pdf(out_base + ".pdf", pages, lay.reg, meta, pdfa=pdfa)

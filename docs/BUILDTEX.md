@@ -44,6 +44,41 @@ The program saves `buildlang.doc/v0`, a line-oriented IR (`meta`, `theme`, `bloc
 
 A theme is JSON data with single inheritance (`themes/*.json`): page geometry, fonts by role, spacing, line-break parameters, block styles, art layers and the finish. The author writes structure; the theme decides the look.
 
+## Papers: figures, tables, equations and references
+
+The `paper` theme sets research papers and whitepapers in the same press family as the designed CV and resumes:
+the laid paper, the aperture emblem with its foil core, the dot band, and the title and byline debossed and inked.
+The decoration stays on page one above the abstract (`clear_body`) and is drawn as PDF artifact content, so the
+text layer is the paper alone. `paper-plain` is the same theme with every embellishment off.
+
+| Block | IR | What it does |
+|---|---|---|
+| `title`, `subtitle`, `author`, `meta` | `block	title	...` | The title block; `title` and `author` sit in the deboss |
+| `abstracthead`, `abstract` | | The abstract, inset from both margins |
+| `section`, `subsection` | label optional | Sections are numbered; `{ref:label}` gives the number |
+| `eq` | label optional | Display math, numbered `(n)` at the right margin |
+| `figure` | fifth field `src=chart.png;width=0.8;alt=...` | A PNG beside the IR, scaled to the width fraction, captioned "Figure n." and kept with its caption |
+| `tablecap`, `thead`, `row` | cells split by U+00A6; `cols=0.5,0.25,0.25` on the first row; `last=1` on the last | A table: caption "Table n.", a ruled header, wrapped cells, a closing rule |
+| `bib` | label is the cite key | Numbered references; `{cite:key}` gives `[n]` |
+
+In a BuildLang program, `attributed(&mut d, kind, label, text, attrs)` writes the fifth field. The PNG reader
+(`engine/pngread.py`) takes 8-bit grey, RGB, grey with alpha and RGBA, and lays alpha over the theme's paper.
+
+Text-layer rules a paper build keeps:
+
+- A label (section number, "Figure 1.", "[1]") is followed by a real space in the text layer, so it extracts as
+  "1 Method", never "1Method".
+- Math glyphs map to their plain letters in the ToUnicode table (NFKC), so an equation copies as letters and
+  digits; `check` drops math commands such as `rac` before it compares words.
+- Reading order is checked against the laid-out document, after references and citations are numbered.
+- `buildtex.check.same_text(a, b)` compares the words of two PDFs page by page. A paper's embossed build and its
+  `paper-plain` build must agree; the papers on the site report that check.
+- The PDF names an author (`/Author`, and `dc:creator` with `--pdfa`) and a subject only when the document sets
+  `meta pdf_author` and `meta subject`. Without them the PDF carries the title and producer alone, as before.
+
+Math in `paper` is set in Noto Sans Math (SIL OFL 1.1, `data/fonts/NotoSansMath-Regular.ttf`), so the theme
+builds on any machine.
+
 ## Migrating from .tex
 
 `buildtex/texin.py` reads a LaTeX subset as text and writes the IR, or a BuildLang program that saves the same IR (`texin.to_program`). Covered: the title block, `\section`, `\subsection`, `\paragraph`, itemize and enumerate, `\newpage`, `\label`, `\emph`, `\textit`, `\textbf`, `\textsc`, `\texttt` and `\url` (verbatim, no dash or quote ligatures), `\href`, `\ref`, `\cite`, inline and display math, TeX quotes, dashes, ties and escapes. Preamble commands are skipped. Any other command is collected and reported in the build receipt, never dropped without a record; an unbalanced group is an error.
@@ -121,7 +156,8 @@ SOURCE_DATE_EPOCH=$(git log -1 --format=%ct) python -m buildtex resume.tex out/r
 ## Limits
 
 - The engine is Python; only line breaking also runs as BuildLang.
-- Math needs an OpenType MATH font. The `press` and `ats` themes carry none, so they set math source as plain text and record a note in the receipt; a math-heavy document uses a theme with a MATH font, such as `latex-article` where Cambria Math is installed.
+- Figures are PNG only; tables do not break inside a row and have no right-aligned columns; figures do not float.
+- Math needs an OpenType MATH font. The `paper` theme ships one (Noto Sans Math); the `press` and `ats` themes carry none, so they set math source as plain text and record a note in the receipt; a math-heavy document uses a theme with a MATH font, such as `latex-article` where Cambria Math is installed.
 - PDF/A-2b metadata is written only with `--pdfa`, and no validator has run. A publish-metadata check reports that packet even though it holds no author. Decoration is marked as `/Artifact` content so extraction and assistive technology skip it, but no structure tree (tagged PDF) is written.
 - The relief is a raster at the theme's dpi (150 for `press`); text and rules stay vector.
 - The proof hook in documents and the Lean importer are design only. The checker candidate is mmk in #117, not yet merged or wired in.

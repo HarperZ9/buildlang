@@ -83,6 +83,15 @@ pub fn labelled(d: &mut Doc, kind: str, label: str, text: str) -> i32 {
     d.blocks - 1
 }
 
+// A block with attributes, the IR's fifth field: "key=value;key=value".
+// figure: src (a PNG beside the saved IR), width (fraction of the text width), alt.
+// row and thead: cells separated by CELL (the broken bar), cols (column fractions, kept for later rows), last=1.
+pub fn attributed(d: &mut Doc, kind: str, label: str, text: str, attrs: str) -> i32 {
+    d.ir = format!("{}block\t{}\t{}\t{}\t{}\n", d.ir, kind, text, label, attrs);
+    d.blocks = d.blocks + 1;
+    d.blocks - 1
+}
+
 // A measured annotation over characters [start, end) of block `b`.
 // score and err are in bits; meter names the instrument that scored it.
 pub fn mark(d: &mut Doc, dev: Device, lay: Layer, b: i32, start: i32, end: i32,

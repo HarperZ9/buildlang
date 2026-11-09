@@ -39,10 +39,11 @@ def facts(pdf_path, result, doc):
     pages = [pdf.page_text(p) for p in pdf.pages()]
     flat = words(" ".join(pages))
     diag = result["layout"].diag
+    doc = getattr(result["layout"], "doc", doc)   # the laid-out copy, with references and citations resolved
     # Reading order: every block's words appear in the PDF text, each block after the one before.
     pos, order_ok, lost = 0, True, []
     for block in doc.blocks:
-        want = words(block.plain)
+        want = words(_plain_for_text(block))
         if not want:
             continue
         k = _find(flat, want, pos)
@@ -64,6 +65,29 @@ def facts(pdf_path, result, doc):
         "blocks_missing_from_text": lost,
         "pdf_bytes": len(data),
     }
+
+
+def _plain_for_text(block):
+    """A block's text as a reader extracts it: math source loses its commands (frac, sum and the rest), which
+    print as layout or symbols rather than letters."""
+    return "".join(re.sub(r"\\[A-Za-z]+", " ", s.text) if s.style == "m" else s.text for s in block.spans)
+
+
+def same_text(pdf_a, pdf_b):
+    """The words of two PDFs, page by page, compared: an embellished build and a plain build of one source must
+    extract to the same text. Returns (equal, first difference or None)."""
+    def pages(path):
+        with open(path, "rb") as fh:
+            pdf = PDF(fh.read())
+        return [words(pdf.page_text(p)) for p in pdf.pages()]
+    a, b = pages(pdf_a), pages(pdf_b)
+    if len(a) != len(b):
+        return False, f"{len(a)} pages against {len(b)}"
+    for n, (wa, wb) in enumerate(zip(a, b), 1):
+        if wa != wb:
+            k = next((i for i, (x, y) in enumerate(zip(wa, wb)) if x != y), min(len(wa), len(wb)))
+            return False, f"page {n}, word {k}: {wa[k:k + 6]} against {wb[k:k + 6]}"
+    return True, None
 
 
 def _find(hay, needle, start):

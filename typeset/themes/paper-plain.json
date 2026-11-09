@@ -1,0 +1,9 @@
+{
+ "extends": "paper",
+ "name": "paper-plain",
+ "purpose": "The paper theme with every embellishment off: no emblem, no dot band, no relief, no paper fill. Same fonts, geometry and line breaking, so its PDF must extract to the same text as a paper build of the same source (buildtex.check.same_text).",
+ "art": [],
+ "emboss": {"mode": "plates"},
+ "paper_fill": false,
+ "paper": "#ffffff"
+}
