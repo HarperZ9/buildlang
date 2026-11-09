@@ -25,8 +25,15 @@ bdb/qdb.exe app.db "SELECT name FROM users WHERE age > 40"
 bdb/qdb.exe app.db        # interactive REPL
 ```
 
-`test_qdb.sh` asserts rendered output over the whole SQL surface. One divergence from full SQL
-(cross-process ROLLBACK) is asserted as XFAIL, so a closed gap reports XPASS.
+`test_qdb.sh` asserts rendered output over the whole SQL surface. More checks, each with a planted
+failure it must catch, are listed with their results in `bdb/COMPLETE.md`:
+
+```bash
+python3 bdb/tests/test_qdb_crash.py bdb/qdb.exe          # stop at every durable write, recover
+python3 bdb/tests/test_qdb_text.py bdb/qdb.exe           # 1,000 values with | \ line breaks
+python3 bdb/tests/test_qdb_sqlite_oracle.py bdb/qdb.exe  # 2,000 generated queries vs SQLite
+python3 bdb/tests/slt_run.py CORPUS --qdb bdb/qdb.exe    # sqllogictest (corpus not vendored)
+```
 
 ## Where it came from
 
@@ -72,10 +79,10 @@ qdb is about 7,000 lines of BuildLang. BuildQL is the SQL dialect it runs:
 - Column aliases (SELECT col AS alias)
 
 **Storage and reliability:**
-- Line-based file persistence format
+- Line-based file format (format 1): a `QDB 1 <txid>` header, cells escaped (`\\`, `\|`, `\n`, `\r`), so text with a pipe or a line break round-trips; a file without the header is read as before
 - CREATE INDEX with sorted-array indexes and binary search lookup
 - Write-Ahead Log (WAL) for crash recovery
-- BEGIN/COMMIT/ROLLBACK transaction support
+- BEGIN/COMMIT/ROLLBACK transaction support, in one process or across several: a clean exit inside BEGIN leaves `HOLD` in the WAL and the next process resumes the transaction
 - Interactive REPL with dot-commands (.tables, .schema, .wal)
 
 **Architecture:** All state (parser, storage, indexes, WAL, REPL) lives in a
@@ -86,7 +93,8 @@ single `DB` struct due to the flat-struct constraint. The SQL parser is embedded
 - Grouped ORDER BY resolves the key to the group column, an aggregate output, a select alias, or a 1-based positional ordinal; a key that matches none of these fails closed with an error rather than sorting by an unselected column
 - A non-grouped JOIN ORDER BY resolves a column name (in either joined table) or a positional ordinal, but not a projection alias; ordering a non-grouped join by an AS name fails closed rather than sorting by an unselected column. A grouped JOIN ORDER BY is the separate path described in Features, and it does resolve an alias
 - A scalar aggregate, a GROUP BY, a HAVING, an ORDER BY, and a LIMIT/OFFSET over a grouped JOIN all fold, sort, or truncate over the joined rows (see Features above). What remains fail-closed over a JOIN: a secondary ORDER BY key over a grouped JOIN, DISTINCT over a grouped JOIN, and COUNT(DISTINCT ...) over any JOIN (`COUNT(DISTINCT) over a JOIN is not supported`). Each is tracked here rather than returning a silent wrong grouping, order, or count
-- Cross-process transactions do not roll back: each CLI statement is its own process and auto-commit checkpoints, so a later ROLLBACK cannot undo an earlier write
+- A process that ends inside BEGIN without a clean exit (a crash, or a statement rejected with exit code 1) drops the open transaction
+- NULL and the empty string are stored alike, as an empty cell, so `IS NULL` matches `''` and `NOT (col = x)` keeps a NULL row; SQL's three-valued logic is not implemented
 - No query optimizer; all scans are sequential unless an index matches exactly
 - Writes: a bulk load is linear in the rows loaded (about 0.13 s per 1,000 rows, 15 to 28 s per 100,000, see ARCHITECTURE.md, Write Cost). Still superlinear: an INSERT followed by an indexed SELECT on every row, INSERT into a table that is not the last one created, UPDATE, DELETE, and ORDER BY (selection sort)
 - During a REPL session, committed writes live in the append-only WAL and reach the .db at a checkpoint (when the WAL outgrows the .db, and at a clean exit). A crash loses nothing that was committed; the next start replays it
