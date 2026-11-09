@@ -38,8 +38,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 from test_qdb_differential import gen_workload, clean  # noqa: E402
 
-PLANT_FROM = "if sp_kind(d, id) != 2 && vec_get(d.pool_num, id) == x {\n            vset_i32(out, n,"
-PLANT_TO = "if sp_kind(d, id) != 2 && vec_get(d.pool_num, id) <= x + 1.0 {\n            vset_i32(out, n,"
+PLANT_FROM = "if vec_get(nums, j) == x {\n            vset_i32(out, n,"
+PLANT_TO = "if vec_get(nums, j) <= x + 1.0 {\n            vset_i32(out, n,"
 
 
 def build(buildc, cc, wd, name, plant=False):
@@ -109,7 +109,12 @@ def keyed_workload(seed, nops):
         elif r < 0.60:
             stmts.append("UPDATE t SET v = v %s %d WHERE id = %d" % (rnd.choice("+-*"), rnd.randint(0, 4), k))
         elif r < 0.68:
-            stmts.append("UPDATE t SET v = %d WHERE id = %d" % (rnd.randint(-9, 99), k))
+            nv = rnd.randint(-9, 99)
+            stmts.append("UPDATE t SET v = %d WHERE id = %d" % (nv, k))
+            if j >= nops // 2:
+                # Search the moved key at once (P27): the index on v must
+                # find it at its new place, with no rebuild in between.
+                stmts.append("SELECT id, v FROM t WHERE v = %d" % nv)
         elif r < 0.74:
             stmts.append("SELECT id, v FROM t WHERE v = %d" % rnd.randint(-5, 60))
         elif r < 0.80:

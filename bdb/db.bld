@@ -165,6 +165,14 @@ struct DB {
     idx_rowids: Vec<i32>,
     idx_key_starts: Vec<i32>,
     idx_key_counts: Vec<i32>,
+    // Typed key array (P27): idx_num[e] is entry e's key as a number (the
+    // pool entry's cached parse_float; NULL as minus infinity), so an equality
+    // search on a numeric index stays inside one f64 array instead of reading
+    // pool entries spread over memory. Valid while idx_num_ok; ix_move keeps
+    // it current, and every other write of idx_keys clears the flag, which
+    // rebuilds it on the next numeric search.
+    idx_num: Vec<f64>,
+    idx_num_ok: bool,
 
     // SQL parser state
     input: String,
@@ -451,6 +459,7 @@ fn db_new(db_path: String) -> DB {
         tbl_row_starts: vec![], tbl_row_counts: vec![],
         idx_names: vec![], idx_tables: vec![], idx_col_indices: vec![], idx_count: 0,
         idx_keys: vec![], idx_rowids: vec![], idx_key_starts: vec![], idx_key_counts: vec![],
+        idx_num: vec![], idx_num_ok: false,
         input: "", ilen: 0, pos: 0,
         tk_type: 7, tk_val: "",
         stmt_type: 0, p_table: -1,
@@ -1507,6 +1516,7 @@ fn restore_snapshot(d: &mut DB) {
     d.idx_col_indices = d.snap_idx_col_indices;
     d.idx_count = d.snap_idx_count;
     d.idx_keys = copy_vec(d.snap_idx_keys);
+    d.idx_num_ok = false;
     d.idx_rowids = copy_vec(d.snap_idx_rowids);
     d.idx_key_starts = copy_vec(d.snap_idx_key_starts);
     d.idx_key_counts = copy_vec(d.snap_idx_key_counts);
@@ -6660,12 +6670,15 @@ fn ix_move(d: &mut DB, ix: i32, row: i32, old_id: i32, new_id: i32, col_type: i3
     let mut q = ix_lower(d, ks, kc, sp_get(d, new_id), row, col_type);
     let keys = d.idx_keys;
     let rids = d.idx_rowids;
+    let nums = d.idx_num;
+    let typed = d.idx_num_ok;
     if q > p {
         q = q - 1;
         let mut i = p;
         while i < q {
             keys[i] = vec_get(keys, i + 1);
             rids[i] = vec_get(rids, i + 1);
+            if typed { nums[i] = vec_get(nums, i + 1); }
             i = i + 1;
         }
     } else {
@@ -6673,11 +6686,13 @@ fn ix_move(d: &mut DB, ix: i32, row: i32, old_id: i32, new_id: i32, col_type: i3
         while i > q {
             keys[i] = vec_get(keys, i - 1);
             rids[i] = vec_get(rids, i - 1);
+            if typed { nums[i] = vec_get(nums, i - 1); }
             i = i - 1;
         }
     }
     keys[q] = new_id;
     rids[q] = row;
+    if typed { nums[q] = ix_key_num(d, new_id); }
     true
 }
 
@@ -7085,6 +7100,7 @@ fn delete_rows(d: &mut DB, tidx: i32, del: Vec<i32>) {
     // Renumber the table's indexes: drop the deleted rows' entries, map the
     // rest through newid (order kept, since newid is increasing), and close
     // the gap in the flattened arrays.
+    d.idx_num_ok = false;
     let keys = d.idx_keys;
     let rids = d.idx_rowids;
     let kcs = d.idx_key_counts;
@@ -7925,23 +7941,23 @@ fn vset_str(v: Vec<String>, i: i32, x: String) {
 // row ids of every key compare_vals finds equal to x, in index order, written
 // to out from position 0. Returns their count.
 fn index_eq_num_into(d: &mut DB, ix_id: i32, x: f64, out: Vec<i32>) -> i32 {
+    if !d.idx_num_ok { idx_num_rebuild(d); }
     let ks = vec_get(d.idx_key_starts, ix_id);
     let kc = vec_get(d.idx_key_counts, ix_id);
-    let mut lo = 0;
-    let mut hi = kc;
+    let nums = d.idx_num;
+    let mut lo = ks;
+    let mut hi = ks + kc;
     while lo < hi {
         let mid = (lo + hi) / 2;
-        let id = vec_get(d.idx_keys, ks + mid);
-        let k = sp_kind(d, id);
-        if k == 2 || vec_get(d.pool_num, id) < x { lo = mid + 1; } else { hi = mid; }
+        if vec_get(nums, mid) < x { lo = mid + 1; } else { hi = mid; }
     }
     let mut n = 0;
     let mut j = lo;
+    let end = ks + kc;
     let mut go = true;
-    while go && j < kc {
-        let id = vec_get(d.idx_keys, ks + j);
-        if sp_kind(d, id) != 2 && vec_get(d.pool_num, id) == x {
-            vset_i32(out, n, vec_get(d.idx_rowids, ks + j));
+    while go && j < end {
+        if vec_get(nums, j) == x {
+            vset_i32(out, n, vec_get(d.idx_rowids, j));
             n = n + 1;
             j = j + 1;
         } else { go = false; }
@@ -7949,29 +7965,31 @@ fn index_eq_num_into(d: &mut DB, ix_id: i32, x: f64, out: Vec<i32>) -> i32 {
     n
 }
 
+// Entry key id as idx_num holds it: the pool entry's number, NULL as minus
+// infinity (NULL keys sort first and equal no number).
+fn ix_key_num(d: &mut DB, id: i32) -> f64 {
+    if sp_kind(d, id) == 2 { return 0.0 - 1.0e308 - 1.0e308; }
+    vec_get(d.pool_num, id)
+}
+
+// Fill idx_num from idx_keys, every index at once (the flattened arrays
+// shift together).
+fn idx_num_rebuild(d: &mut DB) {
+    let nk = vec_len(d.idx_keys) as i32;
+    let mut nums: Vec<f64> = vec![];
+    let mut e = 0;
+    while e < nk {
+        vec_push(nums, ix_key_num(d, vec_get(d.idx_keys, e)));
+        e = e + 1;
+    }
+    d.idx_num = nums;
+    d.idx_num_ok = true;
+}
+
 // index_eq_num_into into a new vector.
 fn index_eq_num(d: &mut DB, ix_id: i32, x: f64) -> Vec<i32> {
-    let ks = vec_get(d.idx_key_starts, ix_id);
-    let kc = vec_get(d.idx_key_counts, ix_id);
-    let mut lo = 0;
-    let mut hi = kc;
-    // The first entry not below x (NULL keys sort first).
-    while lo < hi {
-        let mid = (lo + hi) / 2;
-        let id = vec_get(d.idx_keys, ks + mid);
-        let k = sp_kind(d, id);
-        if k == 2 || vec_get(d.pool_num, id) < x { lo = mid + 1; } else { hi = mid; }
-    }
-    let mut result: Vec<i32> = vec![];
-    let mut j = lo;
-    let mut go = true;
-    while go && j < kc {
-        let id = vec_get(d.idx_keys, ks + j);
-        if sp_kind(d, id) != 2 && vec_get(d.pool_num, id) == x {
-            vec_push(result, vec_get(d.idx_rowids, ks + j));
-            j = j + 1;
-        } else { go = false; }
-    }
+    let result: Vec<i32> = vec![];
+    let n = index_eq_num_into(d, ix_id, x, result);
     result
 }
 
@@ -8086,6 +8104,7 @@ fn splice_index(d: &mut DB, ix_id: i32, new_keys: Vec<i32>, new_rowids: Vec<i32>
     }
     d.idx_keys = out_keys;
     d.idx_rowids = out_rowids;
+    d.idx_num_ok = false;
     let size_diff = count - old_count;
     d.idx_key_counts = vec_replace(d.idx_key_counts, d.idx_count, ix_id, count);
     let mut si2 = 0;
