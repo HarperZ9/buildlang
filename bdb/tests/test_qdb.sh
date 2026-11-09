@@ -109,8 +109,9 @@ echo "== WHERE operator fail-closed (arithmetic / doubled / stray) =="
 # the parse_condition guards, a leaf built with op -1 evaluated to always-false,
 # so these queries returned zero rows with exit 0: a silent wrong answer. Each
 # must now print a diagnostic, leave emp intact, and (checked below) exit nonzero.
-reseed; errchk "where_arith_plus_closed" "SELECT id FROM emp WHERE salary + 10 > 100" "unsupported operator"
-reseed; errchk "where_arith_pct_closed"  "SELECT id FROM emp WHERE salary % 2 = 0"    "unsupported operator"
+# Arithmetic in WHERE is read by the expression path since P11 and answers.
+reseed; chksel "where_arith_plus"  "SELECT id FROM emp WHERE salary + 10 > 100 ORDER BY id" "$(printf '1\n4')"
+reseed; chksel "where_arith_pct"   "SELECT id FROM emp WHERE salary % 3 = 0 ORDER BY id"    "$(printf '2\n4')"
 reseed; errchk "where_double_eq_closed"  "SELECT id FROM emp WHERE salary == 100"     "expected a value after operator"
 reseed; errchk "where_gtlt_closed"       "SELECT id FROM emp WHERE salary >< 100"     "expected a value after operator"
 
@@ -660,6 +661,28 @@ $QDB "$DB" "INSERT INTO cr VALUES ('a|b','c'),('a','b|c')" >/dev/null
 chksel "union_key_pipe"   "SELECT COUNT(*) FROM cr" "2"
 chk   "union_key_pipe_rows" "$(rows "SELECT u, v FROM cr UNION SELECT u, v FROM cr" | wc -l | tr -d ' ')" "2"
 rm -f "$DB" "$DB".wal "$DB".ckpt 2>/dev/null
+
+echo "== expressions in the select list and WHERE (P11) =="
+# xrows: the rows with runs of spaces squeezed, for multi-column answers.
+xrows() { rows "$1" | tr -s ' '; }
+reseed
+chk    "x_arith"        "$(xrows "SELECT id, salary * 2 + age FROM emp WHERE id = 2")" "2 | 225"
+chk    "x_int_div"      "$(xrows "SELECT salary / 7, salary % 7 FROM emp WHERE id = 1")" "14 | 2"
+chksel "x_real_div"     "SELECT salary / 8.0 FROM emp WHERE id = 1" "12.5"
+chksel "x_div_zero"     "SELECT salary / 0 FROM emp WHERE id = 1" "NULL"
+chksel "x_col_col"      "SELECT id FROM emp WHERE salary > age * 3 ORDER BY id" "1"
+chksel "x_minus_lex"    "SELECT salary-age FROM emp WHERE id = 5" "42"
+chksel "x_case"         "SELECT CASE WHEN salary >= 100 THEN 'hi' WHEN salary >= 80 THEN 'mid' ELSE 'lo' END FROM emp ORDER BY id" "$(printf 'hi\nmid\nmid\nhi\nlo')"
+chksel "x_case_simple"  "SELECT CASE dept WHEN 'eng' THEN 1 WHEN 'hr' THEN 2 END FROM emp ORDER BY id" "$(printf '1\n1\nNULL\nNULL\n2')"
+chk    "x_abs_coalesce" "$(xrows "SELECT abs(age - 40), coalesce(NULL, name) FROM emp WHERE id = 1")" "10 | alice"
+chk    "x_corr_subq"    "$(xrows "SELECT id, (SELECT count(*) FROM emp AS x WHERE x.salary > emp.salary) FROM emp ORDER BY 2, 1")" "$(printf '4 | 0\n1 | 1\n2 | 2\n3 | 3\n5 | 4')"
+chksel "x_exists"       "SELECT id FROM emp WHERE EXISTS (SELECT 1 FROM emp AS x WHERE x.age > emp.age + 10) ORDER BY id" "$(printf '1\n3\n5')"
+chk    "x_agg_expr"     "$(xrows "SELECT count(*), sum(salary) / count(*), avg(age) FROM emp WHERE salary > age * 2")" "4 | 92 | 35.75"
+chk    "x_order_keys"   "$(xrows "SELECT dept, age, id FROM emp ORDER BY 1, 2 DESC, 3")" "$(printf 'eng | 45 | 2\neng | 30 | 1\nhr | 28 | 5\nsales | 50 | 4\nsales | 35 | 3')"
+chksel "x_between_expr" "SELECT id FROM emp WHERE salary BETWEEN age * 2 AND age * 3 ORDER BY id" "$(printf '2\n3\n4\n5')"
+chksel "x_three_valued" "SELECT id FROM emp WHERE NOT (CASE WHEN id = 1 THEN NULL ELSE 1 END = 1) ORDER BY id" ""
+chk    "x_no_function"  "$($QDB "$DB" "SELECT nosuch(id) FROM emp" 2>&1 | tr -d '\r' | grep -ci 'no such function')" "1"
+chk    "x_no_column"    "$($QDB "$DB" "SELECT id + nosuch FROM emp" 2>&1 | tr -d '\r' | grep -ci 'no such column')" "1"
 
 echo "== ALTER / DROP =="
 reseed; $QDB "$DB" "ALTER TABLE emp ADD COLUMN active INTEGER" >/dev/null
