@@ -400,6 +400,18 @@ Predictions: total from 9,143 to between 9,175 and 9,185; `slt_lang_aggfunc.test
 of 67; no other file changes; statements not below 1,938. Planted check: a build whose DISTINCT is
 ignored in SUM, AVG and TOTAL loses at least 8 records of the aggfunc file. Guards as in P22.
 
+**P24. REPLACE (item 5), written 2026-11-09 before the full run.** `REPLACE INTO t ...` and `INSERT OR
+REPLACE INTO t ...` are refused, so `evidence/slt_lang_replace.test` has 4 wrong answers and 4
+statements fail. The change follows SQLite: each new row removes every row whose UNIQUE or PRIMARY
+KEY key equals its own (NULL keys never clash), then goes in; within one statement a later row
+replaces an earlier one; a NOT NULL failure is found before anything is removed, so a failing
+REPLACE changes nothing. Removal uses the in-place DELETE of P20. Disclosed: during development the
+replace file alone was run on the change (6 of 6 queries, 8 of 8 statements) and one script was
+compared with Python's sqlite3, before this entry. Measured on P1. Predictions: total 9,181 to
+9,185; statements 1,938 to 1,942; no other file changes. Planted check: a build whose REPLACE
+removes nothing fails the replace file (at least 2 of its 6 queries wrong or rejected) and a new
+test_qdb.sh check. Guards as in P23.
+
 ### Amendments
 
 - **A1 (2026-11-08 17:45, before the first qdb run of P1).** The SQLite self-check scored 9,198 of
@@ -885,6 +897,23 @@ median of 3).
   10,000, digest unchanged; P2 2,000 of 2,000; text 0 changed; WAL recovery 0; reference
   differential 16 of 16; library 0 failures; receipts reproduced; test_qdb_mutations.py 0.
 
+## After P24: REPLACE (2026-11-09, feat/bdb-replace)
+
+| Measure | P23 | P24 | Prediction |
+|---|---|---|---|
+| P1 query records passing | 9,181 of 9,202 | 9,185 (99.82 percent) | 9,185: held |
+| `slt_lang_replace.test` | 2 of 6, statements 4 of 8 | 6 of 6, statements 8 of 8 | |
+| statements as expected | 1,938 | 1,942 | 1,942: held |
+
+- No other file changed. Planted check caught: a build whose REPLACE removes nothing answers 2 of
+  the replace file's 6 queries wrong, fails 2 of its statements, and fails 4 of the 6 new
+  test_qdb.sh checks.
+- test_qdb.sh 314 pass, 0 fail. Guards: crash 176 points, 0 violations; power cuts 0 of 10,000,
+  digest unchanged; P2 2,000 of 2,000; text 0 changed; WAL recovery 0; reference differential 16
+  of 16; library 0 failures; receipts reproduced; test_qdb_mutations.py 0 disagreements. The
+  receipts overhead that run printed (-27.7 percent, one repetition while sqllogictest ran beside
+  it) shows that single-repetition overhead figures on a loaded machine carry no information.
+
 ## Stage 1: a correct, durable single-file engine
 
 | Row | Check (fails if) | Status | Evidence |
@@ -902,7 +931,7 @@ median of 3).
 
 | Row | Check (fails if) | Status | Evidence |
 |---|---|---|---|
-| 2a sqllogictest queries | any P1 query record does not pass | FAIL | 9,181 of 9,202 (99.77 percent) after P23; 9,143 (99.36 percent) after P22; 9,087 (98.75 percent) after P18; 8,921 (96.95 percent) after P12; 8,186 after P11 (`select5` not run); 1,084 after P10; 32 at the move; `bdb/tests/slt_run.py` |
+| 2a sqllogictest queries | any P1 query record does not pass | FAIL | 9,185 of 9,202 (99.82 percent) after P24; 9,181 (99.77 percent) after P23; 9,143 (99.36 percent) after P22; 9,087 (98.75 percent) after P18; 8,921 (96.95 percent) after P12; 8,186 after P11 (`select5` not run); 1,084 after P10; 32 at the move; `bdb/tests/slt_run.py` |
 | 2b Expressions in the select list | `SELECT a+1, a*b-c FROM t` refused or wrong | PASS | P11: arithmetic, CASE, functions, correlated subqueries; `select1` to `select3` 5,320 of 5,320 |
 | 2c Column types with arguments and constraints | `VARCHAR(30)`, `INTEGER PRIMARY KEY`, `UNIQUE` refused | PASS | P9 type arguments; P13 PRIMARY KEY, UNIQUE and NOT NULL enforced on INSERT and UPDATE, kept in the file and through ROLLBACK; statements 1,931 of 1,993 |
 | 2d CASE, scalar functions (abs, coalesce) | refused or wrong | PASS | P11: searched and simple CASE, `abs`, `coalesce`, `ifnull`, `nullif` |
