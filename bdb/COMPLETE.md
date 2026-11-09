@@ -282,6 +282,26 @@ with the digest unchanged (history is off by default); P2 2,000; text, WAL, libr
 differential unchanged. Limits stated in advance: the crash and power-cut tests do not run with
 history on; `AS OF` replays the history from the base on every query.
 
+**P17. Constraint checks through a key map (scoreboard target, item 3), written 2026-11-09 06:05 PT
+before the change.** P13 checks a new row against every row of its table and an UPDATE of a key
+column compares every pair of rows, so a keyed bulk load is quadratic and one key UPDATE is
+quadratic in the table. The change keeps one hash map from canonical key text (constraint number,
+then each key cell as a number in shortest form or as text, length-prefixed) to presence, plus the
+largest key of each `INTEGER PRIMARY KEY` for numbering NULLs. INSERT checks and extends it; any
+other mutation, ROLLBACK and a new constraint mark it stale, and the next INSERT rebuilds it in one
+pass. An UPDATE of a key column checks the table through a fresh map in one pass. NULL keys stay
+distinct, and two keys equal as numbers (`1` and `1.0`) stay equal, as in P13. Benchmark: two new
+scenarios in `bench_qdb_load.py`: `txn_keyed` loads N rows into `(id INTEGER PRIMARY KEY, name
+TEXT UNIQUE, age INTEGER)` inside one transaction; `txn_keyed_update` does the same and then one
+UPDATE of the `name` column. N = 1,000, 2,000, 4,000 and 8,000, before (main ee630a1) and after.
+Predictions: before, exponent k of 1.7 or more for both; after, k at most 1.3 for both, and 8,000
+rows at least 5 times faster than before. Guards: test_qdb.sh no FAIL (P13's thirteen constraint
+checks included); P1 statements 1,931 of 1,993 unchanged and queries 8,921; P2 2,000; crash 0; P15
+digest unchanged; text, WAL, library and reference differential unchanged. Planted checks: a build
+whose map is never marked stale fails a new test_qdb.sh check (DELETE a keyed row, insert its key
+again: must succeed); a build that compares key cells as text fails another (`1.0` after `1` in an
+INTEGER PRIMARY KEY column: must fail).
+
 ### Amendments
 
 - **A1 (2026-11-08 17:45, before the first qdb run of P1).** The SQLite self-check scored 9,198 of
@@ -514,7 +534,7 @@ harness unchanged. Before: 1,251 of 2,000 on this branch, re-run before the chan
   constraint (`bench_qdb_load.py`, 1,000 to 16,000 rows): exponent 1.00 and 1.05 before, 0.96 and
   1.02 after.
 - Limits: the duplicate check scans the table (O(rows) per inserted row, O(rows^2) for an UPDATE of
-  a key column); a constrained bulk load is quadratic until keys get an index. DEFAULT, CHECK and
+  a key column); a constrained bulk load is quadratic until keys get an index. Closed by P17. DEFAULT, CHECK and
   FOREIGN KEY are not read.
 
 ## After P14: atomic replace and fsync (2026-11-09, feat/bdb-atomic)
@@ -600,6 +620,24 @@ harness unchanged. Before: 1,251 of 2,000 on this branch, re-run before the chan
 - Limits: the crash and power-cut tests do not run with history on; `AS OF` replays the history
   from the base on every query; a receipt covers the state, the query text and the printed result,
   and says nothing about who ran it.
+
+## After P17: constraint checks through a key map (2026-11-09, feat/bdb-con-index)
+
+- **Keyed bulk load** (`bench_qdb_load.py txn_keyed`, Windows, one transaction): 8,000 rows 44.1 s
+  before, 2.72 s after (16 times faster); exponent 1.88 before, 0.92 after. With one UPDATE of
+  the UNIQUE column at the end (`txn_keyed_update`): 49.6 s to 3.03 s, exponent 1.93 to 1.03.
+  Predictions (before at least 1.7, after at most 1.3, at least 5 times faster at 8,000) held.
+- **Planted checks:** a build whose map is never marked stale fails `map_numeric_key`,
+  `map_freed_keys` and `map_count`; a build that compares key cells as text fails the same three.
+  Both caught.
+- **Guards:** test_qdb.sh 293 pass, 0 fail (three checks added); P1 8,921 of 9,202 queries and
+  1,931 of 1,993 statements, unchanged; P2 2,000 of 2,000; crash 194 points, 0 violations; P15
+  digest unchanged; P16 1,000 of 1,000; text 0 changed; WAL 0; library 0; reference differential
+  16 of 16. Load with no constraint (`txn`, 2,000 and 8,000 rows): exponent 0.97, 0.30 ms per row.
+- Limits: the map lives in one process and is rebuilt (one pass over the constrained tables) by
+  the first INSERT of each process and after any other mutation, so a single-statement INSERT per
+  process still costs a pass over its table; a run of INSERTs in one process or one library handle
+  pays it once.
 
 ## Stage 1: a correct, durable single-file engine
 

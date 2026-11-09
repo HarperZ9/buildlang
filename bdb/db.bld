@@ -324,6 +324,12 @@ struct DB {
     // every index from scratch. INSERT leaves it alone: appended rows are
     // folded into each index incrementally by refresh_index.
     idx_stale: bool,
+    // P17: canonical key text of every UNIQUE and PRIMARY KEY key in the
+    // tables (see con_key), and "M<k>" -> the largest key of INTEGER PRIMARY
+    // KEY constraint k. INSERT keeps it current; any other mutation marks it
+    // stale and the next INSERT rebuilds it.
+    con_map: HashMap<String, f64>,
+    con_map_ok: bool,
     // Snapshot for rollback (saved at BEGIN)
     snap_cells: Vec<i32>,
     snap_row_starts: Vec<i32>,
@@ -467,6 +473,8 @@ fn db_new(db_path: String) -> DB {
         fmt_escaped: false, fmt_nulls: false, applied_txid: 0, ckpt_path: cp,
         crash_at: 0, crash_torn: false, sync_on: true, trace_writes: false, write_seq: 0,
         idx_stale: false,
+        con_map: map_new(),
+        con_map_ok: false,
         snap_cells: vec![], snap_row_starts: vec![], snap_row_counts: vec![],
         snap_tbl_names: vec![], snap_tbl_count: 0,
         snap_col_names: vec![], snap_col_types: vec![],
@@ -1393,6 +1401,7 @@ fn take_snapshot(d: &mut DB) {
 
 // Restore state from snapshot (for ROLLBACK)
 fn restore_snapshot(d: &mut DB) {
+    d.con_map_ok = false;
     d.con_tbl = copy_vec(d.snap_con_tbl);
     d.con_kind = copy_vec(d.snap_con_kind);
     d.con_cs = copy_vec(d.snap_con_cs);
@@ -9074,6 +9083,7 @@ fn con_load_line(d: &mut DB, line: String) {
     }
     if n == 0 { return; }
     vec_push(d.con_tbl, t);
+    d.con_map_ok = false;
     vec_push(d.con_kind, kind);
     vec_push(d.con_cs, st);
     vec_push(d.con_cn, n);
@@ -9112,30 +9122,120 @@ fn con_same_key(d: &DB, k: i32, ca: Vec<i32>, a: i32, cb: Vec<i32>, b: i32) -> b
     true
 }
 
+// Digits of an integral value below 1e15 in magnitude, exactly.
+fn con_int_digits(f: f64) -> String {
+    let digits = "0123456789";
+    let neg = f < 0.0;
+    let mut v = if neg { 0.0 - f } else { f };
+    let mut out = "";
+    while v >= 1.0 {
+        let q = x_trunc(v / 10.0);
+        let r = v - q * 10.0;
+        let mut i: i64 = 0;
+        while (i as f64) < r { i = i + 1; }
+        out = digits.char_at(i) + out;
+        v = q;
+    }
+    if neg { return "-" + out; }
+    out
+}
+
+// One key cell as text that is equal for two cells exactly when xv_cmp_nn
+// calls them equal: a number by its value (so 1 and 1.0 match), text as is.
+fn con_part(v: String) -> String {
+    if is_numeric_str(v) {
+        let f = v.parse_float();
+        if f == 0.0 { return "N0"; }
+        if f == x_trunc(f) && f < 1000000000000000.0 && f > 0.0 - 1000000000000000.0 {
+            return "N" + con_int_digits(f);
+        }
+        return "N" + to_string_f64(f);
+    }
+    "T" + v
+}
+
+// The map key of row `base` (cell position of its first column) under
+// constraint k, or "" when a key cell is NULL (NULL keys are distinct).
+fn con_key(d: &DB, k: i32, cells: Vec<i32>, base: i32) -> String {
+    let n = vec_get(d.con_cn, k);
+    let st = vec_get(d.con_cs, k);
+    let mut key = to_string_i32(k);
+    let mut j = 0;
+    while j < n {
+        let v = sp_get(d, vec_get(cells, base + vec_get(d.con_cols, st + j)));
+        if is_null(v) { return ""; }
+        let part = con_part(v);
+        key = key + "|" + to_string_i32(part.len()) + ":" + part;
+        j = j + 1;
+    }
+    key
+}
+
+fn con_is_ipk(d: &DB, k: i32) -> bool {
+    let t = vec_get(d.con_tbl, k);
+    let cs = vec_get(d.tbl_col_starts, t);
+    let c0 = vec_get(d.con_cols, vec_get(d.con_cs, k));
+    vec_get(d.con_kind, k) == 1 && vec_get(d.con_cn, k) == 1 && vec_get(d.col_types, cs + c0) == 0
+}
+
+// Add rows (row-major in cells from base, nrows of them, cc columns) of
+// table t to the key map.
+fn con_map_add(d: &mut DB, t: i32, cells: Vec<i32>, base: i32, nrows: i32, cc: i32) {
+    let mut k = 0;
+    while k < vec_len(d.con_tbl) {
+        if vec_get(d.con_tbl, k) == t && vec_get(d.con_kind, k) != 2 {
+            let ipk = con_is_ipk(d, k);
+            let mk = "M" + to_string_i32(k);
+            let c0 = vec_get(d.con_cols, vec_get(d.con_cs, k));
+            let mut mx = 0.0;
+            if map_contains(d.con_map, mk) { mx = map_get(d.con_map, mk); }
+            let mut r = 0;
+            while r < nrows {
+                let key = con_key(d, k, cells, base + r * cc);
+                if key.len() > 0 { map_insert(d.con_map, key, 1.0); }
+                if ipk {
+                    let v = sp_get(d, vec_get(cells, base + r * cc + c0));
+                    if is_numeric_str(v) && v.parse_float() > mx { mx = v.parse_float(); }
+                }
+                r = r + 1;
+            }
+            if ipk { map_insert(d.con_map, mk, mx); }
+        }
+        k = k + 1;
+    }
+}
+
+// Rebuild the key map from every constrained table, in one pass each.
+fn con_map_build(d: &mut DB) {
+    d.con_map = map_new();
+    let mut t = 0;
+    while t < d.tbl_count {
+        let cc = vec_get(d.tbl_col_counts, t);
+        con_map_add(d, t, d.cells, vec_get(d.tbl_row_starts, t), vec_get(d.tbl_row_counts, t), cc);
+        t = t + 1;
+    }
+    d.con_map_ok = true;
+}
+
 // Check nrows new rows (row-major in rows) against table t and each other.
 // Fills a NULL single INTEGER PRIMARY KEY with the largest key plus one.
 // Returns the error text, or "" when every constraint holds.
 fn con_check_insert(d: &mut DB, t: i32, rows: Vec<i32>, nrows: i32) -> String {
     let cs = vec_get(d.tbl_col_starts, t);
     let cc = vec_get(d.tbl_col_counts, t);
-    let rs = vec_get(d.tbl_row_starts, t);
-    let rc = vec_get(d.tbl_row_counts, t);
+    if !d.con_map_ok { con_map_build(d); }
     let mut k = 0;
     while k < vec_len(d.con_tbl) {
         if vec_get(d.con_tbl, k) == t {
             let kind = vec_get(d.con_kind, k);
             let st = vec_get(d.con_cs, k);
             let c0 = vec_get(d.con_cols, st);
-            if kind == 1 && vec_get(d.con_cn, k) == 1 && vec_get(d.col_types, cs + c0) == 0 {
+            if con_is_ipk(d, k) {
                 // INTEGER PRIMARY KEY: number NULLs after the largest key.
+                let mk = "M" + to_string_i32(k);
                 let mut mx = 0.0;
+                if map_contains(d.con_map, mk) { mx = map_get(d.con_map, mk); }
                 let mut r = 0;
-                while r < rc {
-                    let v = sp_get(d, vec_get(d.cells, rs + r * cc + c0));
-                    if is_numeric_str(v) && v.parse_float() > mx { mx = v.parse_float(); }
-                    r = r + 1;
-                }
-                r = 0;
                 while r < nrows {
                     let v = sp_get(d, vec_get(rows, r * cc + c0));
                     if is_numeric_str(v) && v.parse_float() > mx { mx = v.parse_float(); }
@@ -9158,17 +9258,13 @@ fn con_check_insert(d: &mut DB, t: i32, rows: Vec<i32>, nrows: i32) -> String {
                     r = r + 1;
                 }
             } else {
+                let batch: HashMap<String, f64> = map_new();
                 let mut r = 0;
                 while r < nrows {
-                    let mut e = 0;
-                    while e < rc {
-                        if con_same_key(d, k, rows, r * cc, d.cells, rs + e * cc) { return con_fail_text(d, k, t); }
-                        e = e + 1;
-                    }
-                    let mut q = 0;
-                    while q < r {
-                        if con_same_key(d, k, rows, r * cc, rows, q * cc) { return con_fail_text(d, k, t); }
-                        q = q + 1;
+                    let key = con_key(d, k, rows, r * cc);
+                    if key.len() > 0 {
+                        if map_contains(d.con_map, key) || map_contains(batch, key) { return con_fail_text(d, k, t); }
+                        map_insert(batch, key, 1.0);
                     }
                     r = r + 1;
                 }
@@ -9176,6 +9272,8 @@ fn con_check_insert(d: &mut DB, t: i32, rows: Vec<i32>, nrows: i32) -> String {
         }
         k = k + 1;
     }
+    // Every constraint holds: the rows go in, and so do their keys.
+    con_map_add(d, t, rows, 0, nrows, cc);
     ""
 }
 
@@ -9198,12 +9296,13 @@ fn con_check_table(d: &DB, t: i32, cells: Vec<i32>, rs: i32, rc: i32, cc: i32, s
                         r = r + 1;
                     }
                 } else {
+                    let seen: HashMap<String, f64> = map_new();
                     let mut a = 0;
                     while a < rc {
-                        let mut b = 0;
-                        while b < a {
-                            if con_same_key(d, k, cells, rs + a * cc, cells, rs + b * cc) { return con_fail_text(d, k, t); }
-                            b = b + 1;
+                        let key = con_key(d, k, cells, rs + a * cc);
+                        if key.len() > 0 {
+                            if map_contains(seen, key) { return con_fail_text(d, k, t); }
+                            map_insert(seen, key, 1.0);
                         }
                         a = a + 1;
                     }
@@ -9219,6 +9318,7 @@ fn exec_sql_no_wal(d: &mut DB, input: String) ~ Console + FileSystem + Process {
     reset_parser(d, input);
     parse_sql(d);
     let st = d.stmt_type;
+    if st != 0 && st != 20 && st != 1 { d.con_map_ok = false; }
     if st == 0 { exec_select(d); }
     else if st == 20 { exec_xselect(d); }
     else if st == 1 { exec_insert(d); }
@@ -9468,6 +9568,7 @@ fn exec_sql(d: &mut DB, input: String) ~ Console + FileSystem + Process {
     // printed an error and changed nothing (P16).
     d.state_sha = "";
     d.stmt_failed = false;
+    if st != 1 { d.con_map_ok = false; }
     if st == 1 { exec_insert(d); }
     else if st == 2 { exec_create(d); }
     else if st == 3 { exec_update(d); }
