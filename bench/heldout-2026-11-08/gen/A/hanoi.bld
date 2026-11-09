@@ -1,0 +1,19 @@
+fn hanoi(n: i64, from: str, to: str, via: str) ~ Console {
+    if n == 0 {
+        return;
+    }
+    hanoi(n - 1, from, via, to);
+    println!("{} {}", from, to);
+    hanoi(n - 1, via, to, from);
+}
+
+fn main() ~ Console {
+    let mut moves: i64 = 1;
+    let mut i: i64 = 0;
+    while i < 10 {
+        moves = moves * 2;
+        i = i + 1;
+    }
+    println!("{}", moves - 1);
+    hanoi(3, "A", "C", "B");
+}

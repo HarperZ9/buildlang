@@ -1,0 +1,48 @@
+fn record(tick: i64, by: str, hp: i64) -> str {
+    "{\"t\":" + format!("{}", tick) + ",\"by\":\"" + by + "\",\"hp\":" + format!("{}", hp) + "}\n"
+}
+
+fn main() ~ Console + FileSystem {
+    let mut a_hp: i64 = 30;
+    let a_atk: i64 = 7;
+    let a_cd: i64 = 3;
+    let mut b_hp: i64 = 40;
+    let b_atk: i64 = 5;
+    let b_cd: i64 = 2;
+    let mut a_timer: i64 = a_cd;
+    let mut b_timer: i64 = b_cd;
+    let mut tick: i64 = 0;
+    let mut trace = "";
+    loop {
+        tick = tick + 1;
+        a_timer = a_timer - 1;
+        b_timer = b_timer - 1;
+        let a_fires = a_timer == 0;
+        let b_fires = b_timer == 0;
+        if a_fires {
+            b_hp = b_hp - a_atk;
+            a_timer = a_cd;
+        }
+        if b_fires {
+            a_hp = a_hp - b_atk;
+            b_timer = b_cd;
+        }
+        if a_fires {
+            trace = trace + record(tick, "A", b_hp);
+        }
+        if b_fires {
+            trace = trace + record(tick, "B", a_hp);
+        }
+        if a_hp <= 0 || b_hp <= 0 {
+            break;
+        }
+    }
+    write_file("duel.trace", trace);
+    if a_hp <= 0 && b_hp <= 0 {
+        println!("winner draw tick {}", tick);
+    } else if b_hp <= 0 {
+        println!("winner A tick {}", tick);
+    } else {
+        println!("winner B tick {}", tick);
+    }
+}

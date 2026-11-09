@@ -1,0 +1,43 @@
+fn clean(s: str) -> str {
+    let mut out: str = "";
+    for c in s.chars() {
+        let x: i64 = c as i64;
+        if x != 13 && x != 32 && x != 9 {
+            out.push(c);
+        }
+    }
+    out
+}
+
+fn upper(s: str, table: &Vec<char>) -> str {
+    let mut out: str = "";
+    for c in s.chars() {
+        let x: i64 = c as i64;
+        if x >= 97 && x <= 122 {
+            out.push(table[(x - 97) as usize]);
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+fn main() ~ Console + FileSystem {
+    let mut table: Vec<char> = vec_new();
+    for c in "ABCDEFGHIJKLMNOPQRSTUVWXYZ".chars() {
+        table.push(c);
+    }
+    let text = read_file("words.txt");
+    let mut out: str = "";
+    let mut n: i64 = 0;
+    for raw in text.split("\n") {
+        let w = clean(raw);
+        if w.len() > 0 {
+            out.push_str(upper(w, &table));
+            out.push_str("\n");
+            n = n + 1;
+        }
+    }
+    write_file("upper.txt", out);
+    println!("lines {}", n);
+}

@@ -39,24 +39,24 @@ when every row of every stage says PASS.
 A row never moves to PASS on a claim, a design document or a branch. A competitor row (parity,
 surpass) also needs a dated comparison on a shared benchmark before any parity or lead claim.
 
-## Stage 1: the game-rebuild core (target 1.11.0)
+## Stage 1: the game-rebuild core (met on 1.11.0)
 
 M4 from `docs/STRATEGY-2026-10.md`: the gaps the Low Water rebuild needs. Its goldens are the
 pilot's own.
 
 | Row | Check (fails if) | Status | Evidence |
 |---|---|---|---|
-| M4a DETMATH | every row of the Low Water `design/DETMATH.md` golden table reproduced bit for bit by BuildLang `dsin dcos datan datan2 dasin dacos dexp dhypot` (any differing bit) | PASS (1.9.0) | 12 of 12 goldens, scratch install of 1.9.0 (CHANGELOG 1.9.0, #96). The 12 goldens cannot see a one-ulp error in the sine's S1, so a sweep was added on 2026-11-08: raw-native `tests/data/action/detmath-sweep.json` (8 functions x 1,001 inputs, recorded from the JS) gives 8 of 8 equal hashes with 1.10.0; a planted one-ulp S1 changes the dsin and dcos hashes |
-| M4b Move data | a BuildLang loader and expander for `combat/data/moves.json` equals `combat/tests/moves-expanded.golden.json` byte for byte (any differing byte) | PASS (1.9.0) | 168,234 bytes, identical, pilot built with 1.9.0 and again with 1.10.0 |
-| M4c Traces | a BuildLang combat step writes `lw-trace/1` records whose `trace-manifest` equals the JS corpus manifest (any differing hash) | PASS (1.10.0) | see "M4c in detail" below |
-| M4d C ABI | the C++ host links a BuildLang static library through a plain C header and passes the same tests as the C++ module it replaces (any test differs) | PENDING 1.11.0 | built and passing on the branch compiler (#135); scored after the crates.io install |
+| M4a DETMATH | every row of the Low Water `design/DETMATH.md` golden table reproduced bit for bit by BuildLang `dsin dcos datan datan2 dasin dacos dexp dhypot` (any differing bit) | PASS (1.11.0) | 12 of 12 goldens on 1.11.0 (first on 1.9.0, #96). The 12 goldens cannot see a one-ulp error in the sine's S1, so a sweep was added on 2026-11-08: raw-native `tests/data/action/detmath-sweep.json` (8 functions x 1,001 inputs, recorded from the JS) gives 8 of 8 equal hashes with 1.10.0 and 1.11.0; a planted one-ulp S1 changes the dsin and dcos hashes |
+| M4b Move data | a BuildLang loader and expander for `combat/data/moves.json` equals `combat/tests/moves-expanded.golden.json` byte for byte (any differing byte) | PASS (1.11.0) | 168,234 bytes, identical, pilot built with 1.11.0 (and earlier with 1.9.0 and 1.10.0) |
+| M4c Traces | a BuildLang combat step writes `lw-trace/1` records whose `trace-manifest` equals the JS corpus manifest (any differing hash) | PASS (1.11.0) | see "M4c in detail" below |
+| M4d C ABI | the C++ host links a BuildLang static library through a plain C header and passes the same tests as the C++ module it replaces (any test differs) | PASS (1.11.0) | raw-native ab0e692 `tests/test_lowwater_c.cpp` linked against `examples/lowwater-rules` built by crates.io 1.11.0 through `rules_c.h`: OK, 16 of 16 checks, as against the C++ module (OK, 16 of 16). A planted label threshold (Easy at 9) fails 1 check. Limit: the story expression language is not ported; records that need it are refused at create |
 
 ### M4c in detail
 
 The 40-fight corpus is pinned to Low Water `origin/dev` 8b49bdd, regenerated on 2026-11-07 with `LIGHT_HS` unset (`node combat/tools/trace.mjs <dir> 40
 900`, then `tools/trace-manifest.mjs`): 40 traces, 2,944,071 bytes, manifest sha256
 `657983012666366802a742e05bee58d0593e49c162fbb473102ccbe3aaae9f19`; a second JS run gave the same
-manifest, and the bytes equal the untracked 2026-10-22 copy and the 2026-10-23 pilot copy. DETMATH section 4 records 2,845,097 bytes for a 2026-10-23 corpus; no run here reproduces that number, and its source is unknown. The BuildLang port, built by `buildc` 1.10.0 from crates.io, wrote 40 traces whose manifest
+manifest, and the bytes equal the untracked 2026-10-22 copy and the 2026-10-23 pilot copy. DETMATH section 4 records 2,845,097 bytes for a 2026-10-23 corpus; no run here reproduces that number, and its source is unknown. The BuildLang port, built by `buildc` 1.10.0 and again by 1.11.0 from crates.io, wrote 40 traces whose manifest
 has the same sha256: cbegin 40, cin 20,290, cev 5,350, cstate 571 and cend 40 lines, all identical.
 Two planted faults were caught: a heavy-hit force of 3.0 instead of 2.0 changed the hash of every
 trace written before the run stopped, and one flipped bit in one trace changed the manifest.
@@ -66,11 +66,11 @@ them (the field's terms at each refresh, the clock at each hash, the footing gri
 field's evolution and the clock are not ported. The port and the game data live with the private
 game, not in this repository.
 
-## Stage 2: an agent writes it (measured on 1.11.0; fixes ship in 1.12.0)
+## Stage 2: an agent writes it (met on 1.11.0)
 
 | Row | Check (fails if) | Status | Evidence |
 |---|---|---|---|
-| M3 Held-out pass rate | a new held-out probe of at least 30 tasks (at least 6 game-shaped), sealed by hash and pushed before any generator sees it, graded with the `bench/heldout-2026-10-15` harness against the current crates.io release, two generators: pass@1 at least 25/30 each (scaled: 29/34) and zero check-pass-but-fail (either generator below the bar, or any program that passes `buildc check` and then fails to build, crashes or prints the wrong output) | PENDING | bench5, preregistered in `bench/heldout-2026-11-08` |
+| M3 Held-out pass rate | a new held-out probe of at least 30 tasks (at least 6 game-shaped), sealed by hash and pushed before any generator sees it, graded with the `bench/heldout-2026-10-15` harness against the current crates.io release, two generators: pass@1 at least 25/30 each (scaled: 29/34) and zero check-pass-but-fail (either generator below the bar, or any program that passes `buildc check` and then fails to build, crashes or prints the wrong output) | PASS (1.11.0) | bench5 (`bench/heldout-2026-11-08`), 34 tasks with 8 game-shaped, sealed in 3bd69e9 before generation: sample A 34 of 34, sample B 34 of 34, check-pass-but-fail 0 in both. Limits: the two samples are two draws of one model, and the task writer also wrote the 1.11.0 compiler changes (`RESULTS.md`) |
 
 ## Stage 3: parallel by default (shipped in 1.11.0; scored on its crates.io build)
 
@@ -148,8 +148,8 @@ value carries what it means.
 
 | Release | Ships when | Rows |
 |---|---|---|
-| 1.11.0 | now | M4a to M4d scored; M3 measured; M5 and P7 shipped, rerun on the release |
-| 1.12.0 | M3 failures fixed (if any) | M3 re-measured on a new probe |
+| 1.11.0 | released 2026-11-08 | M4 and M3 met; M5 and P7 shipped, to be scored on this build |
+| 1.12.0 | M5 and P7 pass on a crates.io build | M5, P7 |
 | 1.13.0 | M6 passes | M6 |
 | 2.0.0 | stages 1 to 4 pass and F1 to F3 pass | the frozen language |
 | 2.1.0 to 2.3.0 | each verification row passes | V1, V3, S1 to S3; V2, S4; V4, V5 |
@@ -163,8 +163,9 @@ stage's row it depends on.
 
 ## Verified
 
-- M4c: run on 2026-11-07 against `buildc` 1.10.0 from crates.io, manifest sha256 compared, both
-  planted faults caught (this file, "M4c in detail").
+- M4a to M4d: rerun on 2026-11-08 against `buildc` 1.11.0 installed from crates.io with
+  `BUILDLANG_STDLIB` unset; every planted fault was caught.
+- M3: bench5 graded on 2026-11-09 against the same install; grader controls 6 of 6 as predicted.
 - F1: the subsection count was taken by a script over `SPECIFICATION.md` on 2026-11-08.
 - Every NOT BUILT row was checked by a search of `compiler/src` and `docs/` on 2026-11-08 for the
   feature it names; "exists" notes in the evidence column come from that search.

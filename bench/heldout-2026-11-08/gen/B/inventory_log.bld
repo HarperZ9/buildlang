@@ -1,0 +1,102 @@
+fn strip_cr(s: str) -> str {
+    let mut out: str = "";
+    for c in s.chars() {
+        let x: i64 = c as i64;
+        if x != 13 && x != 9 {
+            out.push(c);
+        }
+    }
+    out
+}
+
+fn parse_int(s: str) -> i64 {
+    let mut n: i64 = 0;
+    let mut neg = false;
+    for c in s.chars() {
+        let x: i64 = c as i64;
+        if x == 45 {
+            neg = true;
+        } else if x >= 48 && x <= 57 {
+            n = n * 10 + (x - 48);
+        }
+    }
+    if neg {
+        0 - n
+    } else {
+        n
+    }
+}
+
+fn main() ~ Console + FileSystem {
+    let text = read_file("events.txt");
+    let mut names: Vec<str> = vec_new();
+    let mut counts: Vec<i64> = vec_new();
+    let mut refused: i64 = 0;
+    for raw in text.split("\n") {
+        let line = strip_cr(raw);
+        let mut parts: Vec<str> = vec_new();
+        for p in line.split(" ") {
+            if p.len() > 0 {
+                parts.push(p);
+            }
+        }
+        if parts.len() as i64 >= 3 {
+            let action = parts[0];
+            let item = parts[1];
+            let amount: i64 = parse_int(parts[2]);
+            let mut found: i64 = -1;
+            let mut i: i64 = 0;
+            while i < names.len() as i64 {
+                if names[i as usize] == item {
+                    found = i;
+                }
+                i = i + 1;
+            }
+            if found < 0 {
+                names.push(item);
+                counts.push(0);
+                found = names.len() as i64 - 1;
+            }
+            let cur: i64 = counts[found as usize];
+            if action == "pickup" {
+                counts[found as usize] = cur + amount;
+            } else if action == "use" || action == "drop" {
+                if cur - amount < 0 {
+                    refused = refused + 1;
+                } else {
+                    counts[found as usize] = cur - amount;
+                }
+            }
+        }
+    }
+    let n: i64 = names.len() as i64;
+    let mut idx: Vec<i64> = vec_new();
+    let mut k: i64 = 0;
+    while k < n {
+        idx.push(k);
+        k = k + 1;
+    }
+    let mut pass: i64 = 0;
+    while pass < n {
+        let mut j: i64 = 0;
+        while j + 1 < n {
+            let a: i64 = idx[j as usize];
+            let b: i64 = idx[(j + 1) as usize];
+            if names[b as usize] < names[a as usize] {
+                idx[j as usize] = b;
+                idx[(j + 1) as usize] = a;
+            }
+            j = j + 1;
+        }
+        pass = pass + 1;
+    }
+    let mut m: i64 = 0;
+    while m < n {
+        let p: i64 = idx[m as usize];
+        if counts[p as usize] > 0 {
+            println!("{} {}", names[p as usize], counts[p as usize]);
+        }
+        m = m + 1;
+    }
+    println!("refused {}", refused);
+}

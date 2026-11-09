@@ -1,0 +1,85 @@
+fn clean(s: str) -> str {
+    let mut out = "";
+    for c in s.chars() {
+        let v = c as i64;
+        if v != 13 && v != 32 && v != 9 {
+            out.push(c);
+        }
+    }
+    out
+}
+
+fn parse_int(s: str) -> i64 {
+    let mut n: i64 = 0;
+    let mut neg = false;
+    for c in s.chars() {
+        let v = c as i64;
+        if c == '-' {
+            neg = true;
+        } else if v >= 48 && v <= 57 {
+            n = n * 10 + (v - 48);
+        }
+    }
+    if neg {
+        0 - n
+    } else {
+        n
+    }
+}
+
+fn main() ~ Console + FileSystem {
+    let text = read_file("units.csv");
+    let mut names: Vec<str> = vec_new();
+    let mut hp: Vec<i64> = vec_new();
+    let mut atk: Vec<i64> = vec_new();
+    let mut def: Vec<i64> = vec_new();
+    let mut header = true;
+    for raw in text.split("\n") {
+        let line = clean(raw);
+        if line.len() == 0 {
+            continue;
+        }
+        if header {
+            header = false;
+            continue;
+        }
+        let mut parts: Vec<str> = vec_new();
+        for p in line.split(",") {
+            parts.push(p);
+        }
+        if parts.len() < 4 {
+            continue;
+        }
+        names.push(parts[0]);
+        hp.push(parse_int(parts[1]));
+        atk.push(parse_int(parts[2]));
+        def.push(parse_int(parts[3]));
+    }
+    let n: usize = names.len();
+    let mut i: usize = 0;
+    while i < n {
+        let mut best: usize = 0;
+        let mut best_hits: i64 = 0;
+        let mut have = false;
+        let mut j: usize = 0;
+        while j < n {
+            if j != i {
+                let mut dmg = atk[i] - def[j];
+                if dmg < 1 {
+                    dmg = 1;
+                }
+                let hits = (hp[j] + dmg - 1) / dmg;
+                if !have || hits < best_hits || (hits == best_hits && names[j] < names[best]) {
+                    best = j;
+                    best_hits = hits;
+                    have = true;
+                }
+            }
+            j = j + 1;
+        }
+        if have {
+            println!("{} {} {}", names[i], names[best], best_hits);
+        }
+        i = i + 1;
+    }
+}

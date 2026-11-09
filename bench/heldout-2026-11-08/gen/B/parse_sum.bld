@@ -1,0 +1,43 @@
+fn parse_piece(s: str) -> Result<i64, str> {
+    let mut n: i64 = 0;
+    let mut neg = false;
+    let mut digits: i64 = 0;
+    let mut pos: i64 = 0;
+    for c in s.chars() {
+        let x: i64 = c as i64;
+        if pos == 0 && x == 45 {
+            neg = true;
+        } else if x >= 48 && x <= 57 {
+            n = n * 10 + (x - 48);
+            digits = digits + 1;
+        } else {
+            return Err("bad character");
+        }
+        pos = pos + 1;
+    }
+    if digits == 0 {
+        return Err("no digits");
+    }
+    if neg {
+        Ok(0 - n)
+    } else {
+        Ok(n)
+    }
+}
+
+fn main() ~ Console {
+    let mut sum: i64 = 0;
+    let mut errors: i64 = 0;
+    for piece in "12,x,7,,40,-3,5a".split(",") {
+        match parse_piece(piece) {
+            Ok(v) => {
+                sum = sum + v;
+            },
+            Err(_) => {
+                errors = errors + 1;
+            },
+        }
+    }
+    println!("sum {}", sum);
+    println!("errors {}", errors);
+}

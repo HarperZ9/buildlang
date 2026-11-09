@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 372" width="960" height="372" font-family="Hanken Grotesk, Segoe UI, ui-sans-serif, system-ui, sans-serif" role="img" aria-label="Alt &lt;x&gt; &amp; &quot;y&quot;"><style>
+  :root{ --void:#f4f3ef; --bone:#0b0c0e; --muted:#43474e;
+    --hairline:rgba(11,12,14,.16); --card:rgba(255,255,255,.66);
+    --verified:#1f7a52; --drift:#3a2bd6; }
+  @media (prefers-color-scheme: dark){
+    :root{ --void:#0b0e0f; --bone:#eef1ee; --muted:#9aa39c;
+      --hairline:rgba(238,241,238,.18); --card:rgba(255,255,255,.05);
+      --verified:#5fae93; --drift:#a99cf5; } }
+  .bg{ fill:var(--void); }
+  .card{ fill:var(--card); stroke:var(--hairline); stroke-width:1.4; }
+  .n{ fill:var(--bone); font-size:15px; font-weight:650; }
+  .s{ fill:var(--muted); font-size:11.5px; }
+  .k{ fill:var(--muted); font-size:11px; letter-spacing:.16em; }
+  .h{ fill:var(--bone); font-size:21px; font-weight:700; }
+  .fwd{ stroke:var(--verified); stroke-width:2; fill:none; }
+  .back{ stroke:var(--drift); stroke-width:1.8; fill:none; stroke-dasharray:5 4; }
+  .thin{ stroke:var(--hairline); stroke-width:1.4; fill:none; }
+  .step{ fill:var(--muted); font-size:11px; font-weight:700; letter-spacing:.1em; }
+</style><marker id="af" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="var(--verified)"/></marker><marker id="ab" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="var(--drift)"/></marker><rect class="bg" width="960" height="372"/><text class="k" x="44" y="40" font-family="Conso, ui-monospace, Cascadia Mono, Consolas, monospace">KICK &amp; &lt;TAG&gt; &quot;Q&quot;</text><text class="h" x="44" y="72">Title with &amp; and &lt;b&gt;</text><g><rect class="card" x="44" y="110" width="198.5" height="96" rx="3"/><text class="step" x="58" y="101">01</text><text class="n" x="58" y="142">S0 &amp; &lt;t&gt;</text><text class="s" x="58" y="168">Alpha &amp; beta &lt;gamma&gt; &quot;delta&quot;</text><text class="s" x="58" y="183">epsilon zeta eta theta iota</text><text class="s" x="58" y="198">kappa lambda mu nu xi omicron</text></g><path class="thin" d="M143.25 206V256"/><path class="thin" d="M143.25 256H480V280"/><rect x="44" y="280" width="872" height="46" rx="3" fill="none" stroke="var(--verified)" stroke-width="1.6"/><text class="n" x="58" y="301" font-size="13">O0 &amp;</text><text class="s" x="58" y="317" font-size="10.5">n &lt;0&gt;</text><text class="s" x="44" y="354">Foot &quot;note&quot; &amp; more</text></svg>

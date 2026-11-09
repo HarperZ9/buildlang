@@ -1,0 +1,231 @@
+// =============================================================================
+// repo-art: the workflow diagram, rendered from a spec
+// =============================================================================
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (c) 2022-2026 Zain Dana Harper.
+// =============================================================================
+//
+// Port of BuildLang's tools/repo_flow.py `flow_svg`: stages as cards in rows
+// of four, green forward edges, a dashed iris edge that sends work back, and
+// the outcomes the work ends up as. Same spec, same bytes as the original.
+
+fn ra_grotesk() -> str {
+    "Hanken Grotesk, Segoe UI, ui-sans-serif, system-ui, sans-serif"
+}
+
+fn ra_mono() -> str {
+    "Conso, ui-monospace, Cascadia Mono, Consolas, monospace"
+}
+
+// The two palettes the repository's schematics share. Each renderer appends
+// its own classes after these.
+fn ra_style_palette() -> str {
+    "\n  :root{ --void:#f4f3ef; --bone:#0b0c0e; --muted:#43474e;\n    --hairline:rgba(11,12,14,.16); --card:rgba(255,255,255,.66);\n    --verified:#1f7a52; --drift:#3a2bd6; }\n  @media (prefers-color-scheme: dark){\n    :root{ --void:#0b0e0f; --bone:#eef1ee; --muted:#9aa39c;\n      --hairline:rgba(238,241,238,.18); --card:rgba(255,255,255,.05);\n      --verified:#5fae93; --drift:#a99cf5; } }\n  .bg{ fill:var(--void); }\n"
+}
+
+fn ra_flow_style() -> str {
+    ra_style_palette() + "  .card{ fill:var(--card); stroke:var(--hairline); stroke-width:1.4; }\n  .n{ fill:var(--bone); font-size:15px; font-weight:650; }\n  .s{ fill:var(--muted); font-size:11.5px; }\n  .k{ fill:var(--muted); font-size:11px; letter-spacing:.16em; }\n  .h{ fill:var(--bone); font-size:21px; font-weight:700; }\n  .fwd{ stroke:var(--verified); stroke-width:2; fill:none; }\n  .back{ stroke:var(--drift); stroke-width:1.8; fill:none; stroke-dasharray:5 4; }\n  .thin{ stroke:var(--hairline); stroke-width:1.4; fill:none; }\n  .step{ fill:var(--muted); font-size:11px; font-weight:700; letter-spacing:.1em; }\n"
+}
+
+/// `_wrap` of repo_flow: greedy by character count, at most three lines.
+/// Counts bytes, which equals Python's code-point count for ASCII text.
+fn ra_flow_wrap(text: str, width: usize) -> Vec<str> {
+    let words = ra_words(text);
+    let mut lines: Vec<str> = Vec::new();
+    let mut line = "";
+    let mut i: usize = 0;
+    while i < vec_len(words) {
+        let word = words[i];
+        let mut candidate = word;
+        if line.len() > 0 {
+            candidate = line + " " + word;
+        }
+        if candidate.len() > width && line.len() > 0 {
+            lines.push(line);
+            line = word;
+        } else {
+            line = candidate;
+        }
+        i = i + 1;
+    }
+    if line.len() > 0 {
+        lines.push(line);
+    }
+    let mut out: Vec<str> = Vec::new();
+    let mut j: usize = 0;
+    while j < vec_len(lines) && j < 3 {
+        out.push(lines[j]);
+        j = j + 1;
+    }
+    out
+}
+
+// Layout constants: W 960, PAD 44, GAP 26, CARD_H 96, PER_ROW 4, ROW_GAP 96.
+fn ra_card_w() -> f64 {
+    (960.0 - 88.0 - 78.0) / 4.0
+}
+
+fn ra_box_x(index: i64) -> f64 {
+    let col = index % 4;
+    44.0 + (col as f64) * (ra_card_w() + 26.0)
+}
+
+fn ra_box_y(index: i64) -> f64 {
+    let row = index / 4;
+    (110 + row * (96 + 96)) as f64
+}
+
+fn ra_flow_card(index: i64, stage: Json) -> Result<str, str> {
+    let x = ra_box_x(index);
+    let y = ra_box_y(index);
+    let w = ra_card_w();
+    let mut note = "";
+    if json_has(stage, "note") {
+        note = field_str(stage, "note")?;
+    }
+    let title = field_str(stage, "title")?;
+    let lines = ra_flow_wrap(note, 30);
+    let mut notes = "";
+    let mut i: usize = 0;
+    while i < vec_len(lines) {
+        notes = notes + format!("<text class=\"s\" x=\"{}\" y=\"{}\">{}</text>",
+            ra_num(x + 14.0), ra_num(y + 58.0 + ((i as i64) * 15) as f64), ra_esc(lines[i]));
+        i = i + 1;
+    }
+    let mut out = format!("<g><rect class=\"card\" x=\"{}\" y=\"{}\" width=\"{}\" height=\"96\" rx=\"3\"/>",
+        ra_num(x), ra_num(y), ra_num(w));
+    out = out + format!("<text class=\"step\" x=\"{}\" y=\"{}\">{}</text>",
+        ra_num(x + 14.0), ra_num(y - 9.0), ra_pad2(index + 1));
+    out = out + format!("<text class=\"n\" x=\"{}\" y=\"{}\">{}</text>{}</g>",
+        ra_num(x + 14.0), ra_num(y + 32.0), ra_esc(title), notes);
+    Ok(out)
+}
+
+/// The edge from card `index` to card `index + 1`; a row wrap runs through
+/// the gutter so it never crosses a card.
+fn ra_flow_forward(index: i64) -> str {
+    let x0 = ra_box_x(index);
+    let y0 = ra_box_y(index);
+    let w = ra_card_w();
+    let x1 = ra_box_x(index + 1);
+    let y1 = ra_box_y(index + 1);
+    let mid0 = y0 + 96.0 / 2.0;
+    let mid1 = y1 + 96.0 / 2.0;
+    if y0 == y1 {
+        return format!("<path class=\"fwd\" marker-end=\"url(#af)\" d=\"M{} {}H{}\"/>",
+            ra_num(x0 + w + 4.0), ra_num(mid0), ra_num(x1 - 7.0));
+    }
+    let gut = ra_num(y0 + 96.0 + 96.0 - 26.0);
+    format!("<path class=\"fwd\" marker-end=\"url(#af)\" d=\"M{} {}H940V{}H20V{}H{}\"/>",
+        ra_num(x0 + w + 4.0), ra_num(mid0), gut, ra_num(mid1), ra_num(x1 - 7.0))
+}
+
+/// A dashed edge that sends work back, dipping below the row it leaves.
+fn ra_flow_return(edge: Json) -> Result<str, str> {
+    let from = field_i64(edge, "from")?;
+    let to = field_i64(edge, "to")?;
+    let label = field_str(edge, "label")?;
+    let x0 = ra_box_x(from);
+    let y0 = ra_box_y(from);
+    let w0 = ra_card_w();
+    let x1 = ra_box_x(to);
+    let y1 = ra_box_y(to);
+    let w1 = ra_card_w();
+    let dip = y0 + 96.0 + 22.0;
+    let label_x = (x0 + w0 / 2.0 + x1 + w1 / 2.0) / 2.0;
+    let mut out = format!("<path class=\"back\" marker-end=\"url(#ab)\" d=\"M{} {}V{}H{}V{}\"/>",
+        ra_num(x0 + w0 / 2.0), ra_num(y0 + 96.0), ra_num(dip), ra_num(x1 + w1 / 2.0), ra_num(y1 + 96.0 + 7.0));
+    out = out + format!("<text class=\"k\" x=\"{}\" y=\"{}\" text-anchor=\"middle\" fill=\"var(--drift)\">{}</text>",
+        ra_num(label_x), ra_num(dip + 17.0), ra_esc(label));
+    Ok(out)
+}
+
+fn ra_tone(tone: str, none_colour: str) -> Result<str, str> {
+    if tone == "verified" {
+        return Ok("var(--verified)");
+    }
+    if tone == "drift" {
+        return Ok("var(--drift)");
+    }
+    if tone == "none" {
+        return Ok(none_colour);
+    }
+    Err(format!("repo-art: unknown tone `{}`", tone))
+}
+
+fn ra_flow_outcomes(items: Vec<Json>, top: f64, source: i64) -> Result<str, str> {
+    let x0 = ra_box_x(source);
+    let y0 = ra_box_y(source);
+    let w0 = ra_card_w();
+    let n = vec_len(items) as i64;
+    let span = ((960 - 88 - 26 * (n - 1)) as f64) / (n as f64);
+    let trunk = x0 + w0 / 2.0;
+    let mut out = format!("<path class=\"thin\" d=\"M{} {}V{}\"/>",
+        ra_num(trunk), ra_num(y0 + 96.0), ra_num(top - 24.0));
+    let mut i: usize = 0;
+    while i < vec_len(items) {
+        let item = items[i];
+        let tone = ra_tone(field_str(item, "tone")?, "var(--muted)")?;
+        let x = 44.0 + (i as f64) * (span + 26.0);
+        out = out + format!("<path class=\"thin\" d=\"M{} {}H{}V{}\"/>",
+            ra_num(trunk), ra_num(top - 24.0), ra_num(x + span / 2.0), ra_num(top));
+        out = out + format!("<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"46\" rx=\"3\" fill=\"none\" stroke=\"{}\" stroke-width=\"1.6\"/>",
+            ra_num(x), ra_num(top), ra_num(span), tone);
+        out = out + format!("<text class=\"n\" x=\"{}\" y=\"{}\" font-size=\"13\">{}</text>",
+            ra_num(x + 14.0), ra_num(top + 21.0), ra_esc(field_str(item, "label")?));
+        out = out + format!("<text class=\"s\" x=\"{}\" y=\"{}\" font-size=\"10.5\">{}</text>",
+            ra_num(x + 14.0), ra_num(top + 37.0), ra_esc(field_str(item, "note")?));
+        i = i + 1;
+    }
+    Ok(out)
+}
+
+fn ra_marker(id: str, colour: str) -> str {
+    format!("<marker id=\"{}\" markerWidth=\"9\" markerHeight=\"9\" refX=\"7\" refY=\"3\" orient=\"auto\"><path d=\"M0,0 L7,3 L0,6 Z\" fill=\"{}\"/></marker>",
+        id, colour)
+}
+
+/// `flow_svg`: stages, the edges between them, and what the work ends up as.
+fn ra_flow_svg(spec: Json) -> Result<str, str> {
+    let stages = field_items(spec, "stages")?;
+    let count = vec_len(stages) as i64;
+    let rows = (count + 4 - 1) / 4;
+    let body = 110 + rows * 96 + (rows - 1) * 96;
+    let top = body + 74;
+    let height = top + 46 + 46;
+    let mut cards = "";
+    let mut i: usize = 0;
+    while i < vec_len(stages) {
+        cards = cards + ra_flow_card(i as i64, stages[i])?;
+        i = i + 1;
+    }
+    let mut edges = "";
+    let mut e: i64 = 0;
+    while e < count - 1 {
+        edges = edges + ra_flow_forward(e);
+        e = e + 1;
+    }
+    let mut backs = "";
+    if json_has(spec, "returns") {
+        let returns = field_items(spec, "returns")?;
+        let mut r: usize = 0;
+        while r < vec_len(returns) {
+            backs = backs + ra_flow_return(returns[r])?;
+            r = r + 1;
+        }
+    }
+    let ends = ra_flow_outcomes(field_items(spec, "outcomes")?, top as f64, count - 1)?;
+    let h = ra_int(height);
+    let mut out = format!("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 960 {}\" width=\"960\" height=\"{}\" font-family=\"{}\" role=\"img\" aria-label=\"{}\">",
+        h, h, ra_grotesk(), ra_esc(field_str(spec, "alt")?));
+    out = out + "<style>" + ra_flow_style() + "</style>";
+    out = out + ra_marker("af", "var(--verified)") + ra_marker("ab", "var(--drift)");
+    out = out + format!("<rect class=\"bg\" width=\"960\" height=\"{}\"/>", h);
+    out = out + format!("<text class=\"k\" x=\"44\" y=\"40\" font-family=\"{}\">{}</text>",
+        ra_mono(), ra_esc(ra_upper(field_str(spec, "kicker")?)));
+    out = out + format!("<text class=\"h\" x=\"44\" y=\"72\">{}</text>", ra_esc(field_str(spec, "title")?));
+    out = out + edges + backs + cards + ends;
+    out = out + format!("<text class=\"s\" x=\"44\" y=\"{}\">{}</text></svg>",
+        ra_int(height - 18), ra_esc(field_str(spec, "footnote")?));
+    Ok(out)
+}

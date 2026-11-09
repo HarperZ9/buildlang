@@ -12,3 +12,6 @@ docs/art/*.json text eol=lf
 # not rewrite their line endings on checkout, or a Windows clone would hash
 # differently from a Linux one. `buildc pkg publish` writes text with LF.
 registry/** -text
+
+# The held-out probe is checked against MANIFEST.sha256, so its bytes stay as committed.
+bench/heldout-2026-11-08/** -text

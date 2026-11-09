@@ -1,0 +1,50 @@
+fn trace_line(t: i64, by: str, hp: i64) -> str {
+    let mut line: str = "";
+    line.push_str("{\"t\":");
+    line.push_str(format!("{}", t));
+    line.push_str(",\"by\":\"");
+    line.push_str(by);
+    line.push_str("\",\"hp\":");
+    line.push_str(format!("{}", hp));
+    line.push_str("}\n");
+    line
+}
+
+fn main() ~ Console + FileSystem {
+    let mut hp_a: i64 = 30;
+    let atk_a: i64 = 7;
+    let cd_a: i64 = 3;
+    let mut hp_b: i64 = 40;
+    let atk_b: i64 = 5;
+    let cd_b: i64 = 2;
+    let mut timer_a: i64 = cd_a;
+    let mut timer_b: i64 = cd_b;
+    let mut tick: i64 = 0;
+    let mut out: str = "";
+    loop {
+        tick = tick + 1;
+        timer_a = timer_a - 1;
+        timer_b = timer_b - 1;
+        if timer_a == 0 {
+            hp_b = hp_b - atk_a;
+            timer_a = cd_a;
+            out.push_str(trace_line(tick, "A", hp_b));
+        }
+        if timer_b == 0 {
+            hp_a = hp_a - atk_b;
+            timer_b = cd_b;
+            out.push_str(trace_line(tick, "B", hp_a));
+        }
+        if hp_a <= 0 || hp_b <= 0 {
+            break;
+        }
+    }
+    write_file("duel.trace", out);
+    if hp_a <= 0 && hp_b <= 0 {
+        println!("winner draw tick {}", tick);
+    } else if hp_b <= 0 {
+        println!("winner A tick {}", tick);
+    } else {
+        println!("winner B tick {}", tick);
+    }
+}

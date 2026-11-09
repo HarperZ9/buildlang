@@ -1,0 +1,1 @@
+error: cannot read tests/in/does-not-exist.json

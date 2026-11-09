@@ -15,6 +15,11 @@ tracked in `STATUS.md`, `README.md`, and
 - `buildc check` fails on a refuted claim (BL0801) and on a verifier that disagrees with itself (BL0802).
 - `tests/verify`: Bend 2's published numeric, parallel-sum and Pong laws ported, BuildLang's own DETMATH integer, trace-codec and conservation laws, and planted checks. Details and limits: `docs/VERIFY.md`.
 
+## Unreleased: canonical-record, color, repo-art, readability and art-receipts as BuildLang packages
+
+- `canonical-record` 1.0.0 ports Flywheel's RFC 8785 canonical JSON, its SHA-256 and the array digest (FSL-1.1-MIT): 190 of 190 cases byte-identical with the original. `color` 1.0.0 ports build-color's colour differences and colour spaces (FSL-1.1-MIT): the 34 Sharma CIEDE2000 pairs identical, the rest within 6.42e-12. `repo-art` 1.0.0 ports this repository's flow and card renderers: the committed artworks byte-identical. `readability` 1.0.0 ports Flywheel's Flesch reading ease (FSL-1.1-MIT) and `art-receipts` 1.0.0 ports `scripts/check_art_receipts.py`; both byte-identical on every case. All five are pure `.bld`, built with `buildc pkg build`.
+- `registry/SURVEY.md`: every tool considered, why these were picked, and the language gaps found (issues #139 to #153 and #157).
+
 ## 1.11.0 - 2026-11-08 - parallel by default, packages, opaque handles, units through powers, BuildTeX and the proof kernel
 
 Everything merged since 1.10.0, M5 (`par_for` and `par_map`) and the package manager included. M4's last two checks run on this release: the combat-step traces and the C ABI check (`docs/LANGUAGE-COMPLETE.md`, stage 1).

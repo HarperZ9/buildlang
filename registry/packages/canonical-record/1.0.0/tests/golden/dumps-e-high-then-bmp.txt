@@ -1,0 +1,1 @@
+no canonical form: lone surrogate in a string

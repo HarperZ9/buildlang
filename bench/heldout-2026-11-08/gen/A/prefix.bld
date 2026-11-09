@@ -1,0 +1,20 @@
+fn lcp2(a: str, b: str) -> str {
+    let mut i: usize = 0;
+    while i < a.len() && i < b.len() && a.substring(i, 1) == b.substring(i, 1) {
+        i = i + 1;
+    }
+    a.substring(0, i)
+}
+
+fn main() ~ Console {
+    let mut p = lcp2("interstellar", "internet");
+    p = lcp2(p, "interval");
+    p = lcp2(p, "internal");
+    println!("{}", p);
+    let q = lcp2("dog", "cat");
+    if q.len() == 0 {
+        println!("(none)");
+    } else {
+        println!("{}", q);
+    }
+}

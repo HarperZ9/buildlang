@@ -1,0 +1,55 @@
+fn clean(s: str) -> str {
+    let mut out = "";
+    for c in s.chars() {
+        let v = c as i64;
+        if v != 13 && v != 32 && v != 9 {
+            out.push(c);
+        }
+    }
+    out
+}
+
+fn parse_int(s: str) -> i64 {
+    let mut n: i64 = 0;
+    let mut neg = false;
+    for c in s.chars() {
+        let v = c as i64;
+        if c == '-' {
+            neg = true;
+        } else if v >= 48 && v <= 57 {
+            n = n * 10 + (v - 48);
+        }
+    }
+    if neg {
+        0 - n
+    } else {
+        n
+    }
+}
+
+fn main() ~ Console + FileSystem + Process {
+    let text = read_file("scores.txt");
+    let mut sum: i64 = 0;
+    let mut count: i64 = 0;
+    for raw in text.split("\n") {
+        let line = clean(raw);
+        if line.len() == 0 {
+            continue;
+        }
+        let v = parse_int(line);
+        if v > 100 {
+            println!("invalid {}", v);
+            exit(3);
+        }
+        sum = sum + v;
+        count = count + 1;
+    }
+    let mut avg: i64 = 0;
+    if count > 0 {
+        avg = sum / count;
+        if sum < 0 && sum % count != 0 {
+            avg = avg - 1;
+        }
+    }
+    println!("average {}", avg);
+}

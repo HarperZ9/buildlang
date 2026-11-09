@@ -1,0 +1,41 @@
+fn clean(s: str) -> str {
+    let mut out = "";
+    for c in s.chars() {
+        let v = c as i64;
+        if v != 13 && v != 32 && v != 9 {
+            out.push(c);
+        }
+    }
+    out
+}
+
+fn upper(s: str) -> str {
+    let letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    let mut out = "";
+    for c in s.chars() {
+        let v = c as i64;
+        if v >= 97 && v <= 122 {
+            let idx = (v - 97) as usize;
+            out.push_str(letters.substring(idx, 1));
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+fn main() ~ Console + FileSystem {
+    let text = read_file("words.txt");
+    let mut out = "";
+    let mut n: i64 = 0;
+    for raw in text.split("\n") {
+        let w = clean(raw);
+        if w.len() == 0 {
+            continue;
+        }
+        out = out + upper(w) + "\n";
+        n = n + 1;
+    }
+    write_file("upper.txt", out);
+    println!("lines {}", n);
+}

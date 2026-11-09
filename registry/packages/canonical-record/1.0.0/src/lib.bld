@@ -1,0 +1,272 @@
+// =============================================================================
+// canonical-record: RFC 8785 (JCS) canonical JSON in BuildLang
+// =============================================================================
+// SPDX-License-Identifier: FSL-1.1-MIT
+// Copyright 2026 Zain Dana Harper.
+// =============================================================================
+//
+// A BuildLang port of Flywheel's harness/canonical_record.py (canonical
+// record v1). One byte form for a hashed JSON record: keys sorted by UTF-16
+// code unit, no whitespace, strings as raw UTF-8 with the JSON short escapes,
+// numbers in the ECMAScript Number-to-String form.
+//
+// The Python module parses with the standard json module and serialises the
+// resulting objects. This port reads the JSON text once and emits the
+// canonical form directly, with the same acceptance rules:
+//   - the file must be strict UTF-8 (Python decodes it before parsing);
+//   - parse errors and the NaN / Infinity / -Infinity refusals are positional,
+//     the first one in the text wins (Python's scanner stops there);
+//   - refusals found while serialising (lone surrogate, non-finite float,
+//     integer outside +/-(2**53 - 1)) follow Python's traversal order: an
+//     object's keys are all checked before its values, values in sorted key
+//     order, array items in order;
+//   - a repeated key keeps its last value, as a Python dict does.
+//
+// Files: lib.bld text helpers and the string scanner; json.bld UTF-8 check,
+// numbers and scalars; number.bld ECMAScript number text; keys.bld key
+// order; object.bld the iterative container walk and entry points;
+// array.bld and arraydigest.bld the cr1 numeric-array digest.
+
+use sha256;
+
+/// Error line for text the json module refuses before any value exists.
+fn cr_err_json() -> str {
+    "error: invalid JSON"
+}
+
+fn cr_is_digit(c: u8) -> bool {
+    c >= 48_u8 && c <= 57_u8
+}
+
+fn cr_is_ws(c: u8) -> bool {
+    c == 32_u8 || c == 9_u8 || c == 10_u8 || c == 13_u8
+}
+
+/// Index of the first non-whitespace byte at or after `i`.
+fn cr_ws(b: Vec<u8>, i: usize) -> usize {
+    let n = vec_len(b);
+    let mut j = i;
+    while j < n && cr_is_ws(b[j]) {
+        j = j + 1;
+    }
+    j
+}
+
+/// True when the bytes at `i` spell `word`.
+fn cr_match(b: Vec<u8>, i: usize, word: str) -> bool {
+    let w = word.len();
+    if i + w > vec_len(b) {
+        return false;
+    }
+    let mut k: usize = 0;
+    while k < w {
+        if b[i + k] != word.as_bytes()[k] {
+            return false;
+        }
+        k = k + 1;
+    }
+    true
+}
+
+fn cr_hexval(c: u8) -> i64 {
+    if c >= 48_u8 && c <= 57_u8 {
+        return (c as i64) - 48;
+    }
+    if c >= 97_u8 && c <= 102_u8 {
+        return (c as i64) - 87;
+    }
+    if c >= 65_u8 && c <= 70_u8 {
+        return (c as i64) - 55;
+    }
+    -1
+}
+
+/// The four hex digits at `i` as a code unit, or -1.
+fn cr_hex4(b: Vec<u8>, i: usize) -> i64 {
+    if i + 4 > vec_len(b) {
+        return -1;
+    }
+    let mut v: i64 = 0;
+    let mut k: usize = 0;
+    while k < 4 {
+        let d = cr_hexval(b[i + k]);
+        if d < 0 {
+            return -1;
+        }
+        v = v * 16 + d;
+        k = k + 1;
+    }
+    v
+}
+
+fn cr_hex_digits(v: u32, width: usize) -> str {
+    let digits = "0123456789abcdef";
+    let mut s = "";
+    let mut k: usize = 0;
+    while k < width {
+        let shift = ((width - 1 - k) * 4) as u32;
+        let d = ((v >> shift) & 15_u32) as usize;
+        s = s + digits.substring(d, 1);
+        k = k + 1;
+    }
+    s
+}
+
+/// Append code point `cp` to `u16` as big-endian UTF-16 code units.
+fn cr_push_u16(u16: Vec<u8>, cp: u32) -> Vec<u8> {
+    let mut o = u16;
+    if cp >= 65536_u32 {
+        let v = cp - 65536_u32;
+        let hi = 55296_u32 + (v >> 10);
+        let lo = 56320_u32 + (v & 1023_u32);
+        o.push((hi >> 8) as u8);
+        o.push((hi & 255_u32) as u8);
+        o.push((lo >> 8) as u8);
+        o.push((lo & 255_u32) as u8);
+    } else {
+        o.push((cp >> 8) as u8);
+        o.push((cp & 255_u32) as u8);
+    }
+    o
+}
+
+/// Canonical text of one decoded code point from an escape (string() in Python).
+fn cr_escape_cp(cp: u32) -> str {
+    if cp == 34_u32 {
+        return "\\\"";
+    }
+    if cp == 92_u32 {
+        return "\\\\";
+    }
+    if cp == 8_u32 {
+        return "\\b";
+    }
+    if cp == 12_u32 {
+        return "\\f";
+    }
+    if cp == 10_u32 {
+        return "\\n";
+    }
+    if cp == 13_u32 {
+        return "\\r";
+    }
+    if cp == 9_u32 {
+        return "\\t";
+    }
+    if cp < 32_u32 || (cp >= 55296_u32 && cp <= 57343_u32) {
+        // Controls get \u00xx. A lone surrogate is refused by the caller; it is
+        // written the same way here only so that key texts stay distinct.
+        return format!("\\u{}", cr_hex_digits(cp, 4));
+    }
+    format!("{}{}", "", cp as char)
+}
+
+/// A scanned JSON string.
+struct CrStr {
+    ok: bool,
+    pos: usize,
+    out: str,
+    u16: Vec<u8>,
+    lone: bool,
+}
+
+fn cr_str_fail(pos: usize) -> CrStr {
+    let none: Vec<u8> = Vec::new();
+    CrStr { ok: false, pos: pos, out: "", u16: none, lone: false }
+}
+
+/// Scan the JSON string whose opening quote is at `start` (input already
+/// checked as UTF-8). `out` is the canonical text with quotes; `u16` the
+/// decoded value as UTF-16BE, the order RFC 8785 sorts keys by.
+fn cr_scan_string(src: str, b: Vec<u8>, start: usize) -> CrStr {
+    let n = vec_len(b);
+    let mut i = start + 1;
+    let mut run = i;
+    let mut out = "\"";
+    let mut u16: Vec<u8> = Vec::new();
+    let mut lone = false;
+    while i < n {
+        let c = b[i];
+        if c == 34_u8 {
+            out.push_str(src.substring(run, i - run));
+            out.push_str("\"");
+            return CrStr { ok: true, pos: i + 1, out: out, u16: u16, lone: lone };
+        }
+        if c < 32_u8 {
+            return cr_str_fail(i);
+        }
+        if c == 92_u8 {
+            out.push_str(src.substring(run, i - run));
+            if i + 1 >= n {
+                return cr_str_fail(i);
+            }
+            let e = b[i + 1];
+            let mut cp: u32 = 0;
+            if e == 117_u8 {
+                let v = cr_hex4(b, i + 2);
+                if v < 0 {
+                    return cr_str_fail(i);
+                }
+                cp = v as u32;
+                i = i + 6;
+                // Python joins \uD8xx\uDCxx into one code point when 6 more
+                // characters follow and they are a backslash-u escape.
+                if cp >= 55296_u32 && cp <= 56319_u32 && i + 6 < n && b[i] == 92_u8 && b[i + 1] == 117_u8 {
+                    let lo = cr_hex4(b, i + 2);
+                    if lo < 0 {
+                        return cr_str_fail(i);
+                    }
+                    if lo >= 56320 && lo <= 57343 {
+                        cp = 65536_u32 + ((cp - 55296_u32) << 10) + ((lo as u32) - 56320_u32);
+                        i = i + 6;
+                    }
+                }
+            } else {
+                if e == 34_u8 || e == 92_u8 || e == 47_u8 {
+                    cp = e as u32;
+                } else if e == 98_u8 {
+                    cp = 8_u32;
+                } else if e == 102_u8 {
+                    cp = 12_u32;
+                } else if e == 110_u8 {
+                    cp = 10_u32;
+                } else if e == 114_u8 {
+                    cp = 13_u32;
+                } else if e == 116_u8 {
+                    cp = 9_u32;
+                } else {
+                    return cr_str_fail(i);
+                }
+                i = i + 2;
+            }
+            if cp >= 55296_u32 && cp <= 57343_u32 {
+                lone = true;
+            }
+            u16 = cr_push_u16(u16, cp);
+            out.push_str(cr_escape_cp(cp));
+            run = i;
+        } else {
+            // Raw UTF-8: copied as is (the run), decoded only for the sort key.
+            let mut cp: u32 = c as u32;
+            let mut len: usize = 1;
+            if c >= 240_u8 {
+                cp = c as u32 & 7_u32;
+                len = 4;
+            } else if c >= 224_u8 {
+                cp = c as u32 & 15_u32;
+                len = 3;
+            } else if c >= 192_u8 {
+                cp = c as u32 & 31_u32;
+                len = 2;
+            }
+            let mut k: usize = 1;
+            while k < len {
+                cp = (cp << 6) | (b[i + k] as u32 & 63_u32);
+                k = k + 1;
+            }
+            u16 = cr_push_u16(u16, cp);
+            i = i + len;
+        }
+    }
+    cr_str_fail(i)
+}

@@ -1,0 +1,251 @@
+// =============================================================================
+// repo-art: the record card, drawn field by field
+// =============================================================================
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (c) 2022-2026 Zain Dana Harper.
+// =============================================================================
+//
+// Port of BuildLang's tools/repo_card.py `card_svg`. Note lines wrap by drawn
+// width, measured from face-metrics.json: per character, the widest advance
+// any face in the stack gives it. The sum runs as CPython 3.12's sum() does
+// (compensated), so a line breaks at the same word the original breaks at.
+
+// Layout: W 960, PAD 44, TOP 142, KEY_W 186, VAL_W 258, GUTTER 26,
+// NOTE_X 540, NOTE_W 376, FOOT_BUDGET 872, ROW_H 46, LEADING 15.
+
+/// The widest advance per character, in em, over every face of one
+/// group ("sans" or "mono") and weight ("regular" or "bold").
+fn ra_widest(metrics: Json, group: str, weight: str) -> Result<Vec<f64>, str> {
+    let range = field_items(metrics, "range")?;
+    let first = json_i64(range[0])?;
+    let last = json_i64(range[1])?;
+    let faces_obj = json_get(json_get(metrics, group)?, weight)?;
+    let mut faces: Vec<Vec<Json>> = Vec::new();
+    match faces_obj {
+        Json::Obj(_, vals) => {
+            let mut f: usize = 0;
+            while f < vec_len(vals) {
+                faces.push(json_items(vals[f])?);
+                f = f + 1;
+            }
+        },
+        _ => {
+            return Err(format!("repo-art: metrics {}.{} is not an object", group, weight));
+        },
+    }
+    let mut out: Vec<f64> = Vec::new();
+    let mut i: i64 = 0;
+    while i <= last - first {
+        let mut best: f64 = 0.0;
+        let mut f: usize = 0;
+        while f < vec_len(faces) {
+            let face = faces[f];
+            let v = json_f64(face[i as usize])?;
+            if f == 0 || v > best {
+                best = v;
+            }
+            f = f + 1;
+        }
+        out.push(best / 1000.0);
+        i = i + 1;
+    }
+    Ok(out)
+}
+
+/// The first code point a metrics table covers.
+fn ra_metrics_first(metrics: Json) -> Result<i64, str> {
+    let range = field_items(metrics, "range")?;
+    json_i64(range[0])
+}
+
+/// The off-table advance: the widest entry of any of the four tables.
+fn ra_off_table(tables: Vec<Vec<f64>>) -> f64 {
+    let mut best: f64 = 0.0;
+    let mut t: usize = 0;
+    while t < vec_len(tables) {
+        let table = tables[t];
+        let mut i: usize = 0;
+        while i < vec_len(table) {
+            if table[i] > best {
+                best = table[i];
+            }
+            i = i + 1;
+        }
+        t = t + 1;
+    }
+    best
+}
+
+/// `element_width`: what one element draws, in pixels, given its table, size
+/// in pixels and letter-spacing in em. A byte outside the table's range takes
+/// `off`; the original does the same per code point.
+fn ra_element_width(text: str, table: Vec<f64>, first: i64, off: f64, size: f64, tracking: f64) -> f64 {
+    let b = text.as_bytes();
+    let n = text.len();
+    let last = first + (vec_len(table) as i64) - 1;
+    let mut parts: Vec<f64> = Vec::new();
+    let mut i: usize = 0;
+    while i < n {
+        let c = b[i] as i64;
+        if c >= first && c <= last {
+            parts.push(table[(c - first) as usize]);
+        } else {
+            parts.push(off);
+        }
+        i = i + 1;
+    }
+    let total = ra_fsum(parts);
+    total * size + tracking * size * (n as f64)
+}
+
+/// `_wrap` of repo_card: greedy by drawn width (the note role: sans regular
+/// at 11.5px), cut to `limit` lines.
+fn ra_card_wrap(text: str, sans: Vec<f64>, first: i64, off: f64, width: f64, limit: usize) -> Vec<str> {
+    let words = ra_words(text);
+    let mut lines: Vec<str> = Vec::new();
+    let mut line = "";
+    let mut i: usize = 0;
+    while i < vec_len(words) {
+        let word = words[i];
+        let mut candidate = word;
+        if line.len() > 0 {
+            candidate = line + " " + word;
+        }
+        if ra_element_width(candidate, sans, first, off, 11.5, 0.0) > width && line.len() > 0 {
+            lines.push(line);
+            line = word;
+        } else {
+            line = candidate;
+        }
+        i = i + 1;
+    }
+    if line.len() > 0 {
+        lines.push(line);
+    }
+    let mut out: Vec<str> = Vec::new();
+    let mut j: usize = 0;
+    while j < vec_len(lines) && j < limit {
+        out.push(lines[j]);
+        j = j + 1;
+    }
+    out
+}
+
+fn ra_card_style() -> str {
+    ra_style_palette() + "  .row{ fill:var(--card); stroke:var(--hairline); stroke-width:1.2; }\n  .key{ fill:var(--bone); font-size:13px; font-weight:650; }\n  .val{ fill:var(--muted); font-size:12px; }\n  .s{ fill:var(--muted); font-size:11.5px; }\n  .k{ fill:var(--muted); font-size:11px; letter-spacing:.16em; }\n  .h{ fill:var(--bone); font-size:21px; font-weight:700; }\n  .thin{ stroke:var(--hairline); stroke-width:1.2; fill:none; }\n"
+}
+
+/// One field: its name, what comes back in it, and how to check it.
+fn ra_card_row(index: i64, field: Json, row_h: i64, notes_in: Vec<str>) -> Result<str, str> {
+    let y = 142 + index * row_h;
+    let mut tone_name = "none";
+    if json_has(field, "tone") {
+        tone_name = field_str(field, "tone")?;
+    }
+    let tone = ra_tone(tone_name, "var(--hairline)")?;
+    let accent = tone_name != "none";
+    let mut notes = "";
+    let mut i: usize = 0;
+    while i < vec_len(notes_in) {
+        notes = notes + format!("<text class=\"s\" x=\"540\" y=\"{}\">{}</text>",
+            ra_int(y + 20 + (i as i64) * 15), ra_esc(notes_in[i]));
+        i = i + 1;
+    }
+    let mut rule = "";
+    let mut style = "";
+    if accent {
+        rule = format!("<rect x=\"44\" y=\"{}\" width=\"3\" height=\"{}\" fill=\"{}\"/>",
+            ra_int(y), ra_int(row_h - 8), tone);
+        style = format!(" style=\"fill:{}\"", tone);
+    }
+    let mut out = format!("<g><rect class=\"row\" x=\"44\" y=\"{}\" width=\"872\" height=\"{}\" rx=\"3\"/>{}",
+        ra_int(y), ra_int(row_h - 8), rule);
+    out = out + format!("<text class=\"key\" x=\"60\" y=\"{}\" font-family=\"{}\">{}</text>",
+        ra_int(y + 24), ra_mono(), ra_esc(field_str(field, "key")?));
+    out = out + format!("<text class=\"val\" x=\"256\" y=\"{}\" font-family=\"{}\"{}>{}</text>{}</g>",
+        ra_int(y + 24), ra_mono(), style, ra_esc(field_str(field, "value")?), notes);
+    Ok(out)
+}
+
+/// `card_svg`: a receipt drawn field by field, with the source behind it.
+fn ra_card_svg(spec: Json, metrics: Json) -> Result<str, str> {
+    let sans = ra_widest(metrics, "sans", "regular")?;
+    let mut tables: Vec<Vec<f64>> = Vec::new();
+    tables.push(sans);
+    tables.push(ra_widest(metrics, "sans", "bold")?);
+    tables.push(ra_widest(metrics, "mono", "regular")?);
+    tables.push(ra_widest(metrics, "mono", "bold")?);
+    let off = ra_off_table(tables);
+    let first = ra_metrics_first(metrics)?;
+    let fields = field_items(spec, "fields")?;
+    let n = vec_len(fields);
+    let mut wrapped: Vec<Vec<str>> = Vec::new();
+    let mut most: usize = 0;
+    let mut i: usize = 0;
+    while i < n {
+        let lines = ra_card_wrap(field_str(fields[i], "note")?, sans, first, off, 376.0, 3);
+        if vec_len(lines) > most {
+            most = vec_len(lines);
+        }
+        wrapped.push(lines);
+        i = i + 1;
+    }
+    let mut extra: i64 = (most as i64) - 2;
+    if extra < 0 {
+        extra = 0;
+    }
+    let row_h = 46 + 15 * extra;
+    let foot = ra_card_wrap(field_str(spec, "footnote")?, sans, first, off, 872.0, 4);
+    let rule = 142 + (n as i64) * row_h + 12;
+    let height = rule + 22 + (vec_len(foot) as i64) * 16;
+    let mut rows = "";
+    i = 0;
+    while i < n {
+        rows = rows + ra_card_row(i as i64, fields[i], row_h, wrapped[i])?;
+        i = i + 1;
+    }
+    let mut heads: Vec<str> = Vec::new();
+    if json_has(spec, "heads") {
+        let hs = field_items(spec, "heads")?;
+        let mut k: usize = 0;
+        while k < vec_len(hs) {
+            heads.push(json_str(hs[k])?);
+            k = k + 1;
+        }
+    } else {
+        heads.push("field");
+        heads.push("what comes back");
+        heads.push("how you check it");
+    }
+    let mut cols: Vec<i64> = Vec::new();
+    cols.push(60);
+    cols.push(256);
+    cols.push(540);
+    let mut head_svg = "";
+    let mut c: usize = 0;
+    while c < vec_len(heads) && c < 3 {
+        head_svg = head_svg + format!("<text class=\"k\" x=\"{}\" y=\"128\" font-family=\"{}\">{}</text>",
+            cols[c], ra_mono(), ra_esc(ra_upper(heads[c])));
+        c = c + 1;
+    }
+    let h = ra_int(height);
+    let mut out = format!("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 960 {}\" width=\"960\" height=\"{}\" font-family=\"{}\" role=\"img\" aria-label=\"{}\">",
+        h, h, ra_grotesk(), ra_esc(field_str(spec, "alt")?));
+    out = out + "<style>" + ra_card_style() + "</style>";
+    out = out + format!("<rect class=\"bg\" width=\"960\" height=\"{}\"/>", h);
+    out = out + format!("<text class=\"k\" x=\"44\" y=\"40\" font-family=\"{}\">{}</text>",
+        ra_mono(), ra_esc(ra_upper(field_str(spec, "kicker")?)));
+    out = out + format!("<text class=\"h\" x=\"44\" y=\"72\">{}</text>", ra_esc(field_str(spec, "title")?));
+    out = out + format!("<text class=\"s\" x=\"44\" y=\"94\" font-family=\"{}\" font-size=\"11.5\">$ {}</text>",
+        ra_mono(), ra_esc(field_str(spec, "source")?));
+    out = out + head_svg + rows;
+    out = out + format!("<path class=\"thin\" d=\"M44 {}H916\"/>", ra_int(rule));
+    let mut f: usize = 0;
+    while f < vec_len(foot) {
+        out = out + format!("<text class=\"s\" x=\"44\" y=\"{}\">{}</text>",
+            ra_int(rule + 22 + (f as i64) * 16), ra_esc(foot[f]));
+        f = f + 1;
+    }
+    out = out + "</svg>";
+    Ok(out)
+}

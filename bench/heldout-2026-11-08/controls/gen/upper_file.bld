@@ -1,0 +1,6 @@
+fn main() ~ Console + FileSystem {
+    let text = read_file("words.txt");
+    let up = text.to_uppercase();
+    let ok = write_file("upper.txt", up);
+    println!("lines {}", 4);
+}

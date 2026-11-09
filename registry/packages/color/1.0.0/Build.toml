@@ -1,0 +1,9 @@
+[package]
+name = "color"
+version = "1.0.0"
+edition = "2026"
+description = "Colour difference metrics (CIE76, CIE94, CIEDE2000, CMC, HyAB) and sRGB, XYZ, xyY, Lab, LCh, Oklab and Oklch conversions in pure BuildLang"
+author = "Zain Dana Harper"
+license = "FSL-1.1-MIT"
+
+[dependencies]

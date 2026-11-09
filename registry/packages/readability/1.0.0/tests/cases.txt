@@ -1,0 +1,10 @@
+# mode golden args... (run from the package folder)
+exact tests/golden-flywheel-readme.txt tests/flywheel-readme.md
+exact tests/golden-getting-started.txt tests/getting-started.md
+exact tests/golden-metr-interop.txt tests/metr-interop.md
+exact tests/golden-security.txt tests/security.md
+exact tests/golden-edge-cases.txt tests/edge-cases.txt
+exact tests/golden-short.txt tests/short.txt
+exact tests/golden-empty.txt tests/empty.txt
+exact tests/golden-no-stop.txt tests/no-stop.txt
+exact tests/golden-several.txt tests/flywheel-readme.md tests/edge-cases.txt tests/empty.txt

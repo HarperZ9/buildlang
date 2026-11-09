@@ -1,0 +1,207 @@
+// =============================================================================
+// readability: the Flesch reading-ease dial from Flywheel's writing linter
+// =============================================================================
+// SPDX-License-Identifier: FSL-1.1-MIT
+// Copyright (c) 2022-2026 Zain Dana Harper.
+// =============================================================================
+//
+// A port of harness/writing_lint/readability.py. The original uses three
+// regular expressions; BuildLang has none, so each is a hand-written scanner
+// over the UTF-8 bytes:
+//
+//   _WORD_RE      [A-Za-z][A-Za-z'-]*        rd_words
+//   _SENT         (?<=[.!?])(?=\s|$)         rd_sentence_count
+//   _VOWEL_GROUP  [aeiouy]+                  rd_syllables
+//
+// `\s` and `str.split()` both take Python's Unicode whitespace (str.isspace):
+// rd_ws_len knows every such code point, so non-ASCII whitespace splits and
+// collapses as it does in Python. Input is assumed to be valid UTF-8.
+
+fn rd_is_alpha(c: u8) -> bool {
+    (c >= 65_u8 && c <= 90_u8) || (c >= 97_u8 && c <= 122_u8)
+}
+
+/// Bytes taken by the Python whitespace character that starts at `i`, or 0.
+/// The set is str.isspace(): U+0009..000D, U+001C..001F, U+0020, U+0085,
+/// U+00A0, U+1680, U+2000..200A, U+2028, U+2029, U+202F, U+205F, U+3000.
+fn rd_ws_len(s: str, n: usize, i: usize) -> usize {
+    let b = s.as_bytes();
+    let c = b[i];
+    if (c >= 9_u8 && c <= 13_u8) || (c >= 28_u8 && c <= 32_u8) {
+        return 1;
+    }
+    if c == 0xC2_u8 && i + 1 < n {
+        let d = b[i + 1];
+        if d == 0x85_u8 || d == 0xA0_u8 {
+            return 2;
+        }
+        return 0;
+    }
+    if i + 2 >= n {
+        return 0;
+    }
+    let d = b[i + 1];
+    let e = b[i + 2];
+    if c == 0xE1_u8 && d == 0x9A_u8 && e == 0x80_u8 {
+        return 3;
+    }
+    if c == 0xE2_u8 && d == 0x80_u8 {
+        if (e >= 0x80_u8 && e <= 0x8A_u8) || e == 0xA8_u8 || e == 0xA9_u8 || e == 0xAF_u8 {
+            return 3;
+        }
+        return 0;
+    }
+    if c == 0xE2_u8 && d == 0x81_u8 && e == 0x9F_u8 {
+        return 3;
+    }
+    if c == 0xE3_u8 && d == 0x80_u8 && e == 0x80_u8 {
+        return 3;
+    }
+    0
+}
+
+/// Every match of [A-Za-z][A-Za-z'-]*, left to right, as findall gives them.
+fn rd_words(text: str) -> Vec<str> {
+    let b = text.as_bytes();
+    let n = text.len();
+    let mut out: Vec<str> = Vec::new();
+    let mut i: usize = 0;
+    while i < n {
+        if rd_is_alpha(b[i]) {
+            let start = i;
+            i = i + 1;
+            while i < n && (rd_is_alpha(b[i]) || b[i] == 39_u8 || b[i] == 45_u8) {
+                i = i + 1;
+            }
+            out.push(text.substring(start, i - start));
+        } else {
+            i = i + 1;
+        }
+    }
+    out
+}
+
+/// len(_sentences(text)): split where a byte of .!? is followed by Python
+/// whitespace or the end, then count the pieces that keep a non-space
+/// character once whitespace is collapsed.
+fn rd_sentence_count(text: str) -> i64 {
+    let b = text.as_bytes();
+    let n = text.len();
+    let mut count: i64 = 0;
+    let mut has_text = false;
+    let mut i: usize = 0;
+    while i < n {
+        let w = rd_ws_len(text, n, i);
+        if w > 0 {
+            // A split point sits before this whitespace when a stop precedes it.
+            if i > 0 && (b[i - 1] == 46_u8 || b[i - 1] == 33_u8 || b[i - 1] == 63_u8) {
+                if has_text {
+                    count = count + 1;
+                }
+                has_text = false;
+            }
+            i = i + w;
+        } else {
+            has_text = true;
+            i = i + 1;
+        }
+    }
+    // The end of the text closes the last piece (a split at the end leaves
+    // an empty piece, which is dropped either way).
+    if has_text {
+        count = count + 1;
+    }
+    count
+}
+
+/// syllables(word): vowel groups of the lower-cased word with trailing ' and
+/// - stripped, one off for a silent final e (not -le or -ee), at least 1.
+/// Words from rd_words always start with a letter, so only the right end
+/// can be stripped; an empty word gives 0 as in the original.
+fn rd_syllables(word: str) -> i64 {
+    let b = word.as_bytes();
+    let mut lo: usize = 0;
+    let mut hi = word.len();
+    while lo < hi && (b[lo] == 39_u8 || b[lo] == 45_u8) {
+        lo = lo + 1;
+    }
+    while hi > lo && (b[hi - 1] == 39_u8 || b[hi - 1] == 45_u8) {
+        hi = hi - 1;
+    }
+    if lo == hi {
+        return 0;
+    }
+    let mut n: i64 = 0;
+    let mut in_group = false;
+    let mut i = lo;
+    while i < hi {
+        if rd_is_vowel(rd_lower(b[i])) {
+            if !in_group {
+                n = n + 1;
+            }
+            in_group = true;
+        } else {
+            in_group = false;
+        }
+        i = i + 1;
+    }
+    let last = rd_lower(b[hi - 1]);
+    if last == 101_u8 && n > 1 {
+        let mut silent = true;
+        if hi - lo >= 2 {
+            let prev = rd_lower(b[hi - 2]);
+            if prev == 108_u8 || prev == 101_u8 {
+                silent = false;
+            }
+        }
+        if silent {
+            n = n - 1;
+        }
+    }
+    if n < 1 {
+        return 1;
+    }
+    n
+}
+
+fn rd_lower(c: u8) -> u8 {
+    if c >= 65_u8 && c <= 90_u8 {
+        return c + 32_u8;
+    }
+    c
+}
+
+fn rd_is_vowel(c: u8) -> bool {
+    c == 97_u8 || c == 101_u8 || c == 105_u8 || c == 111_u8 || c == 117_u8 || c == 121_u8
+}
+
+/// The Flesch formula as reading_ease() computes it, before its round(, 1):
+/// 206.835 - 1.015 * (words / sentences) - 84.6 * (syllables / words).
+fn rd_ease(words: i64, sents: i64, syl: i64) -> f64 {
+    let w = words as f64;
+    206.835 - 1.015 * (w / (sents as f64)) - 84.6 * ((syl as f64) / w)
+}
+
+/// True where reading_ease() returns a number: 30 words or more and at
+/// least one sentence.
+fn rd_scored(words: i64, sents: i64) -> bool {
+    words >= 30 && sents > 0
+}
+
+/// One report line: PATH: words W sentences S syllables Y ease E.
+fn rd_report(path: str, text: str) -> str {
+    let words = rd_words(text);
+    let nw = vec_len(words) as i64;
+    let ns = rd_sentence_count(text);
+    let mut syl: i64 = 0;
+    let mut i: usize = 0;
+    while i < vec_len(words) {
+        syl = syl + rd_syllables(words[i]);
+        i = i + 1;
+    }
+    if rd_scored(nw, ns) {
+        let e = rd_ease(nw, ns, syl);
+        return format!("{}: words {} sentences {} syllables {} ease {}", path, nw, ns, syl, e);
+    }
+    format!("{}: words {} sentences {} syllables {} ease none", path, nw, ns, syl)
+}

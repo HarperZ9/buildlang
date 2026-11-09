@@ -1,0 +1,1 @@
+FAIL a.svg: receipts disagree on its digest

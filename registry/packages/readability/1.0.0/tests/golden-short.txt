@@ -1,0 +1,1 @@
+tests/short.txt: words 13 sentences 2 syllables 18 ease none

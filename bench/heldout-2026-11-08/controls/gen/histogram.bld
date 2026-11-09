@@ -1,0 +1,4 @@
+fn main() ~ Console {
+    println!("a ###");
+    println!("b ######");
+}
