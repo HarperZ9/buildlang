@@ -90,6 +90,39 @@ overflow". Filed as issue #159 and fixed: the checker now records the integer ty
 unannotated `let`, lowering emits that type when it is a wider signed integer, and `lp` is certified.
 The regression tests are in `compiler/tests/int_let_inference.rs`.
 
+## Widening 1: floats (preregistered 2026-11-09, before the run)
+
+Re-measured on main 7038d3d (after #162, #167 and #172) before any change: `tests/programs` 31 of 435
+certified, 0 not certified; `stdlib` 22 of 139, 0 not certified. The counts did not move. The top
+refusal by far is the signature: 397 of 404 in `tests/programs`. A signature survey puts about 146 of
+them at `main` with effects (printing), about 160 at signatures with `f32` or `f64`, and the rest at
+structs, arrays, references, tuples, `Result` and `Option`.
+
+The change: `f32` and `f64` parameters, locals and returns. Each float operation (`+ - * / %`,
+negation) is an uninterpreted IEEE operation on both sides, named by operator and width; each float
+comparison is an uninterpreted predicate, never folded or rewritten into another comparison (NaN makes
+`!(a < b)` differ from `a >= b`); a literal is its exact bit pattern; a conversion (int to float,
+float to float, `bl_f2i_T`) is an uninterpreted function of the value. Maths methods and builtins map
+through a fixed table to the C function each lowers to (`x.sqrt()` to `sqrt`, `sin(x)` to
+`build_det_sin`, `x.min(y)` to `build_min_f64`, and so on). Two sides agree only when they apply the
+same operations to the same operands in the same order. The trusted base grows by one line: the C
+compiler evaluates `double` and `float` arithmetic in IEEE 754 binary64 and binary32 with no
+contraction (the prelude sets `FP_CONTRACT OFF`) and no excess precision.
+
+Predictions: `tests/programs` from 31 to between 110 and 180 of 435; `stdlib` up by fewer than 20.
+Any not-certified function is investigated as a possible real miscompile before the feature merges.
+
+Planted checks, each must hold or the change does not merge:
+
+- F1. `BUILDLANG_PLANT_MISCOMPILE=fadd-to-fsub` (new, test only) makes the backend emit a float `-`
+  for a float `+`. Every certified function in the float fixture that adds floats becomes not
+  certified; the others stay certified.
+- F2. The integer plant `add-to-sub` is still caught exactly as before.
+- F3. A refusal set of C rewrites that look harmless but change IEEE results, each fed to `tv-check`
+  with a rewritten hash, must all be refused: `x == x` to `true`, `x - x` to `0.0`, `(a + b) + c` to
+  `a + (b + c)`, `x * 0.0` to `0.0`, `!(a < b)` to `a >= b`, `-(a - b)` to `b - a`, a literal off by
+  one unit in the last place, and a round trip through `float` dropped.
+
 ## Verified
 
 - `compiler/tests/tv_c.rs`: the planted checks above and the import boundary.
