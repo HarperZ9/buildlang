@@ -302,6 +302,19 @@ whose map is never marked stale fails a new test_qdb.sh check (DELETE a keyed ro
 again: must succeed); a build that compares key cells as text fails another (`1.0` after `1` in an
 INTEGER PRIMARY KEY column: must fail).
 
+**P18. IN with a literal on the left, and IN of a table (item 4), written 2026-11-09 06:50 PT before
+the change.** The largest groups of P1 rejections are `evidence/in1.test` (183, "expected keyword
+'FROM', got 'IN'": `SELECT 1 IN (...)` with no FROM) and `evidence/in2.test` (45, "expected a
+comparison after the literal"): `WHERE 1 IN (...)`. The expression path (P11) already reads IN
+with a list, an empty list and a subquery, with SQL's NULL rules; the older path is chosen for
+these statements. The change routes a SELECT to the expression path when IN or NOT IN follows a
+literal or NULL, or appears in the select list, and reads `x IN t` (SQLite's table form) as
+`x IN (SELECT * FROM t)`. Measured on P1. Predictions: `in1.test` from 4 to at least 150 of 187
+query records; `in2.test` from 0 to at least 35 of 45; every other file unchanged; total from
+8,921 to between 9,100 and 9,160. Planted check: a build without the table form loses the
+`IN t` records of `in1.test` (about 90). Guards: test_qdb.sh no FAIL, P2 2,000, statements not
+below 1,931.
+
 ### Amendments
 
 - **A1 (2026-11-08 17:45, before the first qdb run of P1).** The SQLite self-check scored 9,198 of
@@ -381,6 +394,15 @@ INTEGER PRIMARY KEY column: must fail).
   the receipt line as one string and prints it with one argument; the bytes printed are the same.
   The 2-seed pilot of that build gave 3.5 percent on Windows. The full P16b runs (5 seeds, 5
   repetitions, Windows and Linux) cover both changes; the A8 predictions stand.
+- **A10 (2026-11-09 07:20 PT, after the first P18 run, before the second).** First run: 9,084 of
+  9,202 query records (prediction 9,100 to 9,160: missed), `in1.test` 123 of 187 (prediction at
+  least 150: missed), `in2.test` 44 of 45 (held), and statements 1,927 of 1,993, below the 1,931
+  guard. Causes: on the expression path `NULL IN ()` was NULL where SQL gives false (an empty set
+  holds no match even for NULL); and `IN (SELECT 1, 2)` with two columns was accepted where SQLite
+  refuses it (the four `statement error` records of `in2.test`). Both are fixed in P18 before the
+  second run. Most of the 58 wrong `in1.test` records read tables filled by `INSERT INTO t SELECT
+  ...`, which qdb does not run (7 statement records), so they stay wrong. The predictions stand
+  for the second run.
 
 ## Baseline (qdb at the move, 2026-11-08, buildc 1.11.0)
 
@@ -639,6 +661,23 @@ harness unchanged. Before: 1,251 of 2,000 on this branch, re-run before the chan
   process still costs a pass over its table; a run of INSERTs in one process or one library handle
   pays it once.
 
+## After P18: IN with a literal on the left, IN of a table (2026-11-09, feat/bdb-in)
+
+- **P1 sqllogictest:** 9,087 of 9,202 query records (98.75 percent), up from 8,921; 65 wrong, 50
+  rejected; statements 1,931 of 1,993 (unchanged). `evidence/in1.test` 4 to 125 of 187,
+  `evidence/in2.test` 0 to 45 of 45, every other file unchanged. Predictions: total 9,100 to 9,160
+  missed by 13; `in1.test` at least 150 missed (56 records stay wrong because their tables are
+  filled by `INSERT INTO t SELECT ...`, which qdb does not run); `in2.test` held. The first run
+  (A10) gave 9,084 with statements at 1,927; its two faults were fixed before this run.
+- **Planted check:** the build without the table form passes 81 of 187 `in1.test` records (76
+  rejected), 44 fewer than with it: caught, below the estimate of about 90 because many of those
+  records are wrong either way for the reason above.
+- **Guards:** test_qdb.sh 293 pass, 0 fail; P2 2,000 of 2,000; statements 1,931.
+- What is left in P1, by count: 65 wrong (56 in `in1.test` from `INSERT ... SELECT`, the rest in
+  the REPLACE, UPDATE and aggregate files), 19 `DISTINCT` inside SUM, AVG, MIN, MAX or TOTAL, 11
+  aggregate forms the parser refuses, 9 trailing input, then views (2), `group_concat` (1); and 62
+  statements (triggers 20, views 10, DROP forms 9, `INSERT ... SELECT` 7, REPLACE 4, REINDEX 1).
+
 ## Stage 1: a correct, durable single-file engine
 
 | Row | Check (fails if) | Status | Evidence |
@@ -656,7 +695,7 @@ harness unchanged. Before: 1,251 of 2,000 on this branch, re-run before the chan
 
 | Row | Check (fails if) | Status | Evidence |
 |---|---|---|---|
-| 2a sqllogictest queries | any P1 query record does not pass | FAIL | 8,921 of 9,202 (96.95 percent) after P12; 8,186 after P11 (`select5` not run); 1,084 after P10; 32 at the move; `bdb/tests/slt_run.py` |
+| 2a sqllogictest queries | any P1 query record does not pass | FAIL | 9,087 of 9,202 (98.75 percent) after P18; 8,921 (96.95 percent) after P12; 8,186 after P11 (`select5` not run); 1,084 after P10; 32 at the move; `bdb/tests/slt_run.py` |
 | 2b Expressions in the select list | `SELECT a+1, a*b-c FROM t` refused or wrong | PASS | P11: arithmetic, CASE, functions, correlated subqueries; `select1` to `select3` 5,320 of 5,320 |
 | 2c Column types with arguments and constraints | `VARCHAR(30)`, `INTEGER PRIMARY KEY`, `UNIQUE` refused | PASS | P9 type arguments; P13 PRIMARY KEY, UNIQUE and NOT NULL enforced on INSERT and UPDATE, kept in the file and through ROLLBACK; statements 1,931 of 1,993 |
 | 2d CASE, scalar functions (abs, coalesce) | refused or wrong | PASS | P11: searched and simple CASE, `abs`, `coalesce`, `ifnull`, `nullif` |

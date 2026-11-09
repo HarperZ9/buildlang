@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- 2026-11-09: `SELECT 1 IN (...)`, `WHERE 1 IN (...)` and SQLite's `x IN t` run; `NULL IN ()` is
+  false; `IN (SELECT a, b ...)` is an error. sqllogictest 8,921 to 9,087 of 9,202.
+
 - 2026-11-09: PRIMARY KEY and UNIQUE checks go through a key map instead of a scan of the table, so
   a keyed bulk load is linear: 8,000 rows in one transaction 44.1 s to 2.72 s, and an UPDATE of a
   key column checks the table in one pass. NULL keys stay distinct and `1` still equals `1.0`.
