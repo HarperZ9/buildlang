@@ -1,4 +1,5 @@
 """Glyph shaping: cmap lookup, fallback chain, ligatures, pair kerning."""
+import os
 from dataclasses import dataclass, field
 
 
@@ -25,9 +26,12 @@ class Diagnostics:
     underfull: list = field(default_factory=list)
     notes: list = field(default_factory=list)
     math_errors: list = field(default_factory=list)  # (math source, error)
+    fallbacks: list = field(default_factory=list)    # (char, font key asked for, shipped font file used)
 
     def report(self):
         out = []
+        for ch, key, file in sorted(set(self.fallbacks)):
+            out.append(f"glyph fallback: U+{ord(ch):04X} {ch!r} not in {key}, set in {file}")
         for ch, key in self.missing:
             out.append(f"missing glyph U+{ord(ch):04X} {ch!r} in {key} (and its fallbacks)")
         for entry in self.overfull:
@@ -68,6 +72,11 @@ class Shaper:
                 if (len(ch) > 1 and ch in getattr(f, "text_ligs", {})) or f.glyph(ch[0]) or ch in "  ":
                     use = k
                     break
+            if use is None and len(ch) == 1 and hasattr(self.reg, "glyph_fallback"):
+                # no theme font has it: a font shipped in data/fonts that does, named in the receipt
+                use = self.reg.glyph_fallback(ch, chain)
+                if use is not None:
+                    self.diag.fallbacks.append((ch, key, os.path.basename(self.reg.paths[use])))
             if use is None:
                 self.diag.missing.append((ch, key))
                 use = key

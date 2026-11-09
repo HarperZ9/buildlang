@@ -125,8 +125,13 @@ The import runs once. After it, the `.bld` program is edited, and the `.tex` fil
 `python -m buildtex SOURCE OUT --theme NAME` lays the document out once and writes `OUT.pdf`, `OUT.html` and per-page SVG from the same pages, then reads its own PDF back and writes `OUT.buildtex.json`, the build receipt:
 
 - the source, IR and output SHA-256;
-- the facts: page count from the PDF and from the layout, overfull lines (each with `where`: the block and line, or for a line in a table cell the block, table row and column, as in `block 12, table row 3, column 2`; the header row is `header`), underfull lines, missing glyphs, every font and whether it is embedded, images, blind text runs, and whether every block's words come out of the PDF in source order;
+- the facts: page count from the PDF and from the layout, overfull lines (each with `where`: the block and line, or for a line in a table cell the block, table row and column, as in `block 12, table row 3, column 2`; the header row is `header`), underfull lines, glyph fallbacks, missing glyphs, every font and whether it is embedded, images, blind text runs, and whether every block's words come out of the PDF in source order;
 - `failed`, the list of broken conditions, empty for a passing build;
+- glyph fallback: a character none of the theme's fonts has (Hanken Grotesk has no `ő` or `š`) is set in the first
+  font shipped in `data/fonts`, in file-name order, that has it. `facts.glyph_fallbacks` and a note name the
+  character, the font asked for and the font used, and the fallback font is embedded like any other. A character
+  no shipped font has stays a missing glyph, and the build fails. Today Accession Display is the shipped font
+  that covers Latin Extended-A, so those letters print in its design. `tests/test_glyph_fallback.py` holds this.
 - `external_programs`, every process the build started.
 
 The guard (`buildtex/guard.py`) wraps every way Python starts a process for the length of a build. A TeX or Lean program (pdflatex, xelatex, lualatex, latexmk, tex, bibtex, biber, kpsewhich, lean, lake, elan and the rest of the list) raises `ForbiddenBinary`; anything else is recorded. A `.tsv` or `.tex` build starts nothing. A `.bld` build starts `buildc`, BuildLang's own compiler, to run the document program.

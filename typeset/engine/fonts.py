@@ -5,6 +5,7 @@ from .sfnt import Font
 from .metricfont import MetricFont
 
 ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+SHIPPED = os.path.join(ROOT, "data", "fonts")
 SEARCH = [os.path.join(ROOT, "data", "fonts"), os.path.join(os.environ.get("SystemRoot", ""), "Fonts"),
           "/usr/share/fonts/truetype"] + os.environ.get("TYPESET_FONTS", "").split(os.pathsep)
 
@@ -43,3 +44,23 @@ class Registry(dict):
                     cache[(path, index)] = f
             self[key] = cache[(path, index)]
             self.paths[key] = path
+
+    def glyph_fallback(self, ch, tried=()):
+        """The registry key of a font shipped in data/fonts that has ch, loading it under "fallback-<name>" on
+        first use; None when no shipped font has it. Fonts are tried in file-name order, so builds repeat."""
+        shipped = getattr(self, "_shipped", None)
+        if shipped is None:
+            names = sorted(n for n in os.listdir(SHIPPED) if n.lower().endswith((".ttf", ".otf")))
+            shipped = self._shipped = [(n, os.path.join(SHIPPED, n)) for n in names]
+        skip = {os.path.normcase(os.path.abspath(self.paths[k])) for k in tried if k in self.paths}
+        for name, path in shipped:
+            if os.path.normcase(os.path.abspath(path)) in skip:
+                continue
+            key = "fallback-" + os.path.splitext(name)[0]
+            if key not in self:
+                font = Font(path, 0)
+                font.kind = "ttf"
+                self[key], self.paths[key] = font, path
+            if self[key].glyph(ch):
+                return key
+        return None
