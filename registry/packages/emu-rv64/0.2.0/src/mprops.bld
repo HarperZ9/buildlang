@@ -1,0 +1,30 @@
+// Property check for the trap profile of emu-rv64. Like props.bld it uses
+// no reference model. For kinds 41 and 42 `step` is the round number; for
+// kind 43 it is the number of the first failing case.
+//
+//   41  decode(encode(i)) equals i for every generated Zicsr instruction
+//       and MRET
+//   42  for any 32-bit word w whose low seven bits are 0x73, the SYSTEM
+//       opcode, decode(w) is "no instruction" or encode(decode(w)) equals w
+//   43  every hand-computed case in mvec.bld and mvec2.bld passes
+
+fn mprop_run(v: u64, seed: u64, steps: u64) -> Refusal ~ Console {
+    let mut r = Rng { s: seed };
+    let mut i: u64 = 0_u64;
+    while i < steps {
+        let d = gen_minsn(&mut r);
+        let w = emu_encode(&d);
+        let back = mctl_decode(v, w);
+        if !same_insn(&d, &back) { return fz_refuse(41, i, w, d.op); }
+        let raw = (rng_next(&mut r) & 0xFFFFFF80_u64) | 0x73_u64;
+        let e = mctl_decode(v, raw);
+        if e.op != 0_u64 {
+            let again = emu_encode(&e);
+            if again != raw { return fz_refuse(42, i, again, raw); }
+        }
+        i = i + 1_u64;
+    }
+    let bad = mvec_run(v, false);
+    if bad != 0_u64 { return fz_refuse(43, bad, 0_u64, 0_u64); }
+    fz_refuse(0, steps, 0_u64, 0_u64)
+}

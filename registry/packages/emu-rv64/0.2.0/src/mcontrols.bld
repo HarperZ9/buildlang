@@ -1,0 +1,49 @@
+// Planted controls for the trap profile of emu-rv64, variants 7 to 12. Each
+// is the core with one defect put in on purpose. The checks must refuse
+// every one; `emu-rv64 mcontrols` shows the refusals. Nothing outside the
+// checks calls these.
+//
+//    7  a trap saves pc + 4 in mepc instead of pc
+//    8  ECALL from machine mode reports cause 8 (ECALL from user mode)
+//    9  MRET leaves MIE as it was instead of copying MPIE into it
+//   10  CSRRS and CSRRSI with rs1 = 0 count as a write, so reading a
+//       read-only CSR that way traps
+//   11  CSRRC and CSRRCI set the bits instead of clearing them
+//   12  the decoder sign-extends the CSR number
+
+// The decoder as variant v would have written it.
+fn mctl_decode(v: u64, w: u64) -> Insn {
+    let mut d = emu_decode(w);
+    if v == 12_u64 && emu_class(d.op) == CL_CSR { d.imm = emu_sext(d.imm, 12_u64); }
+    d
+}
+
+// What variants 7 and 8 do after a step that took a trap.
+fn mctl_after(v: u64, m: &mut Machine, rc: i64) -> i64 {
+    if rc != EMU_TRAP { return rc; }
+    if v == 7_u64 { m.mepc = m.mepc.wrapping_add(4_u64); }
+    if v == 8_u64 && m.mcause == EXC_ECALL_M { m.mcause = 8_u64; }
+    rc
+}
+
+// One step of variant v in the trap profile.
+fn mstep_v(v: u64, m: &mut Machine, x: &mut [u64], ram: &mut [u8], out: &mut [u8]) -> i64 {
+    if v == 0_u64 || x.len() < 32 { return emu_step(m, x, ram, out); }
+    if (m.pc & 3_u64) != 0_u64 || !emu_in_ram(ram.len() as u64, m.pc, 4_u64) {
+        let early = emu_step(m, x, ram, out);
+        return mctl_after(v, m, early);
+    }
+    let w = emu_peek(ram, m.pc, 4_u64);
+    let mut d = mctl_decode(v, w);
+    let before = m.mstatus;
+    if v == 10_u64 && (d.op == OP_CSRRS || d.op == OP_CSRRSI) && d.rs1 == 0_u64 {
+        if emu_csr_kind(d.imm) == 2_u64 { return emu_trap(m, EXC_ILLEGAL, w); }
+    }
+    if v == 11_u64 && d.op == OP_CSRRC { d.op = OP_CSRRS; }
+    if v == 11_u64 && d.op == OP_CSRRCI { d.op = OP_CSRRSI; }
+    let rc = emu_mexec(m, x, ram, out, &d, w);
+    if v == 9_u64 && d.op == OP_MRET {
+        m.mstatus = (m.mstatus & !MS_MIE) | (before & MS_MIE);
+    }
+    mctl_after(v, m, rc)
+}

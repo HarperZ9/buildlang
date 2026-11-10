@@ -1,0 +1,24 @@
+# kind | what is compared or required
+1 | differential: result code of the step
+2 | differential: pc after the step
+3 | differential: one of the 32 registers
+4 | differential: one byte of memory
+5 | differential: one byte of serial output
+6 | differential: register 0 is 0
+7 | differential: step count and serial output length
+41 | property: decode(encode(i)) equals i for every generated instruction i
+42 | property: for any 32-bit word w, decode(w) is "not RV64I" or encode(decode(w)) equals w
+43 | property: every hand-computed case passes (step is the number of the first failing case)
+# trap profile (commands mfuzz, mprops, mcontrols): kinds 1 to 7 as above, and
+8 | differential: trap count
+11 | differential: mstatus
+12 | differential: mtvec
+13 | differential: mepc
+14 | differential: mcause
+15 | differential: mtval
+16 | differential: mie
+17 | differential: mip
+18 | differential: mscratch
+41 | property: decode(encode(i)) equals i for every generated Zicsr instruction and MRET
+42 | property: for any 32-bit word w with opcode 0x73, decode(w) is "no instruction" or encode(decode(w)) equals w
+43 | property: every hand-computed trap-profile case passes (step is the number of the first failing case)

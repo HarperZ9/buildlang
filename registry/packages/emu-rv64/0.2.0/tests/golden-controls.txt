@@ -1,0 +1,36 @@
+variant 0: the core
+ differential:
+  accepted, 20000 steps: ok=11764 illegal=4756 bus=2550 align=324 loads=404 stores=230 jumps=2105
+ properties:
+  accepted, 61 cases, 20000 round trips, 20000 raw words
+control 1: branch offset bit 11 read from the wrong word bit
+ differential:
+  REFUSED kind=2 step=7 got=8000080c want=8000000c
+ properties:
+  REFUSED kind=41 step=29 got=1ef82e3 want=5
+control 2: arithmetic right shift decoded as logical
+ differential:
+  REFUSED kind=3 step=1416 got=1fffffffffff want=ffffffffffffffff
+ properties:
+  REFUSED kind=41 step=34 got=42ffde13 want=1e
+control 3: 12-bit immediates zero-extended
+ differential:
+  REFUSED kind=3 step=6 got=1 want=0
+ properties:
+  REFUSED kind=41 step=3 got=9ee59183 want=c
+control 4: jump offset bits 19 to 12 dropped
+ differential:
+  REFUSED kind=2 step=80 got=7ff00430 want=7ffdd430
+ properties:
+  REFUSED kind=41 step=246 got=2c51c2ef want=3
+control 5: writes to register 0 land
+ differential:
+  REFUSED kind=6 step=38 got=80000060 want=0
+ properties:
+  REFUSED kind=43 step=22 got=0 want=0
+control 6: ADDIW result not sign-extended
+ differential:
+  REFUSED kind=3 step=20 got=ffffffe0 want=ffffffffffffffe0
+ properties:
+  REFUSED kind=43 step=32 got=0 want=0
+result: core accepted, 6 of 6 controls refused by both checks

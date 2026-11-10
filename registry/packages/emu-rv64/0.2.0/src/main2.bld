@@ -1,0 +1,97 @@
+// emu-rv64 command line, second part: the checks of the trap profile.
+//
+//   emu-rv64 mcases              hand-computed CSR, trap and MRET cases and
+//                                the trap-handler program
+//   emu-rv64 mfuzz SEED STEPS    differential run against the reference model
+//   emu-rv64 mprops SEED STEPS   property run, no model
+//   emu-rv64 mcontrols           shows that every planted defect is refused
+
+fn mshow_counts(steps: u64, ct: &[u64]) ~ Console {
+    println!("  accepted, {} steps: retired={} csr={} mret={} fetch_faults={}",
+             steps, ct[12], ct[13], ct[14], ct[15]);
+    println!("  traps by cause: 0={} 1={} 2={} 3={} 5={} 7={} 11={}",
+             ct[0], ct[1], ct[2], ct[3], ct[5], ct[7], ct[11]);
+}
+
+// Runs one check (0 differential, 1 properties) for variant v in the trap
+// profile. Returns 1 when the check refuses the variant, else 0.
+fn mcheck_one(check: u64, v: u64, seed: u64, steps: u64) -> i64 ~ Console {
+    let mut ct: [u64; 20] = [0_u64; 20];
+    let mut f = fz_refuse(0, 0_u64, 0_u64, 0_u64);
+    if check == 0_u64 {
+        f = mfuzz_run(v, seed, steps, &mut ct);
+    } else {
+        f = mprop_run(v, seed, steps);
+    }
+    if f.kind != 0 {
+        show_refusal(&f);
+        return 1;
+    }
+    if check == 0_u64 {
+        mshow_counts(steps, &ct);
+    } else {
+        println!("  accepted, {} cases, {} round trips, {} raw words", 59, steps, steps);
+    }
+    0
+}
+
+fn mcontrol_name(v: u64) ~ Console {
+    if v == 0_u64 { println!("variant 0: the core"); }
+    if v == 7_u64 { println!("control 7: a trap saves pc + 4 in mepc"); }
+    if v == 8_u64 { println!("control 8: ECALL reports cause 8 instead of 11"); }
+    if v == 9_u64 { println!("control 9: MRET does not restore MIE from MPIE"); }
+    if v == 10_u64 { println!("control 10: CSRRS with rs1 = 0 counts as a write"); }
+    if v == 11_u64 { println!("control 11: CSRRC sets the bits instead of clearing them"); }
+    if v == 12_u64 { println!("control 12: CSR number sign-extended"); }
+}
+
+// Every control must be refused by both checks, and the core must pass both.
+fn mcontrols() -> i64 ~ Console {
+    let mut bad: i64 = 0;
+    let mut v: u64 = 0_u64;
+    while v <= MCTL_LAST {
+        mcontrol_name(v);
+        println!(" differential:");
+        let d = mcheck_one(0_u64, v, 1_u64, 20000_u64);
+        println!(" properties:");
+        let q = mcheck_one(1_u64, v, 1_u64, 20000_u64);
+        if v == 0_u64 && (d + q) != 0 { bad = bad + 1; }
+        if v != 0_u64 && (d == 0 || q == 0) {
+            println!("  ACCEPTED A PLANTED DEFECT");
+            bad = bad + 1;
+        }
+        v = v + 1_u64;
+        if v == 1_u64 { v = MCTL_FIRST; }
+    }
+    if bad == 0 {
+        println!("result: core accepted, 6 of 6 controls refused by both checks");
+    } else {
+        println!("result: FAILED, {} variants judged wrongly", bad);
+    }
+    bad
+}
+
+// Runs a trap-profile command. Returns -1 when the first argument is not
+// one, else the exit status.
+fn machine_main() -> i64 ~ Console + Process + Environment {
+    let cmd = args_get(1);
+    if cmd == "mcases" {
+        let bad = mvec_run(0_u64, true);
+        let prog = program_trap();
+        if bad != 0_u64 || prog != 0_u64 { return 1; }
+        return 0;
+    }
+    if cmd == "mcontrols" {
+        if mcontrols() != 0 { return 1; }
+        return 0;
+    }
+    if cmd == "mfuzz" || cmd == "mprops" {
+        let seed = args_get(2).parse_int() as u64;
+        let steps = args_get(3).parse_int() as u64;
+        let mut check: u64 = 0_u64;
+        if cmd == "mprops" { check = 1_u64; }
+        println!("{} seed={} steps={}", cmd, seed, steps);
+        return mcheck_one(check, 0_u64, seed, steps);
+    }
+    -1
+}
