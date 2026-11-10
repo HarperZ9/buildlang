@@ -1,0 +1,6 @@
+# code | property
+31 | the ring holds exactly the ready tasks, each one once
+32 | at most one task runs; it is `current` and holds 1 to quantum ticks; an idle processor holds none
+33 | add, wake, remove, block and exit return the exact code the tracked state implies, and a refused operation changes no task state
+34 | first-in first-out: every dispatch picks the task that has been ready the longest, or idles when none is ready
+35 | time slice: a tick takes the processor away exactly when the running task has used its whole quantum, and a dispatched task starts with a full quantum

@@ -1,0 +1,204 @@
+// os-pfa: the page-frame allocator core.
+//
+// A page frame is one fixed-size block of physical memory (4096 bytes on the
+// targets we plan for). This core tracks which frames are in use. It owns no
+// memory and reads no hardware: the caller passes the bitmap storage in, so
+// the same code runs inside a kernel and inside a host test.
+//
+// Bitmap rule: bit f of the map is 1 when frame f is used or does not exist.
+// Contract: see SPEC.md. Every function is total and returns a code.
+
+const PFA_OK: i64 = 0;
+const PFA_NONE: i64 = -1;
+const PFA_RANGE: i64 = -2;
+const PFA_STATE: i64 = -3;
+const PFA_SMALL: i64 = -4;
+const PFA_MAX_FRAMES: u64 = 1099511627776_u64;
+
+// nframes: frames managed. nfree: frames free now.
+// hint: every bitmap word below this index is full (all ones).
+struct Pfa { nframes: u64, nfree: u64, hint: u64 }
+
+fn pfa_new() -> Pfa {
+    Pfa { nframes: 0_u64, nfree: 0_u64, hint: 0_u64 }
+}
+
+fn pfa_words(nframes: u64) -> u64 {
+    (nframes + 63_u64) / 64_u64
+}
+
+// Index of the lowest set bit of x. The caller guarantees x != 0.
+fn pfa_ctz(x: u64) -> u64 {
+    let mut v: u64 = x;
+    let mut n: u64 = 0_u64;
+    if (v & 0xFFFFFFFF_u64) == 0_u64 { n = n + 32_u64; v = v >> 32_u64; }
+    if (v & 0xFFFF_u64) == 0_u64 { n = n + 16_u64; v = v >> 16_u64; }
+    if (v & 0xFF_u64) == 0_u64 { n = n + 8_u64; v = v >> 8_u64; }
+    if (v & 0xF_u64) == 0_u64 { n = n + 4_u64; v = v >> 4_u64; }
+    if (v & 0x3_u64) == 0_u64 { n = n + 2_u64; v = v >> 2_u64; }
+    if (v & 0x1_u64) == 0_u64 { n = n + 1_u64; }
+    n
+}
+
+fn pfa_init(p: &mut Pfa, bits: &mut [u64], nframes: u64) -> i64 {
+    if nframes == 0_u64 || nframes > PFA_MAX_FRAMES {
+        return PFA_RANGE;
+    }
+    let words = pfa_words(nframes);
+    if (bits.len() as u64) < words {
+        return PFA_SMALL;
+    }
+    let mut w: u64 = 0_u64;
+    while w < words {
+        bits[w as usize] = 0_u64;
+        w = w + 1_u64;
+    }
+    let tail = nframes % 64_u64;
+    if tail != 0_u64 {
+        bits[(words - 1_u64) as usize] = !0_u64 << tail;
+    }
+    p.nframes = nframes;
+    p.nfree = nframes;
+    p.hint = 0_u64;
+    PFA_OK
+}
+
+// True when frame f is used or outside the managed range.
+fn pfa_is_used(p: &Pfa, bits: &[u64], f: u64) -> bool {
+    if f >= p.nframes {
+        return true;
+    }
+    ((bits[(f / 64_u64) as usize] >> (f % 64_u64)) & 1_u64) == 1_u64
+}
+
+fn pfa_set(bits: &mut [u64], f: u64) {
+    let w = (f / 64_u64) as usize;
+    bits[w] = bits[w] | (1_u64 << (f % 64_u64));
+}
+
+fn pfa_clear(bits: &mut [u64], f: u64) {
+    let w = (f / 64_u64) as usize;
+    bits[w] = bits[w] & !(1_u64 << (f % 64_u64));
+}
+
+// Takes the lowest-numbered free frame. Returns its number, or PFA_NONE.
+fn pfa_alloc(p: &mut Pfa, bits: &mut [u64]) -> i64 {
+    let words = pfa_words(p.nframes);
+    let mut w: u64 = p.hint;
+    while w < words {
+        let free = !bits[w as usize];
+        if free != 0_u64 {
+            let f = w * 64_u64 + pfa_ctz(free);
+            pfa_set(bits, f);
+            p.nfree = p.nfree - 1_u64;
+            p.hint = w;
+            return f as i64;
+        }
+        w = w + 1_u64;
+    }
+    p.hint = words;
+    PFA_NONE
+}
+
+fn pfa_free(p: &mut Pfa, bits: &mut [u64], f: u64) -> i64 {
+    if f >= p.nframes {
+        return PFA_RANGE;
+    }
+    if !pfa_is_used(p, bits, f) {
+        return PFA_STATE;
+    }
+    pfa_clear(bits, f);
+    p.nfree = p.nfree + 1_u64;
+    let w = f / 64_u64;
+    if w < p.hint {
+        p.hint = w;
+    }
+    PFA_OK
+}
+
+// Range check shared by the run operations. Written so it cannot overflow.
+fn pfa_range_ok(p: &Pfa, start: u64, n: u64) -> bool {
+    n != 0_u64 && start < p.nframes && n <= p.nframes - start
+}
+
+// Takes the lowest-numbered run of n free neighbouring frames (first fit).
+// Returns the first frame number, PFA_NONE when no run exists, or PFA_RANGE
+// when n is 0.
+fn pfa_alloc_run(p: &mut Pfa, bits: &mut [u64], n: u64) -> i64 {
+    if n == 0_u64 {
+        return PFA_RANGE;
+    }
+    if n > p.nfree {
+        return PFA_NONE;
+    }
+    let mut f: u64 = p.hint * 64_u64;
+    let mut start: u64 = f;
+    let mut run: u64 = 0_u64;
+    while f < p.nframes {
+        if pfa_is_used(p, bits, f) {
+            run = 0_u64;
+            start = f + 1_u64;
+        } else {
+            run = run + 1_u64;
+            if run == n {
+                let mut g: u64 = start;
+                while g <= f {
+                    pfa_set(bits, g);
+                    g = g + 1_u64;
+                }
+                p.nfree = p.nfree - n;
+                return start as i64;
+            }
+        }
+        f = f + 1_u64;
+    }
+    PFA_NONE
+}
+
+// Marks frames start..start+n used. All or nothing: PFA_STATE and no change
+// when any frame in the range is already used.
+fn pfa_reserve(p: &mut Pfa, bits: &mut [u64], start: u64, n: u64) -> i64 {
+    if !pfa_range_ok(p, start, n) {
+        return PFA_RANGE;
+    }
+    let mut f: u64 = start;
+    while f < start + n {
+        if pfa_is_used(p, bits, f) {
+            return PFA_STATE;
+        }
+        f = f + 1_u64;
+    }
+    f = start;
+    while f < start + n {
+        pfa_set(bits, f);
+        f = f + 1_u64;
+    }
+    p.nfree = p.nfree - n;
+    PFA_OK
+}
+
+// Frees frames start..start+n. All or nothing: PFA_STATE and no change when
+// any frame in the range is already free.
+fn pfa_free_run(p: &mut Pfa, bits: &mut [u64], start: u64, n: u64) -> i64 {
+    if !pfa_range_ok(p, start, n) {
+        return PFA_RANGE;
+    }
+    let mut f: u64 = start;
+    while f < start + n {
+        if !pfa_is_used(p, bits, f) {
+            return PFA_STATE;
+        }
+        f = f + 1_u64;
+    }
+    f = start;
+    while f < start + n {
+        pfa_clear(bits, f);
+        f = f + 1_u64;
+    }
+    p.nfree = p.nfree + n;
+    let w = start / 64_u64;
+    if w < p.hint {
+        p.hint = w;
+    }
+    PFA_OK
+}

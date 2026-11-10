@@ -1,0 +1,192 @@
+// os-pfa command line: runs the checks of the page-frame allocator core.
+//
+//   os-pfa cases                   fixed script with hand-derived results
+//   os-pfa trace SIZE SEED STEPS   generated operations through the core
+//   os-pfa trace-ref SIZE SEED STEPS   the same operations through the model
+//   os-pfa fuzz SEED STEPS         differential run against the model
+//   os-pfa props SEED STEPS        property run, no model
+//   os-pfa controls                shows that every planted defect is refused
+
+fn show(label: &str, rc: i64, p: &Pfa) ~ Console {
+    println!("{} -> {} free={}", label, rc, p.nfree);
+}
+
+fn cases_first(p: &mut Pfa, bits: &mut [u64]) ~ Console {
+    show("init 70", pfa_init(p, bits, 70_u64), p);
+    show("alloc", pfa_alloc(p, bits), p);
+    show("alloc", pfa_alloc(p, bits), p);
+    show("alloc", pfa_alloc(p, bits), p);
+    show("free 1", pfa_free(p, bits, 1_u64), p);
+    show("free 1", pfa_free(p, bits, 1_u64), p);
+    show("free 70", pfa_free(p, bits, 70_u64), p);
+    show("alloc", pfa_alloc(p, bits), p);
+    show("alloc_run 3", pfa_alloc_run(p, bits, 3_u64), p);
+    show("reserve 62 4", pfa_reserve(p, bits, 62_u64, 4_u64), p);
+    show("reserve 65 1", pfa_reserve(p, bits, 65_u64, 1_u64), p);
+    show("alloc_run 60", pfa_alloc_run(p, bits, 60_u64), p);
+    show("alloc_run 56", pfa_alloc_run(p, bits, 56_u64), p);
+    show("alloc", pfa_alloc(p, bits), p);
+}
+
+fn cases_second(p: &mut Pfa, bits: &mut [u64]) ~ Console {
+    show("free_run 62 4", pfa_free_run(p, bits, 62_u64, 4_u64), p);
+    show("free_run 62 4", pfa_free_run(p, bits, 62_u64, 4_u64), p);
+    show("alloc_run 5", pfa_alloc_run(p, bits, 5_u64), p);
+    show("alloc_run 0", pfa_alloc_run(p, bits, 0_u64), p);
+    show("alloc_run 4", pfa_alloc_run(p, bits, 4_u64), p);
+    show("reserve 69 2", pfa_reserve(p, bits, 69_u64, 2_u64), p);
+    show("reserve 67 3", pfa_reserve(p, bits, 67_u64, 3_u64), p);
+    show("alloc", pfa_alloc(p, bits), p);
+    show("free 0", pfa_free(p, bits, 0_u64), p);
+    show("alloc", pfa_alloc(p, bits), p);
+    show("init 0", pfa_init(p, bits, 0_u64), p);
+    show("init 513", pfa_init(p, bits, 513_u64), p);
+}
+
+fn cases() ~ Console {
+    let mut p = pfa_new();
+    let mut bits: [u64; 8] = [0_u64; 8];
+    cases_first(&mut p, &mut bits);
+    cases_second(&mut p, &mut bits);
+}
+
+fn show_op(op: &Op, rc: i64) ~ Console {
+    if op.kind == 0_u64 { println!("alloc -> {}", rc); }
+    if op.kind == 1_u64 { println!("free {} -> {}", op.a, rc); }
+    if op.kind == 2_u64 { println!("alloc_run {} -> {}", op.a, rc); }
+    if op.kind == 3_u64 { println!("reserve {} {} -> {}", op.a, op.b, rc); }
+    if op.kind == 4_u64 { println!("free_run {} {} -> {}", op.a, op.b, rc); }
+}
+
+// Prints every generated operation and its result, then the free count and
+// a digest of the final frame set. `trace` and `trace-ref` must print the
+// same bytes: one comes from the core, the other from the model.
+fn trace(use_ref: bool, nframes: u64, seed: u64, steps: u64) ~ Console {
+    let mut p = pfa_new();
+    let mut bits: [u64; 8] = [0_u64; 8];
+    let mut r = ref_new(nframes);
+    let mut rng = Rng { s: seed };
+    pfa_init(&mut p, &mut bits, nframes);
+    let mut step: u64 = 1_u64;
+    while step <= steps {
+        let op = gen_op(&mut rng, nframes, step);
+        if use_ref {
+            show_op(&op, apply_ref(&mut r, &op));
+        } else {
+            show_op(&op, apply_sut(0, &mut p, &mut bits, &op));
+        }
+        step = step + 1_u64;
+    }
+    let mut h: u64 = 0xCBF29CE484222325_u64;
+    let mut f: u64 = 0_u64;
+    while f < nframes {
+        if use_ref {
+            h = digest_step(h, r[f as usize] == 1_u8);
+        } else {
+            h = digest_step(h, pfa_is_used(&p, &bits, f));
+        }
+        f = f + 1_u64;
+    }
+    let mut free = p.nfree;
+    if use_ref { free = ref_free_count(&r); }
+    println!("frames={} free={} digest={:016x}", nframes, free, h);
+}
+
+fn show_fail(fl: &Fail) ~ Console {
+    println!("  REFUSED kind={} step={} op={} got={} want={}", fl.kind, fl.step, fl.op, fl.got, fl.want);
+}
+
+// Runs one check (0 differential, 1 properties) for variant v over the six
+// map sizes. Stops at the first refusal. Returns the number of refusals.
+fn sweep(check: i64, v: i64, seed: u64, steps: u64, quiet: bool) -> i64 ~ Console {
+    let mut i: u64 = 0_u64;
+    while i < 6_u64 {
+        let n = chk_size(i);
+        let mut fl = fail_new();
+        let mut ok = false;
+        if check == 0 {
+            ok = diff_run(v, n, seed + i, steps, &mut fl);
+        } else {
+            ok = prop_run(v, n, seed + i, steps, &mut fl);
+        }
+        if !ok {
+            println!("  frames={} seed={}", n, seed + i);
+            show_fail(&fl);
+            return 1;
+        }
+        if !quiet {
+            println!("  frames={} seed={} steps={} ok", n, seed + i, steps);
+        }
+        i = i + 1_u64;
+    }
+    if quiet {
+        println!("  accepted, 6 map sizes, {} steps each", steps);
+    }
+    0
+}
+
+fn control_name(v: i64) ~ Console {
+    if v == 0 { println!("variant 0: the core"); }
+    if v == 1 { println!("control 1: free never lowers the hint"); }
+    if v == 2 { println!("control 2: free has no double-free check"); }
+    if v == 3 { println!("control 3: run search restarts on the used frame"); }
+    if v == 4 { println!("control 4: init leaves the tail bits clear"); }
+}
+
+// Every control must be refused by both checks, and the core must pass both.
+fn controls() -> i64 ~ Console {
+    let mut bad: i64 = 0;
+    let mut v: i64 = 0;
+    while v <= 4 {
+        control_name(v);
+        println!(" differential:");
+        let d = sweep(0, v, 1_u64, 3000_u64, true);
+        println!(" properties:");
+        let q = sweep(1, v, 1_u64, 3000_u64, true);
+        if v == 0 && (d + q) != 0 { bad = bad + 1; }
+        if v != 0 && (d == 0 || q == 0) {
+            println!("  ACCEPTED A PLANTED DEFECT");
+            bad = bad + 1;
+        }
+        v = v + 1;
+    }
+    if bad == 0 {
+        println!("result: core accepted, 4 of 4 controls refused by both checks");
+    } else {
+        println!("result: FAILED, {} variants judged wrongly", bad);
+    }
+    bad
+}
+
+fn main() ~ Console + Process + Environment {
+    let cmd = args_get(1);
+    if cmd == "cases" {
+        cases();
+        return;
+    }
+    if cmd == "controls" {
+        if controls() != 0 { exit(1); }
+        return;
+    }
+    let a = args_get(2).parse_int() as u64;
+    let b = args_get(3).parse_int() as u64;
+    if cmd == "fuzz" || cmd == "props" {
+        let mut check: i64 = 0;
+        if cmd == "props" { check = 1; }
+        println!("{} seed={} steps={}", cmd, a, b);
+        if sweep(check, 0, a, b, false) != 0 { exit(1); }
+        return;
+    }
+    if cmd == "trace" || cmd == "trace-ref" {
+        let steps = args_get(4).parse_int() as u64;
+        if a == 0_u64 || a > CHK_MAX_FRAMES {
+            println!("error: SIZE must be 1 to 512");
+            exit(2);
+        }
+        trace(cmd == "trace-ref", a, b, steps);
+        return;
+    }
+    println!("usage: os-pfa cases | controls | fuzz SEED STEPS | props SEED STEPS");
+    println!("       os-pfa trace SIZE SEED STEPS | trace-ref SIZE SEED STEPS");
+    exit(2);
+}

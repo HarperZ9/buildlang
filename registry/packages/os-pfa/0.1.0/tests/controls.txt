@@ -1,0 +1,5 @@
+# id | function | planted defect | refused by (code)
+1 | ctl_free_keeps_hint | free never lowers the search hint, so a freed low frame is skipped | invariant 13 in both checks
+2 | ctl_free_double | free has no double-free check and counts the frame twice | differential 1 (return code), property 22
+3 | ctl_alloc_run_off | the run search restarts on the used frame instead of after it | differential 1 (return code), property 25
+4 | ctl_init_no_tail | init leaves the bits past the last frame clear | invariant 12 in both checks

@@ -1,0 +1,401 @@
+alloc -> 0
+alloc_run 1 -> 1
+alloc -> 2
+free 63 -> -3
+free 29 -> -3
+reserve 11 1 -> 0
+free_run 64 4 -> -3
+free 48 -> -3
+free 11 -> 0
+alloc -> 3
+free_run 45 0 -> -2
+reserve 31 3 -> 0
+reserve 15 3 -> 0
+free 50 -> -3
+free_run 33 1 -> 0
+free 43 -> -3
+alloc -> 4
+alloc -> 5
+free 45 -> -3
+free 40 -> -3
+alloc -> 6
+free 6 -> 0
+free 60 -> -3
+alloc_run 5 -> 6
+alloc -> 11
+free 67 -> -3
+free 30 -> -3
+alloc -> 12
+alloc -> 13
+reserve 65 0 -> -2
+free_run 54 3 -> -3
+free_run 18 4 -> -3
+alloc -> 14
+alloc -> 18
+alloc -> 19
+alloc -> 20
+alloc -> 21
+free 53 -> -3
+free 31 -> 0
+alloc_run 0 -> -2
+reserve 54 0 -> -2
+free 63 -> -3
+free_run 28 3 -> -3
+alloc_run 0 -> -2
+free 29 -> -3
+alloc_run 1 -> 22
+free 48 -> -3
+alloc -> 23
+alloc -> 24
+alloc -> 25
+alloc_run 3 -> 26
+reserve 54 1 -> 0
+alloc -> 29
+alloc -> 30
+free 37 -> -3
+alloc -> 31
+alloc -> 33
+free 28 -> 0
+free 34 -> -3
+free_run 15 3 -> 0
+alloc_run 0 -> -2
+alloc_run 2 -> 15
+alloc -> 17
+alloc_run 4 -> 34
+alloc -> 28
+alloc_run 2 -> 38
+reserve 61 4 -> 0
+free 66 -> -3
+free 2 -> 0
+free_run 51 1 -> -3
+alloc -> 2
+alloc -> 40
+free 16 -> 0
+free 11 -> 0
+reserve 31 1 -> -3
+alloc -> 11
+free_run 53 3 -> -3
+alloc -> 16
+reserve 46 1 -> 0
+free_run 46 1 -> 0
+free 37 -> 0
+alloc -> 37
+free 69 -> -3
+free 15 -> 0
+alloc -> 15
+free_run 19 2 -> 0
+alloc -> 19
+free 50 -> -3
+alloc -> 20
+alloc_run 1 -> 41
+free 54 -> 0
+free 52 -> -3
+reserve 62 1 -> -3
+free_run 33 2 -> 0
+free_run 64 3 -> -3
+free 30 -> 0
+reserve 46 2 -> 0
+alloc_run 0 -> -2
+free_run 70 3 -> -2
+alloc -> 30
+alloc -> 33
+alloc -> 34
+free 28 -> 0
+free_run 20 1 -> 0
+alloc_run 4 -> 42
+reserve 30 4 -> -3
+reserve 23 1 -> -3
+alloc -> 20
+alloc -> 28
+reserve 56 1 -> 0
+alloc -> 48
+alloc_run 5 -> 49
+reserve 7 1 -> -3
+free 39 -> 0
+alloc -> 39
+free 60 -> -3
+free 41 -> 0
+reserve 30 2 -> -3
+free 10 -> 0
+reserve 34 3 -> -3
+alloc -> 10
+free 26 -> 0
+alloc -> 26
+alloc -> 41
+alloc -> 54
+alloc -> 55
+free 11 -> 0
+free 61 -> 0
+free_run 52 2 -> 0
+alloc -> 11
+reserve 66 0 -> -2
+alloc_run 2 -> 52
+free_run 30 3 -> 0
+alloc_run 3 -> 30
+free 66 -> -3
+alloc_run 2 -> 57
+free 46 -> 0
+alloc -> 46
+alloc -> 59
+free 40 -> 0
+alloc_run 5 -> 65
+free 36 -> 0
+free_run 19 3 -> 0
+alloc -> 19
+alloc_run 2 -> 20
+free 54 -> 0
+alloc -> 36
+alloc -> 40
+alloc -> 54
+reserve 4 0 -> -2
+free 3 -> 0
+free 53 -> 0
+alloc_run 5 -> -1
+alloc -> 3
+reserve 44 1 -> -3
+free 56 -> 0
+free_run 30 3 -> 0
+free_run 43 4 -> 0
+alloc -> 30
+free 14 -> 0
+free 46 -> -3
+free 31 -> -3
+alloc_run 1 -> 14
+alloc -> 31
+alloc -> 32
+free 25 -> 0
+reserve 3 1 -> -3
+alloc -> 25
+free_run 12 4 -> 0
+alloc -> 12
+free 7 -> 0
+free 38 -> 0
+reserve 15 1 -> 0
+reserve 18 4 -> -3
+alloc -> 7
+alloc -> 13
+free 24 -> 0
+alloc -> 14
+alloc -> 24
+alloc -> 38
+free_run 40 0 -> -2
+free 58 -> 0
+alloc -> 43
+reserve 17 0 -> -2
+free 64 -> 0
+reserve 26 3 -> -3
+free 45 -> -3
+free 23 -> 0
+alloc -> 23
+reserve 34 3 -> -3
+free 22 -> 0
+free 32 -> 0
+free 15 -> 0
+free 3 -> 0
+free 35 -> 0
+alloc -> 3
+alloc -> 15
+alloc -> 22
+free 48 -> 0
+alloc -> 32
+alloc -> 35
+reserve 62 4 -> -3
+free_run 2 1 -> 0
+free 47 -> 0
+free 17 -> 0
+alloc_run 1 -> 2
+reserve 30 0 -> -2
+reserve 29 1 -> -3
+alloc -> 17
+reserve 45 3 -> 0
+free 61 -> -3
+alloc_run 3 -> -1
+alloc -> 44
+alloc -> 48
+alloc -> 53
+free 54 -> 0
+free_run 65 4 -> 0
+free 57 -> 0
+reserve 51 3 -> -3
+alloc_run 1 -> 54
+alloc_run 4 -> 64
+free 19 -> 0
+free 43 -> 0
+free 20 -> 0
+free_run 11 0 -> -2
+free 47 -> 0
+reserve 44 2 -> -3
+alloc_run 3 -> 56
+alloc -> 19
+alloc -> 20
+free 71 -> -2
+alloc -> 43
+free 8 -> 0
+free 71 -> -2
+free 15 -> 0
+alloc_run 3 -> -1
+free 57 -> 0
+alloc -> 8
+free_run 63 4 -> 0
+alloc_run 1 -> 15
+alloc_run 3 -> 63
+free 11 -> 0
+free 40 -> 0
+free 44 -> 0
+alloc -> 11
+free 47 -> -3
+alloc -> 40
+free 66 -> -3
+free_run 52 2 -> 0
+alloc_run 3 -> -1
+alloc_run 4 -> -1
+alloc_run 4 -> -1
+reserve 34 2 -> -3
+free 66 -> -3
+reserve 21 3 -> -3
+alloc_run 5 -> -1
+free 32 -> 0
+alloc -> 32
+alloc -> 44
+alloc_run 0 -> -2
+alloc -> 47
+reserve 52 0 -> -2
+reserve 15 4 -> -3
+alloc -> 52
+alloc -> 53
+alloc_run 2 -> 60
+reserve 10 1 -> -3
+alloc_run 5 -> -1
+alloc_run 5 -> -1
+alloc -> 57
+alloc -> 66
+free 62 -> 0
+free 22 -> 0
+alloc -> 22
+free 55 -> 0
+alloc -> 55
+reserve 34 2 -> -3
+free_run 30 1 -> 0
+alloc -> 30
+reserve 45 0 -> -2
+reserve 68 2 -> -3
+alloc -> 62
+alloc -> 68
+free_run 66 4 -> 0
+alloc -> 66
+reserve 8 1 -> -3
+free_run 20 1 -> 0
+free 3 -> 0
+alloc -> 3
+alloc_run 5 -> -1
+alloc_run 1 -> 20
+free_run 58 0 -> -2
+alloc -> 67
+alloc_run 2 -> 68
+free 1 -> 0
+free_run 44 0 -> -2
+free_run 14 3 -> 0
+alloc_run 1 -> 1
+alloc -> 14
+alloc -> 15
+free 31 -> 0
+reserve 44 1 -> -3
+alloc -> 16
+free_run 57 4 -> 0
+free 45 -> 0
+free 44 -> 0
+free 62 -> 0
+alloc_run 5 -> -1
+free 71 -> -2
+free_run 62 2 -> -3
+free 64 -> 0
+free_run 31 1 -> -3
+alloc -> 31
+alloc -> 44
+free 66 -> 0
+reserve 6 0 -> -2
+reserve 63 1 -> -3
+free 64 -> -3
+alloc -> 45
+alloc -> 57
+alloc -> 58
+alloc_run 5 -> -1
+free_run 52 4 -> 0
+reserve 63 1 -> -3
+free 18 -> 0
+reserve 61 3 -> -3
+free_run 20 2 -> 0
+alloc -> 18
+alloc_run 0 -> -2
+alloc -> 20
+free 69 -> 0
+alloc -> 21
+free 0 -> 0
+alloc -> 0
+free 38 -> 0
+alloc_run 2 -> 52
+alloc_run 4 -> -1
+alloc -> 38
+free 43 -> 0
+reserve 0 2 -> -3
+alloc -> 43
+alloc -> 54
+alloc -> 55
+free_run 31 1 -> 0
+alloc -> 31
+alloc -> 59
+alloc -> 60
+alloc -> 62
+alloc -> 64
+alloc -> 66
+alloc_run 4 -> -1
+alloc_run 1 -> 69
+reserve 54 2 -> -3
+free 70 -> -2
+free_run 45 1 -> 0
+alloc -> 45
+free 58 -> 0
+alloc -> 58
+alloc -> -1
+alloc_run 4 -> -1
+alloc -> -1
+alloc -> -1
+free_run 54 0 -> -2
+alloc -> -1
+free_run 35 3 -> 0
+free_run 53 1 -> 0
+alloc_run 3 -> 35
+free 7 -> 0
+free_run 40 3 -> 0
+alloc_run 4 -> -1
+reserve 50 2 -> -3
+reserve 50 4 -> -3
+alloc -> 7
+free 32 -> 0
+alloc_run 5 -> -1
+alloc -> 32
+reserve 60 0 -> -2
+reserve 21 0 -> -2
+reserve 9 0 -> -2
+free_run 67 0 -> -2
+alloc_run 4 -> -1
+alloc_run 3 -> 40
+free_run 0 0 -> -2
+alloc -> 53
+alloc -> -1
+alloc_run 1 -> -1
+free 55 -> 0
+alloc -> 55
+alloc -> -1
+reserve 62 1 -> -3
+alloc -> -1
+free 9 -> 0
+free 14 -> 0
+free_run 10 4 -> 0
+free 43 -> 0
+alloc_run 0 -> -2
+alloc_run 3 -> 9
+reserve 12 2 -> 0
+alloc_run 3 -> -1
+alloc -> 14
+frames=70 free=1 digest=75d23a9c5d6783a8

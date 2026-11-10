@@ -127,6 +127,36 @@
         }
       }
     },
+    "os-pfa": {
+      "version": "0.1.0",
+      "description": "Page-frame allocator core for an operating-system kernel: bitmap with an exact contract, reference model, differential fuzz and planted controls",
+      "author": "Zain Dana Harper",
+      "license": "AGPL-3.0-only",
+      "checksum": "sha256:018ce20e392bc575e927562c3c42a9e88457afa57f15869f3aa574ec34c1550c",
+      "path": "packages/os-pfa/0.1.0",
+      "versions": {
+        "0.1.0": {
+          "path": "packages/os-pfa/0.1.0",
+          "checksum": "sha256:018ce20e392bc575e927562c3c42a9e88457afa57f15869f3aa574ec34c1550c",
+          "dependencies": {}
+        }
+      }
+    },
+    "os-runq": {
+      "version": "0.1.0",
+      "description": "Round-robin run queue core for an operating-system kernel: ring buffer with an exact contract, reference model, differential fuzz and planted controls",
+      "author": "Zain Dana Harper",
+      "license": "AGPL-3.0-only",
+      "checksum": "sha256:74d63c163736f3cfcf0cad79856515d2a68e8098a5c943a1eed13778e2631326",
+      "path": "packages/os-runq/0.1.0",
+      "versions": {
+        "0.1.0": {
+          "path": "packages/os-runq/0.1.0",
+          "checksum": "sha256:74d63c163736f3cfcf0cad79856515d2a68e8098a5c943a1eed13778e2631326",
+          "dependencies": {}
+        }
+      }
+    },
     "readability": {
       "version": "1.0.0",
       "description": "Flesch reading ease with word, sentence and syllable counts, ported from Flywheel's writing linter",

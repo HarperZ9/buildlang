@@ -1,0 +1,229 @@
+// Check harness for os-pfa: a seeded operation generator, a dispatch layer
+// that selects the implementation under test, state invariants, and the
+// differential run against the reference model.
+//
+// Variant 0 is the core. Variants 1 to 4 are the planted controls.
+
+const CHK_WORDS: usize = 8;
+const CHK_MAX_FRAMES: u64 = 512_u64;
+
+// splitmix64: a small seeded generator. Same seed, same sequence, on every
+// host, because every step is wrapping 64-bit integer arithmetic.
+struct Rng { s: u64 }
+
+fn rng_next(r: &mut Rng) -> u64 {
+    r.s = r.s.wrapping_add(0x9E3779B97F4A7C15_u64);
+    let mut z: u64 = r.s;
+    z = (z ^ (z >> 30_u64)).wrapping_mul(0xBF58476D1CE4E5B9_u64);
+    z = (z ^ (z >> 27_u64)).wrapping_mul(0x94D049BB133111EB_u64);
+    z ^ (z >> 31_u64)
+}
+
+// One generated operation. kind: 0 alloc, 1 free(a), 2 alloc_run(a),
+// 3 reserve(a, b), 4 free_run(a, b).
+struct Op { kind: u64, a: u64, b: u64 }
+
+// Steps come in blocks of 128. Even blocks lean towards taking frames and
+// odd blocks towards freeing them, so runs visit both full and empty maps.
+// Arguments reach two frames past the end to exercise the range errors.
+fn gen_op(rng: &mut Rng, nframes: u64, step: u64) -> Op {
+    let k = rng_next(rng) % 8_u64;
+    let a = rng_next(rng);
+    let b = rng_next(rng);
+    let drain = ((step / 128_u64) % 2_u64) == 1_u64;
+    if k < 3_u64 {
+        if drain {
+            return Op { kind: 1_u64, a: a % (nframes + 2_u64), b: 0_u64 };
+        }
+        return Op { kind: 0_u64, a: 0_u64, b: 0_u64 };
+    }
+    if k < 5_u64 {
+        if drain {
+            return Op { kind: 0_u64, a: 0_u64, b: 0_u64 };
+        }
+        return Op { kind: 1_u64, a: a % (nframes + 2_u64), b: 0_u64 };
+    }
+    if k == 5_u64 {
+        return Op { kind: 2_u64, a: a % 6_u64, b: 0_u64 };
+    }
+    if k == 6_u64 {
+        return Op { kind: 3_u64, a: a % (nframes + 2_u64), b: b % 5_u64 };
+    }
+    Op { kind: 4_u64, a: a % (nframes + 2_u64), b: b % 5_u64 }
+}
+
+fn sut_init(v: i64, p: &mut Pfa, bits: &mut [u64], nframes: u64) -> i64 {
+    if v == 4 {
+        return ctl_init_no_tail(p, bits, nframes);
+    }
+    pfa_init(p, bits, nframes)
+}
+
+fn sut_free(v: i64, p: &mut Pfa, bits: &mut [u64], f: u64) -> i64 {
+    if v == 1 {
+        return ctl_free_keeps_hint(p, bits, f);
+    }
+    if v == 2 {
+        return ctl_free_double(p, bits, f);
+    }
+    pfa_free(p, bits, f)
+}
+
+fn sut_alloc_run(v: i64, p: &mut Pfa, bits: &mut [u64], n: u64) -> i64 {
+    if v == 3 {
+        return ctl_alloc_run_off(p, bits, n);
+    }
+    pfa_alloc_run(p, bits, n)
+}
+
+fn apply_sut(v: i64, p: &mut Pfa, bits: &mut [u64], op: &Op) -> i64 {
+    if op.kind == 0_u64 {
+        return pfa_alloc(p, bits);
+    }
+    if op.kind == 1_u64 {
+        return sut_free(v, p, bits, op.a);
+    }
+    if op.kind == 2_u64 {
+        return sut_alloc_run(v, p, bits, op.a);
+    }
+    if op.kind == 3_u64 {
+        return pfa_reserve(p, bits, op.a, op.b);
+    }
+    pfa_free_run(p, bits, op.a, op.b)
+}
+
+fn apply_ref(r: &mut Vec<u8>, op: &Op) -> i64 {
+    if op.kind == 0_u64 {
+        return ref_alloc(r);
+    }
+    if op.kind == 1_u64 {
+        return ref_free(r, op.a);
+    }
+    if op.kind == 2_u64 {
+        return ref_alloc_run(r, op.a);
+    }
+    if op.kind == 3_u64 {
+        return ref_reserve(r, op.a, op.b);
+    }
+    ref_free_run(r, op.a, op.b)
+}
+
+fn raw_bit(bits: &[u64], f: u64) -> bool {
+    ((bits[(f / 64_u64) as usize] >> (f % 64_u64)) & 1_u64) == 1_u64
+}
+
+// Invariants that need no model. Returns 0 when all hold, otherwise:
+// 11 free count differs from the number of clear bits, 12 a bit past the
+// last frame is clear, 13 a word below the hint is not full.
+fn inv_check(p: &Pfa, bits: &[u64]) -> i64 {
+    let words = pfa_words(p.nframes);
+    let mut clear: u64 = 0_u64;
+    let mut f: u64 = 0_u64;
+    while f < words * 64_u64 {
+        if !raw_bit(bits, f) {
+            if f >= p.nframes {
+                return 12;
+            }
+            clear = clear + 1_u64;
+        }
+        f = f + 1_u64;
+    }
+    if clear != p.nfree {
+        return 11;
+    }
+    if p.hint > words {
+        return 13;
+    }
+    let mut w: u64 = 0_u64;
+    while w < p.hint {
+        if bits[w as usize] != !0_u64 {
+            return 13;
+        }
+        w = w + 1_u64;
+    }
+    0
+}
+
+// True when the core state and the model describe the same set of frames.
+fn same_state(p: &Pfa, bits: &[u64], r: &Vec<u8>) -> bool {
+    if p.nframes != ref_count(r) {
+        return false;
+    }
+    let mut f: u64 = 0_u64;
+    while f < p.nframes {
+        if raw_bit(bits, f) != (r[f as usize] == 1_u8) {
+            return false;
+        }
+        f = f + 1_u64;
+    }
+    true
+}
+
+// Where and why a run was refused. kind: 0 none, 1 return codes differ,
+// 2 state differs from the model, 11 to 13 an invariant, 21 to 25 a property.
+struct Fail { kind: i64, step: u64, op: u64, got: i64, want: i64 }
+
+fn fail_new() -> Fail {
+    Fail { kind: 0, step: 0_u64, op: 0_u64, got: 0, want: 0 }
+}
+
+fn fail_set(fl: &mut Fail, kind: i64, step: u64, op: u64, got: i64, want: i64) -> bool {
+    fl.kind = kind;
+    fl.step = step;
+    fl.op = op;
+    fl.got = got;
+    fl.want = want;
+    false
+}
+
+// Differential run: the same generated operations go to variant v and to
+// the model. After every step the return codes, the frame sets and the
+// invariants must agree. Returns true when no step was refused.
+fn diff_run(v: i64, nframes: u64, seed: u64, steps: u64, fl: &mut Fail) -> bool {
+    let mut p = pfa_new();
+    let mut bits: [u64; 8] = [0_u64; 8];
+    let mut r = ref_new(nframes);
+    let mut rng = Rng { s: seed };
+    let rc = sut_init(v, &mut p, &mut bits, nframes);
+    if rc != PFA_OK {
+        return fail_set(fl, 1, 0_u64, 9_u64, rc, PFA_OK);
+    }
+    let k0 = inv_check(&p, &bits);
+    if k0 != 0 {
+        return fail_set(fl, k0, 0_u64, 9_u64, 0, 0);
+    }
+    let mut step: u64 = 1_u64;
+    while step <= steps {
+        let op = gen_op(&mut rng, nframes, step);
+        let got = apply_sut(v, &mut p, &mut bits, &op);
+        let want = apply_ref(&mut r, &op);
+        if got != want {
+            return fail_set(fl, 1, step, op.kind, got, want);
+        }
+        if !same_state(&p, &bits, &r) {
+            return fail_set(fl, 2, step, op.kind, got, want);
+        }
+        let k = inv_check(&p, &bits);
+        if k != 0 {
+            return fail_set(fl, k, step, op.kind, got, want);
+        }
+        step = step + 1_u64;
+    }
+    true
+}
+
+fn chk_size(i: u64) -> u64 {
+    if i == 0_u64 { return 1_u64; }
+    if i == 1_u64 { return 63_u64; }
+    if i == 2_u64 { return 64_u64; }
+    if i == 3_u64 { return 65_u64; }
+    if i == 4_u64 { return 200_u64; }
+    CHK_MAX_FRAMES
+}
+
+// Order-sensitive digest of the used flags, for the trace output.
+fn digest_step(h: u64, used: bool) -> u64 {
+    let mut x: u64 = h ^ 1_u64;
+    if used { x = h ^ 2_u64; }
+    x.wrapping_mul(0x100000001B3_u64)
+}
