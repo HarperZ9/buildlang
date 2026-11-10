@@ -17,6 +17,7 @@ use crate::codegen::builder::values;
 use crate::codegen::ir::*;
 use crate::codegen::runtime;
 
+use super::asserts;
 use super::limits::{c_limit_macro, int_type_by_name};
 use super::{MirLowerer, OverloadTarget};
 
@@ -138,10 +139,18 @@ impl<'ctx> MirLowerer<'ctx> {
                         self.lower_asm_macro(tokens)?;
                         Ok(None)
                     }
-                    _ => {
-                        // Unknown macro -- skip with no output
+                    name if asserts::assert_arity(name).is_some() => {
+                        let arity = asserts::assert_arity(name).unwrap_or(1);
+                        self.lower_assert_macro(name, arity, tokens)?;
                         Ok(None)
                     }
+                    name if asserts::is_abort_macro(name) => {
+                        self.lower_abort_macro(name, path.span.start.0, tokens)?;
+                        Ok(None)
+                    }
+                    // A macro the compiler does not implement is an error.
+                    // It used to be dropped, which hid failing checks.
+                    name => Err(asserts::unknown_macro(name, tokens)),
                 }
             }
         }
@@ -605,10 +614,16 @@ impl<'ctx> MirLowerer<'ctx> {
                         self.lower_asm_macro(tokens)?;
                         Ok(values::unit())
                     }
-                    _ => {
-                        // Unknown macro expression - return unit
+                    name if asserts::assert_arity(name).is_some() => {
+                        let arity = asserts::assert_arity(name).unwrap_or(1);
+                        self.lower_assert_macro(name, arity, tokens)?;
                         Ok(values::unit())
                     }
+                    name if asserts::is_abort_macro(name) => {
+                        self.lower_abort_macro(name, path.span.start.0, tokens)?;
+                        Ok(values::unit())
+                    }
+                    name => Err(asserts::unknown_macro(name, tokens)),
                 }
             }
 

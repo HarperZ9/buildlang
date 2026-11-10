@@ -2981,7 +2981,7 @@ impl<'ctx> MirLowerer<'ctx> {
 
 /// The source text of one macro argument, with the module merge's renames
 /// applied (see `register_macro_ident_rename`), trimmed.
-fn renamed_slice(
+pub(super) fn renamed_slice(
     source: &str,
     start: usize,
     end: usize,
