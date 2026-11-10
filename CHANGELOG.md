@@ -12,6 +12,8 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## 1.14.0 - 2026-11-09 - typed vector access, the same C on every run, a fuzz target, `Vec::clear` and `Vec::release`
 
+Loops over vectors now compile to plain C array reads with every bounds check kept, which took n-body from 3.35 times the run time of C to 0.98 times at gcc -O2. The compiler emits the same C bytes on every run and `buildc build-hash` checks it, `Vec::clear` no longer writes through freed memory, and `Vec::release` frees a vector.
+
 ### Benchmarks
 
 - `bench/wider-2026-11`: fannkuch-redux, mandelbrot, binary-trees and fasta against rustc 1.98.0 and gcc 13.2.0, with predictions written before the run. BuildLang is level with C -O2 on fannkuch-redux and mandelbrot, 1.26 times C on fasta and 1.9 to 2.4 times C on binary-trees.
