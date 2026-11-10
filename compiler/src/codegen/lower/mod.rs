@@ -562,7 +562,10 @@ impl<'ctx> MirLowerer<'ctx> {
         }
 
         // For each (Trait, Type) impl pair, create a vtable
-        let impl_pairs: Vec<_> = self.trait_impls.keys().cloned().collect();
+        // Sorted: map order differs from one compiler run to the next, and the
+        // emitted code must not.
+        let mut impl_pairs: Vec<_> = self.trait_impls.keys().cloned().collect();
+        impl_pairs.sort();
         for (trait_name, type_name) in impl_pairs {
             if let Some(trait_methods) = self.trait_methods.get(&trait_name) {
                 let methods: Vec<_> = trait_methods

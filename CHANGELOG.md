@@ -10,6 +10,12 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+### `buildc build-hash`: the emitted C is the same bytes on every run
+
+- `buildc build-hash FILE [--runs N] [--json]` compiles FILE to C in N fresh compiler processes (default 3), prints one SHA-256 when every run emitted the same bytes, and exits 1 with the run and first differing line when one did not. `--json` prints a `buildlang-build-hash/v1` record with the source hash, compiler version and per-run hashes.
+- Fixed: programs with trait objects emitted their vtable types and instances in hash-map order, so two compiler runs could print different C for one source. 6 of 148 programs in `tests/programs` differed between two runs; after sorting, 147 of 147 that compile on this branch hash the same over 8 runs each.
+- `compiler/tests/build_hash.rs` holds the six programs at 8 runs each; unit tests plant a run counter, a late reordering and a truncation, and the comparison must name each.
+
 ### `Vec::release()`, and the database's memory bounds restored
 
 - `v.release()` returns a vector's buffer and handle to the allocator. The vector must not be used afterwards. `v.clear()` empties the vector and keeps the buffer for reuse (#227); in 1.13.0 it freed the handle, and the next push wrote through freed memory.
@@ -22,6 +28,7 @@ tracked in `STATUS.md`, `README.md`, and
 - A temporary computed from an integer limit now has the limit's width. `u64::MAX - 9223372036854775807` was stored in an `int32_t` and truncated to 0, so `mul(2^63, 2)` printed 0 instead of trapping (#215).
 - An integer-literal local that the type checker unified with a float (`let mut x = 0; ... x = h;` with `h: f64`) was a `double` in C but added through the 32-bit integer helper, which truncated it: `x + 1` with `x = 0.5` printed 1. A float operand now keeps the operation in floating point, and it prints 1.5 (#203).
 - `compiler/tests/int_limits_and_float_ops.rs`: 4 of 4 fail before the fix and pass after. `buildc tv` coverage of `tests/programs` is unchanged at 247 of 437 certified.
+
 ### Vector accesses as plain C array reads, bounds checks kept
 
 - A function that cannot resize or replace a vector (every call is a maths routine, an element store or a user function that cannot reach a vector) loads each vector parameter's buffer and length once and indexes them with a constant stride. Each access keeps its bounds check, message and exit code 101. A vector whose runtime element size differs from its type stops at its first access with a layout message instead of being read at the wrong offsets.
