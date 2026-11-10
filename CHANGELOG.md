@@ -10,6 +10,10 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+### Registry
+
+- `os-pfa` and `os-runq` 0.1.0 (AGPL-3.0-only): the host-testable cores of two operating-system kernel subsystems in pure `.bld`. `os-pfa` is a page-frame allocator over a caller-supplied bitmap; `os-runq` is a round-robin run queue over a caller-supplied ring. Each has an exact contract in `SPEC.md`, a reference model that shares no data structure with the core, hand-derived golden cases, a seeded differential fuzz run, model-free property checks, and four planted-defect controls that both checks must refuse. Neither has run inside a kernel.
+
 ## 1.14.0 - 2026-11-09 - typed vector access, the same C on every run, a fuzz target, `Vec::clear` and `Vec::release`
 
 Loops over vectors now compile to plain C array reads with every bounds check kept, which took n-body from 3.35 times the run time of C to 0.98 times at gcc -O2. The compiler emits the same C bytes on every run and `buildc build-hash` checks it, `Vec::clear` no longer writes through freed memory, and `Vec::release` frees a vector.
