@@ -10,6 +10,8 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+## 1.14.0 - 2026-11-09 - typed vector access, the same C on every run, a fuzz target, `Vec::clear` and `Vec::release`
+
 ### Benchmarks
 
 - `bench/wider-2026-11`: fannkuch-redux, mandelbrot, binary-trees and fasta against rustc 1.98.0 and gcc 13.2.0, with predictions written before the run. BuildLang is level with C -O2 on fannkuch-redux and mandelbrot, 1.26 times C on fasta and 1.9 to 2.4 times C on binary-trees.
