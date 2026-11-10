@@ -1,0 +1,2 @@
+planted
+PLANTED WRONG: a correct slot whose folder also carries its own tests/cases.txt.

@@ -1,0 +1,4 @@
+# n reps (hold-out workload sizes for the paired bench)
+37 5000000
+1000 600000
+1000003 800

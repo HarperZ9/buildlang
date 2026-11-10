@@ -213,6 +213,21 @@
           "dependencies": {}
         }
       }
+    },
+    "sum-det": {
+      "version": "0.1.0",
+      "description": "Float sums with a written order (serial, tree, interleave8), an exact correctly rounded sum two ways (Shewchuk partials, exact bins), and a slot the improvement loop may replace",
+      "author": "Zain Dana Harper",
+      "license": "FSL-1.1-MIT",
+      "checksum": "sha256:c3b60fbda9612c98cbbc033135998168cec4cb79349653c618696010b27dcc21",
+      "path": "packages/sum-det/0.1.0",
+      "versions": {
+        "0.1.0": {
+          "path": "packages/sum-det/0.1.0",
+          "checksum": "sha256:c3b60fbda9612c98cbbc033135998168cec4cb79349653c618696010b27dcc21",
+          "dependencies": {}
+        }
+      }
     }
   }
 }

@@ -1,0 +1,53 @@
+// sum-det slot `i8`, variant `unroll16`.
+// SPDX-License-Identifier: FSL-1.1-MIT
+// Copyright (c) 2026 Zain Dana Harper.
+//
+// Claim: sixteen elements per pass, two additions per lane in index order.
+// Add xs[at] to a lane total when the input reaches that far.
+fn sdv_tail(acc: f64, xs: &Vec<f64>, at: usize) -> f64 {
+    if at < xs.len() { acc + xs[at] } else { acc }
+}
+
+fn sd_i8(xs: &Vec<f64>) -> f64 {
+    let n = xs.len();
+    let full = n - n % 16;
+    let mut a0: f64 = 0.0;
+    let mut a1: f64 = 0.0;
+    let mut a2: f64 = 0.0;
+    let mut a3: f64 = 0.0;
+    let mut a4: f64 = 0.0;
+    let mut a5: f64 = 0.0;
+    let mut a6: f64 = 0.0;
+    let mut a7: f64 = 0.0;
+    let mut i: usize = 0;
+    while i < full {
+        a0 = (a0 + xs[i]) + xs[i + 8];
+        a1 = (a1 + xs[i + 1]) + xs[i + 9];
+        a2 = (a2 + xs[i + 2]) + xs[i + 10];
+        a3 = (a3 + xs[i + 3]) + xs[i + 11];
+        a4 = (a4 + xs[i + 4]) + xs[i + 12];
+        a5 = (a5 + xs[i + 5]) + xs[i + 13];
+        a6 = (a6 + xs[i + 6]) + xs[i + 14];
+        a7 = (a7 + xs[i + 7]) + xs[i + 15];
+        i = i + 16;
+    }
+    if n - i >= 8 {
+        a0 = a0 + xs[i];
+        a1 = a1 + xs[i + 1];
+        a2 = a2 + xs[i + 2];
+        a3 = a3 + xs[i + 3];
+        a4 = a4 + xs[i + 4];
+        a5 = a5 + xs[i + 5];
+        a6 = a6 + xs[i + 6];
+        a7 = a7 + xs[i + 7];
+        i = i + 8;
+    }
+    a0 = sdv_tail(a0, xs, i);
+    a1 = sdv_tail(a1, xs, i + 1);
+    a2 = sdv_tail(a2, xs, i + 2);
+    a3 = sdv_tail(a3, xs, i + 3);
+    a4 = sdv_tail(a4, xs, i + 4);
+    a5 = sdv_tail(a5, xs, i + 5);
+    a6 = sdv_tail(a6, xs, i + 6);
+    sd_fold8(a0, a1, a2, a3, a4, a5, a6, a7)
+}

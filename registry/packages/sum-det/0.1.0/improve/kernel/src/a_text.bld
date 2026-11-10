@@ -1,0 +1,117 @@
+// improve-kernel: text helpers.
+// SPDX-License-Identifier: FSL-1.1-MIT
+// Copyright (c) 2026 Zain Dana Harper.
+
+fn ik_read(path: str) -> str ~ FileSystem {
+    if file_exists(path) { read_file(path) } else { "" }
+}
+
+// Trimmed lines that are not empty and do not start with '#'.
+fn ik_lines(text: str) -> Vec<str> {
+    let raw = text.split("\n");
+    let mut out: Vec<str> = Vec::new();
+    let mut i: usize = 0;
+    while i < raw.len() {
+        let t = raw[i].trim();
+        if t.len() > 0 && !t.starts_with("#") {
+            out.push(t);
+        }
+        i = i + 1;
+    }
+    out
+}
+
+// The value of the last line "key=value" in a facts text, or "".
+fn ik_kv(text: str, key: str) -> str {
+    let want = format!("{}=", key);
+    let rows = text.split("\n");
+    let mut found: str = "";
+    let mut i: usize = 0;
+    while i < rows.len() {
+        if rows[i].starts_with(want) {
+            found = rows[i].substring(want.len(), rows[i].len() - want.len());
+        }
+        i = i + 1;
+    }
+    found
+}
+
+fn ik_kv_int(text: str, key: str) -> i64 {
+    let v = ik_kv(text, key);
+    if v.len() == 0 { 0 } else { v.parse_int() }
+}
+
+// The integer on the line "key = N" of a TOML text, or -1.
+fn ik_toml_int(text: str, key: str) -> i64 {
+    let want = format!("{} = ", key);
+    let rows = ik_lines(text);
+    let mut i: usize = 0;
+    while i < rows.len() {
+        if rows[i].starts_with(want) {
+            return rows[i].substring(want.len(), rows[i].len() - want.len()).trim().parse_int();
+        }
+        i = i + 1;
+    }
+    -1
+}
+
+fn ik_count(text: str, pat: str) -> i64 {
+    (text.split(pat).len() as i64) - 1
+}
+
+fn ik_join(items: &Vec<str>, sep: str) -> str {
+    let mut out: str = "";
+    let mut i: usize = 0;
+    while i < items.len() {
+        if i > 0 {
+            out = format!("{}{}{}", out, sep, items[i]);
+        } else {
+            out = items[i];
+        }
+        i = i + 1;
+    }
+    out
+}
+
+// A JSON array of strings. The items hold no quote or backslash.
+fn ik_json_list(items: &Vec<str>) -> str {
+    if items.len() == 0 {
+        return "[]";
+    }
+    format!("[\"{}\"]", ik_join(items, "\",\""))
+}
+
+// Lower-case letters, digits and hyphens only.
+fn ik_name_ok(s: str) -> bool {
+    let b = s.as_bytes();
+    let mut i: usize = 0;
+    while i < s.len() {
+        let c = b[i] as i64;
+        let ok = (c >= 97 && c <= 122) || (c >= 48 && c <= 57) || c == 45;
+        if !ok {
+            return false;
+        }
+        i = i + 1;
+    }
+    s.len() > 0
+}
+
+// Floor of v * 1e6 as an integer (parts per million).
+fn ik_ppm(v: f64) -> i64 {
+    let x = v * 1000000.0;
+    let k = x as i64;
+    if (k as f64) > x { k - 1 } else { k }
+}
+
+// A lower-case hex string of at most 15 digits as an integer.
+fn ik_hex_int(s: str) -> i64 {
+    let b = s.as_bytes();
+    let mut v: i64 = 0;
+    let mut i: usize = 0;
+    while i < s.len() {
+        let c = b[i] as i64;
+        v = v * 16 + (if c >= 97 { c - 87 } else { c - 48 });
+        i = i + 1;
+    }
+    v
+}

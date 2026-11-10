@@ -1,0 +1,95 @@
+// improve-kernel: plan lines for the spawner.
+// SPDX-License-Identifier: FSL-1.1-MIT
+// Copyright (c) 2026 Zain Dana Harper.
+//
+// The language has no builtin that starts a process, so the kernel prints
+// what must run and improve/spawn.py runs it. Fields are split by '|'.
+//   tree|DEST|SLOT        copy Build.toml, Build.lock and src/ to DEST, then
+//                         SLOT over DEST/src/i8.bld ("-" keeps the slot)
+//   run|OUT|CWD|ARG...    run, output to OUT, exit code to OUT.rc
+//   bench|OUT|CWD|ARG...  the same under the memory watch, its line to OUT.mw
+// The word BUILDC stands for the compiler. Every path is relative to the
+// package folder.
+
+// The built program. Where programs carry no ".exe" the spawner drops it.
+fn ik_exe(dir: str) -> str {
+    format!("{}/target/pkg/sum-det.exe", dir)
+}
+
+fn ik_plan_build(dir: str, slot: str) ~ Console {
+    println!("tree|{}|{}", dir, slot);
+    println!("run|{}/out/build.txt|{}|BUILDC|pkg|build|--release", dir, dir);
+    println!("run|{}/out/lint.txt|{}|BUILDC|lint|target/pkg/work/main.bld", dir, dir);
+    println!("run|{}/out/tv.txt|{}|BUILDC|tv|target/pkg/work/main.bld", dir, dir);
+}
+
+// One run per case line "MODE GOLDEN ARG...".
+fn ik_plan_cases(dir: str, cases: str, tag: str) ~ Console + FileSystem {
+    let rows = ik_lines(ik_read(cases));
+    let mut i: usize = 0;
+    while i < rows.len() {
+        let toks = rows[i].split(" ");
+        let mut line = format!("run|{}/out/{}-{}.txt|.|{}", dir, tag, i, ik_exe(dir));
+        let mut k: usize = 2;
+        while k < toks.len() {
+            line = format!("{}|{}", line, toks[k]);
+            k = k + 1;
+        }
+        println!("{}", line);
+        i = i + 1;
+    }
+}
+
+fn ik_plan_props(dir: str) ~ Console + FileSystem {
+    let rows = ik_lines(ik_read("tests/props.txt"));
+    let mut i: usize = 0;
+    while i < rows.len() {
+        let t = rows[i].split(" ");
+        println!("run|{}/out/prop-{}.txt|.|{}|prop|{}|{}|{}", dir, i, ik_exe(dir), t[0], t[1], t[2]);
+        i = i + 1;
+    }
+}
+
+fn ik_plan_fuzz(dir: str, seed: i64, count: i64) ~ Console {
+    println!("run|{}/out/fuzz.txt|.|{}|fuzz|{}|{}", dir, ik_exe(dir), seed, count);
+}
+
+// The equality steps for one tree.
+fn ik_plan_equal(work: str, dir: str, slot: str) ~ Console + FileSystem {
+    let count = ik_toml_int(ik_read("bench/bench.toml"), "fuzz_count");
+    ik_plan_build(dir, slot);
+    ik_plan_cases(dir, "tests/cases.txt", "case");
+    ik_plan_props(dir);
+    ik_plan_fuzz(dir, ik_get_int(work, "seed"), count);
+}
+
+// A, B, A, B: the baseline first in every round, one process per measurement.
+fn ik_plan_bench(work: str, dir: str, tag: str, n: i64, reps: i64) ~ Console + FileSystem {
+    let rounds = ik_toml_int(ik_read("bench/bench.toml"), "rounds");
+    let seed = ik_get_int(work, "seed");
+    let a = ik_exe(format!("{}/A", work));
+    let b = ik_exe(dir);
+    let mut r: i64 = 0;
+    while r < rounds {
+        println!("bench|{}/out/{}-a-{}.txt|.|{}|bench|i8|{}|{}|{}", dir, tag, r, a, n, reps, seed + r);
+        println!("bench|{}/out/{}-b-{}.txt|.|{}|bench|i8|{}|{}|{}", dir, tag, r, b, n, reps, seed + r);
+        r = r + 1;
+    }
+}
+
+fn ik_plan_open_bench(work: str, dir: str) ~ Console + FileSystem {
+    let toml = ik_read("bench/bench.toml");
+    ik_plan_bench(work, dir, "open", ik_toml_int(toml, "open_n"), ik_toml_int(toml, "open_reps"));
+}
+
+// Hold-out: the hold-out cases, then a paired bench at each hold-out size.
+fn ik_plan_holdout(work: str, dir: str) ~ Console + FileSystem {
+    ik_plan_cases(dir, "holdout/cases.txt", "hold");
+    let rows = ik_lines(ik_read("holdout/sizes.txt"));
+    let mut i: usize = 0;
+    while i < rows.len() {
+        let t = rows[i].split(" ");
+        ik_plan_bench(work, dir, format!("size{}", i), t[0].parse_int(), t[1].parse_int());
+        i = i + 1;
+    }
+}

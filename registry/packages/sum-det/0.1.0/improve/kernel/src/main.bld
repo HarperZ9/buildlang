@@ -1,0 +1,259 @@
+// improve-kernel: the promotion loop for one kernel package, as a state machine.
+// SPDX-License-Identifier: FSL-1.1-MIT
+// Copyright (c) 2026 Zain Dana Harper.
+//
+// Run from the package folder:
+//   improve-kernel next WORK [PROPOSAL...]   print the next plan, or "done"
+//   improve-kernel frozen                    check improve/FROZEN.sha256
+//   improve-kernel verify                    check the ledger chain
+// The caller runs each plan and calls `next` again until it prints "done".
+// Controls run first, every run. The kernel writes three things: the state
+// file under WORK, lines appended to the ledger, and, on a promotion, the
+// slot src/i8.bld.
+
+fn ik_controls() -> Vec<str> ~ FileSystem {
+    let rows = ik_lines(ik_read("tests/controls.txt"));
+    let mut names: Vec<str> = Vec::new();
+    let mut i: usize = 0;
+    while i < rows.len() {
+        names.push(rows[i].split("|")[0].trim());
+        i = i + 1;
+    }
+    names
+}
+
+fn ik_proposals(work: str) -> Vec<str> ~ FileSystem {
+    let csv = ik_get(work, "proposals");
+    if csv.len() == 0 {
+        return Vec::new();
+    }
+    csv.split(",")
+}
+
+// Why a proposal may not be measured in this run, or "".
+fn ik_gate(work: str, name: str, nth: i64) -> str ~ FileSystem + Clock {
+    let toml = ik_read("bench/bench.toml");
+    if !ik_name_ok(name) || !is_dir(format!("improve/proposals/{}", name)) {
+        return "unknown-variant";
+    }
+    if ik_get(work, "void") == "1" {
+        return "run-void";
+    }
+    if nth >= ik_toml_int(toml, "max_proposals") {
+        return "budget-proposals";
+    }
+    if time_unix() - ik_get_int(work, "t0") > ik_toml_int(toml, "wall_clock_s") {
+        return "budget-wall-clock";
+    }
+    ""
+}
+
+// The compiler's own version line, as the spawner captured it.
+fn ik_buildc(work: str) -> str ~ FileSystem {
+    let rows = ik_lines(ik_text(format!("{}/out/buildc.txt", work)));
+    if rows.len() == 0 || rows[0].contains("\"") || rows[0].contains("\\") {
+        return "unknown";
+    }
+    rows[0]
+}
+
+fn ik_finish(work: str) ~ Console + FileSystem + Clock {
+    let total = ik_controls().len() as i64;
+    let refused = ik_get_int(work, "ctl_refused");
+    let bad = ik_frozen_bad();
+    let ok = ik_get(work, "void") != "1" && refused == total && bad.len() == 0;
+    let best = ik_get(work, "best");
+    let mut promoted: str = "";
+    let mut digest: str = "";
+    if ok && best.len() > 0 {
+        // The bytes that were built and measured, not the proposal folder as it is now.
+        let tested = format!("{}/{}/src/i8.bld", work, best);
+        digest = read_bytes(tested).sha256();
+        write_file("src/i8.bld", read_file(tested));
+        promoted = best;
+    }
+    let head = format!(
+        "\"buildc\":\"{}\",\"controls_refused\":{},\"controls_total\":{},\"frozen_sha256\":\"{}\",\"kind\":\"run\"",
+        ik_buildc(work), refused, total, ik_frozen_digest());
+    let mid = format!("\"promoted\":\"{}\",\"promoted_sha256\":\"{}\",\"run\":\"{}\",\"schema\":\"kimprove-ledger/1\"",
+        promoted, digest, ik_get(work, "run"));
+    let rest = format!("\"status\":\"{}\",\"time_unix\":{},\"variants\":{}", if ok { "ok" } else { "void" },
+        time_unix(), ik_get_int(work, "idx"));
+    ik_ledger_append(head, mid, rest);
+    ik_set(work, "phase", "done");
+    println!("run {} promoted [{}] frozen-changed [{}]", if ok { "ok" } else { "void" }, promoted, bad);
+    println!("done");
+}
+
+// Close the current variant with a ledger line and count a refused control.
+fn ik_close(work: str, name: str, kind: str, decision: str, bench: str, holdout: str) ~ Console + FileSystem + Clock {
+    ik_record(work, name, kind, decision, bench, holdout);
+    if kind == "control" && decision == "refuse" {
+        ik_set(work, "ctl_refused", format!("{}", ik_get_int(work, "ctl_refused") + 1));
+    }
+    if kind == "control" && decision != "refuse" {
+        ik_set(work, "void", "1");
+    }
+}
+
+// Start variants from index `from` until one needs a plan to run.
+fn ik_begin(work: str, from: i64) ~ Console + FileSystem + Clock {
+    let ctl = ik_controls();
+    let props = ik_proposals(work);
+    let nctl = ctl.len() as i64;
+    let mut i = from;
+    while i < nctl + (props.len() as i64) {
+        let kind = if i < nctl { "control" } else { "proposal" };
+        let name = if i < nctl { ctl[i as usize] } else { props[(i - nctl) as usize] };
+        ik_set(work, "idx", format!("{}", i + 1));
+        ik_set(work, "steps", "");
+        ik_set(work, "reasons", "");
+        ik_set(work, "bench", "null");
+        let gate = if i < nctl { "" } else { ik_gate(work, name, i - nctl) };
+        let src = format!("improve/{}s/{}", kind, name);
+        let why = if gate.len() > 0 { gate } else { ik_admit(src) };
+        ik_step(work, if gate.len() > 0 { "gate" } else { "admit" }, why.len() == 0, why);
+        if why.len() == 0 {
+            let dir = format!("{}/{}", work, name);
+            ik_plan_equal(work, dir, format!("{}/src/i8.bld", src));
+            if i < nctl {
+                ik_plan_cases(dir, "holdout/cases.txt", "hold");
+            }
+            ik_set(work, "phase", "equal");
+            return;
+        }
+        ik_close(work, name, kind, "refuse", "null", "not-run");
+        i = i + 1;
+    }
+    ik_finish(work);
+}
+
+fn ik_start(work: str) ~ Console + FileSystem + Clock + Environment {
+    let bad = ik_frozen_bad();
+    let missing = ik_frozen_missing();
+    let chain = ik_ledger_verify();
+    if bad.len() > 0 || missing.len() > 0 || chain >= 0 {
+        println!("abort frozen-changed [{}] not-frozen [{}] ledger-line [{}]", bad, missing, chain);
+        ik_set(work, "phase", "done");
+        println!("done");
+        return;
+    }
+    let mut names: Vec<str> = Vec::new();
+    let mut k: i64 = 3;
+    while k < args_count() {
+        names.push(args_get(k));
+        k = k + 1;
+    }
+    let seed = format!("{}:{}:{}", time_unix(), clock_ms(), ik_ledger_tail().1).sha256().substring(0, 11);
+    ik_set(work, "run", format!("run-{}", time_unix()));
+    ik_set(work, "t0", format!("{}", time_unix()));
+    ik_set(work, "seed", format!("{}", ik_hex_int(seed)));
+    ik_set(work, "proposals", ik_join(&names, ","));
+    ik_set(work, "phase", "base");
+    println!("run|{}/out/buildc.txt|.|BUILDC|--version", work);
+    ik_plan_equal(work, format!("{}/A", work), "-");
+}
+
+// The current variant: (name, kind, working folder).
+fn ik_current(work: str) -> (str, str, str) ~ FileSystem {
+    let ctl = ik_controls();
+    let i = ik_get_int(work, "idx") - 1;
+    if i < (ctl.len() as i64) {
+        return (ctl[i as usize], "control", format!("{}/{}", work, ctl[i as usize]));
+    }
+    let name = ik_proposals(work)[(i as usize) - ctl.len()];
+    (name, "proposal", format!("{}/{}", work, name))
+}
+
+fn ik_after_equal(work: str) ~ Console + FileSystem + Clock {
+    let cur = ik_current(work);
+    let mut pass = ik_judge_equal(work, cur.2);
+    if cur.1 == "control" && ik_judge_build(cur.2) {
+        let hold = ik_judge_cases(cur.2, "holdout/cases.txt", "hold");
+        ik_step(work, "hold-cases", hold, "hold-cases");
+        pass = pass && hold;
+    }
+    if cur.1 == "proposal" && pass {
+        ik_plan_open_bench(work, cur.2);
+        ik_set(work, "phase", "bench");
+        return;
+    }
+    let decision = if pass { "control-passed" } else { "refuse" };
+    ik_close(work, cur.0, cur.1, decision, "null", "not-run");
+    ik_begin(work, ik_get_int(work, "idx"));
+}
+
+fn ik_after_bench(work: str) ~ Console + FileSystem + Clock {
+    let cur = ik_current(work);
+    if ik_judge_open(work, cur.2) {
+        ik_plan_holdout(work, cur.2);
+        ik_set(work, "phase", "hold");
+        return;
+    }
+    ik_close(work, cur.0, cur.1, "refuse", ik_get(work, "bench"), "not-run");
+    ik_begin(work, ik_get_int(work, "idx"));
+}
+
+fn ik_after_hold(work: str) ~ Console + FileSystem + Clock {
+    let cur = ik_current(work);
+    let cases = ik_judge_cases(cur.2, "holdout/cases.txt", "hold");
+    ik_step(work, "hold-cases", cases, "overfit-hold-cases");
+    let sizes = ik_judge_sizes(cur.2);
+    ik_step(work, "hold-sizes", sizes, "overfit-hold-sizes");
+    let pass = cases && sizes;
+    if pass && (ik_get(work, "best").len() == 0 || ik_get_int(work, "lo") > ik_get_int(work, "best_lo")) {
+        ik_set(work, "best", cur.0);
+        ik_set(work, "best_lo", ik_get(work, "lo"));
+    }
+    let word = if pass { "pass" } else { "fail" };
+    ik_close(work, cur.0, cur.1, if pass { "eligible" } else { "refuse" }, ik_get(work, "bench"), word);
+    ik_begin(work, ik_get_int(work, "idx"));
+}
+
+fn ik_next(work: str) ~ Console + FileSystem + Clock + Environment {
+    let phase = ik_get(work, "phase");
+    if phase == "" {
+        ik_start(work);
+    } else if phase == "base" {
+        ik_set(work, "steps", "");
+        ik_set(work, "reasons", "");
+        if ik_judge_equal(work, format!("{}/A", work)) {
+            ik_begin(work, 0);
+        } else {
+            println!("abort baseline-fails [{}]", ik_get(work, "reasons"));
+            ik_set(work, "void", "1");
+            ik_finish(work);
+        }
+    } else if phase == "equal" {
+        ik_after_equal(work);
+    } else if phase == "bench" {
+        ik_after_bench(work);
+    } else if phase == "hold" {
+        ik_after_hold(work);
+    } else {
+        println!("done");
+    }
+}
+
+fn main() ~ Console + FileSystem + Clock + Environment + Process {
+    let cmd = if args_count() > 1 { args_get(1) } else { "" };
+    if cmd == "next" && args_count() > 2 {
+        ik_next(args_get(2));
+    } else if cmd == "frozen" {
+        let bad = ik_frozen_bad();
+        let missing = ik_frozen_missing();
+        println!("frozen {} changed [{}] not-listed [{}]", ik_frozen_digest(), bad, missing);
+        if bad.len() > 0 || missing.len() > 0 {
+            exit(1);
+        }
+    } else if cmd == "verify" {
+        let at = ik_ledger_verify();
+        println!("ledger lines {} first-bad-line {}", ik_ledger_tail().0, at);
+        if at >= 0 {
+            exit(1);
+        }
+    } else {
+        println!("usage: improve-kernel next WORK [PROPOSAL...] | frozen | verify");
+        exit(2);
+    }
+}
