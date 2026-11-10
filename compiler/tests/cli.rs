@@ -712,23 +712,20 @@ fn check_receipt_records_env_macro_capability_source() {
         .arg(&fixture)
         .arg("--receipt")
         .arg("-")
+        .env("TOKEN", "fixture-value")
         .output()
         .expect("run buildc check --receipt -");
 
     let _ = fs::remove_file(&fixture);
 
-    // `env!` has no lowering yet. It used to be dropped from the program with
-    // no diagnostic, so this check passed while `token_name` held nothing.
-    // The check now refuses the program by name, and the receipt still
-    // records which macro needed the capability.
+    // `env!` reads the variable while compiling, so the check needs it set.
     assert!(
-        !output.status.success(),
-        "env! has no lowering, so the check must refuse it\nstdout:\n{}",
+        output.status.success(),
+        "stdout:
+{}
+stderr:
+{}",
         String::from_utf8_lossy(&output.stdout),
-    );
-    assert!(
-        String::from_utf8_lossy(&output.stderr).contains("macro `env!` is not implemented"),
-        "stderr:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
     let receipt = receipt_from_stdout(&output);

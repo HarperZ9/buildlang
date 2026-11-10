@@ -139,6 +139,10 @@ impl<'ctx> MirLowerer<'ctx> {
                         self.lower_asm_macro(tokens)?;
                         Ok(None)
                     }
+                    "env" => {
+                        self.lower_env_macro(tokens)?;
+                        Ok(None)
+                    }
                     name if asserts::assert_arity(name).is_some() => {
                         let arity = asserts::assert_arity(name).unwrap_or(1);
                         self.lower_assert_macro(name, arity, tokens)?;
@@ -610,6 +614,7 @@ impl<'ctx> MirLowerer<'ctx> {
                         self.lower_format_macro(tokens)
                     }
                     "vec" => self.lower_vec_macro(tokens),
+                    "env" => self.lower_env_macro(tokens),
                     "asm" => {
                         self.lower_asm_macro(tokens)?;
                         Ok(values::unit())
@@ -636,7 +641,7 @@ impl<'ctx> MirLowerer<'ctx> {
         }
     }
 
-    fn lower_literal(&mut self, lit: &Literal) -> CodegenResult<MirValue> {
+    pub(super) fn lower_literal(&mut self, lit: &Literal) -> CodegenResult<MirValue> {
         match lit {
             Literal::Int { value, suffix, .. } => {
                 let (ty, signed) = suffix
