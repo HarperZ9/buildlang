@@ -1,0 +1,7 @@
+# id | where | planted defect | refused by (kind)
+1 | ctl_decode | branch offset bit 11 is read from word bit 20 instead of word bit 7 | differential 2 (pc), property 41
+2 | ctl_decode | the shift decoder ignores word bit 30, so SRAI reads as SRLI | differential 3 (register), property 41
+3 | ctl_decode | 12-bit immediates are zero-extended instead of sign-extended | differential 3 (register), property 41
+4 | ctl_decode | the jump decoder drops offset bits 19 to 12 | differential 2 (pc), property 41
+5 | step_v | register 0 is an ordinary register, so a write to it lands | differential 6 (register 0), hand-computed case 22
+6 | step_v | ADDIW leaves the upper 32 bits clear instead of copying bit 31 | differential 3 (register), hand-computed case 32

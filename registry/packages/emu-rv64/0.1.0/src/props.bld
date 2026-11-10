@@ -1,0 +1,31 @@
+// Property check for emu-rv64. It uses no reference model: it tests facts
+// that must hold for any correct decoder, then the hand-computed cases.
+// For kinds 41 and 42 `step` is the round number; for kind 43 it is the
+// number of the first failing case.
+//
+//   41  decode(encode(i)) equals i for every generated instruction i
+//   42  for any 32-bit word w, decode(w) is "not RV64I" or
+//       encode(decode(w)) equals w, so no two instructions share a word and
+//       the decoder reads every bit of the word
+//   43  every hand-computed case in vectors.bld passes
+
+fn prop_run(v: u64, seed: u64, steps: u64) -> Refusal ~ Console {
+    let mut r = Rng { s: seed };
+    let mut i: u64 = 0_u64;
+    while i < steps {
+        let d = gen_insn(&mut r);
+        let w = emu_encode(&d);
+        let back = ctl_decode(v, w);
+        if !same_insn(&d, &back) { return fz_refuse(41, i, w, d.op); }
+        let raw = rng_next(&mut r) & 0xFFFFFFFF_u64;
+        let e = ctl_decode(v, raw);
+        if e.op != 0_u64 {
+            let again = emu_encode(&e);
+            if again != raw { return fz_refuse(42, i, again, raw); }
+        }
+        i = i + 1_u64;
+    }
+    let bad = vectors_run(v, false);
+    if bad != 0_u64 { return fz_refuse(43, bad, 0_u64, 0_u64); }
+    fz_refuse(0, steps, 0_u64, 0_u64)
+}

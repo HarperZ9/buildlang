@@ -1,0 +1,66 @@
+// emu-rv64: every constant of the package, in one file that sorts first.
+// The package sources are joined in name order, and a constant is declared
+// here before any function uses it.
+
+const EMU_OK: i64 = 0;
+const EMU_BREAK: i64 = 1;
+const EMU_ECALL: i64 = 2;
+const EMU_ILLEGAL: i64 = -1;
+const EMU_BUS: i64 = -2;
+const EMU_ALIGN: i64 = -3;
+const EMU_SMALL: i64 = -4;
+
+const EMU_RAM_BASE: u64 = 0x80000000_u64;
+const EMU_UART_BASE: u64 = 0x10000000_u64;
+const EMU_UART_LSR: u64 = 0x10000005_u64;
+const EMU_SIGN: u64 = 0x8000000000000000_u64;
+
+// Operation numbers. 0 means "not an RV64I instruction".
+const OP_LUI: u64 = 1_u64;
+const OP_AUIPC: u64 = 2_u64;
+const OP_JAL: u64 = 3_u64;
+const OP_JALR: u64 = 4_u64;
+const OP_BEQ: u64 = 5_u64;
+const OP_BGEU: u64 = 10_u64;
+const OP_LB: u64 = 11_u64;
+const OP_LWU: u64 = 17_u64;
+const OP_SB: u64 = 18_u64;
+const OP_SD: u64 = 21_u64;
+const OP_ADDI: u64 = 22_u64;
+const OP_SLLI: u64 = 28_u64;
+const OP_SRLI: u64 = 29_u64;
+const OP_SRAI: u64 = 30_u64;
+const OP_ADD: u64 = 31_u64;
+const OP_AND: u64 = 40_u64;
+const OP_ADDIW: u64 = 41_u64;
+const OP_SLLIW: u64 = 42_u64;
+const OP_SRAIW: u64 = 44_u64;
+const OP_ADDW: u64 = 45_u64;
+const OP_SRAW: u64 = 49_u64;
+const OP_FENCE: u64 = 50_u64;
+const OP_ECALL: u64 = 51_u64;
+const OP_EBREAK: u64 = 52_u64;
+
+// Field classes: which fields of a decoded instruction carry meaning.
+const CL_U: u64 = 1_u64;
+const CL_J: u64 = 2_u64;
+const CL_I: u64 = 3_u64;
+const CL_B: u64 = 4_u64;
+const CL_S: u64 = 5_u64;
+const CL_R: u64 = 6_u64;
+const CL_SYS: u64 = 7_u64;
+
+// Differential fuzz: bytes of memory and of serial output per machine.
+const FZ_RAM: u64 = 1024_u64;
+const FZ_OUT: u64 = 64_u64;
+
+// Number of planted-defect variants.
+const CTL_COUNT: u64 = 6_u64;
+
+// Hand-computed cases: base address, next address, a branch target and two
+// bit patterns.
+const V_B: u64 = 0x80000000_u64;
+const V_N: u64 = 0x80000004_u64;
+const V_P: u64 = 0x80000100_u64;
+const V_ONES: u64 = 0xFFFFFFFFFFFFFFFF_u64;
+const V_NEG32: u64 = 0xFFFFFFFF80000000_u64;
