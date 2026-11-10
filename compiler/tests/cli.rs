@@ -717,10 +717,18 @@ fn check_receipt_records_env_macro_capability_source() {
 
     let _ = fs::remove_file(&fixture);
 
+    // `env!` has no lowering yet. It used to be dropped from the program with
+    // no diagnostic, so this check passed while `token_name` held nothing.
+    // The check now refuses the program by name, and the receipt still
+    // records which macro needed the capability.
     assert!(
-        output.status.success(),
-        "env macro receipt check should succeed\nstdout:\n{}\nstderr:\n{}",
+        !output.status.success(),
+        "env! has no lowering, so the check must refuse it\nstdout:\n{}",
         String::from_utf8_lossy(&output.stdout),
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("macro `env!` is not implemented"),
+        "stderr:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
     let receipt = receipt_from_stdout(&output);

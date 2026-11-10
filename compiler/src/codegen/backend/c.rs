@@ -3897,6 +3897,7 @@ impl CBackend {
             } => {
                 self.write_indent();
                 let cond_str = self.value_to_c(cond, locals);
+                let msg = self.escape_string(msg);
                 if *expected {
                     write!(self.output,
                         "if (!{}) {{ fprintf(stderr, \"Assertion failed: %s\\n\", \"{}\"); abort(); }}\n",
