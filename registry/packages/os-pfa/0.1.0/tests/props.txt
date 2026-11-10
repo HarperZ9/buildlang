@@ -1,0 +1,9 @@
+# code | property
+11 | the free count equals the number of clear bits below nframes
+12 | every bit at or past nframes in the last word is set
+13 | every word below the hint is full
+21 | alloc returns the lowest free frame, or PFA_NONE when no frame is free
+22 | every operation returns the exact code the tracked state implies
+23 | an operation changes exactly the bits it names, and a refused one changes none
+24 | conservation: free count plus used count equals nframes after every step
+25 | alloc_run is first fit: it returns the lowest start of n free frames in a row

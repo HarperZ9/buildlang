@@ -1,0 +1,145 @@
+// Property checks for os-runq. They use no reference model. The harness
+// keeps a copy of the task states from before each operation and the step
+// number at which each task last became ready, then judges the result. The
+// properties, with the refusal code each one raises:
+//
+//   31, 32  the state invariants of check.bld hold after every step
+//   33  add, wake, remove, block and exit return the exact code the copy
+//       implies, and a refused operation changes no task state
+//   34  first-in first-out: every dispatch picks the task that has been
+//       ready the longest, or idles when none is ready
+//   35  time slice: a tick takes the processor away exactly when the
+//       running task has used its whole quantum, and a dispatched task
+//       starts with a full quantum
+
+// What the harness knows before an operation.
+struct Pre { cur: i64, left: u64 }
+
+fn pre_copy(dst: &mut [u8], src: &[u8]) {
+    let mut i: u64 = 0_u64;
+    while i < CHK_SLOTS {
+        dst[i as usize] = src[i as usize];
+        i = i + 1_u64;
+    }
+}
+
+fn states_equal(a: &[u8], b: &[u8]) -> bool {
+    let mut i: u64 = 0_u64;
+    while i < CHK_SLOTS {
+        if a[i as usize] != b[i as usize] { return false; }
+        i = i + 1_u64;
+    }
+    true
+}
+
+// The exact code for add (need = absent), wake (need = blocked) and remove
+// (need = 255: any state except absent).
+fn expect_task_op(st0: &[u8], cap: u64, t: u64, need: u8) -> i64 {
+    if t >= cap {
+        return RQ_RANGE;
+    }
+    let s = st0[t as usize];
+    if need == 255_u8 {
+        if s == RQ_ABSENT { return RQ_STATE; }
+        return RQ_OK;
+    }
+    if s != need { return RQ_STATE; }
+    RQ_OK
+}
+
+// The task a dispatch must pick: the ready task with the lowest ready step.
+// `requeue` is the task that goes to the back first, or -1.
+fn expect_dispatch(st0: &[u8], since: &[u64], cap: u64, requeue: i64) -> i64 {
+    let mut best: i64 = -1;
+    let mut t: u64 = 0_u64;
+    while t < cap {
+        let ready = st0[t as usize] == RQ_READY || (t as i64) == requeue;
+        if ready && (best < 0 || since[t as usize] < since[best as usize]) {
+            best = t as i64;
+        }
+        t = t + 1_u64;
+    }
+    best
+}
+
+// Judges a step that must dispatch. Returns 0 or a refusal code.
+fn judge_dispatch(q: &Runq, st0: &[u8], since: &[u64], requeue: i64, got: i64) -> i64 {
+    if got != expect_dispatch(st0, since, q.cap, requeue) {
+        return 34;
+    }
+    if got >= 0 && q.left != q.quantum {
+        return 35;
+    }
+    0
+}
+
+// Judges add, wake and remove. Marks the ready step on success.
+fn judge_task_op(op: &Op, st0: &[u8], state: &[u8], since: &mut [u64], cap: u64, step: u64, got: i64) -> i64 {
+    let mut need: u8 = RQ_ABSENT;
+    if op.kind == 4_u64 { need = RQ_BLOCKED; }
+    if op.kind == 6_u64 { need = 255_u8; }
+    if got != expect_task_op(st0, cap, op.t, need) {
+        return 33;
+    }
+    if got != RQ_OK && !states_equal(st0, state) {
+        return 33;
+    }
+    if got == RQ_OK && op.kind != 6_u64 {
+        since[op.t as usize] = step;
+    }
+    0
+}
+
+// Judges next, tick, block and exit.
+fn judge_cpu_op(op: &Op, q: &Runq, pre: &Pre, st0: &[u8], state: &[u8], since: &mut [u64], step: u64, got: i64) -> i64 {
+    if op.kind == 3_u64 || op.kind == 5_u64 {
+        if pre.cur < 0 {
+            if got != RQ_STATE || !states_equal(st0, state) { return 33; }
+            return 0;
+        }
+        return judge_dispatch(q, st0, since, -1, got);
+    }
+    if op.kind == 2_u64 && pre.cur >= 0 && pre.left > 1_u64 {
+        if got != pre.cur || q.left != pre.left - 1_u64 { return 35; }
+        return 0;
+    }
+    if pre.cur >= 0 {
+        since[pre.cur as usize] = step;
+    }
+    judge_dispatch(q, st0, since, pre.cur, got)
+}
+
+// Property run over variant v. Returns true when no step was refused.
+fn prop_run(v: i64, cap: u64, seed: u64, steps: u64, fl: &mut Fail) -> bool {
+    let mut q = rq_new();
+    let mut ring: [u64; 16] = [0_u64; 16];
+    let mut state: [u8; 16] = [0_u8; 16];
+    let mut st0: [u8; 16] = [0_u8; 16];
+    let mut since: [u64; 16] = [0_u64; 16];
+    let mut rng = Rng { s: seed };
+    let rc = rq_init(&mut q, &mut ring, &mut state, cap, chk_quantum(seed));
+    if rc != RQ_OK {
+        return fail_set(fl, 1, 0_u64, 9_u64, rc, RQ_OK);
+    }
+    let mut step: u64 = 1_u64;
+    while step <= steps {
+        let op = gen_op(&mut rng, cap);
+        pre_copy(&mut st0, &state);
+        let pre = Pre { cur: q.current, left: q.left };
+        let got = apply_sut(v, &mut q, &mut ring, &mut state, &op);
+        let mut k: i64 = 0;
+        if op.kind == 0_u64 || op.kind == 4_u64 || op.kind == 6_u64 {
+            k = judge_task_op(&op, &st0, &state, &mut since, cap, step, got);
+        } else {
+            k = judge_cpu_op(&op, &q, &pre, &st0, &state, &mut since, step, got);
+        }
+        if k == 0 {
+            k = inv_check(&q, &ring, &state);
+        }
+        if k != 0 {
+            return fail_set(fl, k, step, op.kind, got, 0);
+        }
+        step = step + 1_u64;
+    }
+    true
+}

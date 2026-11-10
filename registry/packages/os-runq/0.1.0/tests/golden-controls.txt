@@ -1,0 +1,34 @@
+variant 0: the core
+ differential:
+  accepted, 5 queue sizes, 3000 steps each
+ properties:
+  accepted, 5 queue sizes, 3000 steps each
+control 1: next puts the running task at the front
+ differential:
+  cap=2 seed=2 quantum=3
+  REFUSED kind=1 step=278 op=1 got=1 want=0
+ properties:
+  cap=2 seed=2 quantum=3
+  REFUSED kind=34 step=278 op=1 got=1 want=0
+control 2: wake accepts a task that is already ready
+ differential:
+  cap=1 seed=1 quantum=2
+  REFUSED kind=1 step=108 op=4 got=0 want=-3
+ properties:
+  cap=1 seed=1 quantum=2
+  REFUSED kind=33 step=108 op=4 got=0 want=0
+control 3: remove fills the gap with the last entry
+ differential:
+  cap=8 seed=4 quantum=1
+  REFUSED kind=2 step=1339 op=6 got=0 want=0
+ properties:
+  cap=8 seed=4 quantum=1
+  REFUSED kind=34 step=2901 op=2 got=1 want=0
+control 4: tick preempts one tick early
+ differential:
+  cap=1 seed=1 quantum=2
+  REFUSED kind=2 step=26 op=2 got=0 want=0
+ properties:
+  cap=1 seed=1 quantum=2
+  REFUSED kind=35 step=26 op=2 got=0 want=0
+result: core accepted, 4 of 4 controls refused by both checks

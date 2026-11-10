@@ -1,0 +1,7 @@
+fuzz seed=1 steps=4000
+  frames=1 seed=1 steps=4000 ok
+  frames=63 seed=2 steps=4000 ok
+  frames=64 seed=3 steps=4000 ok
+  frames=65 seed=4 steps=4000 ok
+  frames=200 seed=5 steps=4000 ok
+  frames=512 seed=6 steps=4000 ok

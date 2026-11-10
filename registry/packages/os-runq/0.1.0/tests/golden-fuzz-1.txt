@@ -1,0 +1,6 @@
+fuzz seed=1 steps=4000
+  cap=1 seed=1 quantum=2 steps=4000 ok
+  cap=2 seed=2 quantum=3 steps=4000 ok
+  cap=3 seed=3 quantum=4 steps=4000 ok
+  cap=8 seed=4 quantum=1 steps=4000 ok
+  cap=16 seed=5 quantum=2 steps=4000 ok

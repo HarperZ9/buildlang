@@ -1,0 +1,34 @@
+variant 0: the core
+ differential:
+  accepted, 6 map sizes, 3000 steps each
+ properties:
+  accepted, 6 map sizes, 3000 steps each
+control 1: free never lowers the hint
+ differential:
+  frames=1 seed=1
+  REFUSED kind=13 step=36 op=1 got=0 want=0
+ properties:
+  frames=1 seed=1
+  REFUSED kind=13 step=36 op=1 got=0 want=0
+control 2: free has no double-free check
+ differential:
+  frames=1 seed=1
+  REFUSED kind=1 step=11 op=1 got=0 want=-3
+ properties:
+  frames=1 seed=1
+  REFUSED kind=22 step=11 op=1 got=0 want=-3
+control 3: run search restarts on the used frame
+ differential:
+  frames=63 seed=2
+  REFUSED kind=1 step=8 op=2 got=2 want=3
+ properties:
+  frames=63 seed=2
+  REFUSED kind=25 step=8 op=2 got=2 want=3
+control 4: init leaves the tail bits clear
+ differential:
+  frames=1 seed=1
+  REFUSED kind=12 step=0 op=9 got=0 want=0
+ properties:
+  frames=1 seed=1
+  REFUSED kind=12 step=0 op=9 got=0 want=0
+result: core accepted, 4 of 4 controls refused by both checks

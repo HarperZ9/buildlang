@@ -10,6 +10,10 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+### Registry
+
+- `os-pfa` and `os-runq` 0.1.0 (AGPL-3.0-only): the host-testable cores of two operating-system kernel subsystems in pure `.bld`. `os-pfa` is a page-frame allocator over a caller-supplied bitmap; `os-runq` is a round-robin run queue over a caller-supplied ring. Each has an exact contract in `SPEC.md`, a reference model that shares no data structure with the core, hand-derived golden cases, a seeded differential fuzz run, model-free property checks, and four planted-defect controls that both checks must refuse. Neither has run inside a kernel.
+
 ### A kernel package with a gated improvement loop
 
 - `sum-det` 0.1.0 in the registry adds a list of binary64 floats in a written order (`serial`, `tree2`, `interleave8`) and returns the same bits on every run. Two functions that share no code (`sd_fsum`, `sd_binned`) return the exact sum rounded once. Goldens come from `ref/reference.py`, which takes the exact sum from Python `math.fsum` and from a `fractions.Fraction` sum; the inputs include cancellation, half-way cases, subnormals and values near overflow.

@@ -1,0 +1,227 @@
+// os-runq command line: runs the checks of the round-robin run queue core.
+//
+//   os-runq cases                  fixed script with hand-derived results
+//   os-runq trace CAP SEED STEPS   generated operations through the core
+//   os-runq trace-ref CAP SEED STEPS   the same operations through the model
+//   os-runq fuzz SEED STEPS        differential run against the model
+//   os-runq props SEED STEPS       property run, no model
+//   os-runq controls               shows that every planted defect is refused
+
+fn show(label: &str, rc: i64, q: &Runq) ~ Console {
+    println!("{} -> {} cur={} len={} left={}", label, rc, q.current, q.len, q.left);
+}
+
+fn cases_first(q: &mut Runq, ring: &mut [u64], st: &mut [u8]) ~ Console {
+    show("init 4 2", rq_init(q, ring, st, 4_u64, 2_u64), q);
+    show("next", rq_next(q, ring, st), q);
+    show("add 0", rq_add(q, ring, st, 0_u64), q);
+    show("add 1", rq_add(q, ring, st, 1_u64), q);
+    show("add 2", rq_add(q, ring, st, 2_u64), q);
+    show("add 2", rq_add(q, ring, st, 2_u64), q);
+    show("add 4", rq_add(q, ring, st, 4_u64), q);
+    show("tick", rq_tick(q, ring, st), q);
+    show("tick", rq_tick(q, ring, st), q);
+    show("tick", rq_tick(q, ring, st), q);
+    show("block", rq_block(q, ring, st), q);
+    show("wake 1", rq_wake(q, ring, st, 1_u64), q);
+    show("wake 1", rq_wake(q, ring, st, 1_u64), q);
+    show("next", rq_next(q, ring, st), q);
+    show("remove 1", rq_remove(q, ring, st, 1_u64), q);
+    show("exit", rq_exit(q, ring, st), q);
+}
+
+fn cases_second(q: &mut Runq, ring: &mut [u64], st: &mut [u8]) ~ Console {
+    show("tick", rq_tick(q, ring, st), q);
+    show("tick", rq_tick(q, ring, st), q);
+    show("remove 2", rq_remove(q, ring, st, 2_u64), q);
+    show("tick", rq_tick(q, ring, st), q);
+    show("block", rq_block(q, ring, st), q);
+    show("exit", rq_exit(q, ring, st), q);
+    show("remove 2", rq_remove(q, ring, st, 2_u64), q);
+    show("remove 9", rq_remove(q, ring, st, 9_u64), q);
+    show("add 3", rq_add(q, ring, st, 3_u64), q);
+    show("tick", rq_tick(q, ring, st), q);
+    show("init 0 2", rq_init(q, ring, st, 0_u64, 2_u64), q);
+    show("init 4 0", rq_init(q, ring, st, 4_u64, 0_u64), q);
+    show("init 17 1", rq_init(q, ring, st, 17_u64, 1_u64), q);
+}
+
+fn cases() ~ Console {
+    let mut q = rq_new();
+    let mut ring: [u64; 16] = [0_u64; 16];
+    let mut st: [u8; 16] = [0_u8; 16];
+    cases_first(&mut q, &mut ring, &mut st);
+    cases_second(&mut q, &mut ring, &mut st);
+}
+
+fn show_op(op: &Op, rc: i64) ~ Console {
+    if op.kind == 0_u64 { println!("add {} -> {}", op.t, rc); }
+    if op.kind == 1_u64 { println!("next -> {}", rc); }
+    if op.kind == 2_u64 { println!("tick -> {}", rc); }
+    if op.kind == 3_u64 { println!("block -> {}", rc); }
+    if op.kind == 4_u64 { println!("wake {} -> {}", op.t, rc); }
+    if op.kind == 5_u64 { println!("exit -> {}", rc); }
+    if op.kind == 6_u64 { println!("remove {} -> {}", op.t, rc); }
+}
+
+// Digest of the core state: task states, then the queue front to back.
+fn core_digest(q: &Runq, ring: &[u64], state: &[u8]) -> u64 {
+    let mut h: u64 = 0xCBF29CE484222325_u64;
+    let mut t: u64 = 0_u64;
+    while t < q.cap {
+        h = digest_step(h, state[t as usize] as u64);
+        t = t + 1_u64;
+    }
+    let mut i: u64 = 0_u64;
+    while i < q.len {
+        h = digest_step(h, ring_at(q, ring, i));
+        i = i + 1_u64;
+    }
+    h
+}
+
+// The same digest from the model: task states, then ready tasks by stamp.
+fn model_digest(st: &Vec<u8>, stamp: &Vec<u64>) -> u64 {
+    let mut h: u64 = 0xCBF29CE484222325_u64;
+    let mut t: usize = 0;
+    while t < st.len() {
+        h = digest_step(h, st[t] as u64);
+        t = t + 1;
+    }
+    let mut floor: u64 = 0_u64;
+    let mut next = refq_oldest(st, stamp, floor);
+    while next >= 0 {
+        h = digest_step(h, next as u64);
+        floor = stamp[next as usize];
+        next = refq_oldest(st, stamp, floor);
+    }
+    h
+}
+
+// Prints every generated operation and its result, then the running task,
+// its remaining ticks and a digest of the final state. `trace` and
+// `trace-ref` must print the same bytes.
+fn trace(use_ref: bool, cap: u64, seed: u64, steps: u64) ~ Console {
+    let mut q = rq_new();
+    let mut ring: [u64; 16] = [0_u64; 16];
+    let mut state: [u8; 16] = [0_u8; 16];
+    let mut m = refq_new(chk_quantum(seed));
+    let mut st = refq_states(cap);
+    let mut stamp = refq_stamps(cap);
+    let mut rng = Rng { s: seed };
+    rq_init(&mut q, &mut ring, &mut state, cap, chk_quantum(seed));
+    let mut step: u64 = 1_u64;
+    while step <= steps {
+        let op = gen_op(&mut rng, cap);
+        if use_ref {
+            show_op(&op, apply_ref(&mut m, &mut st, &mut stamp, &op));
+        } else {
+            show_op(&op, apply_sut(0, &mut q, &mut ring, &mut state, &op));
+        }
+        step = step + 1_u64;
+    }
+    if use_ref {
+        println!("cap={} cur={} left={} digest={:016x}", cap, m.cur, m.left, model_digest(&st, &stamp));
+    } else {
+        println!("cap={} cur={} left={} digest={:016x}", cap, q.current, q.left, core_digest(&q, &ring, &state));
+    }
+}
+
+// Runs one check (0 differential, 1 properties) for variant v over the five
+// queue sizes. Stops at the first refusal. Returns the number of refusals.
+fn sweep(check: i64, v: i64, seed: u64, steps: u64, quiet: bool) -> i64 ~ Console {
+    let mut i: u64 = 0_u64;
+    while i < 5_u64 {
+        let cap = chk_cap(i);
+        let mut fl = fail_new();
+        let mut ok = false;
+        if check == 0 {
+            ok = diff_run(v, cap, seed + i, steps, &mut fl);
+        } else {
+            ok = prop_run(v, cap, seed + i, steps, &mut fl);
+        }
+        if !ok {
+            println!("  cap={} seed={} quantum={}", cap, seed + i, chk_quantum(seed + i));
+            println!("  REFUSED kind={} step={} op={} got={} want={}", fl.kind, fl.step, fl.op, fl.got, fl.want);
+            return 1;
+        }
+        if !quiet {
+            println!("  cap={} seed={} quantum={} steps={} ok", cap, seed + i, chk_quantum(seed + i), steps);
+        }
+        i = i + 1_u64;
+    }
+    if quiet {
+        println!("  accepted, 5 queue sizes, {} steps each", steps);
+    }
+    0
+}
+
+fn control_name(v: i64) ~ Console {
+    if v == 0 { println!("variant 0: the core"); }
+    if v == 1 { println!("control 1: next puts the running task at the front"); }
+    if v == 2 { println!("control 2: wake accepts a task that is already ready"); }
+    if v == 3 { println!("control 3: remove fills the gap with the last entry"); }
+    if v == 4 { println!("control 4: tick preempts one tick early"); }
+}
+
+// Every control must be refused by both checks, and the core must pass both.
+fn controls() -> i64 ~ Console {
+    let mut bad: i64 = 0;
+    let mut v: i64 = 0;
+    while v <= 4 {
+        control_name(v);
+        println!(" differential:");
+        let d = sweep(0, v, 1_u64, 3000_u64, true);
+        println!(" properties:");
+        let p = sweep(1, v, 1_u64, 3000_u64, true);
+        if v == 0 && (d + p) != 0 { bad = bad + 1; }
+        if v != 0 && (d == 0 || p == 0) {
+            println!("  ACCEPTED A PLANTED DEFECT");
+            bad = bad + 1;
+        }
+        v = v + 1;
+    }
+    if bad == 0 {
+        println!("result: core accepted, 4 of 4 controls refused by both checks");
+    } else {
+        println!("result: FAILED, {} variants judged wrongly", bad);
+    }
+    bad
+}
+
+fn usage() ~ Console {
+    println!("usage: os-runq cases | controls | fuzz SEED STEPS | props SEED STEPS");
+    println!("       os-runq trace CAP SEED STEPS | trace-ref CAP SEED STEPS");
+}
+
+fn main() ~ Console + Process + Environment {
+    let cmd = args_get(1);
+    if cmd == "cases" {
+        cases();
+        return;
+    }
+    if cmd == "controls" {
+        if controls() != 0 { exit(1); }
+        return;
+    }
+    let a = args_get(2).parse_int() as u64;
+    let b = args_get(3).parse_int() as u64;
+    if cmd == "fuzz" || cmd == "props" {
+        let mut check: i64 = 0;
+        if cmd == "props" { check = 1; }
+        println!("{} seed={} steps={}", cmd, a, b);
+        if sweep(check, 0, a, b, false) != 0 { exit(1); }
+        return;
+    }
+    if cmd == "trace" || cmd == "trace-ref" {
+        let steps = args_get(4).parse_int() as u64;
+        if a == 0_u64 || a > CHK_SLOTS {
+            println!("error: CAP must be 1 to 16");
+            exit(2);
+        }
+        trace(cmd == "trace-ref", a, b, steps);
+        return;
+    }
+    usage();
+    exit(2);
+}

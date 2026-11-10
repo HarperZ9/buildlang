@@ -1,0 +1,9 @@
+[package]
+name = "os-runq"
+version = "0.1.0"
+edition = "2026"
+description = "Round-robin run queue core for an operating-system kernel: ring buffer with an exact contract, reference model, differential fuzz and planted controls"
+author = "Zain Dana Harper"
+license = "AGPL-3.0-only"
+
+[dependencies]
