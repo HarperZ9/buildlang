@@ -78,13 +78,23 @@ impl<'ctx> MirLowerer<'ctx> {
         let cont = builder.create_block();
         if is_read {
             let result = builder.create_local(pointee);
-            builder.call(MirValue::Function(Arc::from(VOLATILE_READ)), vec![ptr], Some(result), cont);
+            builder.call(
+                MirValue::Function(Arc::from(VOLATILE_READ)),
+                vec![ptr],
+                Some(result),
+                cont,
+            );
             builder.switch_to_block(cont);
             return Ok(values::local(result));
         }
         let mut call_args = vec![ptr];
         call_args.extend(args);
-        builder.call(MirValue::Function(Arc::from(VOLATILE_WRITE)), call_args, None, cont);
+        builder.call(
+            MirValue::Function(Arc::from(VOLATILE_WRITE)),
+            call_args,
+            None,
+            cont,
+        );
         builder.switch_to_block(cont);
         Ok(values::unit())
     }
@@ -98,7 +108,10 @@ impl<'ctx> MirLowerer<'ctx> {
         let want = if is_read { 1 } else { 2 };
         if args.len() != want {
             return Err(rejected(
-                format!("volatile access takes {want} argument(s), found {}", args.len()),
+                format!(
+                    "volatile access takes {want} argument(s), found {}",
+                    args.len()
+                ),
                 None,
                 "write `ptr::read_volatile(p)` or `ptr::write_volatile(p, v)`",
             ));
@@ -122,7 +135,10 @@ impl<'ctx> MirLowerer<'ctx> {
             };
             let is_str = matches!(
                 &tok.kind,
-                TokenKind::Literal { kind: LiteralKind::Str { .. }, .. }
+                TokenKind::Literal {
+                    kind: LiteralKind::Str { .. },
+                    ..
+                }
             );
             if expect_string && is_str {
                 let text = self.extract_string_from_tokens(&[ast::TokenTree::Token(tok.clone())]);

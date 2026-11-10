@@ -41,7 +41,10 @@ fn expect(tag: &str, src: &str, want: &str) {
         eprintln!("skipped {tag}: no C compiler");
         return;
     };
-    assert_eq!(code, 0, "{tag} failed\nstdout:\n{stdout}\nstderr:\n{stderr}");
+    assert_eq!(
+        code, 0,
+        "{tag} failed\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
     assert_eq!(stdout, want, "{tag}: wrong output\nstderr:\n{stderr}");
 }
 

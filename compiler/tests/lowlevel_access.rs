@@ -7,7 +7,10 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf()
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .to_path_buf()
 }
 
 /// `buildc build --emit c` on `src`: (success, emitted C, stderr).
@@ -22,8 +25,10 @@ fn emit_c(tag: &str, src: &str) -> (bool, String, String) {
         .arg(&dir)
         .output()
         .expect("buildc runs");
-    let c = std::fs::read_to_string(dir.join("target").join("debug").join("main.c")).unwrap_or_default();
-    let stderr = String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
+    let c = std::fs::read_to_string(dir.join("target").join("debug").join("main.c"))
+        .unwrap_or_default();
+    let stderr =
+        String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
     let _ = std::fs::remove_dir_all(&dir);
     (out.status.success(), c, stderr)
 }
@@ -48,8 +53,14 @@ fn main() ~ Console {\n\
 fn volatile_read_and_write_are_volatile_in_c() {
     let (ok, c, err) = emit_c("vol", VOLATILE_SRC);
     assert!(ok, "build failed: {err}");
-    assert!(c.contains("*(volatile uint8_t *)(p)"), "no volatile read:\n{c}");
-    assert!(c.contains("*(volatile uint32_t *)(p) = (uint32_t)(v);"), "no volatile write");
+    assert!(
+        c.contains("*(volatile uint8_t *)(p)"),
+        "no volatile read:\n{c}"
+    );
+    assert!(
+        c.contains("*(volatile uint32_t *)(p) = (uint32_t)(v);"),
+        "no volatile write"
+    );
 }
 
 #[test]
@@ -57,12 +68,19 @@ fn volatile_read_in_loop_condition_is_read_each_iteration() {
     let (ok, c, err) = emit_c("loop", VOLATILE_SRC);
     assert!(ok, "build failed: {err}");
     let c = c.replace("\r\n", "\n");
-    let start = c.find("wait_ready(uintptr_t a) {").expect("wait_ready definition");
+    let start = c
+        .find("wait_ready(uintptr_t a) {")
+        .expect("wait_ready definition");
     let body = &c[start..];
     let body = &body[..body.find("\n}\n").unwrap()];
-    let read = body.find("*(volatile uint8_t *)(p)").expect("volatile read in wait_ready");
+    let read = body
+        .find("*(volatile uint8_t *)(p)")
+        .expect("volatile read in wait_ready");
     // The block that holds the read: the last `bbN:` label before it.
-    let label_at = body[..read].rfind("\nbb").expect("the read sits in a labelled block") + 1;
+    let label_at = body[..read]
+        .rfind("\nbb")
+        .expect("the read sits in a labelled block")
+        + 1;
     let label = &body[label_at..label_at + body[label_at..].find(':').unwrap()];
     assert!(
         !body[label_at..read].contains("goto"),
@@ -83,8 +101,14 @@ fn asm_string_template_is_emitted() {
                fn main() ~ Console { halt(); two(); println!(\"ok\"); }\n";
     let (ok, c, err) = emit_c("asm", src);
     assert!(ok, "build failed: {err}");
-    assert!(c.contains("__asm__ __volatile__(\"nop\");"), "asm dropped:\n{c}");
-    assert!(c.contains("__asm__ __volatile__(\"nop\\n\\tnop\");"), "two templates not joined");
+    assert!(
+        c.contains("__asm__ __volatile__(\"nop\");"),
+        "asm dropped:\n{c}"
+    );
+    assert!(
+        c.contains("__asm__ __volatile__(\"nop\\n\\tnop\");"),
+        "two templates not joined"
+    );
 }
 
 #[test]
@@ -93,8 +117,14 @@ fn asm_with_operands_is_a_compile_error_with_a_line() {
                fn main() ~ Console { f(1_u64); }\n";
     let (ok, _c, err) = emit_c("asmop", src);
     assert!(!ok, "operand form must not build");
-    assert!(err.contains("operands and options are not supported yet"), "{err}");
-    assert!(err.contains("main.bld:2:"), "error does not name line 2: {err}");
+    assert!(
+        err.contains("operands and options are not supported yet"),
+        "{err}"
+    );
+    assert!(
+        err.contains("main.bld:2:"),
+        "error does not name line 2: {err}"
+    );
 }
 
 #[test]
@@ -113,7 +143,8 @@ fn other_backends_refuse_asm_and_volatile() {
         .arg(&dir)
         .output()
         .expect("buildc runs");
-    let text = String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
+    let text =
+        String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
     let _ = std::fs::remove_dir_all(&dir);
     assert!(!out.status.success(), "llvm target accepted asm!: {text}");
     assert!(text.contains("lowered only by the C backend"), "{text}");

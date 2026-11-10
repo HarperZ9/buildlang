@@ -18,9 +18,17 @@ pub(crate) const VOLATILE_WRITE: &str = "bl_volatile_write";
 /// rather than emit a call to a function that does not exist.
 pub(crate) fn reserved_call_in(mir: &crate::codegen::ir::MirModule) -> Option<&'static str> {
     use crate::codegen::ir::MirTerminator;
-    let blocks = mir.functions.iter().filter_map(|f| f.blocks.as_ref()).flatten();
+    let blocks = mir
+        .functions
+        .iter()
+        .filter_map(|f| f.blocks.as_ref())
+        .flatten();
     for term in blocks.filter_map(|b| b.terminator.as_ref()) {
-        if let MirTerminator::Call { func: MirValue::Function(name), .. } = term {
+        if let MirTerminator::Call {
+            func: MirValue::Function(name),
+            ..
+        } = term
+        {
             match name.as_ref() {
                 INLINE_ASM => return Some("`asm!`"),
                 VOLATILE_READ => return Some("`ptr::read_volatile`"),
@@ -54,7 +62,9 @@ impl CBackend {
                     .get(dest.0 as usize)
                     .map(|l| l.ty.clone())
                     .ok_or_else(|| internal("volatile read destination is unknown"))?;
-                let ptr = args.first().ok_or_else(|| internal("volatile read has no pointer"))?;
+                let ptr = args
+                    .first()
+                    .ok_or_else(|| internal("volatile read has no pointer"))?;
                 Ok(Some(format!(
                     "{} = *(volatile {} *)({});\n",
                     self.local_name(*dest, locals),
@@ -96,6 +106,9 @@ impl CBackend {
                 .ok_or_else(|| internal("asm! template string is missing"))?;
             lines.push(self.escape_string(text));
         }
-        Ok(format!("__asm__ __volatile__(\"{}\");\n", lines.join("\\n\\t")))
+        Ok(format!(
+            "__asm__ __volatile__(\"{}\");\n",
+            lines.join("\\n\\t")
+        ))
     }
 }
