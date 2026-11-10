@@ -1,0 +1,24 @@
+# id | where | planted defect | refused by (kind)
+1 | ctl_decode | branch offset bit 11 is read from word bit 20 instead of word bit 7 | differential 2 (pc), property 41
+2 | ctl_decode | the shift decoder ignores word bit 30, so SRAI reads as SRLI | differential 3 (register), property 41
+3 | ctl_decode | 12-bit immediates are zero-extended instead of sign-extended | differential 3 (register), property 41
+4 | ctl_decode | the jump decoder drops offset bits 19 to 12 | differential 2 (pc), property 41
+5 | step_v | register 0 is an ordinary register, so a write to it lands | differential 6 (register 0), hand-computed case 22
+6 | step_v | ADDIW leaves the upper 32 bits clear instead of copying bit 31 | differential 3 (register), hand-computed case 32
+# trap profile (command mcontrols): step and case numbers are those of seed 1, 20000 steps
+7 | mctl_after | a trap saves pc + 4 in mepc instead of pc | differential 13 (mepc) at step 0, hand-computed case 13
+8 | mctl_after | ECALL from machine mode reports cause 8 instead of 11 | differential 14 (mcause) at step 5, hand-computed case 36
+9 | mstep_v | MRET leaves MIE as it was instead of copying MPIE into it | differential 11 (mstatus) at step 102, hand-computed case 53
+10 | mstep_v | CSRRS and CSRRSI with rs1 = 0 count as a write, so reading a read-only CSR traps | differential 1 (result code) at step 15, hand-computed case 16
+11 | mstep_v | CSRRC and CSRRCI set the bits instead of clearing them | differential 14 (mcause) at step 74, hand-computed case 23
+12 | mctl_decode | the decoder sign-extends the 12-bit CSR number | differential 1 (result code) at step 15, property 42 at round 0
+# timer and interrupts (command icontrols): step and case numbers are those of seed 1, 20000 steps.
+# The hand-computed case is the first that fails; the command prints every failing case.
+# The last entry is the stream property (kinds 46 to 50) run alone.
+13 | ictl_pick | an interrupt is taken while mstatus.MIE is 0 | differential 14 (mcause) at step 12, hand-computed case 29, property 46 at step 15
+14 | ictl_take | an interrupt leaves bit 63 of mcause clear | differential 14 (mcause) at step 98, hand-computed case 31, property 47 at step 52
+15 | ictl_take | an interrupt saves pc + 4 in mepc instead of pc | differential 13 (mepc) at step 98, hand-computed case 31, property 48 at step 52
+16 | ictl_take | the vectored handler address is BASE + cause instead of BASE + 4 * cause | differential 2 (pc) at step 135, hand-computed case 42, property 49 at step 101
+17 | ictl_mip | the timer interrupt is pending only while mtime > mtimecmp, so it is one step late | differential 1 (result code) at step 900, hand-computed case 22, property 47 at step 2884
+18 | ictl_pick | the timer interrupt is taken before the software interrupt | differential 2 (pc) at step 324, hand-computed case 37, property 46 at step 278
+19 | istep_v | mtime rises before the interrupt check of a step instead of after the step | differential 19 (mtime) at step 31, hand-computed case 9, property 46 at step 2883

@@ -1,0 +1,128 @@
+// Differential check for the timer and the interrupts of emu-rv64. One
+// runner serves two streams. Mode 0 is the stream of mcheck.bld (command
+// mfuzz). Mode 1 (command ifuzz) starts from that stream and replaces half
+// of its words so that interrupts are frequent: loads and stores that reach
+// the timer registers, writes to mie, sets and clears of mstatus.MIE, WFI
+// and MRET. In mode 1 the host also flips the software and the external
+// pending bit every eight steps. The core variant and the reference model
+// of mmodel.bld and imodel.bld receive the same stream, and the full state
+// is compared after every step, mtime and mtimecmp included.
+
+// A load or store that reaches, or nearly reaches, a timer register.
+// Register 5 gets the address of one register and register 6 a value near
+// the present time, in both machines. The offset runs from -2 to 9, so some
+// accesses leave the register and fault. One word in four is the 8-byte
+// store at offset 0, the one that moves the whole register.
+fn ifz_timer(r: &mut Rng, ma: &Machine, xa: &mut [u64], xb: &mut [u64]) -> u64 {
+    let pick = rng_next(r);
+    let mut base = EMU_MTIMECMP;
+    if (pick & 1_u64) != 0_u64 { base = EMU_MTIME; }
+    let mut val = ma.mtime.wrapping_add((pick >> 8_u64) % 24_u64);
+    if ((pick >> 4_u64) & 7_u64) == 0_u64 { val = gen_value(r); }
+    xa[5] = base;
+    xb[5] = base;
+    xa[6] = val;
+    xb[6] = val;
+    let mut op = OP_LB + (pick >> 16_u64) % 11_u64;
+    let mut off = ((pick >> 24_u64) % 12_u64).wrapping_sub(2_u64);
+    if ((pick >> 40_u64) & 3_u64) == 0_u64 { op = OP_SD; off = 0_u64; }
+    let d = Insn { op: op, rd: (pick >> 32_u64) & 31_u64, rs1: 5_u64, rs2: 6_u64, imm: off };
+    emu_encode(&emu_canon(&d))
+}
+
+// The host flips MSIP or MEIP every eight steps.
+fn ifz_host(r: &mut Rng, i: u64, ma: &mut Machine, c: &mut [u64]) {
+    if i % 8_u64 != 5_u64 { return; }
+    let mut bit = MI_MSIP;
+    if (rng_next(r) & 1_u64) != 0_u64 { bit = MI_MEIP; }
+    ma.mip = ma.mip ^ bit;
+    c[RC_IP] = ma.mip;
+}
+
+// The word of step i in mode 1. w is the word mode 0 would run. Of 16:
+// 2 timer accesses, 1 CSRRW x0, mie, x7 with a fresh x7, 1 set or clear of
+// mstatus.MIE, 1 WFI, 1 MRET, 10 words of mode 0.
+//   CSRRW  x0, mie, x7     = 0x304 << 20 | 7 << 15 | 1 << 12 | 0x73 = 0x30439073
+//   CSRRSI x0, mstatus, 8  = 0x300 << 20 | 8 << 15 | 6 << 12 | 0x73 = 0x30046073
+//   CSRRCI x0, mstatus, 8  = 0x300 << 20 | 8 << 15 | 7 << 12 | 0x73 = 0x30047073
+fn ifz_word(r: &mut Rng, ma: &Machine, xa: &mut [u64], xb: &mut [u64], w: u64) -> u64 {
+    let pick = rng_next(r);
+    let sel = pick % 16_u64;
+    if sel < 2_u64 { return ifz_timer(r, ma, xa, xb); }
+    if sel == 2_u64 {
+        xa[7] = pick >> 8_u64;
+        xb[7] = xa[7];
+        return 0x30439073_u64;
+    }
+    if sel == 3_u64 {
+        if ((pick >> 8_u64) & 3_u64) == 0_u64 { return 0x30047073_u64; }
+        return 0x30046073_u64;
+    }
+    if sel == 4_u64 { return 0x10500073_u64; }
+    if sel == 5_u64 { return 0x30200073_u64; }
+    w
+}
+
+// Compares the two machines outside the registers, memory and CSRs, then
+// the timer registers. Kinds 1, 2, 7, 8, 19 and 20.
+fn ifz_cmp(step: u64, ca: i64, cb: i64, ma: &Machine, mb: &Machine, c: &[u64]) -> Refusal {
+    let f = mfz_cmp_m(step, ca, cb, ma, mb);
+    if f.kind != 0 { return f; }
+    if ma.mtime != c[RC_TIME] { return fz_refuse(19, step, ma.mtime, c[RC_TIME]); }
+    if ma.mtimecmp != c[RC_CMP] { return fz_refuse(20, step, ma.mtimecmp, c[RC_CMP]); }
+    fz_refuse(0, step, 0_u64, 0_u64)
+}
+
+// True when word w is a load or store that reaches a timer register.
+fn ifz_reaches(x: &[u64], w: u64) -> bool {
+    let d = emu_decode(w);
+    emu_timer_hit(x, &d) != 0_u64
+}
+
+// Runs `steps` steps of the stream of `mode` through variant v and the
+// model. Kinds: see mfuzz_run in mcheck.bld.
+fn xfz_run(mode: u64, v: u64, seed: u64, steps: u64, ct: &mut [u64]) -> Refusal {
+    let mut r = Rng { s: seed };
+    let mut xa: [u64; 32] = [0_u64; 32];
+    let mut xb: [u64; 32] = [0_u64; 32];
+    let mut ra: [u8; 1024] = [0_u8; 1024];
+    let mut rb: [u8; 1024] = [0_u8; 1024];
+    let mut oa: [u8; 64] = [0_u8; 64];
+    let mut ob: [u8; 64] = [0_u8; 64];
+    let mut c: [u64; 11] = [0_u64; 11];
+    ref_reset(&mut c);
+    let mut ma = emu_new_machine();
+    let mut mb = emu_new();
+    let mut i: u64 = 0_u64;
+    while i < steps {
+        if i % 4_u64 == 0_u64 { fz_seed(&mut r, &mut xa, &mut xb); }
+        mfz_prep(&mut r, i, &mut ma, &mut mb, &mut c, ct);
+        let mut w = mfz_word(&mut r);
+        if mode != 0_u64 {
+            ifz_host(&mut r, i, &mut ma, &mut c);
+            w = ifz_word(&mut r, &ma, &mut xa, &mut xb, w);
+        }
+        if mfz_pc_ok(ma.pc) {
+            emu_poke(&mut ra, ma.pc, 4_u64, w);
+            emu_poke(&mut rb, mb.pc, 4_u64, w);
+        }
+        let th = ifz_reaches(&xa, w);
+        let ca = istep_v(v, &mut ma, &mut xa, &mut ra, &mut oa);
+        let cb = ref_mstep(&mut mb, &mut xb, &mut rb, &mut ob, &mut c);
+        let f = ifz_cmp(i, ca, cb, &ma, &mb, &c);
+        if f.kind != 0 { return f; }
+        let g = fz_cmp(i, &xa, &xb, &ra, &rb, &oa, &ob);
+        if g.kind != 0 { return g; }
+        let h = mfz_cmp_csr(i, &ma, &c);
+        if h.kind != 0 { return h; }
+        mfz_count(ct, ca, ma.mcause, w);
+        if th && ca == EMU_OK { ct[19] = ct[19] + 1_u64; }
+        i = i + 1_u64;
+    }
+    fz_refuse(0, steps, 0_u64, 0_u64)
+}
+
+// The interrupt stream, command ifuzz.
+fn ifuzz_run(v: u64, seed: u64, steps: u64, ct: &mut [u64]) -> Refusal {
+    xfz_run(1_u64, v, seed, steps, ct)
+}

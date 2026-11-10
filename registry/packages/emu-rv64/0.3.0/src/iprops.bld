@@ -1,0 +1,176 @@
+// Property check for the timer and the interrupts of emu-rv64. No
+// reference model is used. `step` is the round or step number, except for
+// kinds 43, 44 and 51, where it is the number of the first failing case.
+//
+//   41 to 43  the properties of mprops.bld; the generator now includes WFI
+//   44  every hand-computed case in ivec.bld, ivec2.bld and ivec3.bld passes
+//   45  timer round trip: a store of any width at any offset inside a timer
+//       register, then an unsigned load of the same width at the same
+//       offset, reads the stored bytes; for mtime, the bytes of the stored
+//       register plus the one tick of the store step
+//   46  an interrupt was taken that the state before the step did not
+//       permit, or its cause was not the highest-priority one
+//   47  an interrupt that the state before the step required was not taken
+//   48  after an interrupt: mepc is the old pc, mtval is 0, MIE is 0 and
+//       MPIE is 1
+//   49  after an interrupt: pc is BASE, or BASE + 4 * cause when the old
+//       mtvec had bit 0 set
+//   50  mtime rose by exactly one in a step that stored nothing
+//   51  the timer program takes 99 interrupts in 10000 steps and two runs
+//       give one hash
+//
+// Kinds 46 to 50 run over the stream of the command ifuzz. The property
+// works out what must happen from the state before the step: pending is
+// the host bits 3 and 11 of mip plus bit 7 while mtime >= mtimecmp.
+
+// The bytes a store of `n` bytes of `val` at byte offset `off` leaves in
+// the register that held `reg`.
+fn ipr_put(reg: u64, off: u64, n: u64, val: u64) -> u64 {
+    let mut r = reg;
+    let mut k: u64 = 0_u64;
+    while k < n {
+        let sh = 8_u64 * (off + k);
+        r = (r & !(0xFF_u64 << sh)) | (((val >> (8_u64 * k)) & 0xFF_u64) << sh);
+        k = k + 1_u64;
+    }
+    r
+}
+
+// The value an unsigned load of `n` bytes at offset `off` reads from reg.
+fn ipr_get(reg: u64, off: u64, n: u64) -> u64 {
+    let mut r: u64 = 0_u64;
+    let mut k: u64 = 0_u64;
+    while k < n {
+        r = r | (((reg >> (8_u64 * (off + k))) & 0xFF_u64) << (8_u64 * k));
+        k = k + 1_u64;
+    }
+    r
+}
+
+// One round of kind 45. Returns 0 when it holds, else 1 with the loaded
+// and the expected value in gw.
+fn ipr_trip(v: u64, r: &mut Rng, gw: &mut [u64]) -> u64 {
+    let pick = rng_next(r);
+    let k = pick & 3_u64;
+    let n = 1_u64 << k;
+    let off = (pick >> 8_u64) % (9_u64 - n);
+    let is_time = ((pick >> 16_u64) & 1_u64) == 1_u64;
+    let old = rng_next(r);
+    let val = rng_next(r);
+    let mut m = emu_new_machine();
+    let mut x: [u64; 32] = [0_u64; 32];
+    let mut ram: [u8; 64] = [0_u8; 64];
+    let mut out: [u8; 8] = [0_u8; 8];
+    m.mtimecmp = old;
+    x[1] = EMU_MTIMECMP;
+    if is_time { m.mtime = old; m.mtimecmp = !0_u64; x[1] = EMU_MTIME; }
+    x[2] = val;
+    let mut lop = OP_LB + 4_u64 + k;
+    if k == 3_u64 { lop = OP_LB + 3_u64; }
+    let st = Insn { op: OP_LB + 7_u64 + k, rd: 0_u64, rs1: 1_u64, rs2: 2_u64, imm: off };
+    let ld = Insn { op: lop, rd: 3_u64, rs1: 1_u64, rs2: 0_u64, imm: off };
+    emu_poke(&mut ram, EMU_RAM_BASE, 4_u64, emu_encode(&emu_canon(&st)));
+    emu_poke(&mut ram, EMU_RAM_BASE + 4_u64, 4_u64, emu_encode(&emu_canon(&ld)));
+    let c1 = istep_v(v, &mut m, &mut x, &mut ram, &mut out);
+    let c2 = istep_v(v, &mut m, &mut x, &mut ram, &mut out);
+    let mut reg = ipr_put(old, off, n, val);
+    if is_time { reg = reg.wrapping_add(1_u64); }
+    gw[0] = x[3];
+    gw[1] = ipr_get(reg, off, n);
+    if c1 != EMU_OK || c2 != EMU_OK || gw[0] != gw[1] { return 1_u64; }
+    0_u64
+}
+
+// The interrupt the state must take: MIE set, and the first of external,
+// software, timer that is both pending and enabled. 0: none.
+fn ipr_due(m: &Machine) -> u64 {
+    if ((m.mstatus >> 3_u64) & 1_u64) == 0_u64 { return 0_u64; }
+    let mut pend = m.mip & 0x808_u64;
+    if m.mtime >= m.mtimecmp { pend = pend + 0x80_u64; }
+    let both = pend & m.mie;
+    let order: [u64; 3] = [11_u64, 3_u64, 7_u64];
+    let mut k: usize = 0;
+    while k < 3 {
+        if ((both >> order[k]) & 1_u64) == 1_u64 { return order[k]; }
+        k = k + 1;
+    }
+    0_u64
+}
+
+// Kinds 46 to 50 for one step. `was` is the machine before the step, `m`
+// after it, `stored` tells whether the step ran a store instruction.
+fn ipr_judge(i: u64, was: &Machine, m: &Machine, rc: i64, stored: bool) -> Refusal {
+    let want = ipr_due(was);
+    let mut got: u64 = 0_u64;
+    if rc == EMU_TRAP && (m.mcause >> 63_u64) == 1_u64 { got = m.mcause & 0xFFFF_u64; }
+    if got != want && got != 0_u64 { return fz_refuse(46, i, got, want); }
+    if got != want { return fz_refuse(47, i, got, want); }
+    if (!stored || got != 0_u64) && m.mtime != was.mtime.wrapping_add(1_u64) {
+        return fz_refuse(50, i, m.mtime, was.mtime.wrapping_add(1_u64));
+    }
+    if got == 0_u64 { return fz_refuse(0, i, 0_u64, 0_u64); }
+    let status = (was.mstatus & !0x88_u64) | 0x80_u64;
+    if m.mepc != (was.pc & !3_u64) { return fz_refuse(48, i, m.mepc, was.pc & !3_u64); }
+    if m.mtval != 0_u64 || m.mstatus != status { return fz_refuse(48, i, m.mstatus, status); }
+    let mut at = was.mtvec & !3_u64;
+    if (was.mtvec & 1_u64) == 1_u64 { at = at.wrapping_add(4_u64 * got); }
+    if m.pc != at { return fz_refuse(49, i, m.pc, at); }
+    fz_refuse(0, i, 0_u64, 0_u64)
+}
+
+fn ipr_copy(m: &Machine) -> Machine {
+    Machine { pc: m.pc, steps: m.steps, out_len: m.out_len, profile: m.profile, traps: m.traps,
+              mstatus: m.mstatus, mtvec: m.mtvec, mepc: m.mepc, mcause: m.mcause, mtval: m.mtval,
+              mie: m.mie, mip: m.mip, mscratch: m.mscratch, mtime: m.mtime, mtimecmp: m.mtimecmp }
+}
+
+// Kinds 46 to 50 over `steps` steps of the ifuzz stream. ct[0] counts the
+// interrupts judged.
+fn ipr_stream(v: u64, seed: u64, steps: u64, ct: &mut [u64]) -> Refusal {
+    let mut r = Rng { s: seed };
+    let mut xa: [u64; 32] = [0_u64; 32];
+    let mut xb: [u64; 32] = [0_u64; 32];
+    let mut ra: [u8; 1024] = [0_u8; 1024];
+    let mut oa: [u8; 64] = [0_u8; 64];
+    let mut c: [u64; 11] = [0_u64; 11];
+    let mut junk: [u64; 20] = [0_u64; 20];
+    let mut ma = emu_new_machine();
+    let mut mb = emu_new();
+    let mut i: u64 = 0_u64;
+    while i < steps {
+        if i % 4_u64 == 0_u64 { fz_seed(&mut r, &mut xa, &mut xb); }
+        mfz_prep(&mut r, i, &mut ma, &mut mb, &mut c, &mut junk);
+        ifz_host(&mut r, i, &mut ma, &mut c);
+        let w = ifz_word(&mut r, &ma, &mut xa, &mut xb, mfz_word(&mut r));
+        let fetch = mfz_pc_ok(ma.pc);
+        if fetch { emu_poke(&mut ra, ma.pc, 4_u64, w); }
+        let was = ipr_copy(&ma);
+        let rc = istep_v(v, &mut ma, &mut xa, &mut ra, &mut oa);
+        let stored = fetch && emu_class(emu_decode(w).op) == CL_S;
+        let f = ipr_judge(i, &was, &ma, rc, stored);
+        if f.kind != 0 { return f; }
+        if rc == EMU_TRAP && (ma.mcause >> 63_u64) == 1_u64 { ct[0] = ct[0] + 1_u64; }
+        mb.pc = ma.pc;
+        i = i + 1_u64;
+    }
+    fz_refuse(0, steps, 0_u64, 0_u64)
+}
+
+// Every property, for variant v. ct[0] returns the interrupts judged.
+fn iprop_run(v: u64, seed: u64, steps: u64, ct: &mut [u64]) -> Refusal ~ Console {
+    let f = mprop_run(v, seed, steps);
+    if f.kind != 0 { return f; }
+    let bad = ivec_run(v, false);
+    if bad != 0_u64 { return fz_refuse(44, bad, 0_u64, 0_u64); }
+    let mut r = Rng { s: seed };
+    let mut gw: [u64; 2] = [0_u64; 2];
+    let mut i: u64 = 0_u64;
+    while i < steps {
+        if ipr_trip(v, &mut r, &mut gw) != 0_u64 { return fz_refuse(45, i, gw[0], gw[1]); }
+        i = i + 1_u64;
+    }
+    let g = ipr_stream(v, seed, steps, ct);
+    if g.kind != 0 { return g; }
+    if program_timer(v, false) != 0_u64 { return fz_refuse(51, 1_u64, 0_u64, 0_u64); }
+    fz_refuse(0, steps, 0_u64, 0_u64)
+}
