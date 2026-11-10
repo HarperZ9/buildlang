@@ -90,7 +90,7 @@ pub fn generate(rng: &mut Rng, depth: u32) -> Expr {
             Expr::Var(rng.below(4) as usize)
         };
     }
-    let mut sub = |rng: &mut Rng| Box::new(generate(rng, depth - 1));
+    let sub = |rng: &mut Rng| Box::new(generate(rng, depth - 1));
     match rng.below(12) {
         0 => Expr::Neg(sub(rng)),
         1 => Expr::Shift(rng.below(2) == 0, sub(rng), rng.below(8) as u32),
