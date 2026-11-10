@@ -22,6 +22,7 @@ use crate::codegen::runtime;
 use crate::codegen::{GeneratedCode, OutputFormat};
 
 mod header;
+pub(crate) mod lowlevel;
 mod parallel;
 mod vec_hoist;
 mod vec_hoist_emit;
@@ -3170,6 +3171,16 @@ impl CBackend {
 
                 // An element store into a hoisted vector (see `c/vec_hoist.rs`).
                 if let Some(code) = self.hoisted_set_call(&func_str, args, dest.is_some(), locals) {
+                    self.output.push_str(&code);
+                    if let Some(target) = target {
+                        self.write_indent();
+                        write!(self.output, "goto bb{};\n", target.0).unwrap();
+                    }
+                    return Ok(());
+                }
+
+                // asm! and volatile pointer access (see `c/lowlevel.rs`).
+                if let Some(code) = self.lowlevel_call(&func_str, args, dest.as_ref(), locals)? {
                     self.output.push_str(&code);
                     if let Some(target) = target {
                         self.write_indent();

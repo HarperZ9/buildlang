@@ -134,6 +134,10 @@ impl<'ctx> MirLowerer<'ctx> {
                         self.lower_print_macro(tokens, true, false)?;
                         Ok(None)
                     }
+                    "asm" => {
+                        self.lower_asm_macro(tokens)?;
+                        Ok(None)
+                    }
                     _ => {
                         // Unknown macro -- skip with no output
                         Ok(None)
@@ -597,6 +601,10 @@ impl<'ctx> MirLowerer<'ctx> {
                         self.lower_format_macro(tokens)
                     }
                     "vec" => self.lower_vec_macro(tokens),
+                    "asm" => {
+                        self.lower_asm_macro(tokens)?;
+                        Ok(values::unit())
+                    }
                     _ => {
                         // Unknown macro expression - return unit
                         Ok(values::unit())
@@ -2338,6 +2346,9 @@ impl<'ctx> MirLowerer<'ctx> {
                     },
                 );
                 return Ok(values::local(result));
+            }
+            if let Some(is_read) = super::lowlevel::volatile_path(&segs) {
+                return self.lower_volatile_call(is_read, args);
             }
             if let (Some((helper, ty)), 1) = (from_bits, args.len()) {
                 let bits = self.lower_expr(&args[0])?;

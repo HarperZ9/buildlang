@@ -209,6 +209,15 @@ impl<'ctx> CodeGenerator<'ctx> {
             )));
         }
 
+        if self.target != Target::C {
+            if let Some(name) = backend::c::lowlevel::reserved_call_in(mir) {
+                return Err(CodegenError::Unsupported(format!(
+                    "{name} is lowered only by the C backend; target `{}` cannot compile it",
+                    self.target
+                )));
+            }
+        }
+
         // Run the MIR `#[linear]` affine/borrow checker on every function
         // now that MIR exists, before handing off to a backend. This is the
         // first MIR-phase user diagnostic; errors are collected (not

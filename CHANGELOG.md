@@ -14,6 +14,9 @@ tracked in `STATUS.md`, `README.md`, and
 
 - A `const` or `static` declared later in the source than a function that uses it now keeps its declared type in that function. Before, the C backend stored `BASE + 8_u64` with `const BASE: u64 = 0x80000000_u64;` at the end of the file in an `int32_t` temporary, so the result was sign-extended to `ffffffff80000008` with no diagnostic. Globals are now registered before any function body is lowered. Packages are joined in file-name order, so the bug depended on file names. Test: `compiler/tests/global_decl_order.rs`.
 - `TICKS + 1` with `static mut TICKS: u64` called the 32-bit signed add helper, because the C backend took the helper width from the literal when the other operand was a global. It now takes it from the global, so the counter passes 2^32. Same test file.
+- `ptr::read_volatile(p)` and `ptr::write_volatile(p, v)` now compile for a raw pointer to any integer width. The spellings `std::ptr::`, `core::ptr::`, `ptr_read_volatile` and `ptr_write_volatile` are accepted too. Each lowers to one C `volatile` access, so a status register read in a loop condition is read on every iteration. Before, both failed to compile. The method form `p.read_volatile()` does not exist yet. Test: `compiler/tests/lowlevel_access.rs`.
+- `asm!` is no longer dropped. Before, `unsafe { asm!("hlt"); }` built with an empty function body. A call with string-literal templates only, such as `asm!("cli", "hlt")`, now lowers to `__asm__ __volatile__(...)` with one template per line. A call with operands or options is a compile error that names the line and says operands are not supported yet. Same test file.
+- Only the C backend lowers volatile access and `asm!`. Every other target now refuses a program that uses them with an error, instead of emitting a call to a function that does not exist.
 
 ### Registry
 
