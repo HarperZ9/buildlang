@@ -10,6 +10,10 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+### Registry
+
+- `emu-rv64` 0.1.0 (AGPL-3.0-only): the core of a RISC-V machine emulator in pure `.bld`. It decodes, encodes and executes the 52 instructions of RV64I, the 64-bit base integer set, against caller-supplied registers and memory, with one serial output device. The step function is total and deterministic, and a step that fails changes nothing. It is checked by 61 hand-computed instruction cases, two short programs, a bit-serial reference model that shares no code with the core, a seeded differential fuzz run, encode and decode round trips, and six planted-defect controls that both checks must refuse. No other emulator was used. It has no control and status registers, traps, interrupts or timer yet, and no kernel has run on it.
+
 ## 1.14.0 - 2026-11-09 - typed vector access, the same C on every run, a fuzz target, `Vec::clear` and `Vec::release`
 
 Loops over vectors now compile to plain C array reads with every bounds check kept, which took n-body from 3.35 times the run time of C to 0.98 times at gcc -O2. The compiler emits the same C bytes on every run and `buildc build-hash` checks it, `Vec::clear` no longer writes through freed memory, and `Vec::release` frees a vector.
