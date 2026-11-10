@@ -122,6 +122,10 @@ pub struct CBackend {
     /// setting a process-global env var, which is unsound under parallel
     /// `cargo test` (see `set_experimental_free_enabled_for_test`).
     experimental_free_override_for_test: Option<bool>,
+    /// Integer type of each module global, by name. An arithmetic helper
+    /// takes its width from a global operand before a literal one, so
+    /// `TICKS + 1` with `static mut TICKS: u64` calls `bl_uadd_u64` (G6).
+    global_int_types: std::collections::HashMap<String, (IntSize, bool)>,
 }
 
 impl CBackend {
@@ -148,6 +152,7 @@ impl CBackend {
             plain_structs: std::collections::HashSet::new(),
             current_fn_flag_block_frees: std::collections::HashMap::new(),
             experimental_free_override_for_test: None,
+            global_int_types: std::collections::HashMap::new(),
         }
     }
 
@@ -1919,6 +1924,10 @@ impl CBackend {
 
         self.output.push_str("// Global variables\n");
         for global in globals {
+            if let MirType::Int(size, signed) = &global.ty {
+                self.global_int_types
+                    .insert(global.name.to_string(), (*size, *signed));
+            }
             let c_type = self.type_to_c(&global.ty);
 
             // A foreign `static` is an external declaration, never a definition.
@@ -4969,7 +4978,13 @@ impl CBackend {
             MirValue::Local(_) => self.value_int_type(right, locals),
             _ => None,
         });
+        let global_ty = |v: &MirValue| match v {
+            MirValue::Global(name) => self.global_int_types.get(name.as_ref()).copied(),
+            _ => None,
+        };
         local_ty
+            .or_else(|| global_ty(left))
+            .or_else(|| global_ty(right))
             .or_else(|| self.value_int_type(left, locals))
             .or_else(|| self.value_int_type(right, locals))
     }

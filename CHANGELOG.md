@@ -10,6 +10,11 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+### Fixes
+
+- A `const` or `static` declared later in the source than a function that uses it now keeps its declared type in that function. Before, the C backend stored `BASE + 8_u64` with `const BASE: u64 = 0x80000000_u64;` at the end of the file in an `int32_t` temporary, so the result was sign-extended to `ffffffff80000008` with no diagnostic. Globals are now registered before any function body is lowered. Packages are joined in file-name order, so the bug depended on file names. Test: `compiler/tests/global_decl_order.rs`.
+- `TICKS + 1` with `static mut TICKS: u64` called the 32-bit signed add helper, because the C backend took the helper width from the literal when the other operand was a global. It now takes it from the global, so the counter passes 2^32. Same test file.
+
 ### Registry
 
 - `emu-rv64` 0.1.0 (AGPL-3.0-only): the core of a RISC-V machine emulator in pure `.bld`. It decodes, encodes and executes the 52 instructions of RV64I, the 64-bit base integer set, against caller-supplied registers and memory, with one serial output device. The step function is total and deterministic, and a step that fails changes nothing. It is checked by 61 hand-computed instruction cases, two short programs, a bit-serial reference model that shares no code with the core, a seeded differential fuzz run, encode and decode round trips, and six planted-defect controls that both checks must refuse. No other emulator was used. It has no control and status registers, traps, interrupts or timer yet, and no kernel has run on it.

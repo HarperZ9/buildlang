@@ -483,12 +483,19 @@ impl<'ctx> MirLowerer<'ctx> {
             self.collect_item(item)?;
         }
 
+        // Register every `const` and `static` before any body is lowered, so a
+        // body that names a global declared later in the source still sees its
+        // declared type (a later `const BASE: u64` was typed `i32`, G13).
+        for item in &module.items {
+            self.collect_globals(item)?;
+        }
+
         // Generate vtables for all (Trait, Type) pairs
         self.generate_vtables();
 
         // Second pass: lower function bodies
         for item in &module.items {
-            self.lower_item(item)?;
+            self.lower_top_level_item(item)?;
         }
 
         let mut repr_c: Vec<Arc<str>> = self.repr_c_structs.iter().cloned().collect();
@@ -1914,7 +1921,7 @@ impl<'ctx> MirLowerer<'ctx> {
             ItemKind::Effect(_) => Ok(()),
             // Inline module: push module name onto prefix stack and
             // recursively lower all contained items.
-            ItemKind::Mod(m) => self.lower_inline_mod(m, &item.attrs),
+            ItemKind::Mod(m) => self.lower_inline_mod(m, false),
             // Use declarations - no-op in lowering (name resolution is
             // handled by the prefix + join scheme).
             ItemKind::Use(_) => Ok(()),
@@ -1925,21 +1932,68 @@ impl<'ctx> MirLowerer<'ctx> {
     /// Lower items inside an inline `mod` block.
     ///
     /// Similar to `collect_inline_mod`, this pushes the module name onto
-    /// the prefix stack and rewrites item names before lowering.
-    fn lower_inline_mod(
-        &mut self,
-        m: &ast::ModDef,
-        _attrs: &[ast::Attribute],
-    ) -> CodegenResult<()> {
+    /// the prefix stack and rewrites item names before lowering. `top_level`
+    /// is true for a module-level `mod`, whose globals `collect_globals`
+    /// has already added.
+    fn lower_inline_mod(&mut self, m: &ast::ModDef, top_level: bool) -> CodegenResult<()> {
         if let Some(ref content) = m.content {
             self.module_prefix.push(m.name.name.clone());
             for item in &content.items {
                 let rewritten = self.rewrite_item_with_prefix(item);
-                self.lower_item(&rewritten)?;
+                if top_level {
+                    self.lower_top_level_item(&rewritten)?;
+                } else {
+                    self.lower_item(&rewritten)?;
+                }
             }
             self.module_prefix.pop();
         }
         Ok(())
+    }
+
+    /// Add the module-level `const` and `static` globals, in source order,
+    /// ahead of the body pass. Items inside an inline `mod` get the same
+    /// prefixed names `lower_inline_mod` gives them.
+    fn collect_globals(&mut self, item: &ast::Item) -> CodegenResult<()> {
+        match &item.kind {
+            ItemKind::Static(s) => self.lower_static(s),
+            ItemKind::Const(c) => self.lower_const(c),
+            ItemKind::Mod(m) => {
+                if let Some(ref content) = m.content {
+                    self.module_prefix.push(m.name.name.clone());
+                    for it in &content.items {
+                        let rewritten = self.rewrite_item_with_prefix(it);
+                        self.collect_globals(&rewritten)?;
+                    }
+                    self.module_prefix.pop();
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Lower a module-level item in the body pass. Its `const` and `static`
+    /// globals were added by `collect_globals`, so only the `#[uniform]`
+    /// extraction is left for them here; a `const` inside a function body
+    /// still goes through `lower_item`.
+    fn lower_top_level_item(&mut self, item: &ast::Item) -> CodegenResult<()> {
+        match &item.kind {
+            ItemKind::Static(s) => {
+                if Self::has_attribute(&item.attrs, "uniform") {
+                    self.extract_uniform_from_static(s);
+                }
+                Ok(())
+            }
+            ItemKind::Const(c) => {
+                if Self::has_attribute(&item.attrs, "uniform") {
+                    self.extract_uniform_from_const(c);
+                }
+                Ok(())
+            }
+            ItemKind::Mod(m) => self.lower_inline_mod(m, true),
+            _ => self.lower_item(item),
+        }
     }
 
     /// Check if any attribute has the given name.
