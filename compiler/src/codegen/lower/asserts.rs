@@ -32,7 +32,7 @@ use crate::parser::Parser;
 
 use super::MirLowerer;
 
-fn rejected(message: String, location: Option<(u32, u32)>, help: &str) -> CodegenError {
+pub(super) fn rejected(message: String, location: Option<(u32, u32)>, help: &str) -> CodegenError {
     CodegenError::Rejected {
         message,
         location,
@@ -53,14 +53,14 @@ fn tree_span(tree: &ast::TokenTree) -> (u32, u32) {
 }
 
 /// Byte range of a run of token trees.
-fn trees_span(trees: &[ast::TokenTree]) -> Option<(u32, u32)> {
+pub(super) fn trees_span(trees: &[ast::TokenTree]) -> Option<(u32, u32)> {
     let (start, _) = tree_span(trees.first()?);
     let (_, end) = tree_span(trees.last()?);
     Some((start, end))
 }
 
 /// The macro's arguments without its own delimiter group.
-fn inner(tokens: &[ast::TokenTree]) -> &[ast::TokenTree] {
+pub(super) fn inner(tokens: &[ast::TokenTree]) -> &[ast::TokenTree] {
     match tokens {
         [ast::TokenTree::Delimited { tokens, .. }] => tokens,
         other => other,
@@ -68,7 +68,7 @@ fn inner(tokens: &[ast::TokenTree]) -> &[ast::TokenTree] {
 }
 
 /// Split at top-level commas. A trailing comma adds no empty part.
-fn split_commas(trees: &[ast::TokenTree]) -> Vec<&[ast::TokenTree]> {
+pub(super) fn split_commas(trees: &[ast::TokenTree]) -> Vec<&[ast::TokenTree]> {
     let mut parts = Vec::new();
     let mut start = 0usize;
     for (i, tree) in trees.iter().enumerate() {
@@ -92,7 +92,7 @@ pub(super) fn unknown_macro(name: &str, tokens: &[ast::TokenTree]) -> CodegenErr
         trees_span(tokens),
         "implemented macros: println, print, eprintln, eprint, dbg, format, vec, panic, asm, \
          assert, assert_eq, assert_ne, debug_assert, debug_assert_eq, debug_assert_ne, \
-         unreachable, todo, unimplemented",
+         unreachable, todo, unimplemented, env",
     )
 }
 

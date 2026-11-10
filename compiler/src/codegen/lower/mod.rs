@@ -16,6 +16,7 @@
 
 mod asserts;
 mod c_abi;
+mod env_macro;
 mod expr;
 mod format;
 mod limits;

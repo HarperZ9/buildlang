@@ -3180,7 +3180,12 @@ impl<'ctx> TypeInfer<'ctx> {
                 self.record_macro_token_capabilities(tokens);
                 self.check_format_macro_first_arg(macro_name, tokens, expr.span);
                 self.check_macro_args(macro_name, tokens);
-                Ty::fresh_var()
+                if macro_name == "env" {
+                    // `env!` lowers to a string holding the variable's value.
+                    Ty::str()
+                } else {
+                    Ty::fresh_var()
+                }
             }
 
             // BuildLang AI extensions

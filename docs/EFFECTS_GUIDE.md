@@ -94,6 +94,16 @@ Compile-time ambient macros are direct capability surfaces too. `include!`,
 `include_str!`, and `include_bytes!` require `FileSystem`; `env!` and
 `option_env!` require `Environment`; receipts record the exact macro source
 under `observed_capabilities`.
+
+`env!("NAME")` is the one of these the compiler builds today. It reads `NAME`
+from the compiler's own environment while it compiles and puts the value in the
+program as a string. A variable that is not set is a compile error, and
+`env!("NAME", "message")` uses `message` as that error's text. The value is
+copied into the generated C and the binary, so a secret passed through `env!`
+can be read from either. The receipt records that `env!` was used and leaves the
+value out. The other macros in this paragraph are checked for their effect and
+then refused by name at code generation.
+
 Macro argument token trees are scanned for ambient capability surfaces as well:
 `println!("{}", read_file("ops.toml"))` requires both `Console` and `FileSystem`, and
 the receipt records `println!` under `Console` plus `read_file` under
