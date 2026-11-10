@@ -142,6 +142,36 @@
         }
       }
     },
+    "os-pfa": {
+      "version": "0.1.0",
+      "description": "Page-frame allocator core for an operating-system kernel: bitmap with an exact contract, reference model, differential fuzz and planted controls",
+      "author": "Zain Dana Harper",
+      "license": "AGPL-3.0-only",
+      "checksum": "sha256:018ce20e392bc575e927562c3c42a9e88457afa57f15869f3aa574ec34c1550c",
+      "path": "packages/os-pfa/0.1.0",
+      "versions": {
+        "0.1.0": {
+          "path": "packages/os-pfa/0.1.0",
+          "checksum": "sha256:018ce20e392bc575e927562c3c42a9e88457afa57f15869f3aa574ec34c1550c",
+          "dependencies": {}
+        }
+      }
+    },
+    "os-runq": {
+      "version": "0.1.0",
+      "description": "Round-robin run queue core for an operating-system kernel: ring buffer with an exact contract, reference model, differential fuzz and planted controls",
+      "author": "Zain Dana Harper",
+      "license": "AGPL-3.0-only",
+      "checksum": "sha256:74d63c163736f3cfcf0cad79856515d2a68e8098a5c943a1eed13778e2631326",
+      "path": "packages/os-runq/0.1.0",
+      "versions": {
+        "0.1.0": {
+          "path": "packages/os-runq/0.1.0",
+          "checksum": "sha256:74d63c163736f3cfcf0cad79856515d2a68e8098a5c943a1eed13778e2631326",
+          "dependencies": {}
+        }
+      }
+    },
     "readability": {
       "version": "1.0.0",
       "description": "Flesch reading ease with word, sentence and syllable counts, ported from Flywheel's writing linter",
@@ -225,6 +255,21 @@
         "1.0.0": {
           "path": "packages/std-math",
           "checksum": "sha256:6bc34224ff7335ae95137b0c53bc06ee6c859a377c84743f9464d9091730584b",
+          "dependencies": {}
+        }
+      }
+    },
+    "sum-det": {
+      "version": "0.1.0",
+      "description": "Float sums with a written order (serial, tree, interleave8), an exact correctly rounded sum two ways (Shewchuk partials, exact bins), and a slot the improvement loop may replace",
+      "author": "Zain Dana Harper",
+      "license": "FSL-1.1-MIT",
+      "checksum": "sha256:c3b60fbda9612c98cbbc033135998168cec4cb79349653c618696010b27dcc21",
+      "path": "packages/sum-det/0.1.0",
+      "versions": {
+        "0.1.0": {
+          "path": "packages/sum-det/0.1.0",
+          "checksum": "sha256:c3b60fbda9612c98cbbc033135998168cec4cb79349653c618696010b27dcc21",
           "dependencies": {}
         }
       }

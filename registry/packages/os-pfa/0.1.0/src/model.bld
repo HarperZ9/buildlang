@@ -1,0 +1,116 @@
+// Reference model for os-pfa: one byte per frame, linear scans, no bitmap
+// words and no hint. It is slow on purpose. Its only job is to be simple
+// enough to check by reading, so the core can be compared against it.
+
+fn ref_new(nframes: u64) -> Vec<u8> {
+    let mut r: Vec<u8> = Vec::new();
+    let mut i: u64 = 0_u64;
+    while i < nframes {
+        r.push(0_u8);
+        i = i + 1_u64;
+    }
+    r
+}
+
+fn ref_count(r: &Vec<u8>) -> u64 {
+    r.len() as u64
+}
+
+fn ref_free_count(r: &Vec<u8>) -> u64 {
+    let mut c: u64 = 0_u64;
+    let mut i: usize = 0;
+    while i < r.len() {
+        if r[i] == 0_u8 { c = c + 1_u64; }
+        i = i + 1;
+    }
+    c
+}
+
+fn ref_alloc(r: &mut Vec<u8>) -> i64 {
+    let mut i: usize = 0;
+    while i < r.len() {
+        if r[i] == 0_u8 {
+            r[i] = 1_u8;
+            return i as i64;
+        }
+        i = i + 1;
+    }
+    -1
+}
+
+fn ref_free(r: &mut Vec<u8>, f: u64) -> i64 {
+    if f >= ref_count(r) {
+        return -2;
+    }
+    if r[f as usize] == 0_u8 {
+        return -3;
+    }
+    r[f as usize] = 0_u8;
+    0
+}
+
+// True when every frame in start..start+n holds the value want.
+fn ref_all(r: &Vec<u8>, start: u64, n: u64, want: u8) -> bool {
+    let mut i: u64 = 0_u64;
+    while i < n {
+        if r[(start + i) as usize] != want {
+            return false;
+        }
+        i = i + 1_u64;
+    }
+    true
+}
+
+fn ref_fill(r: &mut Vec<u8>, start: u64, n: u64, value: u8) {
+    let mut i: u64 = 0_u64;
+    while i < n {
+        r[(start + i) as usize] = value;
+        i = i + 1_u64;
+    }
+}
+
+fn ref_alloc_run(r: &mut Vec<u8>, n: u64) -> i64 {
+    if n == 0_u64 {
+        return -2;
+    }
+    let total = ref_count(r);
+    if n > total {
+        return -1;
+    }
+    let mut s: u64 = 0_u64;
+    while s <= total - n {
+        if ref_all(r, s, n, 0_u8) {
+            ref_fill(r, s, n, 1_u8);
+            return s as i64;
+        }
+        s = s + 1_u64;
+    }
+    -1
+}
+
+fn ref_range_ok(r: &Vec<u8>, start: u64, n: u64) -> bool {
+    let total = ref_count(r);
+    n != 0_u64 && start < total && n <= total - start
+}
+
+fn ref_reserve(r: &mut Vec<u8>, start: u64, n: u64) -> i64 {
+    if !ref_range_ok(r, start, n) {
+        return -2;
+    }
+    if !ref_all(r, start, n, 0_u8) {
+        return -3;
+    }
+    ref_fill(r, start, n, 1_u8);
+    0
+}
+
+fn ref_free_run(r: &mut Vec<u8>, start: u64, n: u64) -> i64 {
+    if !ref_range_ok(r, start, n) {
+        return -2;
+    }
+    if !ref_all(r, start, n, 1_u8) {
+        return -3;
+    }
+    ref_fill(r, start, n, 0_u8);
+    0
+}

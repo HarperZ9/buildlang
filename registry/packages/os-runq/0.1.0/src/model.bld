@@ -1,0 +1,127 @@
+// Reference model for os-runq. It has no queue at all. Each task carries a
+// stamp: the value of a counter at the moment the task last became ready.
+// The task to run next is the ready task with the lowest stamp. That is
+// first-in first-out order by definition, with no ring and no shifting, so
+// it shares no mechanism with the core it is compared against.
+
+struct RefQ { cur: i64, left: u64, quantum: u64, clock: u64 }
+
+fn refq_new(quantum: u64) -> RefQ {
+    RefQ { cur: -1, left: 0_u64, quantum: quantum, clock: 0_u64 }
+}
+
+fn refq_states(cap: u64) -> Vec<u8> {
+    let mut v: Vec<u8> = Vec::new();
+    let mut i: u64 = 0_u64;
+    while i < cap {
+        v.push(0_u8);
+        i = i + 1_u64;
+    }
+    v
+}
+
+fn refq_stamps(cap: u64) -> Vec<u64> {
+    let mut v: Vec<u64> = Vec::new();
+    let mut i: u64 = 0_u64;
+    while i < cap {
+        v.push(0_u64);
+        i = i + 1_u64;
+    }
+    v
+}
+
+fn refq_ready(m: &mut RefQ, st: &mut Vec<u8>, stamp: &mut Vec<u64>, t: u64) {
+    m.clock = m.clock + 1_u64;
+    st[t as usize] = 1_u8;
+    stamp[t as usize] = m.clock;
+}
+
+// The ready task with the lowest stamp above `floor`, or -1.
+fn refq_oldest(st: &Vec<u8>, stamp: &Vec<u64>, floor: u64) -> i64 {
+    let mut best: i64 = -1;
+    let mut t: usize = 0;
+    while t < st.len() {
+        if st[t] == 1_u8 && stamp[t] > floor {
+            if best < 0 || stamp[t] < stamp[best as usize] {
+                best = t as i64;
+            }
+        }
+        t = t + 1;
+    }
+    best
+}
+
+fn refq_dispatch(m: &mut RefQ, st: &mut Vec<u8>, stamp: &Vec<u64>) -> i64 {
+    let t = refq_oldest(st, stamp, 0_u64);
+    m.cur = t;
+    m.left = 0_u64;
+    if t >= 0 {
+        st[t as usize] = 2_u8;
+        m.left = m.quantum;
+    }
+    t
+}
+
+fn refq_add(m: &mut RefQ, st: &mut Vec<u8>, stamp: &mut Vec<u64>, t: u64) -> i64 {
+    if t >= (st.len() as u64) {
+        return -2;
+    }
+    if st[t as usize] != 0_u8 {
+        return -3;
+    }
+    refq_ready(m, st, stamp, t);
+    0
+}
+
+fn refq_next(m: &mut RefQ, st: &mut Vec<u8>, stamp: &mut Vec<u64>) -> i64 {
+    if m.cur >= 0 {
+        refq_ready(m, st, stamp, m.cur as u64);
+    }
+    refq_dispatch(m, st, stamp)
+}
+
+fn refq_tick(m: &mut RefQ, st: &mut Vec<u8>, stamp: &mut Vec<u64>) -> i64 {
+    if m.cur < 0 {
+        return refq_dispatch(m, st, stamp);
+    }
+    if m.left > 1_u64 {
+        m.left = m.left - 1_u64;
+        return m.cur;
+    }
+    refq_next(m, st, stamp)
+}
+
+// Shared by block (to = 3) and exit (to = 0).
+fn refq_leave(m: &mut RefQ, st: &mut Vec<u8>, stamp: &Vec<u64>, to: u8) -> i64 {
+    if m.cur < 0 {
+        return -3;
+    }
+    st[m.cur as usize] = to;
+    refq_dispatch(m, st, stamp)
+}
+
+fn refq_wake(m: &mut RefQ, st: &mut Vec<u8>, stamp: &mut Vec<u64>, t: u64) -> i64 {
+    if t >= (st.len() as u64) {
+        return -2;
+    }
+    if st[t as usize] != 3_u8 {
+        return -3;
+    }
+    refq_ready(m, st, stamp, t);
+    0
+}
+
+fn refq_remove(m: &mut RefQ, st: &mut Vec<u8>, t: u64) -> i64 {
+    if t >= (st.len() as u64) {
+        return -2;
+    }
+    if st[t as usize] == 0_u8 {
+        return -3;
+    }
+    if st[t as usize] == 2_u8 {
+        m.cur = -1;
+        m.left = 0_u64;
+    }
+    st[t as usize] = 0_u8;
+    0
+}

@@ -127,6 +127,42 @@ golden value. `tests/reference.py` in each package runs the original tool on
 the same inputs and wrote the goldens. `compiler/tests/registry_packages.rs`
 builds every such package from its own lock and runs every case.
 
+## Kernel packages and the improvement loop
+
+A kernel package is a tool package with a written numeric contract. `sum-det`
+is the first: it adds binary64 values in a fixed order and returns the same
+bits on every machine. Beside the usual files it carries `SPEC.md` and
+`KERNEL.toml` (the contract in words and in machine-readable form),
+`tests/controls.txt` (planted-wrong versions every check must refuse),
+`tests/props.txt`, `ref/` (the reference that wrote the goldens), `bench/`
+(the benchmark and its decision rule) and `RECEIPT.json`.
+
+One source file of the package is a slot: a pure function with a slower
+reference beside it. A faster version replaces the slot only through the loop
+under `improve/`:
+
+```
+python improve/spawn.py --buildc buildc PROPOSAL...
+```
+
+The loop sends the planted controls and then each proposal through admission,
+build, lint, `buildc tv`, the cases, the properties, a seeded fuzz run against
+the reference, a paired benchmark of 20 rounds against a threshold fixed
+beforehand, and a hold-out set. It appends every decision to
+`improve/LEDGER.jsonl`, refusals included, and each line carries the digest of
+the line before it. A run in which any control passes promotes nothing.
+
+`improve/FROZEN.sha256` lists the digest of every file the loop may not change:
+cases, goldens, controls, hold-out, the benchmark rule, the reference and the
+loop itself. The loop refuses to start when a digest differs or a required
+file is missing from the list. `compiler/tests/kernel_improve.rs` runs both
+checks in CI, and plants a changed threshold, a dropped list entry, a removed
+ledger line and an edited ledger line to confirm each is refused.
+
+The loop's judge is written in BuildLang (`improve/kernel/`). BuildLang has no
+builtin that starts a process, so a small Python script runs the commands the
+judge prints. `SPEC.md` in the package lists what the loop does not cover.
+
 ## Codes
 
 | Code | When |

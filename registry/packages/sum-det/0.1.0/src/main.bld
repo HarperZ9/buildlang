@@ -1,0 +1,139 @@
+// sum-det: run the sums, their properties, the fuzz run and the bench.
+// SPDX-License-Identifier: FSL-1.1-MIT
+// Copyright (c) 2026 Zain Dana Harper.
+//
+// Usage: sum-det sum ORDER FILE           one result per line of FILE
+//        sum-det gens ORDER FILE          one result per "KIND SEED N" line
+//        sum-det prop NAME SEED COUNT     a named property
+//        sum-det fuzz SEED COUNT          sd_i8 against sd_i8_ref
+//        sum-det bench ORDER N REPS SEED  prints "MS CHECKSUM"
+// ORDER is serial, tree, i8, i8ref, fsum or binned. A float travels as the
+// 16 hex digits of its bits.
+
+// Orders by number, so a timed loop does not compare strings per call.
+fn sd_order(order: str) -> i64 {
+    if order == "serial" { return 0; }
+    if order == "tree" { return 1; }
+    if order == "i8" { return 2; }
+    if order == "i8ref" { return 3; }
+    if order == "fsum" { return 4; }
+    if order == "binned" { return 5; }
+    -1
+}
+
+fn sd_run(which: i64, xs: &Vec<f64>) -> f64 {
+    if which == 0 { return sd_serial(xs); }
+    if which == 1 { return sd_tree(xs); }
+    if which == 2 { return sd_i8(xs); }
+    if which == 3 { return sd_i8_ref(xs); }
+    if which == 4 { return sd_fsum(xs); }
+    sd_binned(xs)
+}
+
+fn sd_hex(tok: str) -> u64 {
+    let b = tok.as_bytes();
+    let mut v: u64 = 0_u64;
+    let mut i: usize = 0;
+    while i < tok.len() {
+        let c = b[i] as u64;
+        let mut d: u64 = c - 48_u64;
+        if c >= 97_u64 {
+            d = c - 87_u64;
+        }
+        v = (v << 4_u64) | d;
+        i = i + 1;
+    }
+    v
+}
+
+fn sd_line(line: str) -> Vec<f64> {
+    let toks = line.split(" ");
+    let mut xs: Vec<f64> = Vec::new();
+    let mut i: usize = 0;
+    while i < toks.len() {
+        if toks[i].len() == 16 {
+            xs.push(f64::from_bits(sd_hex(toks[i])));
+        }
+        i = i + 1;
+    }
+    xs
+}
+
+// Each repeat flips the sign of one element, so no two repeats sum the same
+// input and the compiler cannot lift the call out of the loop.
+fn sd_bench(which: i64, n: usize, reps: i64, seed: u64) ~ Console + Clock {
+    let mut xs = sd_gen(seed, n, 1);
+    let mut acc: u64 = 0_u64;
+    let t0 = clock_ms();
+    let mut r: i64 = 0;
+    while r < reps {
+        let at = (r as usize) % n;
+        xs[at] = 0.0 - xs[at];
+        acc = (acc ^ sd_run(which, &xs).to_bits()).wrapping_mul(1099511628211_u64);
+        acc = acc ^ (acc >> 29_u64);
+        r = r + 1;
+    }
+    println!("{} {:016x}", clock_ms() - t0, acc);
+}
+
+fn sd_sum_file(which: i64, path: str) ~ Console + FileSystem {
+    let lines = read_file(path).split("\n");
+    let mut i: usize = 0;
+    while i < lines.len() {
+        if lines[i].len() > 0 {
+            println!("{:016x}", sd_run(which, &sd_line(lines[i])).to_bits());
+        }
+        i = i + 1;
+    }
+}
+
+fn sd_gens_file(which: i64, path: str) ~ Console + FileSystem {
+    let lines = read_file(path).split("\n");
+    let mut i: usize = 0;
+    while i < lines.len() {
+        let t = lines[i].split(" ");
+        if t.len() == 3 {
+            let xs = sd_gen(t[1].parse_int() as u64, t[2].parse_int() as usize, t[0].parse_int());
+            println!("{:016x}", sd_run(which, &xs).to_bits());
+        }
+        i = i + 1;
+    }
+}
+
+fn main() ~ Console + FileSystem + Process + Environment + Clock {
+    if args_count() < 4 {
+        println!("usage: sum-det sum|gens|prop|fuzz|bench ...");
+        exit(2);
+    }
+    let cmd = args_get(1);
+    let which = sd_order(args_get(2));
+    if (cmd == "sum" || cmd == "gens" || cmd == "bench") && which < 0 {
+        println!("unknown order {}", args_get(2));
+        exit(2);
+    }
+    if cmd == "sum" {
+        sd_sum_file(which, args_get(3));
+    } else if cmd == "gens" {
+        sd_gens_file(which, args_get(3));
+    } else if cmd == "prop" {
+        let bad = sd_prop(args_get(2), args_get(3).parse_int() as u64, args_get(4).parse_int());
+        if bad >= 0 {
+            println!("FAIL {} round {}", args_get(2), bad);
+            exit(1);
+        }
+        println!("ok {} {}", args_get(2), args_get(4));
+    } else if cmd == "fuzz" {
+        let res = sd_fuzz(args_get(2).parse_int() as u64, args_get(3).parse_int());
+        if res.0 >= 0 {
+            println!("FAIL fuzz round {}", res.0);
+            exit(1);
+        }
+        println!("ok fuzz {} {:016x}", args_get(3), res.1);
+    } else if cmd == "bench" {
+        let seed = args_get(5).parse_int() as u64;
+        sd_bench(which, args_get(3).parse_int() as usize, args_get(4).parse_int(), seed);
+    } else {
+        println!("unknown command {}", cmd);
+        exit(2);
+    }
+}

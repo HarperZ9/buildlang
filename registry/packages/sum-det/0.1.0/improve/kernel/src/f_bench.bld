@@ -1,0 +1,156 @@
+// improve-kernel: the paired benchmark and its interval.
+// SPDX-License-Identifier: FSL-1.1-MIT
+// Copyright (c) 2026 Zain Dana Harper.
+//
+// Round r gives a baseline time a[r] and a variant time b[r], and the gain is
+// d[r] = (a[r] - b[r]) / a[r]. The interval is mean(d) +/- t * sd(d) /
+// sqrt(rounds) with t from bench/bench.toml. Results are in parts per million.
+
+// Milliseconds per round for side "a" or "b"; -1 where a run failed.
+fn ik_bench_ms(dir: str, tag: str, side: str, rounds: i64) -> Vec<i64> ~ FileSystem {
+    let mut out: Vec<i64> = Vec::new();
+    let mut r: i64 = 0;
+    while r < rounds {
+        let path = format!("{}/out/{}-{}-{}.txt", dir, tag, side, r);
+        let t = ik_text(path).trim().split(" ");
+        if ik_rc_ok(path) && t.len() == 2 && t[1].len() == 16 {
+            out.push(t[0].parse_int());
+        } else {
+            out.push(-1);
+        }
+        r = r + 1;
+    }
+    out
+}
+
+// Every round's variant checksum equals the baseline's.
+fn ik_bench_same(dir: str, tag: str, rounds: i64) -> bool ~ FileSystem {
+    let mut r: i64 = 0;
+    while r < rounds {
+        let a = ik_text(format!("{}/out/{}-a-{}.txt", dir, tag, r)).trim().split(" ");
+        let b = ik_text(format!("{}/out/{}-b-{}.txt", dir, tag, r)).trim().split(" ");
+        if a.len() != 2 || b.len() != 2 || a[1] != b[1] {
+            return false;
+        }
+        r = r + 1;
+    }
+    true
+}
+
+// Largest peak resident bytes over the rounds; 0 when any reading is missing.
+fn ik_bench_rss(dir: str, tag: str, side: str, rounds: i64) -> i64 ~ FileSystem {
+    let mut peak: i64 = 0;
+    let mut r: i64 = 0;
+    while r < rounds {
+        let t = ik_text(format!("{}/out/{}-{}-{}.txt.mw", dir, tag, side, r)).trim().split(" ");
+        let mut got: i64 = 0;
+        let mut k: usize = 0;
+        while k + 1 < t.len() {
+            if t[k] == "rss_B" {
+                got = t[k + 1].parse_int();
+            }
+            k = k + 1;
+        }
+        if got <= 0 {
+            return 0;
+        }
+        if got > peak {
+            peak = got;
+        }
+        r = r + 1;
+    }
+    peak
+}
+
+fn ik_ms_valid(a: &Vec<i64>, b: &Vec<i64>) -> bool {
+    let mut i: usize = 0;
+    while i < a.len() {
+        if a[i] <= 0 || b[i] < 0 {
+            return false;
+        }
+        i = i + 1;
+    }
+    a.len() >= 2 && a.len() == b.len()
+}
+
+// (mean, low, high) of the paired gain in ppm.
+fn ik_interval(a: &Vec<i64>, b: &Vec<i64>, t_milli: i64) -> (i64, i64, i64) {
+    let n = a.len() as f64;
+    let mut sum: f64 = 0.0;
+    let mut i: usize = 0;
+    while i < a.len() {
+        sum = sum + ((a[i] - b[i]) as f64) / (a[i] as f64);
+        i = i + 1;
+    }
+    let mean = sum / n;
+    let mut sq: f64 = 0.0;
+    let mut j: usize = 0;
+    while j < a.len() {
+        let d = ((a[j] - b[j]) as f64) / (a[j] as f64) - mean;
+        sq = sq + d * d;
+        j = j + 1;
+    }
+    let half = ((t_milli as f64) / 1000.0) * (sq / (n - 1.0)).sqrt() / n.sqrt();
+    (ik_ppm(mean), ik_ppm(mean - half), ik_ppm(mean + half))
+}
+
+fn ik_int_list(v: &Vec<i64>) -> str {
+    let mut out: str = "[";
+    let mut i: usize = 0;
+    while i < v.len() {
+        out = if i == 0 { format!("{}{}", out, v[i]) } else { format!("{},{}", out, v[i]) };
+        i = i + 1;
+    }
+    format!("{}]", out)
+}
+
+// Measure the open workload. Records the steps, stores the JSON for the
+// ledger under "bench", and returns true when the gain clears the threshold.
+fn ik_judge_open(work: str, dir: str) -> bool ~ FileSystem {
+    let toml = ik_read("bench/bench.toml");
+    let rounds = ik_toml_int(toml, "rounds");
+    let a = ik_bench_ms(dir, "open", "a", rounds);
+    let b = ik_bench_ms(dir, "open", "b", rounds);
+    let same = ik_ms_valid(&a, &b) && ik_bench_same(dir, "open", rounds);
+    ik_step(work, "bench-equal", same, "bench-equal");
+    if !same {
+        return false;
+    }
+    let iv = ik_interval(&a, &b, ik_toml_int(toml, "t_crit_milli"));
+    let rss_a = ik_bench_rss(dir, "open", "a", rounds);
+    let rss_b = ik_bench_rss(dir, "open", "b", rounds);
+    let times = format!("\"a_ms\":{},\"b_ms\":{},\"hi_ppm\":{},\"lo_ppm\":{},\"mean_ppm\":{}",
+        ik_int_list(&a), ik_int_list(&b), iv.2, iv.1, iv.0);
+    let shape = format!("\"n\":{},\"reps\":{},\"rounds\":{},\"rss_a\":{},\"rss_b\":{}",
+        ik_toml_int(toml, "open_n"), ik_toml_int(toml, "open_reps"), rounds, rss_a, rss_b);
+    ik_set(work, "bench", format!("{{{},{}}}", times, shape));
+    ik_set(work, "lo", format!("{}", iv.1));
+    let slack = 1000000 + ik_toml_int(toml, "memory_slack_ppm");
+    let mem = rss_a > 0 && rss_b > 0 && rss_b * 1000000 <= rss_a * slack;
+    ik_step(work, "memory", mem, "memory");
+    let gain = iv.1 > ik_toml_int(toml, "threshold_ppm");
+    ik_step(work, "gain", gain, if iv.2 < 0 { "slower" } else { "no-gain" });
+    mem && gain
+}
+
+// Hold-out sizes: checksums equal and the variant not slower at any size.
+// Only pass or fail leaves this function.
+fn ik_judge_sizes(dir: str) -> bool ~ FileSystem {
+    let toml = ik_read("bench/bench.toml");
+    let rounds = ik_toml_int(toml, "rounds");
+    let rows = ik_lines(ik_read("holdout/sizes.txt"));
+    let mut i: usize = 0;
+    while i < rows.len() {
+        let tag = format!("size{}", i);
+        let a = ik_bench_ms(dir, tag, "a", rounds);
+        let b = ik_bench_ms(dir, tag, "b", rounds);
+        if !ik_ms_valid(&a, &b) || !ik_bench_same(dir, tag, rounds) {
+            return false;
+        }
+        if ik_interval(&a, &b, ik_toml_int(toml, "t_crit_milli")).2 < 0 {
+            return false;
+        }
+        i = i + 1;
+    }
+    rows.len() > 0
+}

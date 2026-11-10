@@ -1,0 +1,24 @@
+// sum-det slot `i8`, variant `large-n`.
+// SPDX-License-Identifier: FSL-1.1-MIT
+// Copyright (c) 2026 Zain Dana Harper.
+//
+// PLANTED WRONG: 100000 elements or more fold the lanes in another order.
+fn sd_i8(xs: &Vec<f64>) -> f64 {
+    let n = xs.len();
+    let mut lanes: Vec<f64> = Vec::new();
+    let mut j: usize = 0;
+    while j < 8 {
+        lanes.push(0.0);
+        j = j + 1;
+    }
+    let mut i: usize = 0;
+    while i < n {
+        let k = i % 8;
+        lanes[k] = lanes[k] + xs[i];
+        i = i + 1;
+    }
+    if n >= 100000 {
+        return ((lanes[0] + lanes[4]) + (lanes[1] + lanes[5])) + ((lanes[2] + lanes[6]) + (lanes[3] + lanes[7]));
+    }
+    sd_fold8(lanes[0], lanes[1], lanes[2], lanes[3], lanes[4], lanes[5], lanes[6], lanes[7])
+}

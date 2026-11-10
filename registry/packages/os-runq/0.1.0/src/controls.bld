@@ -1,0 +1,74 @@
+// Planted controls for os-runq. Each function is a copy of a core function
+// with one defect put in on purpose. The checks must refuse every one of
+// them; `os-runq controls` shows the refusals. A check that accepts a
+// planted defect is a broken check. Nothing outside the harness calls these.
+
+// Control 1: the running task goes to the front of the queue instead of the
+// back, so it is picked again at once and the other tasks never run.
+fn ctl_next_front(q: &mut Runq, ring: &mut [u64], state: &mut [u8]) -> i64 {
+    if q.current >= 0 {
+        let c = q.current as u64;
+        state[c as usize] = RQ_READY;
+        q.head = (q.head + q.cap - 1_u64) % q.cap;
+        ring[q.head as usize] = c;
+        q.len = q.len + 1_u64;
+    }
+    rq_dispatch(q, ring, state)
+}
+
+// Control 2: wake accepts a task that is already ready, so the task is
+// queued twice.
+fn ctl_wake_twice(q: &mut Runq, ring: &mut [u64], state: &mut [u8], t: u64) -> i64 {
+    if t >= q.cap {
+        return RQ_RANGE;
+    }
+    if state[t as usize] != RQ_BLOCKED && state[t as usize] != RQ_READY {
+        return RQ_STATE;
+    }
+    state[t as usize] = RQ_READY;
+    rq_push(q, ring, t);
+    RQ_OK
+}
+
+// Control 3: remove fills the gap with the last queue entry instead of
+// shifting, so one waiting task jumps ahead of the others.
+fn ctl_remove_swap(q: &mut Runq, ring: &mut [u64], state: &mut [u8], t: u64) -> i64 {
+    if t >= q.cap {
+        return RQ_RANGE;
+    }
+    let s = state[t as usize];
+    if s == RQ_ABSENT {
+        return RQ_STATE;
+    }
+    if s == RQ_RUNNING {
+        q.current = -1;
+        q.left = 0_u64;
+    }
+    if s == RQ_READY {
+        let last = ring[((q.head + q.len - 1_u64) % q.cap) as usize];
+        let mut i: u64 = 0_u64;
+        while i < q.len {
+            let at = ((q.head + i) % q.cap) as usize;
+            if ring[at] == t {
+                ring[at] = last;
+            }
+            i = i + 1_u64;
+        }
+        q.len = q.len - 1_u64;
+    }
+    state[t as usize] = RQ_ABSENT;
+    RQ_OK
+}
+
+// Control 4: the tick handler takes the processor away one tick early, so a
+// task with quantum q runs for q - 1 ticks.
+fn ctl_tick_short(q: &mut Runq, ring: &mut [u64], state: &mut [u8]) -> i64 {
+    if q.current < 0 {
+        return rq_dispatch(q, ring, state);
+    }
+    if q.left > 2_u64 {
+        q.left = q.left - 1_u64;
+        return q.current;
+    }
+    rq_next(q, ring, state)
+}

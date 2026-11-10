@@ -1,0 +1,8 @@
+# name seed count (run as: sum-det prop NAME SEED COUNT; every round must hold)
+i8-equals-ref 7 3000
+i8-short-is-fold8 11 3000
+i8-negate 13 3000
+i8-append-zeros 17 3000
+i8-integers-agree 19 3000
+fsum-equals-binned 23 3000
+fsum-order-free 29 3000

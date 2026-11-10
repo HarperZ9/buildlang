@@ -1,0 +1,215 @@
+// Check harness for os-runq: a seeded operation generator, a dispatch layer
+// that selects the implementation under test, state invariants, and the
+// differential run against the reference model.
+//
+// Variant 0 is the core. Variants 1 to 4 are the planted controls.
+
+const CHK_SLOTS: u64 = 16_u64;
+
+// splitmix64: a small seeded generator. Same seed, same sequence, on every
+// host, because every step is wrapping 64-bit integer arithmetic.
+struct Rng { s: u64 }
+
+fn rng_next(r: &mut Rng) -> u64 {
+    r.s = r.s.wrapping_add(0x9E3779B97F4A7C15_u64);
+    let mut z: u64 = r.s;
+    z = (z ^ (z >> 30_u64)).wrapping_mul(0xBF58476D1CE4E5B9_u64);
+    z = (z ^ (z >> 27_u64)).wrapping_mul(0x94D049BB133111EB_u64);
+    z ^ (z >> 31_u64)
+}
+
+// One generated operation. kind: 0 add(t), 1 next, 2 tick, 3 block,
+// 4 wake(t), 5 exit, 6 remove(t).
+struct Op { kind: u64, t: u64 }
+
+// Ticks are the most common event, as on real hardware. Task numbers reach
+// one past the last slot to exercise the range error.
+fn gen_op(rng: &mut Rng, cap: u64) -> Op {
+    let k = rng_next(rng) % 16_u64;
+    let t = rng_next(rng) % (cap + 1_u64);
+    if k < 3_u64 { return Op { kind: 0_u64, t: t }; }
+    if k == 3_u64 { return Op { kind: 1_u64, t: 0_u64 }; }
+    if k < 10_u64 { return Op { kind: 2_u64, t: 0_u64 }; }
+    if k < 12_u64 { return Op { kind: 3_u64, t: 0_u64 }; }
+    if k < 14_u64 { return Op { kind: 4_u64, t: t }; }
+    if k == 14_u64 { return Op { kind: 5_u64, t: 0_u64 }; }
+    Op { kind: 6_u64, t: t }
+}
+
+fn apply_sut(v: i64, q: &mut Runq, ring: &mut [u64], state: &mut [u8], op: &Op) -> i64 {
+    if op.kind == 0_u64 { return rq_add(q, ring, state, op.t); }
+    if op.kind == 1_u64 {
+        if v == 1 { return ctl_next_front(q, ring, state); }
+        return rq_next(q, ring, state);
+    }
+    if op.kind == 2_u64 {
+        if v == 4 { return ctl_tick_short(q, ring, state); }
+        return rq_tick(q, ring, state);
+    }
+    if op.kind == 3_u64 { return rq_block(q, ring, state); }
+    if op.kind == 4_u64 {
+        if v == 2 { return ctl_wake_twice(q, ring, state, op.t); }
+        return rq_wake(q, ring, state, op.t);
+    }
+    if op.kind == 5_u64 { return rq_exit(q, ring, state); }
+    if v == 3 { return ctl_remove_swap(q, ring, state, op.t); }
+    rq_remove(q, ring, state, op.t)
+}
+
+fn apply_ref(m: &mut RefQ, st: &mut Vec<u8>, stamp: &mut Vec<u64>, op: &Op) -> i64 {
+    if op.kind == 0_u64 { return refq_add(m, st, stamp, op.t); }
+    if op.kind == 1_u64 { return refq_next(m, st, stamp); }
+    if op.kind == 2_u64 { return refq_tick(m, st, stamp); }
+    if op.kind == 3_u64 { return refq_leave(m, st, stamp, 3_u8); }
+    if op.kind == 4_u64 { return refq_wake(m, st, stamp, op.t); }
+    if op.kind == 5_u64 { return refq_leave(m, st, stamp, 0_u8); }
+    refq_remove(m, st, op.t)
+}
+
+// Task number at queue offset i (0 is the front).
+fn ring_at(q: &Runq, ring: &[u64], i: u64) -> u64 {
+    ring[((q.head + i) % q.cap) as usize]
+}
+
+fn count_state(q: &Runq, state: &[u8], want: u8) -> u64 {
+    let mut n: u64 = 0_u64;
+    let mut t: u64 = 0_u64;
+    while t < q.cap {
+        if state[t as usize] == want { n = n + 1_u64; }
+        t = t + 1_u64;
+    }
+    n
+}
+
+// 31: the ring holds exactly the ready tasks, each one once.
+fn inv_ring(q: &Runq, ring: &[u64], state: &[u8]) -> i64 {
+    if q.len > q.cap || q.head >= q.cap || q.len != count_state(q, state, RQ_READY) {
+        return 31;
+    }
+    let mut i: u64 = 0_u64;
+    while i < q.len {
+        let t = ring_at(q, ring, i);
+        if t >= q.cap || state[t as usize] != RQ_READY {
+            return 31;
+        }
+        let mut j: u64 = i + 1_u64;
+        while j < q.len {
+            if ring_at(q, ring, j) == t { return 31; }
+            j = j + 1_u64;
+        }
+        i = i + 1_u64;
+    }
+    0
+}
+
+// 32: at most one task runs; it is `current` and holds 1 to quantum ticks.
+// An idle processor holds no ticks.
+fn inv_current(q: &Runq, state: &[u8]) -> i64 {
+    let running = count_state(q, state, RQ_RUNNING);
+    if q.current < 0 {
+        if running != 0_u64 || q.left != 0_u64 { return 32; }
+        return 0;
+    }
+    if running != 1_u64 || state[q.current as usize] != RQ_RUNNING {
+        return 32;
+    }
+    if q.left == 0_u64 || q.left > q.quantum { return 32; }
+    0
+}
+
+fn inv_check(q: &Runq, ring: &[u64], state: &[u8]) -> i64 {
+    let a = inv_ring(q, ring, state);
+    if a != 0 { return a; }
+    inv_current(q, state)
+}
+
+// True when the core and the model agree on every task state, the running
+// task, its remaining ticks, and the order of the queue.
+fn same_state(q: &Runq, ring: &[u64], state: &[u8], m: &RefQ, st: &Vec<u8>, stamp: &Vec<u64>) -> bool {
+    if q.current != m.cur || q.left != m.left {
+        return false;
+    }
+    let mut t: u64 = 0_u64;
+    while t < q.cap {
+        if state[t as usize] != st[t as usize] { return false; }
+        t = t + 1_u64;
+    }
+    let mut floor: u64 = 0_u64;
+    let mut i: u64 = 0_u64;
+    while i < q.len {
+        let want = refq_oldest(st, stamp, floor);
+        if want < 0 || ring_at(q, ring, i) != (want as u64) { return false; }
+        floor = stamp[want as usize];
+        i = i + 1_u64;
+    }
+    refq_oldest(st, stamp, floor) < 0
+}
+
+// Where and why a run was refused. kind: 0 none, 1 return codes differ,
+// 2 state differs from the model, 31 or 32 an invariant, 33 to 35 a property.
+struct Fail { kind: i64, step: u64, op: u64, got: i64, want: i64 }
+
+fn fail_new() -> Fail {
+    Fail { kind: 0, step: 0_u64, op: 0_u64, got: 0, want: 0 }
+}
+
+fn fail_set(fl: &mut Fail, kind: i64, step: u64, op: u64, got: i64, want: i64) -> bool {
+    fl.kind = kind;
+    fl.step = step;
+    fl.op = op;
+    fl.got = got;
+    fl.want = want;
+    false
+}
+
+// The quantum a run uses, derived from its seed: 1 to 4 ticks.
+fn chk_quantum(seed: u64) -> u64 {
+    1_u64 + (seed % 4_u64)
+}
+
+fn chk_cap(i: u64) -> u64 {
+    if i == 0_u64 { return 1_u64; }
+    if i == 1_u64 { return 2_u64; }
+    if i == 2_u64 { return 3_u64; }
+    if i == 3_u64 { return 8_u64; }
+    CHK_SLOTS
+}
+
+// Differential run: the same generated operations go to variant v and to
+// the model. After every step the return codes, the full states and the
+// invariants must agree. Returns true when no step was refused.
+fn diff_run(v: i64, cap: u64, seed: u64, steps: u64, fl: &mut Fail) -> bool {
+    let mut q = rq_new();
+    let mut ring: [u64; 16] = [0_u64; 16];
+    let mut state: [u8; 16] = [0_u8; 16];
+    let mut m = refq_new(chk_quantum(seed));
+    let mut st = refq_states(cap);
+    let mut stamp = refq_stamps(cap);
+    let mut rng = Rng { s: seed };
+    let rc = rq_init(&mut q, &mut ring, &mut state, cap, chk_quantum(seed));
+    if rc != RQ_OK {
+        return fail_set(fl, 1, 0_u64, 9_u64, rc, RQ_OK);
+    }
+    let mut step: u64 = 1_u64;
+    while step <= steps {
+        let op = gen_op(&mut rng, cap);
+        let got = apply_sut(v, &mut q, &mut ring, &mut state, &op);
+        let want = apply_ref(&mut m, &mut st, &mut stamp, &op);
+        if got != want {
+            return fail_set(fl, 1, step, op.kind, got, want);
+        }
+        let k = inv_check(&q, &ring, &state);
+        if k != 0 {
+            return fail_set(fl, k, step, op.kind, got, want);
+        }
+        if !same_state(&q, &ring, &state, &m, &st, &stamp) {
+            return fail_set(fl, 2, step, op.kind, got, want);
+        }
+        step = step + 1_u64;
+    }
+    true
+}
+
+fn digest_step(h: u64, x: u64) -> u64 {
+    (h ^ (x + 1_u64)).wrapping_mul(0x100000001B3_u64)
+}

@@ -1,0 +1,17 @@
+# mode golden args... (run from the package folder)
+# hand-derived script: every result in the golden was worked out on paper
+exact tests/golden-cases.txt cases
+# the core and the reference model must print the same bytes
+exact tests/golden-trace-1-3.txt trace 1 3 200
+exact tests/golden-trace-1-3.txt trace-ref 1 3 200
+exact tests/golden-trace-3-5.txt trace 3 5 600
+exact tests/golden-trace-3-5.txt trace-ref 3 5 600
+exact tests/golden-trace-8-4.txt trace 8 4 1500
+exact tests/golden-trace-8-4.txt trace-ref 8 4 1500
+exact tests/golden-trace-16-9.txt trace 16 9 2000
+exact tests/golden-trace-16-9.txt trace-ref 16 9 2000
+# seeded differential run and property run over five queue sizes
+exact tests/golden-fuzz-1.txt fuzz 1 4000
+exact tests/golden-props-1.txt props 1 4000
+# every planted defect must be refused by both checks
+exact tests/golden-controls.txt controls

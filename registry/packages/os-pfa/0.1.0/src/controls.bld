@@ -1,0 +1,87 @@
+// Planted controls for os-pfa. Each function is a copy of a core function
+// with one defect put in on purpose. The checks must refuse every one of
+// them; `os-pfa controls` shows the refusals. A check that accepts a planted
+// defect is a broken check. Nothing outside the test harness calls these.
+
+// Control 1: free that never lowers the hint. A later alloc then skips the
+// freed frame, so the lowest-free-frame rule is broken.
+fn ctl_free_keeps_hint(p: &mut Pfa, bits: &mut [u64], f: u64) -> i64 {
+    if f >= p.nframes {
+        return PFA_RANGE;
+    }
+    if !pfa_is_used(p, bits, f) {
+        return PFA_STATE;
+    }
+    pfa_clear(bits, f);
+    p.nfree = p.nfree + 1_u64;
+    PFA_OK
+}
+
+// Control 2: free with no double-free check. Freeing a free frame returns
+// PFA_OK and raises the free count above the truth.
+fn ctl_free_double(p: &mut Pfa, bits: &mut [u64], f: u64) -> i64 {
+    if f >= p.nframes {
+        return PFA_RANGE;
+    }
+    pfa_clear(bits, f);
+    p.nfree = p.nfree + 1_u64;
+    let w = f / 64_u64;
+    if w < p.hint {
+        p.hint = w;
+    }
+    PFA_OK
+}
+
+// Control 3: run search that restarts on the used frame (off by one), so a
+// returned run can include a frame that was already in use.
+fn ctl_alloc_run_off(p: &mut Pfa, bits: &mut [u64], n: u64) -> i64 {
+    if n == 0_u64 {
+        return PFA_RANGE;
+    }
+    if n > p.nfree {
+        return PFA_NONE;
+    }
+    let mut f: u64 = p.hint * 64_u64;
+    let mut start: u64 = f;
+    let mut run: u64 = 0_u64;
+    while f < p.nframes {
+        if pfa_is_used(p, bits, f) {
+            run = 1_u64;
+            start = f;
+        } else {
+            run = run + 1_u64;
+        }
+        if run == n {
+            let mut g: u64 = start;
+            while g <= f {
+                pfa_set(bits, g);
+                g = g + 1_u64;
+            }
+            p.nfree = p.nfree - n;
+            return start as i64;
+        }
+        f = f + 1_u64;
+    }
+    PFA_NONE
+}
+
+// Control 4: init that leaves the tail bits clear, so frames past the end of
+// memory look free and alloc can hand them out.
+fn ctl_init_no_tail(p: &mut Pfa, bits: &mut [u64], nframes: u64) -> i64 {
+    if nframes == 0_u64 || nframes > PFA_MAX_FRAMES {
+        return PFA_RANGE;
+    }
+    let words = pfa_words(nframes);
+    if (bits.len() as u64) < words {
+        return PFA_SMALL;
+    }
+    let mut w: u64 = 0_u64;
+    while w < words {
+        bits[w as usize] = 0_u64;
+        w = w + 1_u64;
+    }
+    p.nframes = nframes;
+    p.nfree = nframes;
+    p.hint = 0_u64;
+    PFA_OK
+}

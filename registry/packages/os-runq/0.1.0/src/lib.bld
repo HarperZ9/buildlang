@@ -1,0 +1,191 @@
+// os-runq: the round-robin run queue core.
+//
+// A run queue is the list of tasks that are ready to use the processor.
+// Round robin means each ready task gets the processor in turn for a fixed
+// number of timer ticks (the quantum), then goes to the back of the queue.
+//
+// This core holds no memory and reads no hardware. The caller passes the
+// storage in: `ring` is a circular buffer of task numbers, `state` has one
+// byte per task. The same code runs inside a kernel and inside a host test.
+// Contract: see SPEC.md. Every function is total and returns a code.
+
+const RQ_OK: i64 = 0;
+const RQ_IDLE: i64 = -1;
+const RQ_RANGE: i64 = -2;
+const RQ_STATE: i64 = -3;
+const RQ_SMALL: i64 = -4;
+const RQ_MAX_TASKS: u64 = 65536_u64;
+
+const RQ_ABSENT: u8 = 0_u8;
+const RQ_READY: u8 = 1_u8;
+const RQ_RUNNING: u8 = 2_u8;
+const RQ_BLOCKED: u8 = 3_u8;
+
+// cap: number of task slots. head, len: the queue inside the ring.
+// current: the running task, or -1 when the processor is idle.
+// quantum: ticks per turn. left: ticks the running task still has.
+struct Runq { cap: u64, head: u64, len: u64, current: i64, quantum: u64, left: u64 }
+
+fn rq_new() -> Runq {
+    Runq { cap: 0_u64, head: 0_u64, len: 0_u64, current: -1, quantum: 1_u64, left: 0_u64 }
+}
+
+fn rq_init(q: &mut Runq, ring: &mut [u64], state: &mut [u8], cap: u64, quantum: u64) -> i64 {
+    if cap == 0_u64 || cap > RQ_MAX_TASKS || quantum == 0_u64 {
+        return RQ_RANGE;
+    }
+    if (ring.len() as u64) < cap || (state.len() as u64) < cap {
+        return RQ_SMALL;
+    }
+    let mut t: u64 = 0_u64;
+    while t < cap {
+        ring[t as usize] = 0_u64;
+        state[t as usize] = RQ_ABSENT;
+        t = t + 1_u64;
+    }
+    q.cap = cap;
+    q.head = 0_u64;
+    q.len = 0_u64;
+    q.current = -1;
+    q.quantum = quantum;
+    q.left = 0_u64;
+    RQ_OK
+}
+
+// Appends task t at the back. The caller guarantees t is not queued, so the
+// ring cannot overflow: at most cap tasks exist and each is queued once.
+fn rq_push(q: &mut Runq, ring: &mut [u64], t: u64) {
+    ring[((q.head + q.len) % q.cap) as usize] = t;
+    q.len = q.len + 1_u64;
+}
+
+// Picks the task at the front and makes it the running task. Returns its
+// number, or RQ_IDLE when the queue is empty.
+fn rq_dispatch(q: &mut Runq, ring: &mut [u64], state: &mut [u8]) -> i64 {
+    if q.len == 0_u64 {
+        q.current = -1;
+        q.left = 0_u64;
+        return RQ_IDLE;
+    }
+    let t = ring[q.head as usize];
+    q.head = (q.head + 1_u64) % q.cap;
+    q.len = q.len - 1_u64;
+    state[t as usize] = RQ_RUNNING;
+    q.current = t as i64;
+    q.left = q.quantum;
+    q.current
+}
+
+// Admits a new task. It becomes ready at the back of the queue.
+fn rq_add(q: &mut Runq, ring: &mut [u64], state: &mut [u8], t: u64) -> i64 {
+    if t >= q.cap {
+        return RQ_RANGE;
+    }
+    if state[t as usize] != RQ_ABSENT {
+        return RQ_STATE;
+    }
+    state[t as usize] = RQ_READY;
+    rq_push(q, ring, t);
+    RQ_OK
+}
+
+// Scheduling decision. The running task, if any, goes to the back of the
+// queue; then the front task runs with a full quantum. Returns the task that
+// now runs, or RQ_IDLE.
+fn rq_next(q: &mut Runq, ring: &mut [u64], state: &mut [u8]) -> i64 {
+    if q.current >= 0 {
+        let c = q.current as u64;
+        state[c as usize] = RQ_READY;
+        rq_push(q, ring, c);
+    }
+    rq_dispatch(q, ring, state)
+}
+
+// One timer tick. An idle processor picks the front task if there is one.
+// A running task loses one tick; when none are left the next task runs.
+// Returns the task that runs after the tick, or RQ_IDLE.
+fn rq_tick(q: &mut Runq, ring: &mut [u64], state: &mut [u8]) -> i64 {
+    if q.current < 0 {
+        return rq_dispatch(q, ring, state);
+    }
+    if q.left > 1_u64 {
+        q.left = q.left - 1_u64;
+        return q.current;
+    }
+    rq_next(q, ring, state)
+}
+
+// The running task waits for an event. Returns the task that runs next, or
+// RQ_IDLE, or RQ_STATE when no task is running.
+fn rq_block(q: &mut Runq, ring: &mut [u64], state: &mut [u8]) -> i64 {
+    if q.current < 0 {
+        return RQ_STATE;
+    }
+    state[q.current as usize] = RQ_BLOCKED;
+    rq_dispatch(q, ring, state)
+}
+
+// The event a blocked task waited for has happened. It becomes ready at the
+// back of the queue.
+fn rq_wake(q: &mut Runq, ring: &mut [u64], state: &mut [u8], t: u64) -> i64 {
+    if t >= q.cap {
+        return RQ_RANGE;
+    }
+    if state[t as usize] != RQ_BLOCKED {
+        return RQ_STATE;
+    }
+    state[t as usize] = RQ_READY;
+    rq_push(q, ring, t);
+    RQ_OK
+}
+
+// The running task ends. Returns the task that runs next, or RQ_IDLE, or
+// RQ_STATE when no task is running.
+fn rq_exit(q: &mut Runq, ring: &mut [u64], state: &mut [u8]) -> i64 {
+    if q.current < 0 {
+        return RQ_STATE;
+    }
+    state[q.current as usize] = RQ_ABSENT;
+    rq_dispatch(q, ring, state)
+}
+
+// Takes the queue entry at offset i (0 is the front) out of the ring and
+// closes the gap, keeping the order of the others.
+fn rq_unlink(q: &mut Runq, ring: &mut [u64], i: u64) {
+    let mut j: u64 = i;
+    while j + 1_u64 < q.len {
+        let from = ((q.head + j + 1_u64) % q.cap) as usize;
+        ring[((q.head + j) % q.cap) as usize] = ring[from];
+        j = j + 1_u64;
+    }
+    q.len = q.len - 1_u64;
+}
+
+// Removes task t in any state. A removed running task leaves the processor
+// idle until the next rq_next or rq_tick. The order of the other ready
+// tasks does not change.
+fn rq_remove(q: &mut Runq, ring: &mut [u64], state: &mut [u8], t: u64) -> i64 {
+    if t >= q.cap {
+        return RQ_RANGE;
+    }
+    let s = state[t as usize];
+    if s == RQ_ABSENT {
+        return RQ_STATE;
+    }
+    if s == RQ_RUNNING {
+        q.current = -1;
+        q.left = 0_u64;
+    }
+    if s == RQ_READY {
+        let mut i: u64 = 0_u64;
+        while i < q.len {
+            if ring[((q.head + i) % q.cap) as usize] == t {
+                rq_unlink(q, ring, i);
+                i = q.len;
+            }
+            i = i + 1_u64;
+        }
+    }
+    state[t as usize] = RQ_ABSENT;
+    RQ_OK
+}

@@ -1,0 +1,2 @@
+planted
+PLANTED WRONG: prints a pass line and exits from inside the slot.

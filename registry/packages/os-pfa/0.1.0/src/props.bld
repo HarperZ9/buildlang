@@ -1,0 +1,160 @@
+// Property checks for os-pfa. They use no reference model. Before each
+// operation the bitmap is copied; after it, the result is judged against
+// that copy alone. The properties, with the refusal code each one raises:
+//
+//   21 alloc returns the lowest free frame, or PFA_NONE when none is free
+//   22 free, reserve and free_run return the exact code the copy implies
+//   23 the bits that changed are exactly the frames the result names
+//      (so a failed operation changes nothing)
+//   24 the free count moves by exactly the number of frames taken or freed
+//   25 alloc_run returns the lowest run of n free frames (first fit)
+//   11 to 13 the state invariants of check.bld hold after every step
+
+struct Expect { rc: i64, start: u64, n: u64, code: i64 }
+
+fn snap_copy(dst: &mut [u64], src: &[u64]) {
+    let mut i: usize = 0;
+    while i < CHK_WORDS {
+        dst[i] = src[i];
+        i = i + 1;
+    }
+}
+
+fn snap_lowest_free(snap: &[u64], nframes: u64) -> i64 {
+    let mut f: u64 = 0_u64;
+    while f < nframes {
+        if !raw_bit(snap, f) {
+            return f as i64;
+        }
+        f = f + 1_u64;
+    }
+    PFA_NONE
+}
+
+// True when every frame of start..start+n has the used flag `used`.
+fn snap_all(snap: &[u64], start: u64, n: u64, used: bool) -> bool {
+    let mut i: u64 = 0_u64;
+    while i < n {
+        if raw_bit(snap, start + i) != used {
+            return false;
+        }
+        i = i + 1_u64;
+    }
+    true
+}
+
+fn snap_first_run(snap: &[u64], nframes: u64, n: u64) -> i64 {
+    if n > nframes {
+        return PFA_NONE;
+    }
+    let mut s: u64 = 0_u64;
+    while s <= nframes - n {
+        if snap_all(snap, s, n, false) {
+            return s as i64;
+        }
+        s = s + 1_u64;
+    }
+    PFA_NONE
+}
+
+// True when bits and snap differ on the frames start..start+n and nowhere
+// else. With n = 0 it means the two maps are equal.
+fn changed_only(bits: &[u64], snap: &[u64], start: u64, n: u64) -> bool {
+    let mut f: u64 = 0_u64;
+    while f < CHK_MAX_FRAMES {
+        let inside = f >= start && f < start + n;
+        if (raw_bit(bits, f) != raw_bit(snap, f)) != inside {
+            return false;
+        }
+        f = f + 1_u64;
+    }
+    true
+}
+
+// Expected result of a ranged operation. `used` is the state the range must
+// have before the call: false for reserve, true for free_run.
+fn expect_range(snap: &[u64], nframes: u64, a: u64, b: u64, used: bool) -> Expect {
+    let in_range = b != 0_u64 && a < nframes && b <= nframes - a;
+    if !in_range {
+        return Expect { rc: PFA_RANGE, start: 0_u64, n: 0_u64, code: 22 };
+    }
+    if !snap_all(snap, a, b, used) {
+        return Expect { rc: PFA_STATE, start: 0_u64, n: 0_u64, code: 22 };
+    }
+    Expect { rc: PFA_OK, start: a, n: b, code: 22 }
+}
+
+fn expect_alloc_run(snap: &[u64], nframes: u64, n: u64) -> Expect {
+    if n == 0_u64 {
+        return Expect { rc: PFA_RANGE, start: 0_u64, n: 0_u64, code: 25 };
+    }
+    let s = snap_first_run(snap, nframes, n);
+    if s < 0 {
+        return Expect { rc: PFA_NONE, start: 0_u64, n: 0_u64, code: 25 };
+    }
+    Expect { rc: s, start: s as u64, n: n, code: 25 }
+}
+
+fn expect_op(snap: &[u64], nframes: u64, op: &Op) -> Expect {
+    if op.kind == 0_u64 {
+        let f = snap_lowest_free(snap, nframes);
+        if f < 0 {
+            return Expect { rc: PFA_NONE, start: 0_u64, n: 0_u64, code: 21 };
+        }
+        return Expect { rc: f, start: f as u64, n: 1_u64, code: 21 };
+    }
+    if op.kind == 1_u64 {
+        return expect_range(snap, nframes, op.a, 1_u64, true);
+    }
+    if op.kind == 2_u64 {
+        return expect_alloc_run(snap, nframes, op.a);
+    }
+    expect_range(snap, nframes, op.a, op.b, op.kind == 4_u64)
+}
+
+// The free count after an operation that touched e.n frames.
+fn expect_nfree(before: u64, op: &Op, e: &Expect) -> u64 {
+    if op.kind == 1_u64 || op.kind == 4_u64 {
+        return before + e.n;
+    }
+    before - e.n
+}
+
+// Property run over variant v. Returns true when no step was refused.
+fn prop_run(v: i64, nframes: u64, seed: u64, steps: u64, fl: &mut Fail) -> bool {
+    let mut p = pfa_new();
+    let mut bits: [u64; 8] = [!0_u64; 8];
+    let mut snap: [u64; 8] = [0_u64; 8];
+    let mut rng = Rng { s: seed };
+    let rc = sut_init(v, &mut p, &mut bits, nframes);
+    if rc != PFA_OK {
+        return fail_set(fl, 1, 0_u64, 9_u64, rc, PFA_OK);
+    }
+    let k0 = inv_check(&p, &bits);
+    if k0 != 0 {
+        return fail_set(fl, k0, 0_u64, 9_u64, 0, 0);
+    }
+    let mut step: u64 = 1_u64;
+    while step <= steps {
+        let op = gen_op(&mut rng, nframes, step);
+        snap_copy(&mut snap, &bits);
+        let before = p.nfree;
+        let e = expect_op(&snap, nframes, &op);
+        let got = apply_sut(v, &mut p, &mut bits, &op);
+        if got != e.rc {
+            return fail_set(fl, e.code, step, op.kind, got, e.rc);
+        }
+        if !changed_only(&bits, &snap, e.start, e.n) {
+            return fail_set(fl, 23, step, op.kind, got, e.rc);
+        }
+        if p.nfree != expect_nfree(before, &op, &e) {
+            return fail_set(fl, 24, step, op.kind, got, e.rc);
+        }
+        let k = inv_check(&p, &bits);
+        if k != 0 {
+            return fail_set(fl, k, step, op.kind, got, e.rc);
+        }
+        step = step + 1_u64;
+    }
+    true
+}

@@ -1,0 +1,121 @@
+// improve-kernel: read the outputs of a plan and judge each step.
+// SPDX-License-Identifier: FSL-1.1-MIT
+// Copyright (c) 2026 Zain Dana Harper.
+
+fn ik_text(path: str) -> str ~ FileSystem {
+    ik_read(path).replace("\r", "")
+}
+
+fn ik_rc_ok(out: str) -> bool ~ FileSystem {
+    ik_read(format!("{}.rc", out)).trim() == "0"
+}
+
+fn ik_judge_build(dir: str) -> bool ~ FileSystem {
+    let exe = ik_exe(dir);
+    let found = file_exists(exe) || file_exists(exe.substring(0, exe.len() - 4));
+    ik_rc_ok(format!("{}/out/build.txt", dir)) && found
+}
+
+fn ik_judge_lint(dir: str) -> bool ~ FileSystem {
+    let out = format!("{}/out/lint.txt", dir);
+    ik_rc_ok(out) && ik_text(out).contains("No issues found")
+}
+
+// Names the translation validator certified.
+fn ik_tv_names(dir: str) -> Vec<str> ~ FileSystem {
+    let rows = ik_lines(ik_text(format!("{}/out/tv.txt", dir)));
+    let mut names: Vec<str> = Vec::new();
+    let mut i: usize = 0;
+    while i < rows.len() {
+        let at = rows[i].index_of(": certified (");
+        if at > 0 {
+            names.push(rows[i].substring(0, at as usize));
+        }
+        i = i + 1;
+    }
+    names
+}
+
+fn ik_has(items: &Vec<str>, want: str) -> bool {
+    let mut i: usize = 0;
+    while i < items.len() {
+        if items[i] == want {
+            return true;
+        }
+        i = i + 1;
+    }
+    false
+}
+
+// The certified count may not fall and no certified name may be lost.
+fn ik_judge_tv(base: str, dir: str) -> bool ~ FileSystem {
+    let a = ik_tv_names(base);
+    let b = ik_tv_names(dir);
+    let mut i: usize = 0;
+    while i < a.len() {
+        if !ik_has(&b, a[i]) {
+            return false;
+        }
+        i = i + 1;
+    }
+    a.len() > 0 && b.len() >= a.len()
+}
+
+// Every case output equals its golden file, byte for byte after CR removal.
+fn ik_judge_cases(dir: str, cases: str, tag: str) -> bool ~ FileSystem {
+    let rows = ik_lines(ik_read(cases));
+    let mut i: usize = 0;
+    while i < rows.len() {
+        let toks = rows[i].split(" ");
+        let out = format!("{}/out/{}-{}.txt", dir, tag, i);
+        if toks[0] != "exact" || !ik_rc_ok(out) || ik_text(out) != ik_text(toks[1]) {
+            return false;
+        }
+        i = i + 1;
+    }
+    rows.len() > 0
+}
+
+fn ik_judge_props(dir: str) -> bool ~ FileSystem {
+    let rows = ik_lines(ik_read("tests/props.txt"));
+    let mut i: usize = 0;
+    while i < rows.len() {
+        let out = format!("{}/out/prop-{}.txt", dir, i);
+        let want = format!("ok {} {}", rows[i].split(" ")[0], rows[i].split(" ")[2]);
+        if !ik_rc_ok(out) || ik_text(out).trim() != want {
+            return false;
+        }
+        i = i + 1;
+    }
+    rows.len() > 0
+}
+
+// The variant's fuzz line equals the baseline's: same seed, same fold of
+// every result, and both agree with the reference on every round.
+fn ik_judge_fuzz(base: str, dir: str) -> bool ~ FileSystem {
+    let a = format!("{}/out/fuzz.txt", base);
+    let b = format!("{}/out/fuzz.txt", dir);
+    ik_rc_ok(a) && ik_rc_ok(b) && ik_text(a).starts_with("ok fuzz ") && ik_text(a) == ik_text(b)
+}
+
+// Judge the equality steps of the tree at `dir` and record each one.
+// Returns true when every step passed.
+fn ik_judge_equal(work: str, dir: str) -> bool ~ FileSystem {
+    let base = format!("{}/A", work);
+    let built = ik_judge_build(dir);
+    ik_step(work, "build", built, "build");
+    if !built {
+        return false;
+    }
+    let lint = ik_judge_lint(dir);
+    ik_step(work, "lint", lint, "lint");
+    let tv = ik_judge_tv(base, dir);
+    ik_step(work, "tv", tv, "tv");
+    let cases = ik_judge_cases(dir, "tests/cases.txt", "case");
+    ik_step(work, "cases", cases, "cases");
+    let props = ik_judge_props(dir);
+    ik_step(work, "props", props, "props");
+    let fuzz = ik_judge_fuzz(base, dir);
+    ik_step(work, "fuzz", fuzz, "fuzz");
+    lint && tv && cases && props && fuzz
+}

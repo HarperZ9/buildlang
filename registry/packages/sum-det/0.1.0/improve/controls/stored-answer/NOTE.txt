@@ -1,0 +1,2 @@
+planted
+PLANTED WRONG: a stored result for each open case input, a serial sum otherwise.

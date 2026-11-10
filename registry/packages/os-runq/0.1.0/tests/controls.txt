@@ -1,0 +1,5 @@
+# id | function | planted defect | refused by (code)
+1 | ctl_next_front | next puts the running task at the front of the queue | differential 1 (return code), property 34
+2 | ctl_wake_twice | wake accepts a task that is already ready and queues it twice | differential 1 (return code), property 33
+3 | ctl_remove_swap | remove fills the gap with the last entry instead of shifting | differential 2 (queue order), property 34
+4 | ctl_tick_short | tick takes the processor away one tick early | differential 2 (state), property 35
