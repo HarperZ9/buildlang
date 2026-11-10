@@ -1,0 +1,35 @@
+// fasta, random-select kernel: the benchmarks-game linear congruential
+// generator picks nucleotides by cumulative probability; the picks are counted
+// and folded into a hash in place of the text output.
+fn pick(n: i64, cum: &Vec<f64>, counts: &mut Vec<i64>, res: &mut Vec<u64>) {
+    let mut seed: i64 = 42;
+    let mut h: u64 = 1469598103934665603;
+    let mut i = 0;
+    while i < n {
+        seed = (seed * 3877 + 29573) % 139968;
+        let r = (seed as f64) / 139968.0;
+        let mut c = 0;
+        while c < 3 && r >= cum[c] { c = c + 1; }
+        counts[c] = counts[c] + 1;
+        h = (h ^ (c as u64)).wrapping_mul(1099511628211);
+        i = i + 1;
+    }
+    res[0] = h;
+}
+
+fn main() ~ Console + Environment {
+    let n = args_get(1).parse_int();
+    let mut cum: Vec<f64> = Vec::new();
+    cum.push(0.3029549426680);
+    cum.push(0.5009432431601);
+    cum.push(0.6984905497992);
+    cum.push(1.0);
+    let mut counts: Vec<i64> = Vec::new();
+    let mut k = 0;
+    while k < 4 { counts.push(0); k = k + 1; }
+    let mut res: Vec<u64> = Vec::new();
+    res.push(0);
+    pick(n, &cum, &mut counts, &mut res);
+    println!("{} {} {} {}", counts[0], counts[1], counts[2], counts[3]);
+    println!("{}", res[0]);
+}

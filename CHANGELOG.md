@@ -10,6 +10,10 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+### Benchmarks
+
+- `bench/wider-2026-11`: fannkuch-redux, mandelbrot, binary-trees and fasta against rustc 1.98.0 and gcc 13.2.0, with predictions written before the run. BuildLang is level with C -O2 on fannkuch-redux and mandelbrot, 1.26 times C on fasta and 1.9 to 2.4 times C on binary-trees.
+
 ### A differential fuzz target and lint in CI
 
 - `compiler/tests/fuzz_int_expr.rs` generates `i64` expressions from fixed seeds, takes the reference value from Rust checked arithmetic, and compiles and runs one batched program per seed. 450 values over 3 seeds match, and 8 expressions that overflow or divide by zero stop with exit code 101. A mismatch is shrunk to a small expression. Two planted defects (a wrong remainder sign in the reference, one corrupted output line) must be caught.
