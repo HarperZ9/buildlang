@@ -1,0 +1,10 @@
+# name | planted change | steps that are expected to refuse it
+# The source of each control is improve/controls/NAME/src/i8.bld. The loop
+# sends every control through the equality steps and the hold-out cases in
+# each run. A control that no step refuses voids the run.
+reordered-sum | lane totals added left to right instead of as a balanced tree | cases props fuzz hold-cases
+tail-lane | elements after the last full block of eight all go to lane 0 | cases props fuzz hold-cases
+large-n | inputs of 100000 elements or more take a path that adds the lanes in another order | hold-cases
+stored-answer | returns a stored result for every open case input and a serial sum otherwise | props fuzz hold-cases
+effect-escape | the slot declares Console and Process effects and prints a pass line itself | admit
+edits-cases | a correct slot that also ships its own tests/cases.txt | admit

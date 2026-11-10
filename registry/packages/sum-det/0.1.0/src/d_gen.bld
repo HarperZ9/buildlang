@@ -1,0 +1,60 @@
+// sum-det: seeded inputs for cases, properties, the fuzz run and the bench.
+// SPDX-License-Identifier: FSL-1.1-MIT
+// Copyright (c) 2026 Zain Dana Harper.
+//
+// splitmix64, then bit patterns built with integer steps, so ref/reference.py
+// produces the same inputs bit for bit.
+
+struct SdRng { s: u64 }
+
+fn sd_next(r: &mut SdRng) -> u64 {
+    r.s = r.s.wrapping_add(11400714819323198485_u64);
+    let mut z = r.s;
+    z = (z ^ (z >> 30_u64)).wrapping_mul(13787848793156543929_u64);
+    z = (z ^ (z >> 27_u64)).wrapping_mul(10723151780598845931_u64);
+    z ^ (z >> 31_u64)
+}
+
+// A float from sign, a biased exponent in lo .. lo + span - 1, and 52 bits.
+fn sd_float(u: u64, lo: u64, span: u64) -> f64 {
+    let sign = u & 9223372036854775808_u64;
+    let e = lo + ((u >> 52_u64) & 2047_u64) % span;
+    f64::from_bits(sign | (e << 52_u64) | (u & 4503599627370495_u64))
+}
+
+// Kinds: 0 uniform in [-1, 1); 1 exponents 2^-60 .. 2^60; 2 cancellation
+// (large, small, minus the large); 3 subnormals and the smallest normals;
+// 4 nearly the full exponent range; 5 small integers.
+fn sd_gen(seed: u64, n: usize, kind: i64) -> Vec<f64> {
+    let mut r = SdRng { s: seed };
+    let mut out: Vec<f64> = Vec::new();
+    let mut big: f64 = 0.0;
+    let mut i: usize = 0;
+    while i < n {
+        let u = sd_next(&mut r);
+        let mut x: f64 = 0.0;
+        if kind == 0 {
+            x = ((u >> 11_u64) as f64) / 4503599627370496.0 - 1.0;
+        } else if kind == 1 {
+            x = sd_float(u, 963_u64, 121_u64);
+        } else if kind == 2 {
+            if i % 3 == 0 {
+                big = sd_float(u, 1223_u64, 400_u64);
+                x = big;
+            } else if i % 3 == 1 {
+                x = sd_float(u, 900_u64, 100_u64);
+            } else {
+                x = 0.0 - big;
+            }
+        } else if kind == 3 {
+            x = sd_float(u, 0_u64, 2_u64);
+        } else if kind == 4 {
+            x = sd_float(u, 1_u64, 1900_u64);
+        } else {
+            x = (((u >> 40_u64) % 2001_u64) as f64) - 1000.0;
+        }
+        out.push(x);
+        i = i + 1;
+    }
+    out
+}

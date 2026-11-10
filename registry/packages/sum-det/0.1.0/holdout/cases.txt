@@ -1,0 +1,3 @@
+# mode golden args... (run from the package folder)
+exact holdout/golden-hand-i8.txt sum i8 holdout/hand.txt
+exact holdout/golden-gen-i8.txt gens i8 holdout/gen.txt

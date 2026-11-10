@@ -1,0 +1,84 @@
+// sum-det: the exact sum, correctly rounded, two ways.
+// SPDX-License-Identifier: FSL-1.1-MIT
+// Copyright (c) 2026 Zain Dana Harper.
+//
+// Contract for both functions: inputs are finite and the exact sum is below
+// the overflow threshold. The result is the binary64 value nearest the exact
+// sum, ties to even, and +0.0 when the exact sum is zero. Python's math.fsum
+// returns the same bits; tests/cases.txt holds that comparison.
+
+fn sd_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+// Shewchuk's non-overlapping partials, in the arrangement CPython uses.
+fn sd_fsum(xs: &Vec<f64>) -> f64 {
+    let n = xs.len();
+    let mut p: Vec<f64> = Vec::new();
+    let mut np: usize = 0;
+    let mut k: usize = 0;
+    while k < n {
+        let mut x = xs[k];
+        let mut i: usize = 0;
+        let mut j: usize = 0;
+        while j < np {
+            let mut y = p[j];
+            if sd_abs(x) < sd_abs(y) {
+                let t = x;
+                x = y;
+                y = t;
+            }
+            let hi = x + y;
+            let lo = y - (hi - x);
+            if lo != 0.0 {
+                p[i] = lo;
+                i = i + 1;
+            }
+            x = hi;
+            j = j + 1;
+        }
+        np = i;
+        if x != 0.0 {
+            if np < p.len() {
+                p[np] = x;
+            } else {
+                p.push(x);
+            }
+            np = np + 1;
+        }
+        k = k + 1;
+    }
+    sd_fsum_round(&p, np)
+}
+
+// Add the partials from the largest down and fix the half-way case.
+fn sd_fsum_round(p: &Vec<f64>, count: usize) -> f64 {
+    let mut np = count;
+    if np == 0 {
+        return 0.0;
+    }
+    np = np - 1;
+    let mut hi = p[np];
+    let mut lo: f64 = 0.0;
+    while np > 0 {
+        let x = hi;
+        np = np - 1;
+        let y = p[np];
+        hi = x + y;
+        lo = y - (hi - x);
+        if lo != 0.0 {
+            break;
+        }
+    }
+    if np > 0 {
+        let below = p[np - 1];
+        if (lo < 0.0 && below < 0.0) || (lo > 0.0 && below > 0.0) {
+            let y = lo * 2.0;
+            let x = hi + y;
+            if y == x - hi {
+                hi = x;
+            }
+        }
+    }
+    hi
+}

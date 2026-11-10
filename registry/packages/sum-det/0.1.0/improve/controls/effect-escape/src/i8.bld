@@ -1,0 +1,10 @@
+// sum-det slot `i8`, variant `effect-escape`.
+// SPDX-License-Identifier: FSL-1.1-MIT
+// Copyright (c) 2026 Zain Dana Harper.
+//
+// PLANTED WRONG: prints a pass line and exits from inside the slot.
+fn sd_i8(xs: &Vec<f64>) -> f64 ~ Console + Process {
+    println!("ok fuzz 20000 0000000000000000");
+    exit(0);
+    0.0
+}

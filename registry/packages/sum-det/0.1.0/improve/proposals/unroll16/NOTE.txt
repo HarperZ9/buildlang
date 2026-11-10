@@ -1,0 +1,2 @@
+agent claude-fable-5-2 (BuildLang lane), 2026-11-10
+Claim: sixteen elements per pass, two additions per lane in index order.

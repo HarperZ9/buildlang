@@ -1,0 +1,127 @@
+// sum-det: named properties and the differential fuzz run.
+// SPDX-License-Identifier: FSL-1.1-MIT
+// Copyright (c) 2026 Zain Dana Harper.
+
+fn sd_same(a: f64, b: f64) -> bool {
+    a.to_bits() == b.to_bits()
+}
+
+// Length for round c: mostly 0 .. 299, every 50th round up to 4999.
+fn sd_len(u: u64, c: i64) -> usize {
+    if c % 50 == 49 {
+        return (u % 5000_u64) as usize;
+    }
+    (u % 300_u64) as usize
+}
+
+fn sd_map(xs: &Vec<f64>, mul: f64) -> Vec<f64> {
+    let mut out: Vec<f64> = Vec::new();
+    let mut i: usize = 0;
+    while i < xs.len() {
+        out.push(xs[i] * mul);
+        i = i + 1;
+    }
+    out
+}
+
+fn sd_reversed(xs: &Vec<f64>) -> Vec<f64> {
+    let mut out: Vec<f64> = Vec::new();
+    let mut i: usize = xs.len();
+    while i > 0 {
+        i = i - 1;
+        out.push(xs[i]);
+    }
+    out
+}
+
+// Lane start for a short input: +0.0 plus the element, or +0.0 alone.
+fn sd_pad8(xs: &Vec<f64>, at: usize) -> f64 {
+    if at < xs.len() { 0.0 + xs[at] } else { 0.0 }
+}
+
+fn sd_prop_short(xs: &Vec<f64>) -> bool {
+    let mut head: Vec<f64> = Vec::new();
+    let mut i: usize = 0;
+    while i < xs.len() && i < 8 {
+        head.push(xs[i]);
+        i = i + 1;
+    }
+    let want = sd_fold8(sd_pad8(&head, 0), sd_pad8(&head, 1), sd_pad8(&head, 2), sd_pad8(&head, 3),
+        sd_pad8(&head, 4), sd_pad8(&head, 5), sd_pad8(&head, 6), sd_pad8(&head, 7));
+    sd_same(sd_i8(&head), want)
+}
+
+// One round of the named property on one input. True when it holds.
+fn sd_prop_one(name: str, xs: &Vec<f64>, ints: &Vec<f64>) -> bool {
+    if name == "i8-equals-ref" {
+        return sd_same(sd_i8(xs), sd_i8_ref(xs));
+    }
+    if name == "i8-short-is-fold8" {
+        return sd_prop_short(xs);
+    }
+    if name == "i8-negate" {
+        let a = sd_i8(xs);
+        let b = sd_i8(&sd_map(xs, -1.0));
+        return sd_same(b, 0.0 - a) || (a == 0.0 && b == 0.0);
+    }
+    if name == "i8-append-zeros" {
+        let mut ys = sd_map(xs, 1.0);
+        let mut i: usize = 0;
+        while i < 8 {
+            ys.push(0.0);
+            i = i + 1;
+        }
+        return sd_same(sd_i8(xs), sd_i8(&ys));
+    }
+    if name == "i8-integers-agree" {
+        let a = sd_i8(ints);
+        return sd_same(a, sd_serial(ints)) && sd_same(a, sd_tree(ints)) && sd_same(a, sd_fsum(ints));
+    }
+    if name == "fsum-equals-binned" {
+        return sd_same(sd_fsum(xs), sd_binned(xs));
+    }
+    if name == "fsum-order-free" {
+        let ys = sd_reversed(xs);
+        return sd_same(sd_fsum(xs), sd_fsum(&ys)) && sd_same(sd_binned(xs), sd_binned(&ys));
+    }
+    false
+}
+
+// Run a property `count` times over the six input kinds. Returns the first
+// failing round, or -1.
+fn sd_prop(name: str, seed: u64, count: i64) -> i64 {
+    let mut r = SdRng { s: seed };
+    let mut c: i64 = 0;
+    while c < count {
+        let u = sd_next(&mut r);
+        let n = sd_len(u >> 8_u64, c);
+        let xs = sd_gen(u, n, c % 6);
+        let ints = sd_gen(u, n, 5);
+        if !sd_prop_one(name, &xs, &ints) {
+            return c;
+        }
+        c = c + 1;
+    }
+    -1
+}
+
+// Differential run: sd_i8 against sd_i8_ref. Returns (first failing round or
+// -1, a fold of every reference result).
+fn sd_fuzz(seed: u64, count: i64) -> (i64, u64) {
+    let mut r = SdRng { s: seed };
+    let mut fold: u64 = 0_u64;
+    let mut c: i64 = 0;
+    while c < count {
+        let u = sd_next(&mut r);
+        let n = sd_len(u >> 8_u64, c);
+        let xs = sd_gen(u, n, c % 6);
+        let want = sd_i8_ref(&xs).to_bits();
+        if sd_i8(&xs).to_bits() != want {
+            return (c, fold);
+        }
+        fold = (fold ^ want).wrapping_mul(1099511628211_u64);
+        fold = fold ^ (fold >> 29_u64);
+        c = c + 1;
+    }
+    (-1, fold)
+}

@@ -1,0 +1,2 @@
+planted
+PLANTED WRONG: the lane totals are added left to right.

@@ -1,0 +1,71 @@
+// sum-det: float sums with a written operation order.
+// SPDX-License-Identifier: FSL-1.1-MIT
+// Copyright (c) 2026 Zain Dana Harper.
+//
+// Every function here is class exact-ieee: binary64, round to nearest ties to
+// even, one correctly rounded addition per step, no fused multiply-add. The
+// order of the additions is the contract. SPEC.md states each order.
+
+// Order `serial`: ((x0 + x1) + x2) + ... starting from +0.0.
+fn sd_serial(xs: &Vec<f64>) -> f64 {
+    let n = xs.len();
+    let mut s: f64 = 0.0;
+    let mut i: usize = 0;
+    while i < n {
+        s = s + xs[i];
+        i = i + 1;
+    }
+    s
+}
+
+// Largest power of two strictly below n, for n >= 2.
+fn sd_split(n: usize) -> usize {
+    let mut p: usize = 1;
+    while p * 2 < n {
+        p = p * 2;
+    }
+    p
+}
+
+// Order `tree2` over xs[lo .. lo + n]: split at the largest power of two
+// strictly below n, sum each side the same way, add left to right.
+fn sd_tree_range(xs: &Vec<f64>, lo: usize, n: usize) -> f64 {
+    if n == 0 {
+        return 0.0;
+    }
+    if n == 1 {
+        return xs[lo];
+    }
+    let p = sd_split(n);
+    sd_tree_range(xs, lo, p) + sd_tree_range(xs, lo + p, n - p)
+}
+
+fn sd_tree(xs: &Vec<f64>) -> f64 {
+    sd_tree_range(xs, 0, xs.len())
+}
+
+// The last step of order `interleave8`: eight lane totals, added as a
+// balanced tree. Scalar in and out, so translation validation certifies it.
+fn sd_fold8(a0: f64, a1: f64, a2: f64, a3: f64, a4: f64, a5: f64, a6: f64, a7: f64) -> f64 {
+    ((a0 + a1) + (a2 + a3)) + ((a4 + a5) + (a6 + a7))
+}
+
+// Order `interleave8`, the scalar reference. Lane j starts at +0.0 and adds
+// x[j], x[j + 8], x[j + 16], ... in index order. sd_fold8 adds the lanes.
+// This function is the reference for sd_i8 and never changes.
+fn sd_i8_ref(xs: &Vec<f64>) -> f64 {
+    let n = xs.len();
+    let mut lanes: Vec<f64> = Vec::new();
+    let mut j: usize = 0;
+    while j < 8 {
+        lanes.push(0.0);
+        j = j + 1;
+    }
+    let mut i: usize = 0;
+    while i < n {
+        let k = i % 8;
+        lanes[k] = lanes[k] + xs[i];
+        i = i + 1;
+    }
+    sd_fold8(lanes[0], lanes[1], lanes[2], lanes[3], lanes[4], lanes[5], lanes[6], lanes[7])
+}

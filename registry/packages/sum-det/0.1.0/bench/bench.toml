@@ -1,0 +1,25 @@
+# sum-det benchmark and the promotion rule. Every number here was fixed before
+# the first measured run and changes only through a reviewed pull request.
+
+[workload]
+order = "i8"
+command = "sum-det bench i8 N REPS SEED"
+metric = "milliseconds for REPS calls on one input of N elements, timed inside the process"
+open_n = 65536
+open_reps = 12000
+holdout_sizes = "holdout/sizes.txt"
+
+[baseline]
+name = "sum-det slot i8 as it stands when the run starts"
+pairing = "A, B, A, B: one process per measurement, the baseline first in every round"
+
+[decision]
+rounds = 20
+t_crit_milli = 2093
+threshold_ppm = 50000
+memory_slack_ppm = 50000
+
+[loop]
+max_proposals = 4
+wall_clock_s = 5400
+fuzz_count = 20000
