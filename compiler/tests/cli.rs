@@ -712,14 +712,19 @@ fn check_receipt_records_env_macro_capability_source() {
         .arg(&fixture)
         .arg("--receipt")
         .arg("-")
+        .env("TOKEN", "fixture-value")
         .output()
         .expect("run buildc check --receipt -");
 
     let _ = fs::remove_file(&fixture);
 
+    // `env!` reads the variable while compiling, so the check needs it set.
     assert!(
         output.status.success(),
-        "env macro receipt check should succeed\nstdout:\n{}\nstderr:\n{}",
+        "stdout:
+{}
+stderr:
+{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );

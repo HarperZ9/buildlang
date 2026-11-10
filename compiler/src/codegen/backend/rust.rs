@@ -466,7 +466,12 @@ impl RustBackend {
                 if msg.is_empty() {
                     self.writeln(&format!("assert!({});", cond_str));
                 } else {
-                    self.writeln(&format!("assert!({}, {:?});", cond_str, msg.as_ref()));
+                    // The message is data: braces in it are not format fields.
+                    self.writeln(&format!(
+                        "assert!({}, \"{{}}\", {:?});",
+                        cond_str,
+                        msg.as_ref()
+                    ));
                 }
                 self.emit_jump(*target);
             }
