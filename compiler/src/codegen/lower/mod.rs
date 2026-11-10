@@ -91,6 +91,12 @@ pub struct MirLowerer<'ctx> {
     /// Locals that hold a `char` (MIR stores a char as a u32 code point), so
     /// `{}` prints the character rather than its number.
     pub(crate) char_locals: std::collections::HashSet<LocalId>,
+    /// Locals known to hold a reference (`&T`), from a `&` parameter, a `&`
+    /// annotation on a `let`, a `&expr` initializer, or a copy of one. MIR
+    /// lowers references and raw pointers to the same pointer type; this set
+    /// lets `a == b` on two `&str` compare contents while two raw pointers
+    /// still compare addresses.
+    pub(crate) ref_locals: std::collections::HashSet<LocalId>,
     /// Locals (vectors, or pointers to vectors) whose elements are chars, from
     /// a `Vec<char>` annotation on a `let` or a parameter.
     pub(crate) char_vec_locals: std::collections::HashSet<LocalId>,
@@ -294,6 +300,7 @@ impl<'ctx> MirLowerer<'ctx> {
             loop_stack: Vec::new(),
             loop_break_values: HashMap::new(),
             char_locals: std::collections::HashSet::new(),
+            ref_locals: std::collections::HashSet::new(),
             char_vec_locals: std::collections::HashSet::new(),
             pending_untyped_vecs: HashMap::new(),
             untyped_vec_new_binding: false,
@@ -347,6 +354,7 @@ impl<'ctx> MirLowerer<'ctx> {
             loop_stack: Vec::new(),
             loop_break_values: HashMap::new(),
             char_locals: std::collections::HashSet::new(),
+            ref_locals: std::collections::HashSet::new(),
             char_vec_locals: std::collections::HashSet::new(),
             pending_untyped_vecs: HashMap::new(),
             untyped_vec_new_binding: false,
@@ -1380,6 +1388,7 @@ impl<'ctx> MirLowerer<'ctx> {
                     let saved_fn = self.current_fn.take();
                     let saved_vars = std::mem::take(&mut self.var_map);
                     let saved_chars = std::mem::take(&mut self.char_locals);
+                    let saved_refs = std::mem::take(&mut self.ref_locals);
                     let saved_char_vecs = std::mem::take(&mut self.char_vec_locals);
                     let saved_pending_vecs = std::mem::take(&mut self.pending_untyped_vecs);
 
@@ -1388,6 +1397,7 @@ impl<'ctx> MirLowerer<'ctx> {
                     self.current_fn = saved_fn;
                     self.var_map = saved_vars;
                     self.char_locals = saved_chars;
+                    self.ref_locals = saved_refs;
                     self.char_vec_locals = saved_char_vecs;
                     self.pending_untyped_vecs = saved_pending_vecs;
                 }
@@ -2193,6 +2203,7 @@ impl<'ctx> MirLowerer<'ctx> {
             let saved_fn = self.current_fn.take();
             let saved_vars = std::mem::take(&mut self.var_map);
             let saved_chars = std::mem::take(&mut self.char_locals);
+            let saved_refs = std::mem::take(&mut self.ref_locals);
             let saved_char_vecs = std::mem::take(&mut self.char_vec_locals);
             let saved_pending_vecs = std::mem::take(&mut self.pending_untyped_vecs);
 
@@ -2232,6 +2243,9 @@ impl<'ctx> MirLowerer<'ctx> {
                         builder.set_param_annotations(i, annotations);
                     }
                     self.var_map.insert(name.name.clone(), local_id);
+                    if matches!(param.ty.kind, ast::TypeKind::Ref { .. }) {
+                        self.ref_locals.insert(local_id);
+                    }
                     if Self::ast_type_is_char(&param.ty) {
                         self.char_locals.insert(local_id);
                     } else if Self::ast_type_is_char_vec(&param.ty) {
@@ -2308,6 +2322,7 @@ impl<'ctx> MirLowerer<'ctx> {
             self.current_fn = saved_fn;
             self.var_map = saved_vars;
             self.char_locals = saved_chars;
+            self.ref_locals = saved_refs;
             self.char_vec_locals = saved_char_vecs;
             self.pending_untyped_vecs = saved_pending_vecs;
         } else {
@@ -2485,6 +2500,7 @@ impl<'ctx> MirLowerer<'ctx> {
             let saved_fn = self.current_fn.take();
             let saved_vars = std::mem::take(&mut self.var_map);
             let saved_chars = std::mem::take(&mut self.char_locals);
+            let saved_refs = std::mem::take(&mut self.ref_locals);
             let saved_char_vecs = std::mem::take(&mut self.char_vec_locals);
             let saved_pending_vecs = std::mem::take(&mut self.pending_untyped_vecs);
 
@@ -2500,6 +2516,9 @@ impl<'ctx> MirLowerer<'ctx> {
                     let local_id = builder.param_local(i);
                     builder.set_param_name(i, name.name.clone());
                     self.var_map.insert(name.name.clone(), local_id);
+                    if matches!(param.ty.kind, ast::TypeKind::Ref { .. }) {
+                        self.ref_locals.insert(local_id);
+                    }
                     if Self::ast_type_is_char(&param.ty) {
                         self.char_locals.insert(local_id);
                     } else if Self::ast_type_is_char_vec(&param.ty) {
@@ -2529,6 +2548,7 @@ impl<'ctx> MirLowerer<'ctx> {
             self.current_fn = saved_fn;
             self.var_map = saved_vars;
             self.char_locals = saved_chars;
+            self.ref_locals = saved_refs;
             self.char_vec_locals = saved_char_vecs;
             self.pending_untyped_vecs = saved_pending_vecs;
         }
@@ -2577,6 +2597,7 @@ impl<'ctx> MirLowerer<'ctx> {
             let saved_fn = self.current_fn.take();
             let saved_vars = std::mem::take(&mut self.var_map);
             let saved_chars = std::mem::take(&mut self.char_locals);
+            let saved_refs = std::mem::take(&mut self.ref_locals);
             let saved_char_vecs = std::mem::take(&mut self.char_vec_locals);
             let saved_pending_vecs = std::mem::take(&mut self.pending_untyped_vecs);
 
@@ -2591,6 +2612,9 @@ impl<'ctx> MirLowerer<'ctx> {
                     let local_id = builder.param_local(i);
                     builder.set_param_name(i, name.name.clone());
                     self.var_map.insert(name.name.clone(), local_id);
+                    if matches!(param.ty.kind, ast::TypeKind::Ref { .. }) {
+                        self.ref_locals.insert(local_id);
+                    }
                     if Self::ast_type_is_char(&param.ty) {
                         self.char_locals.insert(local_id);
                     } else if Self::ast_type_is_char_vec(&param.ty) {
@@ -2619,6 +2643,7 @@ impl<'ctx> MirLowerer<'ctx> {
             self.current_fn = saved_fn;
             self.var_map = saved_vars;
             self.char_locals = saved_chars;
+            self.ref_locals = saved_refs;
             self.char_vec_locals = saved_char_vecs;
             self.pending_untyped_vecs = saved_pending_vecs;
         }

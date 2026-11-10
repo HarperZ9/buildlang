@@ -424,6 +424,21 @@ impl<'ctx> MirLowerer<'ctx> {
             if annotated_char || init_is_char || call_is_char {
                 self.char_locals.insert(local_id);
             }
+            // A reference binding: `let r: &str = ...;`, `let r = &s;`, or a
+            // copy of another reference local.
+            let annotated_ref = local
+                .ty
+                .as_ref()
+                .is_some_and(|t| matches!(&t.kind, ast::TypeKind::Ref { .. }));
+            let init_is_ref = local
+                .init
+                .as_ref()
+                .is_some_and(|init| Self::expr_is_ref(&init.expr))
+                || matches!(&init_val, Some(MirValue::Local(src)) if self.ref_locals.contains(src));
+            let annotated_other = local.ty.is_some() && !annotated_ref;
+            if annotated_ref || (init_is_ref && !annotated_other) {
+                self.ref_locals.insert(local_id);
+            }
             if let Some(dest) = untyped_vec_dest {
                 self.pending_untyped_vecs
                     .insert(local_id, vec![dest, local_id]);
@@ -963,6 +978,53 @@ impl<'ctx> MirLowerer<'ctx> {
 
         // Check if operands are strings (BuildString) for special operator handling
         let left_ty = self.type_of_value(&left_val);
+
+        // `cmd == "x"` and `a == b` with a borrowed string on the left: load the
+        // string through the reference so the operator below sees a string.
+        // Without this the left operand stayed a `BuildString*`. Against a
+        // string value that did not compile in C, and against another borrowed
+        // string it compared the two addresses.
+        let right_ty = self.type_of_value(&right_val);
+        let known_ref = |me: &Self, e: &ast::Expr, v: &MirValue| {
+            Self::expr_is_ref(e) || matches!(v, MirValue::Local(id) if me.ref_locals.contains(id))
+        };
+        // Pointer against pointer is content comparison only when one side
+        // is known to be a reference; two raw pointers compare addresses.
+        let compares_content = match &right_ty {
+            t if Self::is_string_ref(t) => {
+                known_ref(self, left, &left_val) || known_ref(self, right, &right_val)
+            }
+            t => Self::is_string_or_ref(t),
+        };
+        let (left_val, left_ty) = if Self::is_string_ref(&left_ty)
+            && compares_content
+            && matches!(
+                op,
+                AstBinOp::Eq
+                    | AstBinOp::Ne
+                    | AstBinOp::Lt
+                    | AstBinOp::Le
+                    | AstBinOp::Gt
+                    | AstBinOp::Ge
+            ) {
+            let string_ty = MirType::Struct(Arc::from("BuildString"));
+            let builder = self
+                .current_fn
+                .as_mut()
+                .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
+            let loaded = builder.create_local(string_ty.clone());
+            builder.assign(
+                loaded,
+                MirRValue::Deref {
+                    ptr: left_val,
+                    pointee_ty: string_ty.clone(),
+                },
+            );
+            (values::local(loaded), string_ty)
+        } else {
+            (left_val, left_ty)
+        };
+
         let is_string_op =
             matches!(&left_ty, MirType::Struct(name) if name.as_ref() == "BuildString");
 
@@ -2887,6 +2949,26 @@ impl<'ctx> MirLowerer<'ctx> {
     }
 
     /// Determine the vector component count from a struct type name.
+    /// A pointer to a string: the lowered form of `&str` and `&String`.
+    fn is_string_ref(ty: &MirType) -> bool {
+        matches!(ty, MirType::Ptr(inner)
+            if matches!(&**inner, MirType::Struct(n) if n.as_ref() == "BuildString"))
+    }
+
+    /// `&expr`, through any parentheses.
+    fn expr_is_ref(expr: &ast::Expr) -> bool {
+        match &expr.kind {
+            ExprKind::Ref { .. } => true,
+            ExprKind::Paren(inner) => Self::expr_is_ref(inner),
+            _ => false,
+        }
+    }
+
+    /// A string value or a pointer to one.
+    fn is_string_or_ref(ty: &MirType) -> bool {
+        matches!(ty, MirType::Struct(n) if n.as_ref() == "BuildString") || Self::is_string_ref(ty)
+    }
+
     fn vec_component_count(struct_name: &str) -> Option<u32> {
         match struct_name {
             "build_vec2" => Some(2),
