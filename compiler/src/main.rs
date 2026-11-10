@@ -9322,9 +9322,7 @@ fn cmd_lint(file: &PathBuf) -> Result<(), i32> {
         let line_num = line_num + 1;
 
         // Trailing whitespace
-        if line.len() > trimmed.len() + (line.len() - line.trim_end().len())
-            && line.trim_end().len() < line.len()
-        {
+        if line.trim_end().len() < line.len() {
             eprintln!(
                 "\x1b[33mwarning\x1b[0m: trailing whitespace ({}:{})",
                 file.display(),

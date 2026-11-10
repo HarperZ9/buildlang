@@ -10,6 +10,13 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+### A differential fuzz target and lint in CI
+
+- `compiler/tests/fuzz_int_expr.rs` generates `i64` expressions from fixed seeds, takes the reference value from Rust checked arithmetic, and compiles and runs one batched program per seed. 450 values over 3 seeds match, and 8 expressions that overflow or divide by zero stop with exit code 101. A mismatch is shrunk to a small expression. Two planted defects (a wrong remainder sign in the reference, one corrupted output line) must be caught.
+- CI runs `buildc lint` over the sources under `examples/` and `bench/`: 208 files must pass and 2 control programs with planted type faults must be refused.
+- `buildc lint` reported trailing whitespace only on indented lines; it now reports it on every line (`compiler/tests/lint.rs`).
+- `docs/FUZZING.md` lists the rules for a fuzz target and the targets planned for each compiler stage.
+
 ### `buildc build-hash`: the emitted C is the same bytes on every run
 
 - `buildc build-hash FILE [--runs N] [--json]` compiles FILE to C in N fresh compiler processes (default 3), prints one SHA-256 when every run emitted the same bytes, and exits 1 with the run and first differing line when one did not. `--json` prints a `buildlang-build-hash/v1` record with the source hash, compiler version and per-run hashes.
