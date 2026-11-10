@@ -10,6 +10,13 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+### A kernel package with a gated improvement loop
+
+- `sum-det` 0.1.0 in the registry adds a list of binary64 floats in a written order (`serial`, `tree2`, `interleave8`) and returns the same bits on every run. Two functions that share no code (`sd_fsum`, `sd_binned`) return the exact sum rounded once. Goldens come from `ref/reference.py`, which takes the exact sum from Python `math.fsum` and from a `fractions.Fraction` sum; the inputs include cancellation, half-way cases, subnormals and values near overflow.
+- `src/i8.bld` is a slot. A faster version replaces it only through the loop under `improve/`, which runs lint, `buildc tv`, the cases, the properties, a seeded fuzz run against the reference, a paired benchmark and a hold-out set, with six planted-wrong slots in the same run. The first run refused all six controls and one of three proposals (gain 1.6 percent, interval 1.0 to 2.2, under the 5 percent threshold set before the run). It promoted `unroll8`: 67.5 percent less time at 65,536 values over 20 paired rounds, 95 percent interval 67.1 to 67.8, on one x86-64 Windows machine with gcc 13.2.0 at `-O2`. Every decision is a line in `improve/LEDGER.jsonl`.
+- The loop cannot change its own cases, controls, hold-out or threshold: `improve/FROZEN.sha256` lists their digests, the loop checks them before the first step and before a promotion, and `compiler/tests/kernel_improve.rs` checks the list and the ledger chain in CI with four planted faults that must be refused.
+- The loop is BuildLang except for `improve/spawn.py`, which starts the processes. BuildLang has no builtin that starts a process.
+
 ## 1.14.0 - 2026-11-09 - typed vector access, the same C on every run, a fuzz target, `Vec::clear` and `Vec::release`
 
 Loops over vectors now compile to plain C array reads with every bounds check kept, which took n-body from 3.35 times the run time of C to 0.98 times at gcc -O2. The compiler emits the same C bytes on every run and `buildc build-hash` checks it, `Vec::clear` no longer writes through freed memory, and `Vec::release` frees a vector.

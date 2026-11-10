@@ -34,7 +34,7 @@ a SplitMix64 stream.
 | Vectors: push, index, clear, alias | A Rust `Vec` model | Planned |
 | `buildc tv` | A planted wrong translation must be refused | Built: `compiler/tests/tv_c.rs` |
 | `buildc build-hash` | A planted run counter must be reported | Built: `compiler/tests/build_hash.rs` |
-| Kernel `sum-det` | Exact rational sum | Planned with the kernel |
+| Kernel `sum-det` | Exact rational sum for the goldens; `sd_i8_ref` for the slot, 20000 seeded inputs of length 0 to 4999 | Built: `registry/packages/sum-det/0.1.0`, `sum-det fuzz SEED COUNT` |
 | Kernel `sha256` | Published test vectors and a second implementation | Planned with the kernel |
 | qdb | SQLite on generated queries | Built: `bdb/tests/test_qdb_differential.py` |
 
