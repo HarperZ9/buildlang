@@ -50,6 +50,21 @@
         }
       }
     },
+    "emu-rv64": {
+      "version": "0.1.0",
+      "description": "RV64I machine emulator core: decoder, encoder and deterministic step function with flat memory and one serial device, checked by hand-computed cases, a reference model, differential fuzz and planted controls",
+      "author": "Zain Dana Harper",
+      "license": "AGPL-3.0-only",
+      "checksum": "sha256:d1a4a07abbe9e63f18e9d9dd771dbdc143fb075808a5fc580cd03967862f12fe",
+      "path": "packages/emu-rv64/0.1.0",
+      "versions": {
+        "0.1.0": {
+          "path": "packages/emu-rv64/0.1.0",
+          "checksum": "sha256:d1a4a07abbe9e63f18e9d9dd771dbdc143fb075808a5fc580cd03967862f12fe",
+          "dependencies": {}
+        }
+      }
+    },
     "lw-cbegin": {
       "version": "0.1.0",
       "description": "Low Water corpus run selection (trace.mjs corpusRun) and each run's cbegin record as lw-trace/1 JSON",

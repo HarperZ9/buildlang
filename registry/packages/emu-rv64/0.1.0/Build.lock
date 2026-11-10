@@ -1,0 +1,7 @@
+# Build.lock: written by `buildc pkg resolve`. Do not edit by hand.
+lock-version = 1
+
+[root]
+name = "emu-rv64"
+version = "0.1.0"
+requires = []

@@ -1,0 +1,90 @@
+// Instruction encoder for emu-rv64: the reverse of emu_decode. The checks use
+// it to build programs and to test that decode and encode undo each other.
+// Later it is the seed of an assembler.
+
+fn enc_r(f7: u64, rs2: u64, rs1: u64, f3: u64, rd: u64, opc: u64) -> u64 {
+    (f7 << 25_u64) | (rs2 << 20_u64) | (rs1 << 15_u64) | (f3 << 12_u64) | (rd << 7_u64) | opc
+}
+
+fn enc_i(imm: u64, rs1: u64, f3: u64, rd: u64, opc: u64) -> u64 {
+    ((imm & 0xFFF_u64) << 20_u64) | (rs1 << 15_u64) | (f3 << 12_u64) | (rd << 7_u64) | opc
+}
+
+fn enc_s(imm: u64, rs2: u64, rs1: u64, f3: u64, opc: u64) -> u64 {
+    enc_r((imm >> 5_u64) & 0x7F_u64, rs2, rs1, f3, imm & 0x1F_u64, opc)
+}
+
+fn enc_b(imm: u64, rs2: u64, rs1: u64, f3: u64) -> u64 {
+    let hi = (((imm >> 12_u64) & 1_u64) << 6_u64) | ((imm >> 5_u64) & 0x3F_u64);
+    let lo = (((imm >> 1_u64) & 0xF_u64) << 1_u64) | ((imm >> 11_u64) & 1_u64);
+    enc_r(hi, rs2, rs1, f3, lo, 0x63_u64)
+}
+
+fn enc_u(imm: u64, rd: u64, opc: u64) -> u64 { (imm & 0xFFFFF000_u64) | (rd << 7_u64) | opc }
+
+fn enc_j(imm: u64, rd: u64) -> u64 {
+    (((imm >> 20_u64) & 1_u64) << 31_u64) | (((imm >> 1_u64) & 0x3FF_u64) << 21_u64)
+        | (((imm >> 11_u64) & 1_u64) << 20_u64) | (((imm >> 12_u64) & 0xFF_u64) << 12_u64)
+        | (rd << 7_u64) | 0x6F_u64
+}
+
+// Operations 1 to 21: upper-immediate, jumps, branches, loads, stores.
+fn enc_group_a(d: &Insn) -> u64 {
+    if d.op == OP_LUI { return enc_u(d.imm, d.rd, 0x37_u64); }
+    if d.op == OP_AUIPC { return enc_u(d.imm, d.rd, 0x17_u64); }
+    if d.op == OP_JAL { return enc_j(d.imm, d.rd); }
+    if d.op == OP_JALR { return enc_i(d.imm, d.rs1, 0_u64, d.rd, 0x67_u64); }
+    if d.op == 5_u64 || d.op == 6_u64 { return enc_b(d.imm, d.rs2, d.rs1, d.op - 5_u64); }
+    if d.op <= OP_BGEU { return enc_b(d.imm, d.rs2, d.rs1, d.op - 3_u64); }
+    if d.op <= OP_LWU { return enc_i(d.imm, d.rs1, d.op - OP_LB, d.rd, 0x03_u64); }
+    enc_s(d.imm, d.rs2, d.rs1, d.op - OP_SB, 0x23_u64)
+}
+
+// Operations 22 to 40: 64-bit arithmetic.
+fn enc_group_b(d: &Insn) -> u64 {
+    if d.op == OP_ADDI { return enc_i(d.imm, d.rs1, 0_u64, d.rd, 0x13_u64); }
+    if d.op == 23_u64 { return enc_i(d.imm, d.rs1, 2_u64, d.rd, 0x13_u64); }
+    if d.op == 24_u64 { return enc_i(d.imm, d.rs1, 3_u64, d.rd, 0x13_u64); }
+    if d.op == 25_u64 { return enc_i(d.imm, d.rs1, 4_u64, d.rd, 0x13_u64); }
+    if d.op == 26_u64 { return enc_i(d.imm, d.rs1, 6_u64, d.rd, 0x13_u64); }
+    if d.op == 27_u64 { return enc_i(d.imm, d.rs1, 7_u64, d.rd, 0x13_u64); }
+    if d.op == OP_SLLI { return enc_i(d.imm & 63_u64, d.rs1, 1_u64, d.rd, 0x13_u64); }
+    if d.op == OP_SRLI { return enc_i(d.imm & 63_u64, d.rs1, 5_u64, d.rd, 0x13_u64); }
+    if d.op == OP_SRAI { return enc_i((d.imm & 63_u64) | 0x400_u64, d.rs1, 5_u64, d.rd, 0x13_u64); }
+    if d.op == OP_ADD { return enc_r(0_u64, d.rs2, d.rs1, 0_u64, d.rd, 0x33_u64); }
+    if d.op == 32_u64 { return enc_r(0x20_u64, d.rs2, d.rs1, 0_u64, d.rd, 0x33_u64); }
+    if d.op <= 36_u64 { return enc_r(0_u64, d.rs2, d.rs1, d.op - 32_u64, d.rd, 0x33_u64); }
+    if d.op == 37_u64 { return enc_r(0_u64, d.rs2, d.rs1, 5_u64, d.rd, 0x33_u64); }
+    if d.op == 38_u64 { return enc_r(0x20_u64, d.rs2, d.rs1, 5_u64, d.rd, 0x33_u64); }
+    enc_r(0_u64, d.rs2, d.rs1, d.op - 33_u64, d.rd, 0x33_u64)
+}
+
+// Operations 41 to 52: 32-bit arithmetic, FENCE, ECALL, EBREAK.
+fn enc_group_c(d: &Insn) -> u64 {
+    if d.op == OP_ADDIW { return enc_i(d.imm, d.rs1, 0_u64, d.rd, 0x1B_u64); }
+    if d.op == OP_SLLIW { return enc_i(d.imm & 31_u64, d.rs1, 1_u64, d.rd, 0x1B_u64); }
+    if d.op == 43_u64 { return enc_i(d.imm & 31_u64, d.rs1, 5_u64, d.rd, 0x1B_u64); }
+    if d.op == OP_SRAIW { return enc_i((d.imm & 31_u64) | 0x400_u64, d.rs1, 5_u64, d.rd, 0x1B_u64); }
+    if d.op == OP_ADDW { return enc_r(0_u64, d.rs2, d.rs1, 0_u64, d.rd, 0x3B_u64); }
+    if d.op == 46_u64 { return enc_r(0x20_u64, d.rs2, d.rs1, 0_u64, d.rd, 0x3B_u64); }
+    if d.op == 47_u64 { return enc_r(0_u64, d.rs2, d.rs1, 1_u64, d.rd, 0x3B_u64); }
+    if d.op == 48_u64 { return enc_r(0_u64, d.rs2, d.rs1, 5_u64, d.rd, 0x3B_u64); }
+    if d.op == OP_SRAW { return enc_r(0x20_u64, d.rs2, d.rs1, 5_u64, d.rd, 0x3B_u64); }
+    if d.op == OP_FENCE { return enc_i(d.imm, d.rs1, 0_u64, d.rd, 0x0F_u64); }
+    if d.op == OP_ECALL { return 0x73_u64; }
+    0x00100073_u64
+}
+
+// Encodes a decoded instruction as a 32-bit word. An instruction with an
+// unknown operation number, or a register number above 31, encodes as 0,
+// which is not an RV64I instruction.
+fn emu_encode(d: &Insn) -> u64 {
+    if emu_class(d.op) == 0_u64 || d.rd > 31_u64 || d.rs1 > 31_u64 || d.rs2 > 31_u64 { return 0_u64; }
+    if d.op <= OP_SD { return enc_group_a(d); }
+    if d.op <= OP_AND { return enc_group_b(d); }
+    enc_group_c(d)
+}
+
+fn same_insn(a: &Insn, b: &Insn) -> bool {
+    a.op == b.op && a.rd == b.rd && a.rs1 == b.rs1 && a.rs2 == b.rs2 && a.imm == b.imm
+}

@@ -1,0 +1,10 @@
+# mode golden args... (run from the package folder)
+# hand-computed cases: every word and every result was worked out on paper
+exact tests/golden-cases.txt cases
+# seeded differential runs against the reference model
+exact tests/golden-fuzz-1.txt fuzz 1 20000
+exact tests/golden-fuzz-7.txt fuzz 7 50000
+# seeded property run, no model
+exact tests/golden-props-1.txt props 1 20000
+# every planted defect must be refused by both checks
+exact tests/golden-controls.txt controls

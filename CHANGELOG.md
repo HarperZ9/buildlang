@@ -12,6 +12,7 @@ tracked in `STATUS.md`, `README.md`, and
 
 ### Registry
 
+- `emu-rv64` 0.1.0 (AGPL-3.0-only): the core of a RISC-V machine emulator in pure `.bld`. It decodes, encodes and executes the 52 instructions of RV64I, the 64-bit base integer set, against caller-supplied registers and memory, with one serial output device. The step function is total and deterministic, and a step that fails changes nothing. It is checked by 61 hand-computed instruction cases, two short programs, a bit-serial reference model that shares no code with the core, a seeded differential fuzz run, encode and decode round trips, and six planted-defect controls that both checks must refuse. No other emulator was used. It has no control and status registers, traps, interrupts or timer yet, and no kernel has run on it.
 - `os-pfa` and `os-runq` 0.1.0 (AGPL-3.0-only): the host-testable cores of two operating-system kernel subsystems in pure `.bld`. `os-pfa` is a page-frame allocator over a caller-supplied bitmap; `os-runq` is a round-robin run queue over a caller-supplied ring. Each has an exact contract in `SPEC.md`, a reference model that shares no data structure with the core, hand-derived golden cases, a seeded differential fuzz run, model-free property checks, and four planted-defect controls that both checks must refuse. Neither has run inside a kernel.
 
 ### A kernel package with a gated improvement loop
