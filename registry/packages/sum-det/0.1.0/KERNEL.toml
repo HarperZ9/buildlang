@@ -1,0 +1,87 @@
+# sum-det: the kernel contract in machine-readable form. SPEC.md says the same in words.
+
+[kernel]
+name = "sum-det"
+version = "0.1.0"
+summary = "sum of binary64 values in a written order, and the exact sum rounded once"
+pure = true
+slot = "src/i8.bld"
+slot_function = "sd_i8"
+slot_reference = "sd_i8_ref"
+
+[[input]]
+name = "xs"
+type = "f64"
+shape = "[n], n >= 0"
+meaning = "the values to add; finite, and no partial sum in the chosen order may overflow"
+
+[[output]]
+name = "sum"
+type = "f64"
+shape = "scalar"
+class = "exact-ieee"
+
+[numeric]
+rounding = "round to nearest, ties to even"
+fused_multiply_add = false
+nan = "outside the contract"
+infinity = "outside the contract"
+signed_zero = "an empty input gives +0.0; -0.0 inputs follow IEEE addition from a +0.0 start"
+subnormals = "exact, no flush to zero"
+c_flags = "-ffp-contract=off -fno-fast-math"
+
+# The reduction orders. Each is one function and one golden set.
+[[order]]
+name = "serial"
+function = "sd_serial"
+[[order]]
+name = "tree2"
+function = "sd_tree"
+[[order]]
+name = "interleave8"
+function = "sd_i8"
+[[order]]
+name = "exact, Shewchuk partials"
+function = "sd_fsum"
+[[order]]
+name = "binned"
+function = "sd_binned"
+
+[reference]
+file = "ref/reference.py"
+kind = "straight loop in Python floats; the exact sum from math.fsum and, apart from it, from fractions.Fraction"
+python = "3.12.10"
+
+[tests]
+cases = "tests/cases.txt"
+controls = "tests/controls.txt"
+props = "tests/props.txt"
+sources = "tests/SOURCES.txt"
+holdout_cases = "holdout/cases.txt"
+holdout_sizes = "holdout/sizes.txt"
+
+[bench]
+rule = "bench/bench.toml"
+results = "bench/results"
+
+[improve]
+frozen = "improve/FROZEN.sha256"
+ledger = "improve/LEDGER.jsonl"
+kernel = "improve/kernel"
+spawner = "improve/spawn.py"
+
+[[target]]
+name = "cpu-scalar, C backend, gcc 13.2.0, x86-64 Windows"
+state = "runs"
+[[target]]
+name = "cpu-scalar, C backend, CI runners"
+state = "runs"
+[[target]]
+name = "cpu-simd"
+state = "absent"
+[[target]]
+name = "gpu"
+state = "absent"
+[[target]]
+name = "wasm"
+state = "absent"

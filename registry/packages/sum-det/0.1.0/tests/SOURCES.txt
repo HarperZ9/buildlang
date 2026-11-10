@@ -1,0 +1,37 @@
+Test fixtures of sum-det. Every input and golden file is written by ref/reference.py from Python floats;
+`python ref/reference.py check` rewrites them in memory and compares. Columns: sha256, file, origin.
+
+d03acc678540a2a5b816154ee1fd1c2445eec5ac3f841f8d2c5096983963fb50  cases.txt
+    written by hand: one line per order and input file
+08403183ed2ac523adfd183d1040ef96cc7c8c92cd7543565229212f0b122d9a  controls.txt
+    written by hand: the planted-wrong slots and the steps expected to refuse them
+b00e58ad5aa4f9d2c46a36cd32070e0c4d02248439e2a7327d425a279091cd40  gen.txt
+    generator rows (seed, length, kind), from gen_rows() in ref/reference.py
+8ba6422936e5447240a9a11120d1ae7bf0845438ba7fa806c144e77e2fe26164  golden-gen-binned.txt
+    order binned over gen.txt: a sum of fractions.Fraction rounded once by float()
+8ba6422936e5447240a9a11120d1ae7bf0845438ba7fa806c144e77e2fe26164  golden-gen-fsum.txt
+    order fsum over gen.txt: math.fsum, Python 3.12.10
+239f0f133b90efe2c53df799cada685c116ff4744abbdd058f655b39f2399f6c  golden-gen-i8.txt
+    order i8 over gen.txt: the eight-lane loop in Python floats
+239f0f133b90efe2c53df799cada685c116ff4744abbdd058f655b39f2399f6c  golden-gen-i8ref.txt
+    order i8ref over gen.txt: the eight-lane loop in Python floats
+f910ca3298da94c4fdb3ef9b4038fcfcbd350290ee80a78f3671b18b5df7e858  golden-gen-serial.txt
+    order serial over gen.txt: a left-to-right loop of Python float additions
+1a2e498c5aee46055840ef32d3ff9f65f0848b3d5a2af9743e373868790f0a72  golden-gen-tree.txt
+    order tree over gen.txt: the tree2 recursion in Python floats
+40006e6b95b9650c50ed50003fb16ab72640b46970df9816a23d10f8b3165b7b  golden-hand-binned.txt
+    order binned over hand.txt: a sum of fractions.Fraction rounded once by float()
+40006e6b95b9650c50ed50003fb16ab72640b46970df9816a23d10f8b3165b7b  golden-hand-fsum.txt
+    order fsum over hand.txt: math.fsum, Python 3.12.10
+5445c2653936e3a5b742ec98c29fe0f324195f2c1f67bb06a3aa7fefb9b1efb1  golden-hand-i8.txt
+    order i8 over hand.txt: the eight-lane loop in Python floats
+5445c2653936e3a5b742ec98c29fe0f324195f2c1f67bb06a3aa7fefb9b1efb1  golden-hand-i8ref.txt
+    order i8ref over hand.txt: the eight-lane loop in Python floats
+593c519fbf51553916888e5a85bf60446c6c11d98e38a61d0d72ec64e577f9a3  golden-hand-serial.txt
+    order serial over hand.txt: a left-to-right loop of Python float additions
+13a75d9edd3718e7b9a0a8c89b9700db5db29832ae66d22c847551333cb519c2  golden-hand-tree.txt
+    order tree over hand.txt: the tree2 recursion in Python floats
+71bbd17f219221789ff06765004bc9921cf125536bff9faa3d3aed1ee21f8103  hand.txt
+    hand-written inputs as 16 hex digits per value, from hand_open() in ref/reference.py
+08f8bb139737e8bf2f06ce373bf608dc2cd17f5b38e35fb6aabac12fa5566e61  props.txt
+    written by hand: property names, seeds and round counts

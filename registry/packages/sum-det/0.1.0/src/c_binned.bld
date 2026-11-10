@@ -1,0 +1,154 @@
+// sum-det: order `binned`, an exact sum that does not depend on input order.
+// SPDX-License-Identifier: FSL-1.1-MIT
+// Copyright (c) 2026 Zain Dana Harper.
+//
+// Each input is an integer times 2^-1074. The integers are added exactly in
+// 70 limbs of 32 bits held in i64, so the total is the exact sum whatever the
+// order. One rounding at the end gives the nearest binary64, ties to even.
+// Same contract and same bits as sd_fsum.
+
+fn sd_limbs() -> usize { 70 }
+
+// Carry so that every limb below the top holds 0 .. 2^32 - 1. The top limb
+// keeps the sign.
+fn sd_bin_carry(limbs: &mut Vec<i64>) {
+    let top = sd_limbs() - 1;
+    let mut c: i64 = 0;
+    let mut k: usize = 0;
+    while k < top {
+        let v = limbs[k] + c;
+        c = v >> 32;
+        limbs[k] = v - (c << 32);
+        k = k + 1;
+    }
+    limbs[top] = limbs[top] + c;
+}
+
+fn sd_bin_bit(limbs: &Vec<i64>, i: usize) -> u64 {
+    ((limbs[i / 32] >> ((i % 32) as i64)) & 1) as u64
+}
+
+// Position of the highest set bit, or -1 when every limb is zero.
+fn sd_bin_top(limbs: &Vec<i64>) -> i64 {
+    let mut k: usize = sd_limbs();
+    while k > 0 {
+        k = k - 1;
+        if limbs[k] != 0 {
+            let mut b: i64 = 62;
+            while ((limbs[k] >> b) & 1) == 0 {
+                b = b - 1;
+            }
+            return (k as i64) * 32 + b;
+        }
+    }
+    -1
+}
+
+// True when any bit below position `end` is set.
+fn sd_bin_sticky(limbs: &Vec<i64>, end: usize) -> bool {
+    let mut i: usize = 0;
+    while i + 32 <= end {
+        if limbs[i / 32] != 0 {
+            return true;
+        }
+        i = i + 32;
+    }
+    while i < end {
+        if sd_bin_bit(limbs, i) == 1_u64 {
+            return true;
+        }
+        i = i + 1;
+    }
+    false
+}
+
+// Round the exact total to binary64.
+fn sd_bin_round(limbs: &mut Vec<i64>) -> f64 {
+    sd_bin_carry(limbs);
+    let top = sd_limbs() - 1;
+    let mut sign: u64 = 0_u64;
+    if limbs[top] < 0 {
+        sign = 9223372036854775808_u64;
+        let mut k: usize = 0;
+        while k <= top {
+            limbs[k] = 0 - limbs[k];
+            k = k + 1;
+        }
+        sd_bin_carry(limbs);
+    }
+    let high = sd_bin_top(limbs);
+    if high < 0 {
+        return 0.0;
+    }
+    if high <= 52 {
+        let m = (limbs[0] as u64) | ((limbs[1] as u64) << 32_u64);
+        return f64::from_bits(sign | m);
+    }
+    let p = high as usize;
+    let mut q: u64 = 0_u64;
+    let mut i: usize = 0;
+    while i < 53 {
+        q = q | (sd_bin_bit(limbs, p - 52 + i) << (i as u64));
+        i = i + 1;
+    }
+    let mut e: u64 = (p - 51) as u64;
+    if sd_bin_bit(limbs, p - 53) == 1_u64 {
+        if (q & 1_u64) == 1_u64 || sd_bin_sticky(limbs, p - 53) {
+            q = q + 1_u64;
+            if q == 9007199254740992_u64 {
+                q = 4503599627370496_u64;
+                e = e + 1_u64;
+            }
+        }
+    }
+    if e >= 2047_u64 {
+        return f64::from_bits(sign | 9218868437227405312_u64);
+    }
+    f64::from_bits(sign | (e << 52_u64) | (q - 4503599627370496_u64))
+}
+
+fn sd_binned(xs: &Vec<f64>) -> f64 {
+    let n = xs.len();
+    let mut limbs: Vec<i64> = Vec::new();
+    let mut k: usize = 0;
+    while k < sd_limbs() {
+        limbs.push(0);
+        k = k + 1;
+    }
+    let mask: u64 = 4294967295_u64;
+    let mut pending: i64 = 0;
+    k = 0;
+    while k < n {
+        let bits = xs[k].to_bits();
+        let e = ((bits >> 52_u64) & 2047_u64) as usize;
+        let mut mant = bits & 4503599627370495_u64;
+        let mut pos: usize = 0;
+        if e > 0 {
+            mant = mant | 4503599627370496_u64;
+            pos = e - 1;
+        }
+        let q = pos / 32;
+        let s = (pos % 32) as u64;
+        let lo = (mant & mask) << s;
+        let hi = (mant >> 32_u64) << s;
+        let a0 = (lo & mask) as i64;
+        let a1 = ((lo >> 32_u64) + (hi & mask)) as i64;
+        let a2 = (hi >> 32_u64) as i64;
+        if (bits >> 63_u64) == 1_u64 {
+            limbs[q] = limbs[q] - a0;
+            limbs[q + 1] = limbs[q + 1] - a1;
+            limbs[q + 2] = limbs[q + 2] - a2;
+        } else {
+            limbs[q] = limbs[q] + a0;
+            limbs[q + 1] = limbs[q + 1] + a1;
+            limbs[q + 2] = limbs[q + 2] + a2;
+        }
+        pending = pending + 1;
+        if pending == 268435456 {
+            sd_bin_carry(&mut limbs);
+            pending = 0;
+        }
+        k = k + 1;
+    }
+    sd_bin_round(&mut limbs)
+}

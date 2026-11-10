@@ -1,0 +1,13 @@
+# mode golden args... (run from the package folder)
+exact tests/golden-hand-serial.txt sum serial tests/hand.txt
+exact tests/golden-gen-serial.txt gens serial tests/gen.txt
+exact tests/golden-hand-tree.txt sum tree tests/hand.txt
+exact tests/golden-gen-tree.txt gens tree tests/gen.txt
+exact tests/golden-hand-i8.txt sum i8 tests/hand.txt
+exact tests/golden-gen-i8.txt gens i8 tests/gen.txt
+exact tests/golden-hand-i8ref.txt sum i8ref tests/hand.txt
+exact tests/golden-gen-i8ref.txt gens i8ref tests/gen.txt
+exact tests/golden-hand-fsum.txt sum fsum tests/hand.txt
+exact tests/golden-gen-fsum.txt gens fsum tests/gen.txt
+exact tests/golden-hand-binned.txt sum binned tests/hand.txt
+exact tests/golden-gen-binned.txt gens binned tests/gen.txt

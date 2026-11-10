@@ -1,0 +1,34 @@
+// sum-det slot `i8`, variant `tail-lane`.
+// SPDX-License-Identifier: FSL-1.1-MIT
+// Copyright (c) 2026 Zain Dana Harper.
+//
+// PLANTED WRONG: the elements after the last full block go to lane 0.
+fn sd_i8(xs: &Vec<f64>) -> f64 {
+    let n = xs.len();
+    let full = n - n % 8;
+    let mut a0: f64 = 0.0;
+    let mut a1: f64 = 0.0;
+    let mut a2: f64 = 0.0;
+    let mut a3: f64 = 0.0;
+    let mut a4: f64 = 0.0;
+    let mut a5: f64 = 0.0;
+    let mut a6: f64 = 0.0;
+    let mut a7: f64 = 0.0;
+    let mut i: usize = 0;
+    while i < full {
+        a0 = a0 + xs[i];
+        a1 = a1 + xs[i + 1];
+        a2 = a2 + xs[i + 2];
+        a3 = a3 + xs[i + 3];
+        a4 = a4 + xs[i + 4];
+        a5 = a5 + xs[i + 5];
+        a6 = a6 + xs[i + 6];
+        a7 = a7 + xs[i + 7];
+        i = i + 8;
+    }
+    while i < n {
+        a0 = a0 + xs[i];
+        i = i + 1;
+    }
+    sd_fold8(a0, a1, a2, a3, a4, a5, a6, a7)
+}

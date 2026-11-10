@@ -1,0 +1,2 @@
+agent claude-fable-5-2 (BuildLang lane), 2026-11-10
+Claim: eight scalar lane totals and one block of eight elements per pass.

@@ -1,0 +1,114 @@
+// improve-kernel: the append-only ledger and the run state.
+// SPDX-License-Identifier: FSL-1.1-MIT
+// Copyright (c) 2026 Zain Dana Harper.
+//
+// improve/LEDGER.jsonl holds one JSON object per line with sorted keys and no
+// spaces. "prev" is the SHA-256 of the line before it (64 zeros on the first
+// line) and "seq" is the line's index, so a removed, edited or reordered line
+// breaks the chain. The kernel only ever appends.
+
+fn ik_ledger_path() -> str {
+    "improve/LEDGER.jsonl"
+}
+
+fn ik_zero64() -> str {
+    "0000000000000000000000000000000000000000000000000000000000000000"
+}
+
+// (number of lines, digest of the last line).
+fn ik_ledger_tail() -> (i64, str) ~ FileSystem {
+    let rows = ik_lines(ik_read(ik_ledger_path()));
+    if rows.len() == 0 {
+        return (0, ik_zero64());
+    }
+    (rows.len() as i64, rows[rows.len() - 1].sha256())
+}
+
+// The index of the first line whose seq or prev is wrong, or -1.
+fn ik_ledger_verify() -> i64 ~ FileSystem {
+    let rows = ik_lines(ik_read(ik_ledger_path()));
+    let mut prev = ik_zero64();
+    let mut i: usize = 0;
+    while i < rows.len() {
+        let want_prev = format!("\"prev\":\"{}\"", prev);
+        let want_seq = format!("\"seq\":{},", i);
+        if !rows[i].contains(want_prev) || !rows[i].contains(want_seq) {
+            return i as i64;
+        }
+        prev = rows[i].sha256();
+        i = i + 1;
+    }
+    -1
+}
+
+// Append a record. `head` holds the keys before "prev" and `mid` the keys
+// between "prev" and "seq", both already in sorted order.
+fn ik_ledger_append(head: str, mid: str, rest: str) ~ FileSystem {
+    let tail = ik_ledger_tail();
+    let line = format!("{{{},\"prev\":\"{}\",{},\"seq\":{},{}}}\n", head, tail.1, mid, tail.0, rest);
+    if !append_file(ik_ledger_path(), line) {
+        write_file(ik_ledger_path(), line);
+    }
+}
+
+// Run state: "key=value" lines appended to WORK/state.txt; the last one wins.
+fn ik_set(work: str, key: str, val: str) ~ FileSystem {
+    let path = format!("{}/state.txt", work);
+    let line = format!("{}={}\n", key, val);
+    if !append_file(path, line) {
+        write_file(path, line);
+    }
+}
+
+fn ik_get(work: str, key: str) -> str ~ FileSystem {
+    ik_kv(ik_read(format!("{}/state.txt", work)), key)
+}
+
+fn ik_get_int(work: str, key: str) -> i64 ~ FileSystem {
+    ik_kv_int(ik_read(format!("{}/state.txt", work)), key)
+}
+
+// Record one step of the current variant; a failed step is also a reason.
+fn ik_step(work: str, name: str, pass: bool, why: str) ~ FileSystem {
+    let old = ik_get(work, "steps");
+    let word = if pass { "pass" } else { "fail" };
+    let item = format!("{}={}", name, word);
+    ik_set(work, "steps", if old.len() == 0 { item } else { format!("{},{}", old, item) });
+    if !pass {
+        let was = ik_get(work, "reasons");
+        ik_set(work, "reasons", if was.len() == 0 { why } else { format!("{},{}", was, why) });
+    }
+}
+
+fn ik_csv_json(csv: str) -> str {
+    if csv.len() == 0 {
+        return "[]";
+    }
+    ik_json_list(&csv.split(","))
+}
+
+// The digest of the frozen list itself.
+fn ik_frozen_digest() -> str ~ FileSystem {
+    read_bytes("improve/FROZEN.sha256").sha256()
+}
+
+// One ledger line for the current variant.
+fn ik_record(work: str, name: str, kind: str, decision: str, bench: str, holdout: str) ~ Console + FileSystem + Clock {
+    let dir = format!("improve/{}s/{}", kind, name);
+    let slot = format!("{}/src/i8.bld", dir);
+    let digest = if file_exists(slot) { read_bytes(slot).sha256() } else { "" };
+    let note = ik_lines(ik_read(format!("{}/NOTE.txt", dir)));
+    let who = if note.len() > 0 && !note[0].contains("\"") { note[0] } else { "unknown" };
+    let head = format!(
+        "\"bench\":{},\"decision\":\"{}\",\"frozen_sha256\":\"{}\",\"fuzz_seed\":{},\"holdout\":\"{}\",\"kind\":\"{}\"",
+        bench, decision, ik_frozen_digest(), ik_get(work, "seed"), holdout, kind);
+    let mid = format!(
+        "\"proposer\":\"{}\",\"reasons\":{},\"run\":\"{}\",\"schema\":\"kimprove-ledger/1\"",
+        who, ik_csv_json(ik_get(work, "reasons")), ik_get(work, "run"));
+    let rest = format!(
+        "\"steps\":{},\"threshold_ppm\":{},\"time_unix\":{},\"variant\":\"{}\",\"variant_sha256\":\"{}\"",
+        ik_csv_json(ik_get(work, "steps")), ik_toml_int(ik_read("bench/bench.toml"), "threshold_ppm"),
+        time_unix(), name, digest);
+    ik_ledger_append(head, mid, rest);
+    println!("decision {} {} {} [{}]", kind, name, decision, ik_get(work, "reasons"));
+}
