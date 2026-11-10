@@ -1,0 +1,165 @@
+// Reference model for the trap profile of emu-rv64. Like model.bld it is
+// built a different way from the core on purpose:
+//   - the CSRs live in a caller array `c` of 9 slots, not in the Machine;
+//   - the two live bits of mstatus, MIE and MPIE, are stored as two separate
+//     0-or-1 slots, and the mstatus value is composed when it is read;
+//   - CSR instructions are matched by (mask, value) rows, the CSR number is
+//     gathered one bit at a time, and set and clear work one bit per turn;
+//   - the fault address of a load or store is found by walking the access
+//     byte by byte.
+// Slots: RC_MIE, RC_MPIE, RC_MTVEC, RC_MEPC, RC_MCAUSE, RC_MTVAL, RC_IE (the
+// mie register), RC_IP (the mip register), RC_SCRATCH. Nothing outside the
+// checks calls this file.
+
+// 0: no such CSR. 1: read/write. 2: read-only. One row per register.
+fn ref_csr_kind(n: u64) -> u64 {
+    if n == 0x300_u64 || n == 0x301_u64 || n == 0x304_u64 || n == 0x305_u64 { return 1_u64; }
+    if n == 0x340_u64 || n == 0x341_u64 || n == 0x342_u64 { return 1_u64; }
+    if n == 0x343_u64 || n == 0x344_u64 { return 1_u64; }
+    if n == 0xF11_u64 || n == 0xF12_u64 || n == 0xF13_u64 { return 2_u64; }
+    if n == 0xF14_u64 || n == 0xF15_u64 { return 2_u64; }
+    0_u64
+}
+
+// mstatus as software reads it: MIE at bit 3, MPIE at bit 7, MPP = 11.
+fn ref_status(c: &[u64]) -> u64 {
+    let mie = ref_put(0_u64, 3_u64, c[RC_MIE], 0_u64, 1_u64);
+    let both = ref_put(mie, 7_u64, c[RC_MPIE], 0_u64, 1_u64);
+    both | (1_u64 << 11_u64) | (1_u64 << 12_u64)
+}
+
+// Keeps the three interrupt bits 3, 7 and 11.
+fn ref_irq_bits(v: u64) -> u64 {
+    let a = ref_put(0_u64, 3_u64, v, 3_u64, 1_u64);
+    let b = ref_put(a, 7_u64, v, 7_u64, 1_u64);
+    ref_put(b, 11_u64, v, 11_u64, 1_u64)
+}
+
+fn ref_csr_get(c: &[u64], n: u64) -> u64 {
+    if n == 0x300_u64 { return ref_status(c); }
+    if n == 0x301_u64 { return (1_u64 << 63_u64) | (1_u64 << 8_u64); }
+    if n == 0x304_u64 { return c[RC_IE]; }
+    if n == 0x305_u64 { return c[RC_MTVEC]; }
+    if n == 0x340_u64 { return c[RC_SCRATCH]; }
+    if n == 0x341_u64 { return c[RC_MEPC]; }
+    if n == 0x342_u64 { return c[RC_MCAUSE]; }
+    if n == 0x343_u64 { return c[RC_MTVAL]; }
+    if n == 0x344_u64 { return ref_irq_bits(c[RC_IP]); }
+    0_u64
+}
+
+fn ref_csr_set(c: &mut [u64], n: u64, v: u64) {
+    if n == 0x300_u64 { c[RC_MIE] = ref_bit(v, 3_u64); c[RC_MPIE] = ref_bit(v, 7_u64); }
+    if n == 0x304_u64 { c[RC_IE] = ref_irq_bits(v); }
+    if n == 0x305_u64 { c[RC_MTVEC] = ref_put(ref_bit(v, 0_u64), 2_u64, v, 2_u64, 62_u64); }
+    if n == 0x340_u64 { c[RC_SCRATCH] = v; }
+    if n == 0x341_u64 { c[RC_MEPC] = ref_put(0_u64, 2_u64, v, 2_u64, 62_u64); }
+    if n == 0x342_u64 { c[RC_MCAUSE] = v; }
+    if n == 0x343_u64 { c[RC_MTVAL] = v; }
+}
+
+// Trap entry. Returns the step code 3.
+fn ref_trap(m: &mut Machine, c: &mut [u64], cause: u64, tval: u64) -> i64 {
+    c[RC_MEPC] = ref_put(0_u64, 2_u64, m.pc, 2_u64, 62_u64);
+    c[RC_MCAUSE] = cause;
+    c[RC_MTVAL] = tval;
+    c[RC_MPIE] = c[RC_MIE];
+    c[RC_MIE] = 0_u64;
+    m.pc = ref_put(0_u64, 2_u64, c[RC_MTVEC], 2_u64, 62_u64);
+    m.traps = ref_add(m.traps, 1_u64);
+    3
+}
+
+// The value a CSR instruction writes, one bit per turn.
+// mode: 1 write, 2 set, 3 clear.
+fn ref_csr_mix(mode: u64, old: u64, src: u64) -> u64 {
+    let mut r: u64 = 0_u64;
+    let mut i: u64 = 0_u64;
+    while i < 64_u64 {
+        let o = ref_bit(old, i);
+        let s = ref_bit(src, i);
+        let mut bit = s;
+        if mode == 2_u64 && o == 1_u64 { bit = 1_u64; }
+        if mode == 3_u64 { bit = o; if s == 1_u64 { bit = 0_u64; } }
+        r = r | (bit << i);
+        i = i + 1_u64;
+    }
+    r
+}
+
+// One Zicsr instruction. f3 is the function field of w: 1, 2, 3, 5, 6 or 7.
+fn ref_csr_step(m: &mut Machine, x: &mut [u64], c: &mut [u64], w: u64, f3: u64) -> i64 {
+    let n = ref_put(0_u64, 0_u64, w, 20_u64, 12_u64);
+    let field = ref_put(0_u64, 0_u64, w, 15_u64, 5_u64);
+    let rd = ref_put(0_u64, 0_u64, w, 7_u64, 5_u64);
+    let mode = ref_low(f3, 2_u64);
+    let kind = ref_csr_kind(n);
+    let mut touch = true;
+    if mode != 1_u64 && field == 0_u64 { touch = false; }
+    if kind == 0_u64 { return ref_trap(m, c, 2_u64, w); }
+    if kind == 2_u64 && touch { return ref_trap(m, c, 2_u64, w); }
+    let old = ref_csr_get(c, n);
+    let mut src = field;
+    if ref_bit(f3, 2_u64) == 0_u64 { src = x[field as usize]; }
+    if touch { ref_csr_set(c, n, ref_csr_mix(mode, old, src)); }
+    if rd != 0_u64 { x[rd as usize] = old; }
+    m.pc = ref_add(m.pc, 4_u64);
+    m.steps = ref_add(m.steps, 1_u64);
+    0
+}
+
+// Walks the n bytes of an access and returns the first address outside
+// memory.
+fn ref_first_bad(len: u64, addr: u64, n: u64) -> u64 {
+    let mut i: u64 = 0_u64;
+    while i < n {
+        let at = ref_add(addr, i);
+        if !ref_ram_ok(len, at, 1_u64) { return at; }
+        i = i + 1_u64;
+    }
+    addr
+}
+
+// The trap for an RV64I word that ref_step refused with code rc.
+fn ref_base_trap(m: &mut Machine, x: &[u64], c: &mut [u64], len: u64, w: u64, rc: i64) -> i64 {
+    let op = ref_match(w);
+    let a = x[ref_put(0_u64, 0_u64, w, 15_u64, 5_u64) as usize];
+    let b = x[ref_put(0_u64, 0_u64, w, 20_u64, 5_u64) as usize];
+    if rc == -1 { return ref_trap(m, c, 2_u64, w); }
+    if rc == 2 { return ref_trap(m, c, 11_u64, 0_u64); }
+    if rc == 1 { return ref_trap(m, c, 3_u64, 0_u64); }
+    if rc == -3 { return ref_trap(m, c, 0_u64, ref_flow(op, w, m.pc, a, b).next); }
+    let mut n: u64 = 1_u64;
+    if op == 12_u64 || op == 16_u64 || op == 19_u64 { n = 2_u64; }
+    if op == 13_u64 || op == 17_u64 || op == 20_u64 { n = 4_u64; }
+    if op == 14_u64 || op == 21_u64 { n = 8_u64; }
+    if op >= 18_u64 { return ref_trap(m, c, 7_u64, ref_first_bad(len, ref_add(a, ref_imm(w, 2_u64)), n)); }
+    ref_trap(m, c, 5_u64, ref_first_bad(len, ref_add(a, ref_imm(w, 1_u64)), n))
+}
+
+// MRET: MIE takes the value of MPIE, MPIE becomes 1, pc takes mepc.
+fn ref_mret(m: &mut Machine, c: &mut [u64]) -> i64 {
+    c[RC_MIE] = c[RC_MPIE];
+    c[RC_MPIE] = 1_u64;
+    m.pc = c[RC_MEPC];
+    m.steps = ref_add(m.steps, 1_u64);
+    0
+}
+
+// One step of the reference machine in the trap profile. Same contract as
+// emu_mstep.
+fn ref_mstep(m: &mut Machine, x: &mut [u64], ram: &mut [u8], out: &mut [u8], c: &mut [u64]) -> i64 {
+    if x.len() < 32 { return -4; }
+    let len = ram.len() as u64;
+    if ref_bit(m.pc, 0_u64) == 1_u64 || ref_bit(m.pc, 1_u64) == 1_u64 { return ref_trap(m, c, 0_u64, m.pc); }
+    if !ref_ram_ok(len, m.pc, 4_u64) { return ref_trap(m, c, 1_u64, m.pc); }
+    let w = ref_rd(ram, m.pc, 4_u64);
+    if ref_hit(w, 0xFFFFFFFF_u64, 0x30200073_u64) { return ref_mret(m, c); }
+    let f3 = ref_put(0_u64, 0_u64, w, 12_u64, 3_u64);
+    if ref_hit(w, 0x7F_u64, 0x73_u64) && !ref_hit(w, 0x3000_u64, 0_u64) {
+        return ref_csr_step(m, x, c, w, f3);
+    }
+    let rc = ref_step(m, x, ram, out);
+    if rc == 0 || rc == -4 { return rc; }
+    ref_base_trap(m, x, c, len, w, rc)
+}

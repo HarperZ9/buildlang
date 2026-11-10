@@ -1,0 +1,120 @@
+// emu-rv64 core, third part: executing one decoded instruction.
+
+// The effect of one instruction before it is committed. rc: result code.
+// wr: the instruction writes register rd. val: the value. next: the new pc.
+struct Eff { rc: i64, wr: bool, val: u64, next: u64 }
+
+// Jumps and branches. A taken jump to an address that is not a multiple of
+// 4 is refused with EMU_ALIGN.
+fn emu_eff_flow(pc: u64, d: &Insn, a: u64, b: u64) -> Eff {
+    let mut e = Eff { rc: EMU_OK, wr: false, val: pc.wrapping_add(4_u64), next: pc.wrapping_add(4_u64) };
+    let mut taken = false;
+    let mut target = pc.wrapping_add(d.imm);
+    if d.op == OP_JAL { taken = true; e.wr = true; }
+    if d.op == OP_JALR { taken = true; e.wr = true; target = a.wrapping_add(d.imm) & !1_u64; }
+    if d.op == 5_u64 { taken = a == b; }
+    if d.op == 6_u64 { taken = a != b; }
+    if d.op == 7_u64 { taken = emu_alu(3_u64, a, b) == 1_u64; }
+    if d.op == 8_u64 { taken = emu_alu(3_u64, a, b) == 0_u64; }
+    if d.op == 9_u64 { taken = a < b; }
+    if d.op == 10_u64 { taken = a >= b; }
+    if taken {
+        if (target & 3_u64) != 0_u64 { e.rc = EMU_ALIGN; }
+        e.next = target;
+    }
+    e
+}
+
+// Loads. Width and sign come from the operation number.
+fn emu_eff_load(pc: u64, ram: &[u8], d: &Insn, a: u64) -> Eff {
+    let mut e = Eff { rc: EMU_OK, wr: true, val: 0_u64, next: pc.wrapping_add(4_u64) };
+    let addr = a.wrapping_add(d.imm);
+    let k = d.op - OP_LB;
+    let mut n: u64 = 1_u64 << (k & 3_u64);
+    if k >= 4_u64 { n = 1_u64 << (k - 4_u64); }
+    if emu_in_uart(addr, n) {
+        if addr == EMU_UART_LSR { e.val = 0x60_u64; }
+        return e;
+    }
+    if !emu_in_ram(ram.len() as u64, addr, n) {
+        e.rc = EMU_BUS;
+        return e;
+    }
+    e.val = emu_peek(ram, addr, n);
+    if k < 3_u64 { e.val = emu_sext(e.val, 8_u64 * n); }
+    e
+}
+
+// Stores. A byte stored to the serial data register is appended to `out`.
+fn emu_store(m: &mut Machine, ram: &mut [u8], out: &mut [u8], d: &Insn, a: u64, b: u64) -> i64 {
+    let addr = a.wrapping_add(d.imm);
+    let n: u64 = 1_u64 << (d.op - OP_SB);
+    if emu_in_uart(addr, n) {
+        if addr != EMU_UART_BASE { return EMU_OK; }
+        if m.out_len >= out.len() as u64 { return EMU_SMALL; }
+        out[m.out_len as usize] = (b & 0xFF_u64) as u8;
+        m.out_len = m.out_len + 1_u64;
+        return EMU_OK;
+    }
+    if !emu_in_ram(ram.len() as u64, addr, n) { return EMU_BUS; }
+    emu_poke(ram, addr, n, b);
+    EMU_OK
+}
+
+// Arithmetic: upper-immediate, register-immediate and register-register.
+fn emu_eff_alu(pc: u64, d: &Insn, a: u64, b: u64) -> Eff {
+    let mut e = Eff { rc: EMU_OK, wr: true, val: 0_u64, next: pc.wrapping_add(4_u64) };
+    if d.op == OP_LUI { e.val = d.imm; return e; }
+    if d.op == OP_AUIPC { e.val = pc.wrapping_add(d.imm); return e; }
+    let kind = emu_alu_kind(d.op);
+    let mut rhs = b;
+    if emu_class(d.op) == CL_I { rhs = d.imm; }
+    if d.op >= OP_ADDIW { e.val = emu_alu_w(kind, a, rhs); } else { e.val = emu_alu(kind, a, rhs); }
+    e
+}
+
+// Applies one decoded RV64I instruction and reports every exception to the
+// caller. On any code other than EMU_OK nothing changes. x has 32 entries
+// and x[0] stays 0. A Zicsr instruction or MRET is EMU_ILLEGAL here; the
+// trap profile runs them through emu_mexec.
+fn emu_exec(m: &mut Machine, x: &mut [u64], ram: &mut [u8], out: &mut [u8], d: &Insn) -> i64 {
+    if x.len() < 32 { return EMU_SMALL; }
+    if emu_class(d.op) == 0_u64 || d.op > OP_EBREAK || d.rd > 31_u64 || d.rs1 > 31_u64 || d.rs2 > 31_u64 { return EMU_ILLEGAL; }
+    if d.op == OP_ECALL { return EMU_ECALL; }
+    if d.op == OP_EBREAK { return EMU_BREAK; }
+    let a = x[d.rs1 as usize];
+    let b = x[d.rs2 as usize];
+    let mut e = Eff { rc: EMU_OK, wr: false, val: 0_u64, next: m.pc.wrapping_add(4_u64) };
+    if d.op >= OP_JAL && d.op <= OP_BGEU { e = emu_eff_flow(m.pc, d, a, b); }
+    if d.op >= OP_LB && d.op <= OP_LWU { e = emu_eff_load(m.pc, ram, d, a); }
+    if d.op >= OP_SB && d.op <= OP_SD { e.rc = emu_store(m, ram, out, d, a, b); }
+    if d.op <= OP_AUIPC || (d.op >= OP_ADDI && d.op <= OP_SRAW) { e = emu_eff_alu(m.pc, d, a, b); }
+    if e.rc != EMU_OK { return e.rc; }
+    if e.wr && d.rd != 0_u64 { x[d.rd as usize] = e.val; }
+    m.pc = e.next;
+    m.steps = m.steps + 1_u64;
+    EMU_OK
+}
+
+// One step: fetch the word at pc, decode it, apply it. A machine in the
+// trap profile takes the step in emu_mstep.
+fn emu_step(m: &mut Machine, x: &mut [u64], ram: &mut [u8], out: &mut [u8]) -> i64 {
+    if m.profile == EMU_PROFILE_TRAP { return emu_mstep(m, x, ram, out); }
+    let rc = emu_fetch_check(m, ram);
+    if rc != EMU_OK { return rc; }
+    let d = emu_decode(emu_peek(ram, m.pc, 4_u64));
+    emu_exec(m, x, ram, out, &d)
+}
+
+// Steps until a code other than EMU_OK or EMU_TRAP, or until `max` steps
+// have run. EMU_TRAP occurs only in the trap profile, where the handler is
+// the next instruction to run.
+fn emu_run(m: &mut Machine, x: &mut [u64], ram: &mut [u8], out: &mut [u8], max: u64) -> i64 {
+    let mut i: u64 = 0_u64;
+    while i < max {
+        let rc = emu_step(m, x, ram, out);
+        if rc != EMU_OK && rc != EMU_TRAP { return rc; }
+        i = i + 1_u64;
+    }
+    EMU_OK
+}

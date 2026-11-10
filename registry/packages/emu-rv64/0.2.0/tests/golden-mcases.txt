@@ -1,0 +1,62 @@
+mcase 1 word=340091f3 rc=0 x3=1111222233334444 pc=80000004 mstatus=1808 mepc=80000040 mcause=55 mtval=66 pass=true
+mcase 2 word=34009073 rc=0 x3=0 pc=80000004 mstatus=1808 mepc=80000040 mcause=55 mtval=66 pass=true
+mcase 3 word=340090f3 rc=0 x3=0 pc=80000004 mstatus=1808 mepc=80000040 mcause=55 mtval=66 pass=true
+mcase 4 word=300091f3 rc=0 x3=1808 pc=80000004 mstatus=1888 mepc=80000040 mcause=55 mtval=66 pass=true
+mcase 5 word=300091f3 rc=0 x3=1808 pc=80000004 mstatus=1800 mepc=80000040 mcause=55 mtval=66 pass=true
+mcase 6 word=341091f3 rc=0 x3=80000040 pc=80000004 mstatus=1808 mepc=80000044 mcause=55 mtval=66 pass=true
+mcase 7 word=305091f3 rc=0 x3=80000100 pc=80000004 mstatus=1808 mepc=80000040 mcause=55 mtval=66 pass=true
+mcase 8 word=344091f3 rc=0 x3=800 pc=80000004 mstatus=1808 mepc=80000040 mcause=55 mtval=66 pass=true
+mcase 9 word=301091f3 rc=0 x3=8000000000000100 pc=80000004 mstatus=1808 mepc=80000040 mcause=55 mtval=66 pass=true
+mcase 10 word=342091f3 rc=0 x3=55 pc=80000004 mstatus=1808 mepc=80000040 mcause=8000000000000007 mtval=66 pass=true
+mcase 11 word=343091f3 rc=0 x3=66 pc=80000004 mstatus=1808 mepc=80000040 mcause=55 mtval=dead pass=true
+mcase 12 word=304091f3 rc=0 x3=80 pc=80000004 mstatus=1808 mepc=80000040 mcause=55 mtval=66 pass=true
+mcase 13 word=f1409073 rc=3 x3=0 pc=80000100 mstatus=1880 mepc=80000000 mcause=2 mtval=f1409073 pass=true
+mcase 14 word=3040a1f3 rc=0 x3=80 pc=80000004 mstatus=1808 mepc=80000040 mcause=55 mtval=66 pass=true
+mcase 15 word=340021f3 rc=0 x3=1111222233334444 pc=80000004 mstatus=1808 mepc=80000040 mcause=55 mtval=66 pass=true
+mcase 16 word=f14021f3 rc=0 x3=0 pc=80000004 mstatus=1808 mepc=80000040 mcause=55 mtval=66 pass=true
+mcase 17 word=301021f3 rc=0 x3=8000000000000100 pc=80000004 mstatus=1808 mepc=80000040 mcause=55 mtval=66 pass=true
+mcase 18 word=f140a1f3 rc=3 x3=0 pc=80000100 mstatus=1880 mepc=80000000 mcause=2 mtval=f140a1f3 pass=true
+mcase 19 word=7c0021f3 rc=3 x3=0 pc=80000100 mstatus=1880 mepc=80000000 mcause=2 mtval=7c0021f3 pass=true
+mcase 20 word=c00021f3 rc=3 x3=0 pc=80000100 mstatus=1880 mepc=80000000 mcause=2 mtval=c00021f3 pass=true
+mcase 21 word=3400a1f3 rc=0 x3=1111222233334444 pc=80000004 mstatus=1808 mepc=80000040 mcause=55 mtval=66 pass=true
+mcase 22 word=300021f3 rc=0 x3=1808 pc=80000004 mstatus=1808 mepc=80000040 mcause=55 mtval=66 pass=true
+mcase 23 word=3400b1f3 rc=0 x3=1111222233334444 pc=80000004 mstatus=1808 mepc=80000040 mcause=55 mtval=66 pass=true
+mcase 24 word=340031f3 rc=0 x3=1111222233334444 pc=80000004 mstatus=1808 mepc=80000040 mcause=55 mtval=66 pass=true
+mcase 25 word=3000b1f3 rc=0 x3=1808 pc=80000004 mstatus=1800 mepc=80000040 mcause=55 mtval=66 pass=true
+mcase 26 word=f14031f3 rc=0 x3=0 pc=80000004 mstatus=1808 mepc=80000040 mcause=55 mtval=66 pass=true
+mcase 27 word=340ad1f3 rc=0 x3=1111222233334444 pc=80000004 mstatus=1808 mepc=80000040 mcause=55 mtval=66 pass=true
+mcase 28 word=340051f3 rc=0 x3=1111222233334444 pc=80000004 mstatus=1808 mepc=80000040 mcause=55 mtval=66 pass=true
+mcase 29 word=340fd073 rc=0 x3=0 pc=80000004 mstatus=1808 mepc=80000040 mcause=55 mtval=66 pass=true
+mcase 30 word=304461f3 rc=0 x3=80 pc=80000004 mstatus=1808 mepc=80000040 mcause=55 mtval=66 pass=true
+mcase 31 word=f14061f3 rc=0 x3=0 pc=80000004 mstatus=1808 mepc=80000040 mcause=55 mtval=66 pass=true
+mcase 32 word=300471f3 rc=0 x3=1808 pc=80000004 mstatus=1800 mepc=80000040 mcause=55 mtval=66 pass=true
+mcase 33 word=300071f3 rc=0 x3=1808 pc=80000004 mstatus=1808 mepc=80000040 mcause=55 mtval=66 pass=true
+mcase 34 word=f140f1f3 rc=3 x3=0 pc=80000100 mstatus=1880 mepc=80000000 mcause=2 mtval=f140f1f3 pass=true
+mcase 35 word=f1405073 rc=3 x3=0 pc=80000100 mstatus=1880 mepc=80000000 mcause=2 mtval=f1405073 pass=true
+mcase 36 word=00000073 rc=3 x3=0 pc=80000100 mstatus=1880 mepc=80000000 mcause=b mtval=0 pass=true
+mcase 37 word=00100073 rc=3 x3=0 pc=80000100 mstatus=1880 mepc=80000000 mcause=3 mtval=0 pass=true
+mcase 38 word=00000000 rc=3 x3=0 pc=80000100 mstatus=1880 mepc=80000000 mcause=2 mtval=0 pass=true
+mcase 39 word=ffffffff rc=3 x3=0 pc=80000100 mstatus=1880 mepc=80000000 mcause=2 mtval=ffffffff pass=true
+mcase 40 word=0000b183 rc=3 x3=0 pc=80000100 mstatus=1880 mepc=80000000 mcause=5 mtval=80000200 pass=true
+mcase 41 word=00008183 rc=3 x3=0 pc=80000100 mstatus=1880 mepc=80000000 mcause=5 mtval=0 pass=true
+mcase 42 word=0020b423 rc=3 x3=0 pc=80000100 mstatus=1880 mepc=80000000 mcause=7 mtval=80000200 pass=true
+mcase 43 word=0020b423 rc=3 x3=0 pc=80000100 mstatus=1880 mepc=80000000 mcause=7 mtval=80000200 pass=true
+mcase 44 word=00209423 rc=3 x3=0 pc=80000100 mstatus=1880 mepc=80000000 mcause=7 mtval=10000000 pass=true
+mcase 45 word=005081e7 rc=3 x3=0 pc=80000100 mstatus=1880 mepc=80000000 mcause=0 mtval=80000106 pass=true
+mcase 46 word=00208363 rc=3 x3=0 pc=80000100 mstatus=1880 mepc=80000000 mcause=0 mtval=80000006 pass=true
+mcase 47 word=00208363 rc=0 x3=0 pc=80000004 mstatus=1808 mepc=80000040 mcause=55 mtval=66 pass=true
+mcase 48 word=00000013 rc=3 x3=0 pc=80000100 mstatus=1880 mepc=80000200 mcause=1 mtval=80000200 pass=true
+mcase 49 word=00000013 rc=3 x3=0 pc=80000100 mstatus=1880 mepc=80000000 mcause=0 mtval=80000002 pass=true
+mcase 50 word=00000073 rc=3 x3=0 pc=80000100 mstatus=1880 mepc=80000000 mcause=b mtval=0 pass=true
+mcase 51 word=00000073 rc=3 x3=0 pc=80000100 mstatus=1800 mepc=80000000 mcause=b mtval=0 pass=true
+mcase 52 word=00000073 rc=3 x3=0 pc=80000100 mstatus=1880 mepc=80000000 mcause=b mtval=0 pass=true
+mcase 53 word=30200073 rc=0 x3=0 pc=80000040 mstatus=1880 mepc=80000040 mcause=55 mtval=66 pass=true
+mcase 54 word=30200073 rc=0 x3=0 pc=80000040 mstatus=1888 mepc=80000040 mcause=55 mtval=66 pass=true
+mcase 55 word=30200073 rc=0 x3=0 pc=80000040 mstatus=1888 mepc=80000040 mcause=55 mtval=66 pass=true
+mcase 56 word=30200073 rc=0 x3=0 pc=80000040 mstatus=1880 mepc=80000040 mcause=55 mtval=66 pass=true
+mcase 57 word=340091f3 report profile rc=-1 pc=80000000 pass=true
+mcase 58 word=30200073 report profile rc=-1 pc=80000000 pass=true
+mcase 59 word=10500073 rc=3 x3=0 pc=80000100 mstatus=1880 mepc=80000000 mcause=2 mtval=10500073 pass=true
+mcases: 59 run, first failure 0
+program trap: ok=11 trap=1 steps=11 traps=1 pc=8000001c out_len=1 out=21
+program trap: x29=11 mepc=80000010 mcause=11 mstatus=1880 mtvec=80000040

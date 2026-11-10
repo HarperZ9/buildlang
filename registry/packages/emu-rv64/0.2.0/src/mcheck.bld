@@ -1,0 +1,150 @@
+// Differential check for the trap profile of emu-rv64. The same seeded
+// instruction stream goes to a core variant and to the reference model of
+// mmodel.bld, and the full machine state, every CSR included, is compared
+// after every step. The stream is biased so that CSR instructions, MRET and
+// every trap cause occur often.
+//
+// Counters live in a caller array `ct` of 20 slots: slots 0 to 11 count the
+// traps of each cause, 12 retired instructions, 13 retired CSR instructions,
+// 14 retired MRETs, 15 steps that began with a pc the fetch refuses.
+
+// A CSR number: three in four name an implemented register.
+fn mfz_csr(r: &mut Rng) -> u64 {
+    let pick = rng_next(r);
+    let k = (pick >> 8_u64) % 14_u64;
+    if (pick & 3_u64) == 0_u64 { return (pick >> 16_u64) & 0xFFF_u64; }
+    if k == 0_u64 { return CSR_MSTATUS; }
+    if k == 1_u64 { return CSR_MISA; }
+    if k == 2_u64 { return CSR_MIE; }
+    if k == 3_u64 { return CSR_MTVEC; }
+    if k <= 8_u64 { return CSR_MSCRATCH + k - 4_u64; }
+    CSR_MVENDORID + k - 9_u64
+}
+
+// A random Zicsr instruction or MRET in canonical form. One source operand
+// in four is register 0 or immediate 0, the forms that do not write.
+fn gen_minsn(r: &mut Rng) -> Insn {
+    let pick = rng_next(r);
+    let op = OP_CSRRW + pick % 7_u64;
+    let mut rs1 = (pick >> 16_u64) & 31_u64;
+    if ((pick >> 24_u64) & 3_u64) == 0_u64 { rs1 = 0_u64; }
+    let d = Insn { op: op, rd: (pick >> 8_u64) & 31_u64, rs1: rs1, rs2: 0_u64, imm: mfz_csr(r) };
+    emu_canon(&d)
+}
+
+// Picks the next word. Of 16: 5 Zicsr instructions or MRET, 1 MRET, 1 ECALL
+// or EBREAK, 2 noise, 7 RV64I instructions.
+fn mfz_word(r: &mut Rng) -> u64 {
+    let pick = rng_next(r);
+    let sel = pick % 16_u64;
+    if sel < 5_u64 { let d = gen_minsn(r); return emu_encode(&d); }
+    if sel == 5_u64 { return 0x30200073_u64; }
+    if sel == 6_u64 { return (((pick >> 8_u64) & 1_u64) << 20_u64) | 0x73_u64; }
+    if sel <= 8_u64 { return rng_next(r) & 0xFFFFFFFF_u64; }
+    let d = gen_insn(r);
+    emu_encode(&d)
+}
+
+fn mfz_pc_ok(pc: u64) -> bool {
+    (pc & 3_u64) == 0_u64 && emu_in_ram(FZ_RAM, pc, 4_u64)
+}
+
+// Before step i: a fresh trap vector now and then, new pending bits now and
+// then, a pc that is not a multiple of 4 once in 128 steps, and a new pc
+// three times in four when the fetch would refuse the old one. The fourth
+// time the machine takes the instruction fault.
+fn mfz_prep(r: &mut Rng, i: u64, ma: &mut Machine, mb: &mut Machine, c: &mut [u64], ct: &mut [u64]) {
+    if i % 16_u64 == 0_u64 {
+        let pick = rng_next(r);
+        let mut tv = 4_u64 * ((pick >> 8_u64) % 256_u64) + EMU_RAM_BASE + (pick & 1_u64);
+        if (pick >> 4_u64) % 8_u64 == 0_u64 { tv = gen_value(r); }
+        emu_csr_write(ma, CSR_MTVEC, tv);
+        ref_csr_set(c, 0x305_u64, tv);
+    }
+    if i % 64_u64 == 0_u64 {
+        ma.mip = rng_next(r);
+        c[RC_IP] = ma.mip;
+    }
+    if ma.out_len == FZ_OUT { ma.out_len = 0_u64; mb.out_len = 0_u64; }
+    if i % 128_u64 == 77_u64 {
+        ma.pc = ma.pc | 2_u64;
+        mb.pc = ma.pc;
+        ct[15] = ct[15] + 1_u64;
+        return;
+    }
+    if mfz_pc_ok(ma.pc) { return; }
+    if rng_next(r) % 4_u64 == 0_u64 { ct[15] = ct[15] + 1_u64; return; }
+    ma.pc = 4_u64 * (rng_next(r) % 256_u64) + EMU_RAM_BASE;
+    mb.pc = ma.pc;
+}
+
+// Compares the CSRs of the core with the slots of the model. Kinds 11 to 18.
+fn mfz_cmp_csr(step: u64, m: &Machine, c: &[u64]) -> Refusal {
+    let st = ref_status(c);
+    if m.mstatus != st { return fz_refuse(11, step, m.mstatus, st); }
+    if m.mtvec != c[RC_MTVEC] { return fz_refuse(12, step, m.mtvec, c[RC_MTVEC]); }
+    if m.mepc != c[RC_MEPC] { return fz_refuse(13, step, m.mepc, c[RC_MEPC]); }
+    if m.mcause != c[RC_MCAUSE] { return fz_refuse(14, step, m.mcause, c[RC_MCAUSE]); }
+    if m.mtval != c[RC_MTVAL] { return fz_refuse(15, step, m.mtval, c[RC_MTVAL]); }
+    if m.mie != c[RC_IE] { return fz_refuse(16, step, m.mie, c[RC_IE]); }
+    if m.mip != c[RC_IP] { return fz_refuse(17, step, m.mip, c[RC_IP]); }
+    if m.mscratch != c[RC_SCRATCH] { return fz_refuse(18, step, m.mscratch, c[RC_SCRATCH]); }
+    fz_refuse(0, step, 0_u64, 0_u64)
+}
+
+fn mfz_count(ct: &mut [u64], rc: i64, cause: u64, w: u64) {
+    if rc == EMU_TRAP && cause < 12_u64 { ct[cause as usize] = ct[cause as usize] + 1_u64; }
+    if rc != EMU_OK { return; }
+    ct[12] = ct[12] + 1_u64;
+    let op = emu_decode(w).op;
+    if emu_class(op) == CL_CSR { ct[13] = ct[13] + 1_u64; }
+    if op == OP_MRET { ct[14] = ct[14] + 1_u64; }
+}
+
+// Compares the two machines outside the registers and memory. Kinds 1, 2,
+// 7 and 8.
+fn mfz_cmp_m(step: u64, ca: i64, cb: i64, ma: &Machine, mb: &Machine) -> Refusal {
+    if ca != cb { return fz_refuse(1, step, ca as u64, cb as u64); }
+    if ma.pc != mb.pc { return fz_refuse(2, step, ma.pc, mb.pc); }
+    if ma.steps != mb.steps || ma.out_len != mb.out_len { return fz_refuse(7, step, ma.steps, mb.steps); }
+    if ma.traps != mb.traps { return fz_refuse(8, step, ma.traps, mb.traps); }
+    fz_refuse(0, step, 0_u64, 0_u64)
+}
+
+// Runs `steps` steps through variant v and the model.
+// Kinds: 1 result code, 2 pc, 3 register, 4 memory, 5 serial output,
+// 6 register 0 not zero, 7 step or output count, 8 trap count, 11 mstatus,
+// 12 mtvec, 13 mepc, 14 mcause, 15 mtval, 16 mie, 17 mip, 18 mscratch.
+fn mfuzz_run(v: u64, seed: u64, steps: u64, ct: &mut [u64]) -> Refusal {
+    let mut r = Rng { s: seed };
+    let mut xa: [u64; 32] = [0_u64; 32];
+    let mut xb: [u64; 32] = [0_u64; 32];
+    let mut ra: [u8; 1024] = [0_u8; 1024];
+    let mut rb: [u8; 1024] = [0_u8; 1024];
+    let mut oa: [u8; 64] = [0_u8; 64];
+    let mut ob: [u8; 64] = [0_u8; 64];
+    let mut c: [u64; 9] = [0_u64; 9];
+    let mut ma = emu_new_machine();
+    let mut mb = emu_new();
+    let mut i: u64 = 0_u64;
+    while i < steps {
+        if i % 4_u64 == 0_u64 { fz_seed(&mut r, &mut xa, &mut xb); }
+        mfz_prep(&mut r, i, &mut ma, &mut mb, &mut c, ct);
+        let w = mfz_word(&mut r);
+        if mfz_pc_ok(ma.pc) {
+            emu_poke(&mut ra, ma.pc, 4_u64, w);
+            emu_poke(&mut rb, mb.pc, 4_u64, w);
+        }
+        let ca = mstep_v(v, &mut ma, &mut xa, &mut ra, &mut oa);
+        let cb = ref_mstep(&mut mb, &mut xb, &mut rb, &mut ob, &mut c);
+        let f = mfz_cmp_m(i, ca, cb, &ma, &mb);
+        if f.kind != 0 { return f; }
+        let g = fz_cmp(i, &xa, &xb, &ra, &rb, &oa, &ob);
+        if g.kind != 0 { return g; }
+        let h = mfz_cmp_csr(i, &ma, &c);
+        if h.kind != 0 { return h; }
+        mfz_count(ct, ca, ma.mcause, w);
+        i = i + 1_u64;
+    }
+    fz_refuse(0, steps, 0_u64, 0_u64)
+}
