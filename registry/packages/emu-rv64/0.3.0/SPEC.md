@@ -345,25 +345,33 @@ that the hash depends on the state.
 
 ## Limits
 
-- The manual could not be read for this version. One fetch of
-  `src/machine.adoc` at commit `d50ad50f` of `riscv/riscv-isa-manual`
-  returned HTTP 404, and no other copy was looked for. Every rule that 0.3.0
-  adds was written from memory and is not confirmed against the text:
+- The rules that 0.3.0 adds were first written from memory. They were then
+  compared with `src/priv/machine.adoc` at commit
+  `d50ad50f7dfad97a47a70ae0fab6a11660362167` of `riscv/riscv-isa-manual`
+  (file SHA-256 `ed164558403bba4e05a14bfceba5b0940fd109ac280b2c13b5ea9cdd87531ade`).
+  The text states each of these, and the document agrees:
   - the priority order of the machine interrupts: external, software, timer;
-  - the cause numbers 3, 7 and 11 and their bit positions in `mip` and `mie`;
-  - bit 63 of `mcause` marks an interrupt;
-  - `mepc` holds the instruction that did not execute, and `mtval` is 0;
-  - an interrupt is taken only while MIE is 1 and the bit is set in both
-    `mip` and `mie`;
+  - the cause numbers 3, 7 and 11, and that bit _i_ of `mip` and `mie`
+    belongs to interrupt _i_;
+  - the Interrupt bit of `mcause` is set for an interrupt;
+  - `mepc` holds the instruction that was interrupted, and `mtval` is 0;
+  - an interrupt is taken in M-mode only while MIE is 1 and the bit is set in
+    both `mip` and `mie`;
   - in vectored mode an interrupt goes to BASE + 4 x cause and a
-    synchronous trap goes to BASE;
-  - MTIP is read-only and follows `mtime >= mtimecmp`;
-  - the WFI word `0x10500073`, and the permission to run it as a no-op;
+    synchronous exception goes to BASE;
+  - MTIP is read-only in `mip` and is pending while `mtime >= mtimecmp`,
+    compared as unsigned integers;
+  - WFI may be implemented as a no-op.
+- Two things are still from memory and unconfirmed:
+  - the WFI word `0x10500073`. The manual keeps the encoding in a figure
+    file that could not be fetched;
   - the CLINT addresses `0x02004000` and `0x0200BFF8` of the QEMU `virt`
-    machine.
-- The hand-computed cases, the model and the property rules were all
-  written from that same memory. They show that the core does what this
-  document says. They cannot show that this document matches the manual.
+    machine. The manual gives `mtime` and `mtimecmp` no address.
+- The comparison was a reading of the text by the author of the core. No
+  second reader has checked it, and no architecture test has been run.
+- The hand-computed cases, the model and the property rules were written by
+  the same author as the core. They show that the core does what this
+  document says.
 - WFI does not wait. A run of idle steps costs one step each.
 - No interrupt controller. MSIP and MEIP are set by the host only: the
   timer block has no `msip` register, and there is no PLIC, the platform
