@@ -707,6 +707,12 @@ static BuildVecHandle build_hvec_new_i32(void) {
 static void build_hvec_push_i32(BuildVecHandle h, int32_t val) { build_vec_push(h.inner, &val); }
 static int32_t build_hvec_get_i32(BuildVecHandle h, size_t index) { return *(int32_t*)build_vec_get(h.inner, index); }
 static size_t build_hvec_len(BuildVecHandle h) { return h.inner->len; }
+// The element buffer of a vector, for a `&[T]` view of a `&Vec<T>` argument.
+// `es` is the size of `T`; a vector that stores another width is refused.
+static void* build_hvec_data(BuildVecHandle h, size_t es) {
+    if (h.inner->elem_size != es) bl_vec_layout_fail(h.inner->elem_size, es);
+    return h.inner->ptr;
+}
 static int32_t build_hvec_pop_i32(BuildVecHandle h) {
     if (h.inner->len == 0) return 0;
     h.inner->len--;
