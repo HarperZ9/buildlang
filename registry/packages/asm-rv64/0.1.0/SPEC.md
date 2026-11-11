@@ -104,7 +104,8 @@ Notes on single forms:
   or jump itself. An operand that starts with a digit or a sign is a
   number. `jal x0, 0` jumps to itself. An offset must be even. An offset
   that is even and not a multiple of 4 is accepted, because the format
-  holds it; the emulator traps on such a jump when it is taken.
+  holds it; when such a jump is taken, the emulator traps in its trap
+  profile and returns the alignment step code in its report profile.
 - `fence` is written with all three fields, because the decoder of
   `emu-rv64` accepts every value of them. `bits` is the 12-bit field that
   holds the mode and the two sets. The usual form `fence iorw, iorw` is
