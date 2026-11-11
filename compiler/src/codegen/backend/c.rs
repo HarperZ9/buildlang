@@ -1389,6 +1389,10 @@ impl CBackend {
                 }
             }
         }
+        // A tuple global with no local of its type had no typedef.
+        for g in &module.globals {
+            visit(&g.ty, &existing, &mut seen, &mut out);
+        }
         for f in &module.functions {
             for prm in &f.sig.params {
                 visit(prm, &existing, &mut seen, &mut out);
