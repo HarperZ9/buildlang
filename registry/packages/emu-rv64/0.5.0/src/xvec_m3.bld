@@ -1,0 +1,67 @@
+// Hand cases of the M extension, part 3. Written by
+// tests/tools/ma_oracle.py; do not edit by hand. Each row is
+// word, a, b, expected x3 for `op x3, x1, x2`.
+
+fn xv_m3_1(st: &mut XSt) ~ Console {
+    // 201: remw x3, x1, x2
+    xv_m(st, 0x220E1BB_u64, 0x5_u64, 0x0_u64, 0x5_u64);
+    // 202: remw x3, x1, x2
+    xv_m(st, 0x220E1BB_u64, 0x80000000_u64, 0x0_u64, 0xFFFFFFFF80000000_u64);
+    // 203: remw x3, x1, x2
+    xv_m(st, 0x220E1BB_u64, 0xFFFFFFFF00000005_u64, 0x0_u64, 0x5_u64);
+    // 204: remw x3, x1, x2
+    xv_m(st, 0x220E1BB_u64, 0xFFFFFFFFFFFFFFFF_u64, 0x0_u64, 0xFFFFFFFFFFFFFFFF_u64);
+    // 205: remw x3, x1, x2
+    xv_m(st, 0x220E1BB_u64, 0x80000000_u64, 0xFFFFFFFF_u64, 0x0_u64);
+    // 206: remw x3, x1, x2
+    xv_m(st, 0x220E1BB_u64, 0xAAAAAAAA80000000_u64, 0x55555555FFFFFFFF_u64, 0x0_u64);
+    // 207: remw x3, x1, x2
+    xv_m(st, 0x220E1BB_u64, 0xFFFFFFFF_u64, 0x1_u64, 0x0_u64);
+    // 208: remw x3, x1, x2
+    xv_m(st, 0x220E1BB_u64, 0x7FFFFFFF_u64, 0xFFFFFFFF_u64, 0x0_u64);
+    // 209: remw x3, x1, x2
+    xv_m(st, 0x220E1BB_u64, 0x100000000_u64, 0x3_u64, 0x0_u64);
+    // 210: remw x3, x1, x2
+    xv_m(st, 0x220E1BB_u64, 0x80000000_u64, 0x2_u64, 0x0_u64);
+    // 211: remw x3, x1, x2
+    xv_m(st, 0x220E1BB_u64, 0x100000007_u64, 0x100000000_u64, 0x7_u64);
+    // 212: remw x3, x1, x2
+    xv_m(st, 0x220E1BB_u64, 0xFFFFFFFE_u64, 0x7FFFFFFF_u64, 0xFFFFFFFFFFFFFFFE_u64);
+    // 213: remuw x3, x1, x2
+    xv_m(st, 0x220F1BB_u64, 0x7_u64, 0x2_u64, 0x1_u64);
+    // 214: remuw x3, x1, x2
+    xv_m(st, 0x220F1BB_u64, 0xFFFFFFFFFFFFFFF9_u64, 0x2_u64, 0x1_u64);
+    // 215: remuw x3, x1, x2
+    xv_m(st, 0x220F1BB_u64, 0x7_u64, 0xFFFFFFFFFFFFFFFE_u64, 0x7_u64);
+    // 216: remuw x3, x1, x2
+    xv_m(st, 0x220F1BB_u64, 0xFFFFFFFFFFFFFFF9_u64, 0xFFFFFFFFFFFFFFFE_u64, 0xFFFFFFFFFFFFFFF9_u64);
+    // 217: remuw x3, x1, x2
+    xv_m(st, 0x220F1BB_u64, 0x0_u64, 0x0_u64, 0x0_u64);
+    // 218: remuw x3, x1, x2
+    xv_m(st, 0x220F1BB_u64, 0x5_u64, 0x0_u64, 0x5_u64);
+    // 219: remuw x3, x1, x2
+    xv_m(st, 0x220F1BB_u64, 0x80000000_u64, 0x0_u64, 0xFFFFFFFF80000000_u64);
+    // 220: remuw x3, x1, x2
+    xv_m(st, 0x220F1BB_u64, 0xFFFFFFFF00000005_u64, 0x0_u64, 0x5_u64);
+}
+
+fn xv_m3_2(st: &mut XSt) ~ Console {
+    // 221: remuw x3, x1, x2
+    xv_m(st, 0x220F1BB_u64, 0xFFFFFFFFFFFFFFFF_u64, 0x0_u64, 0xFFFFFFFFFFFFFFFF_u64);
+    // 222: remuw x3, x1, x2
+    xv_m(st, 0x220F1BB_u64, 0x80000000_u64, 0xFFFFFFFF_u64, 0xFFFFFFFF80000000_u64);
+    // 223: remuw x3, x1, x2
+    xv_m(st, 0x220F1BB_u64, 0xAAAAAAAA80000000_u64, 0x55555555FFFFFFFF_u64, 0xFFFFFFFF80000000_u64);
+    // 224: remuw x3, x1, x2
+    xv_m(st, 0x220F1BB_u64, 0xFFFFFFFF_u64, 0x1_u64, 0x0_u64);
+    // 225: remuw x3, x1, x2
+    xv_m(st, 0x220F1BB_u64, 0x7FFFFFFF_u64, 0xFFFFFFFF_u64, 0x7FFFFFFF_u64);
+    // 226: remuw x3, x1, x2
+    xv_m(st, 0x220F1BB_u64, 0x100000000_u64, 0x3_u64, 0x0_u64);
+    // 227: remuw x3, x1, x2
+    xv_m(st, 0x220F1BB_u64, 0x80000000_u64, 0x2_u64, 0x0_u64);
+    // 228: remuw x3, x1, x2
+    xv_m(st, 0x220F1BB_u64, 0x100000007_u64, 0x100000000_u64, 0x7_u64);
+    // 229: remuw x3, x1, x2
+    xv_m(st, 0x220F1BB_u64, 0xFFFFFFFE_u64, 0x7FFFFFFF_u64, 0x0_u64);
+}

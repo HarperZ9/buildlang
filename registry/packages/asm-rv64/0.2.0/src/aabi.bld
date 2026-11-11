@@ -1,0 +1,109 @@
+// asm-rv64: every constant of the package, in one file that sorts first.
+// The sources of the dependency emu-rv64 are joined before this file, so
+// its constants (the OP_ and CL_ numbers, the CSR numbers) are declared
+// already. Every name of this package starts with as_, ad_, ac_, ap_ or
+// ax_, or with AS_, AE_, AK_ or ACTL_, and none of them is a name of
+// emu-rv64.
+
+// Limits of one assembly: bytes of source text, words of output, labels,
+// and bytes in one label name.
+const AS_SRC_MAX: usize = 65536;
+const AS_WORDS_MAX: u64 = 16384_u64;
+const AS_LABELS_MAX: usize = 1024;
+const AS_NAME_MAX: usize = 31;
+// "No such label" and "no label given".
+const AS_NONE: u64 = 0xFFFFFFFFFFFFFFFF_u64;
+
+// Error codes. as_err_text in apass.bld gives the reason for each.
+const AE_MNEMONIC: u64 = 1_u64;
+const AE_REG: u64 = 2_u64;
+const AE_RANGE: u64 = 3_u64;
+const AE_ALIGN: u64 = 4_u64;
+const AE_FAR: u64 = 5_u64;
+const AE_UNDEF: u64 = 6_u64;
+const AE_DUP: u64 = 7_u64;
+const AE_COUNT: u64 = 8_u64;
+const AE_TRAIL: u64 = 9_u64;
+const AE_NUMBER: u64 = 10_u64;
+const AE_MEM: u64 = 11_u64;
+const AE_CSR: u64 = 12_u64;
+const AE_ORG: u64 = 13_u64;
+const AE_DIRECTIVE: u64 = 14_u64;
+const AE_BIG: u64 = 15_u64;
+const AE_LABEL: u64 = 16_u64;
+const AE_EMPTY: u64 = 17_u64;
+const AE_LABELS: u64 = 18_u64;
+const AE_INTERNAL: u64 = 19_u64;
+const AE_ADDR: u64 = 20_u64;
+
+// Operand forms. as_kind in aops.bld maps an operation number to one.
+//   AK_NONE   no operand                 ecall ebreak mret wfi
+//   AK_R      rd, rs1, rs2               also the M extension
+//   AK_I      rd, rs1, imm               imm -2048 to 2047
+//   AK_SH6    rd, rs1, shamt             0 to 63
+//   AK_SH5    rd, rs1, shamt             0 to 31
+//   AK_LOAD   rd, imm(rs1)               loads and jalr
+//   AK_STORE  rs2, imm(rs1)
+//   AK_B      rs1, rs2, target           -4096 to 4094, even
+//   AK_J      rd, target                 -1048576 to 1048574, even
+//   AK_U      rd, imm20                  0 to 1048575
+//   AK_FENCE  rd, rs1, bits              0 to 4095
+//   AK_CSR    rd, csr, rs1
+//   AK_CSRI   rd, csr, uimm              0 to 31
+//   AK_LR     rd, (rs1)                  lr.w lr.d
+//   AK_AMO    rd, rs2, (rs1)             sc.w sc.d and the AMOs
+const AK_NONE: u64 = 0_u64;
+const AK_R: u64 = 1_u64;
+const AK_I: u64 = 2_u64;
+const AK_SH6: u64 = 3_u64;
+const AK_SH5: u64 = 4_u64;
+const AK_LOAD: u64 = 5_u64;
+const AK_STORE: u64 = 6_u64;
+const AK_B: u64 = 7_u64;
+const AK_J: u64 = 8_u64;
+const AK_U: u64 = 9_u64;
+const AK_FENCE: u64 = 10_u64;
+const AK_CSR: u64 = 11_u64;
+const AK_CSRI: u64 = 12_u64;
+const AK_LR: u64 = 13_u64;
+const AK_AMO: u64 = 14_u64;
+
+// Planted defects. The number is passed down to the assembler; 0 is the
+// assembler itself. tests/controls.txt describes each one.
+const ACTL_BRANCH: u64 = 1_u64;
+const ACTL_SBITS: u64 = 2_u64;
+const ACTL_SIGN: u64 = 3_u64;
+const ACTL_RANGE: u64 = 4_u64;
+const ACTL_WORD: u64 = 5_u64;
+const ACTL_STORE: u64 = 6_u64;
+const ACTL_HEX: u64 = 7_u64;
+const ACTL_COMMENT: u64 = 8_u64;
+const ACTL_DUP: u64 = 9_u64;
+const ACTL_UNDEF: u64 = 10_u64;
+// Since 0.2.0, the atomic forms.
+const ACTL_AMOSWAP: u64 = 11_u64;
+const ACTL_WIDTH: u64 = 12_u64;
+const ACTL_PAREN: u64 = 13_u64;
+const ACTL_COUNT: u64 = 13_u64;
+
+// Text styles of the renderer in adis.bld, one bit each. Style 0 is the
+// canonical text that the command dis prints.
+//   1  the other radix: decimal fields in hex, hex fields in decimal
+//   2  CSR numbers in place of CSR names
+//   4  tabs and extra spaces around the operands
+//   8  a plus sign before a branch or jump offset that is not negative
+const AD_RADIX: u64 = 1_u64;
+const AD_CSRNUM: u64 = 2_u64;
+const AD_SPACE: u64 = 4_u64;
+const AD_PLUS: u64 = 8_u64;
+
+// Property kinds of aprops. tests/props.txt describes each one.
+const AP_ENCODE: i64 = 61;
+const AP_WORD: i64 = 62;
+const AP_TEXT: i64 = 63;
+const AP_EDGE: i64 = 64;
+const AP_REFUSE: i64 = 65;
+const AP_LABELS: i64 = 66;
+const AP_UNDEF: i64 = 67;
+const AP_DUP: i64 = 68;
+const AP_COMMENT: i64 = 69;

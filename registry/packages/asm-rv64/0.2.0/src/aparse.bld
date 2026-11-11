@@ -1,0 +1,241 @@
+// asm-rv64: operands. A statement is a mnemonic and up to three operands
+// separated by commas. This file turns the operands into the decoded
+// record (Insn) of emu-rv64, and the encoder of emu-rv64 turns the record
+// into the word. The assembler holds no bit layout of its own.
+
+// The operands of one statement: n of them, and the first three as index
+// ranges a to b of the source, not yet trimmed.
+struct AsFields { n: usize, a0: usize, b0: usize, a1: usize, b1: usize, a2: usize, b2: usize }
+
+// The label table: three entries per label (index of its name in the
+// source, length of the name, byte offset), the words of the image, and
+// the errors as pairs (line, code). errs1 holds the errors of pass 1,
+// errs2 those of pass 2 and errs all of them in line order. count is the
+// number of words when there is no error, else 0.
+struct AsOut { count: u64, words: Vec<u64>, errs: Vec<u64>, errs1: Vec<u64>, errs2: Vec<u64>, labs: Vec<u64> }
+
+// Splits the text lo to hi at its commas.
+fn as_fields(src: &[u8], lo: usize, hi: usize) -> AsFields {
+    let mut f = AsFields { n: 0, a0: hi, b0: hi, a1: hi, b1: hi, a2: hi, b2: hi };
+    let s = as_skip(src, lo, hi);
+    if s == hi { return f; }
+    f.n = 1;
+    f.a0 = s;
+    let mut i = s;
+    while i < hi {
+        if src[i] == 44_u8 {
+            if f.n == 1 { f.b0 = i; f.a1 = i + 1; }
+            if f.n == 2 { f.b1 = i; f.a2 = i + 1; }
+            if f.n == 3 { f.b2 = i; }
+            f.n = f.n + 1;
+        }
+        i = i + 1;
+    }
+    f
+}
+
+// True when the range holds only spaces.
+fn as_blank(src: &[u8], lo: usize, hi: usize) -> bool { as_skip(src, lo, hi) == hi }
+
+// Refuses a statement that has an operand with nothing in it.
+fn as_fields_check(st: &mut AsSt, src: &[u8], f: &AsFields) {
+    if f.n >= 1 && as_blank(src, f.a0, f.b0) { as_fail(st, AE_EMPTY); }
+    if f.n >= 2 && as_blank(src, f.a1, f.b1) { as_fail(st, AE_EMPTY); }
+    if f.n >= 3 && as_blank(src, f.a2, f.b2) { as_fail(st, AE_EMPTY); }
+}
+
+// The index in labs of the label named at lo to hi, or AS_NONE.
+fn as_lab_find(src: &[u8], labs: &Vec<u64>, lo: usize, hi: usize) -> u64 {
+    let mut found: u64 = AS_NONE;
+    let mut i: usize = 0;
+    while i + 2 < labs.len() {
+        if found == AS_NONE && as_same(src, labs[i] as usize, labs[i + 1] as usize, lo, hi - lo) {
+            found = i as u64;
+        }
+        i = i + 3;
+    }
+    found
+}
+
+// The operand imm(rs1) of a load, a store or jalr.
+struct AsMem { imm: u64, reg: u64 }
+
+fn as_f_mem(st: &mut AsSt, src: &[u8], lo: usize, hi: usize) -> AsMem {
+    let mut m = AsMem { imm: 0_u64, reg: 0_u64 };
+    let a = as_skip(src, lo, hi);
+    let n = as_num(st.v, src, a, hi);
+    let p = as_skip(src, n.end, hi);
+    if p >= hi || src[p] != 40_u8 || (!n.ok && n.end == a) {
+        as_fail(st, AE_MEM);
+        return m;
+    }
+    if !n.ok { as_fail(st, AE_NUMBER); }
+    let q = as_skip(src, p + 1, hi);
+    let e = as_word_end(src, q, hi);
+    m.reg = as_reg_val(src, q, e);
+    if m.reg > 31_u64 {
+        as_fail(st, AE_REG);
+        m.reg = 0_u64;
+    }
+    let c = as_skip(src, e, hi);
+    if c >= hi || src[c] != 41_u8 {
+        as_fail(st, AE_MEM);
+        return m;
+    }
+    if as_skip(src, c + 1, hi) != hi { as_fail(st, AE_TRAIL); }
+    m.imm = as_imm(st, &n, 2048_u64, 2047_u64);
+    m
+}
+
+// The offset from the statement to a label, as a signed number. Defect 1
+// measures from the next instruction. Defect 10 reads an undefined label
+// as offset 0 of the image.
+fn as_lab_offset(st: &mut AsSt, src: &[u8], labs: &Vec<u64>, lo: usize, hi: usize) -> AsNum {
+    let mut n = AsNum { ok: true, neg: false, mag: 0_u64, end: hi };
+    if st.pass == 1_u64 { return n; }
+    let at = as_lab_find(src, labs, lo, hi);
+    let mut to: u64 = 0_u64;
+    if at == AS_NONE {
+        if st.v != ACTL_UNDEF { as_fail(st, AE_UNDEF); }
+    } else {
+        to = labs[(at + 2_u64) as usize];
+    }
+    let mut from = st.loc;
+    if st.v == ACTL_BRANCH { from = st.loc + 4_u64; }
+    if to < from {
+        n.neg = true;
+        n.mag = from - to;
+    } else {
+        n.mag = to - from;
+    }
+    n
+}
+
+// The target of a branch or jump: a label, or a number that is the offset
+// in bytes from this instruction. An odd offset is refused first, then
+// one outside -lo_mag to hi.
+fn as_f_target(st: &mut AsSt, src: &[u8], labs: &Vec<u64>, lo: usize, hi: usize, lo_mag: u64, top: u64) -> u64 {
+    let a = as_skip(src, lo, hi);
+    let mut n = AsNum { ok: true, neg: false, mag: 0_u64, end: hi };
+    if a < hi && (as_digit(src[a]) || src[a] == 45_u8 || src[a] == 43_u8) {
+        n = as_f_num(st, src, a, hi);
+    } else {
+        let e = as_word_end(src, a, hi);
+        if !as_ident_ok(src, a, e) {
+            as_fail(st, AE_LABEL);
+            return 0_u64;
+        }
+        if as_skip(src, e, hi) != hi { as_fail(st, AE_TRAIL); }
+        n = as_lab_offset(st, src, labs, a, e);
+    }
+    if st.err != 0_u64 { return 0_u64; }
+    if (n.mag & 1_u64) != 0_u64 { as_fail(st, AE_ALIGN); }
+    if n.neg {
+        if n.mag > lo_mag { as_fail(st, AE_FAR); }
+        return 0_u64.wrapping_sub(n.mag);
+    }
+    if n.mag > top { as_fail(st, AE_FAR); }
+    n.mag
+}
+
+// A CSR operand: a name the core implements, or a number 0 to 4095.
+fn as_f_csr(st: &mut AsSt, src: &[u8], lo: usize, hi: usize) -> u64 {
+    let a = as_skip(src, lo, hi);
+    if a < hi && (as_digit(src[a]) || src[a] == 45_u8 || src[a] == 43_u8) {
+        let n = as_f_num(st, src, a, hi);
+        return as_imm(st, &n, 0_u64, 4095_u64);
+    }
+    let e = as_word_end(src, a, hi);
+    let c = as_csr_find(src, a, e);
+    if c > 4095_u64 {
+        as_fail(st, AE_CSR);
+        return 0_u64;
+    }
+    if as_skip(src, e, hi) != hi { as_fail(st, AE_TRAIL); }
+    c
+}
+
+// A store: rs2, imm(rs1). Defect 6 swaps the two registers. Defect 2
+// swaps bits 4 to 0 of the offset with bits 9 to 5.
+fn as_store(st: &mut AsSt, src: &[u8], op: u64, f: &AsFields) -> Insn {
+    let mut d = Insn { op: op, rd: 0_u64, rs1: 0_u64, rs2: 0_u64, imm: 0_u64 };
+    d.rs2 = as_f_reg(st, src, f.a0, f.b0);
+    let m = as_f_mem(st, src, f.a1, f.b1);
+    d.rs1 = m.reg;
+    d.imm = m.imm;
+    if st.v == ACTL_STORE {
+        d.rs1 = d.rs2;
+        d.rs2 = m.reg;
+    }
+    if st.v == ACTL_SBITS {
+        let low = m.imm & 0x1F_u64;
+        let mid = (m.imm >> 5_u64) & 0x1F_u64;
+        d.imm = (m.imm & !0x3FF_u64) | (low << 5_u64) | mid;
+    }
+    d
+}
+
+// The forms whose first operand is rd and whose last is a number.
+fn as_rd_num(st: &mut AsSt, src: &[u8], k: u64, f: &AsFields, d: &mut Insn) {
+    if k == AK_U {
+        let n = as_f_num(st, src, f.a1, f.b1);
+        let v = as_imm(st, &n, 0_u64, 0xFFFFF_u64);
+        d.imm = emu_sext((v << 12_u64) & 0xFFFFF000_u64, 32_u64);
+        return;
+    }
+    if k == AK_CSR || k == AK_CSRI {
+        d.imm = as_f_csr(st, src, f.a1, f.b1);
+        if k == AK_CSR {
+            d.rs1 = as_f_reg(st, src, f.a2, f.b2);
+            return;
+        }
+        let u = as_f_num(st, src, f.a2, f.b2);
+        d.rs1 = as_imm(st, &u, 0_u64, 31_u64);
+        return;
+    }
+    d.rs1 = as_f_reg(st, src, f.a1, f.b1);
+    let n = as_f_num(st, src, f.a2, f.b2);
+    if k == AK_I { d.imm = as_imm(st, &n, 2048_u64, 2047_u64); }
+    if k == AK_SH6 { d.imm = as_imm(st, &n, 0_u64, 63_u64); }
+    if k == AK_SH5 { d.imm = as_imm(st, &n, 0_u64, 31_u64); }
+    if k == AK_FENCE { d.imm = emu_sext(as_imm(st, &n, 0_u64, 4095_u64), 12_u64); }
+}
+
+// The operands of operation op, read into a decoded record. Errors go to
+// st.err, and the record is then meaningless.
+fn as_insn(st: &mut AsSt, src: &[u8], labs: &Vec<u64>, op: u64, f: &AsFields) -> Insn {
+    let k = as_kind(op);
+    let mut d = Insn { op: op, rd: 0_u64, rs1: 0_u64, rs2: 0_u64, imm: 0_u64 };
+    if f.n != as_kind_fields(k) {
+        as_fail(st, AE_COUNT);
+        return d;
+    }
+    as_fields_check(st, src, f);
+    if k == AK_NONE || st.err != 0_u64 { return d; }
+    if k == AK_STORE { return as_store(st, src, op, f); }
+    if k == AK_LR || k == AK_AMO { return as_atomic(st, src, op, f); }
+    if k == AK_B {
+        d.rs1 = as_f_reg(st, src, f.a0, f.b0);
+        d.rs2 = as_f_reg(st, src, f.a1, f.b1);
+        d.imm = as_f_target(st, src, labs, f.a2, f.b2, 4096_u64, 4094_u64);
+        return d;
+    }
+    d.rd = as_f_reg(st, src, f.a0, f.b0);
+    if k == AK_R {
+        d.rs1 = as_f_reg(st, src, f.a1, f.b1);
+        d.rs2 = as_f_reg(st, src, f.a2, f.b2);
+        return d;
+    }
+    if k == AK_J {
+        d.imm = as_f_target(st, src, labs, f.a1, f.b1, 1048576_u64, 1048574_u64);
+        return d;
+    }
+    if k == AK_LOAD {
+        let m = as_f_mem(st, src, f.a1, f.b1);
+        d.rs1 = m.reg;
+        d.imm = m.imm;
+        return d;
+    }
+    as_rd_num(st, src, k, f, &mut d);
+    d
+}

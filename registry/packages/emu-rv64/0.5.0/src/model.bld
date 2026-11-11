@@ -1,0 +1,180 @@
+// Reference model for emu-rv64. It is built a different way on purpose, so a
+// defect in the core cannot hide in both:
+//   - decoding matches each word against a (mask, value) row per instruction;
+//   - immediates are assembled one bit at a time from the bit positions the
+//     instruction-set manual lists;
+//   - arithmetic is bit-serial: a ripple-carry adder, one-bit shifts in a
+//     loop, comparison by scanning from the top bit.
+// It is slow and simple. Nothing outside the checks calls it.
+
+fn ref_bit(w: u64, i: u64) -> u64 { (w >> i) & 1_u64 }
+
+fn ref_hit(w: u64, mask: u64, value: u64) -> bool { (w & mask) == value }
+
+fn ref_match_a(w: u64) -> u64 {
+    if ref_hit(w, 0x7F_u64, 0x37_u64) { return 1_u64; }
+    if ref_hit(w, 0x7F_u64, 0x17_u64) { return 2_u64; }
+    if ref_hit(w, 0x7F_u64, 0x6F_u64) { return 3_u64; }
+    if ref_hit(w, 0x707F_u64, 0x67_u64) { return 4_u64; }
+    if ref_hit(w, 0x707F_u64, 0x63_u64) { return 5_u64; }
+    if ref_hit(w, 0x707F_u64, 0x1063_u64) { return 6_u64; }
+    if ref_hit(w, 0x707F_u64, 0x4063_u64) { return 7_u64; }
+    if ref_hit(w, 0x707F_u64, 0x5063_u64) { return 8_u64; }
+    if ref_hit(w, 0x707F_u64, 0x6063_u64) { return 9_u64; }
+    if ref_hit(w, 0x707F_u64, 0x7063_u64) { return 10_u64; }
+    if ref_hit(w, 0x707F_u64, 0x0003_u64) { return 11_u64; }
+    if ref_hit(w, 0x707F_u64, 0x1003_u64) { return 12_u64; }
+    if ref_hit(w, 0x707F_u64, 0x2003_u64) { return 13_u64; }
+    if ref_hit(w, 0x707F_u64, 0x3003_u64) { return 14_u64; }
+    if ref_hit(w, 0x707F_u64, 0x4003_u64) { return 15_u64; }
+    if ref_hit(w, 0x707F_u64, 0x5003_u64) { return 16_u64; }
+    if ref_hit(w, 0x707F_u64, 0x6003_u64) { return 17_u64; }
+    if ref_hit(w, 0x707F_u64, 0x0023_u64) { return 18_u64; }
+    if ref_hit(w, 0x707F_u64, 0x1023_u64) { return 19_u64; }
+    if ref_hit(w, 0x707F_u64, 0x2023_u64) { return 20_u64; }
+    if ref_hit(w, 0x707F_u64, 0x3023_u64) { return 21_u64; }
+    0_u64
+}
+
+fn ref_match_b(w: u64) -> u64 {
+    if ref_hit(w, 0x707F_u64, 0x0013_u64) { return 22_u64; }
+    if ref_hit(w, 0x707F_u64, 0x2013_u64) { return 23_u64; }
+    if ref_hit(w, 0x707F_u64, 0x3013_u64) { return 24_u64; }
+    if ref_hit(w, 0x707F_u64, 0x4013_u64) { return 25_u64; }
+    if ref_hit(w, 0x707F_u64, 0x6013_u64) { return 26_u64; }
+    if ref_hit(w, 0x707F_u64, 0x7013_u64) { return 27_u64; }
+    if ref_hit(w, 0xFC00707F_u64, 0x00001013_u64) { return 28_u64; }
+    if ref_hit(w, 0xFC00707F_u64, 0x00005013_u64) { return 29_u64; }
+    if ref_hit(w, 0xFC00707F_u64, 0x40005013_u64) { return 30_u64; }
+    if ref_hit(w, 0xFE00707F_u64, 0x00000033_u64) { return 31_u64; }
+    if ref_hit(w, 0xFE00707F_u64, 0x40000033_u64) { return 32_u64; }
+    if ref_hit(w, 0xFE00707F_u64, 0x00001033_u64) { return 33_u64; }
+    if ref_hit(w, 0xFE00707F_u64, 0x00002033_u64) { return 34_u64; }
+    if ref_hit(w, 0xFE00707F_u64, 0x00003033_u64) { return 35_u64; }
+    if ref_hit(w, 0xFE00707F_u64, 0x00004033_u64) { return 36_u64; }
+    if ref_hit(w, 0xFE00707F_u64, 0x00005033_u64) { return 37_u64; }
+    if ref_hit(w, 0xFE00707F_u64, 0x40005033_u64) { return 38_u64; }
+    if ref_hit(w, 0xFE00707F_u64, 0x00006033_u64) { return 39_u64; }
+    if ref_hit(w, 0xFE00707F_u64, 0x00007033_u64) { return 40_u64; }
+    0_u64
+}
+
+fn ref_match_c(w: u64) -> u64 {
+    if ref_hit(w, 0x707F_u64, 0x001B_u64) { return 41_u64; }
+    if ref_hit(w, 0xFE00707F_u64, 0x0000101B_u64) { return 42_u64; }
+    if ref_hit(w, 0xFE00707F_u64, 0x0000501B_u64) { return 43_u64; }
+    if ref_hit(w, 0xFE00707F_u64, 0x4000501B_u64) { return 44_u64; }
+    if ref_hit(w, 0xFE00707F_u64, 0x0000003B_u64) { return 45_u64; }
+    if ref_hit(w, 0xFE00707F_u64, 0x4000003B_u64) { return 46_u64; }
+    if ref_hit(w, 0xFE00707F_u64, 0x0000103B_u64) { return 47_u64; }
+    if ref_hit(w, 0xFE00707F_u64, 0x0000503B_u64) { return 48_u64; }
+    if ref_hit(w, 0xFE00707F_u64, 0x4000503B_u64) { return 49_u64; }
+    if ref_hit(w, 0x707F_u64, 0x000F_u64) { return 50_u64; }
+    if w == 0x00000073_u64 { return 51_u64; }
+    if w == 0x00100073_u64 { return 52_u64; }
+    0_u64
+}
+
+fn ref_match(w: u64) -> u64 {
+    let a = ref_match_a(w);
+    if a != 0_u64 { return a; }
+    let b = ref_match_b(w);
+    if b != 0_u64 { return b; }
+    ref_match_c(w)
+}
+
+// Copies `count` bits of w, starting at bit `src`, into acc at bit `dst`.
+fn ref_put(acc: u64, dst: u64, w: u64, src: u64, count: u64) -> u64 {
+    let mut r = acc;
+    let mut i: u64 = 0_u64;
+    while i < count {
+        r = r | (ref_bit(w, src + i) << (dst + i));
+        i = i + 1_u64;
+    }
+    r
+}
+
+// Sets every bit of acc from `from` upward to `bit`.
+fn ref_fill(acc: u64, from: u64, bit: u64) -> u64 {
+    let mut r = acc;
+    let mut i: u64 = from;
+    while i < 64_u64 {
+        r = r | (bit << i);
+        i = i + 1_u64;
+    }
+    r
+}
+
+// The immediate of w for format f: 1 I, 2 S, 3 B, 4 U, 5 J.
+fn ref_imm(w: u64, f: u64) -> u64 {
+    let s = ref_bit(w, 31_u64);
+    if f == 1_u64 { return ref_fill(ref_put(0_u64, 0_u64, w, 20_u64, 12_u64), 12_u64, s); }
+    if f == 2_u64 {
+        let lo = ref_put(0_u64, 0_u64, w, 7_u64, 5_u64);
+        return ref_fill(ref_put(lo, 5_u64, w, 25_u64, 7_u64), 12_u64, s);
+    }
+    if f == 3_u64 {
+        let p = ref_put(0_u64, 1_u64, w, 8_u64, 4_u64);
+        let q = ref_put(p, 5_u64, w, 25_u64, 6_u64);
+        return ref_fill(ref_put(q, 11_u64, w, 7_u64, 1_u64), 12_u64, s);
+    }
+    if f == 4_u64 { return ref_fill(ref_put(0_u64, 12_u64, w, 12_u64, 20_u64), 32_u64, s); }
+    let p = ref_put(0_u64, 1_u64, w, 21_u64, 10_u64);
+    let q = ref_put(p, 11_u64, w, 20_u64, 1_u64);
+    ref_fill(ref_put(q, 12_u64, w, 12_u64, 8_u64), 20_u64, s)
+}
+
+// Ripple-carry addition, one bit per turn.
+fn ref_add(a: u64, b: u64) -> u64 {
+    let mut r: u64 = 0_u64;
+    let mut carry: u64 = 0_u64;
+    let mut i: u64 = 0_u64;
+    while i < 64_u64 {
+        let p = ref_bit(a, i);
+        let q = ref_bit(b, i);
+        r = r | ((p ^ q ^ carry) << i);
+        carry = (p & q) | (p & carry) | (q & carry);
+        i = i + 1_u64;
+    }
+    r
+}
+
+fn ref_sub(a: u64, b: u64) -> u64 { ref_add(a, ref_add(!b, 1_u64)) }
+
+// Unsigned less-than by scanning from the top bit down.
+fn ref_ltu(a: u64, b: u64) -> u64 {
+    let mut i: u64 = 64_u64;
+    while i > 0_u64 {
+        i = i - 1_u64;
+        let p = ref_bit(a, i);
+        let q = ref_bit(b, i);
+        if p != q { return q; }
+    }
+    0_u64
+}
+
+fn ref_lt(a: u64, b: u64) -> u64 {
+    let p = ref_bit(a, 63_u64);
+    let q = ref_bit(b, 63_u64);
+    if p != q { return p; }
+    ref_ltu(a, b)
+}
+
+// Shifts one bit per turn. dir: 0 left, 1 right, 2 right keeping the sign.
+fn ref_shift(a: u64, n: u64, dir: u64) -> u64 {
+    let mut r = a;
+    let mut i: u64 = 0_u64;
+    while i < n {
+        let top = ref_bit(r, 63_u64) << 63_u64;
+        if dir == 0_u64 { r = (r & 0x7FFFFFFFFFFFFFFF_u64) << 1_u64; }
+        if dir == 1_u64 { r = r >> 1_u64; }
+        if dir == 2_u64 { r = (r >> 1_u64) | top; }
+        i = i + 1_u64;
+    }
+    r
+}
+
+// Keeps the low 32 bits and copies bit 31 upward.
+fn ref_w(v: u64) -> u64 {
+    ref_fill(ref_put(0_u64, 0_u64, v, 0_u64, 32_u64), 32_u64, ref_bit(v, 31_u64))
+}

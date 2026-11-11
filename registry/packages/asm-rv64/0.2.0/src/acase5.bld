@@ -1,0 +1,148 @@
+// Hand cases of asm-rv64, fifth part: programs of several lines. Labels,
+// .word, .org, comments, line endings and files with errors.
+
+// The timer program of emu-rv64, as tests/timer.s has it without the
+// comments. It must give the 88 bytes of the built-in image.
+fn ac_p_timer(st: &mut AcSt) ~ Console {
+    let mut b: [u8; 1024] = [0_u8; 1024];
+    let mut n = ac_ln(&mut b, 0, "lui x5, 0x2004");
+    n = ac_ln(&mut b, n, "addi x6, x0, 100");
+    n = ac_ln(&mut b, n, "sd x6, 0(x5)");
+    n = ac_ln(&mut b, n, "lui x13, 0x10000");
+    n = ac_ln(&mut b, n, "addi x14, x0, 0x2E");
+    n = ac_ln(&mut b, n, "auipc x7, 0");
+    n = ac_ln(&mut b, n, "addi x7, x7, 0x2C");
+    n = ac_ln(&mut b, n, "csrrw x0, mtvec, x7");
+    n = ac_ln(&mut b, n, "addi x8, x0, 0x80");
+    n = ac_ln(&mut b, n, "csrrw x0, mie, x8");
+    n = ac_ln(&mut b, n, "csrrsi x0, mstatus, 8");
+    n = ac_ln(&mut b, n, "loop: addi x10, x10, 1");
+    n = ac_ln(&mut b, n, "jal x0, loop");
+    n = ac_ln(&mut b, n, ".org 0x40");
+    n = ac_ln(&mut b, n, "handler:");
+    n = ac_ln(&mut b, n, "ld x11, 0(x5)");
+    n = ac_ln(&mut b, n, "addi x11, x11, 100");
+    n = ac_ln(&mut b, n, "sd x11, 0(x5)");
+    n = ac_ln(&mut b, n, "sb x14, 0(x13)");
+    n = ac_ln(&mut b, n, "addi x12, x12, 1");
+    n = ac_ln(&mut b, n, "mret");
+    ac_image(st, "timer", &b, n, 1_u64);
+}
+
+// The trap-handler program of emu-rv64. It must give the 84 bytes of the
+// built-in image.
+fn ac_p_trap(st: &mut AcSt) ~ Console {
+    let mut b: [u8; 1024] = [0_u8; 1024];
+    let mut n = ac_ln(&mut b, 0, "auipc x5, 0");
+    n = ac_ln(&mut b, n, "addi x5, x5, 0x40");
+    n = ac_ln(&mut b, n, "csrrw x0, mtvec, x5");
+    n = ac_ln(&mut b, n, "ecall");
+    n = ac_ln(&mut b, n, "lui x6, 0x10000");
+    n = ac_ln(&mut b, n, "addi x7, x0, 0x21");
+    n = ac_ln(&mut b, n, "sb x7, 0(x6)");
+    n = ac_ln(&mut b, n, "stay: jal x0, stay");
+    n = ac_ln(&mut b, n, ".org 0x40");
+    n = ac_ln(&mut b, n, "csrrs x28, mepc, x0");
+    n = ac_ln(&mut b, n, "addi x28, x28, 4");
+    n = ac_ln(&mut b, n, "csrrw x0, mepc, x28");
+    n = ac_ln(&mut b, n, "csrrs x29, mcause, x0");
+    n = ac_ln(&mut b, n, "mret");
+    ac_image(st, "trap", &b, n, 2_u64);
+}
+
+// The serial and sum programs of emu-rv64, with the words its main.bld
+// holds.
+fn ac_p_small(st: &mut AcSt) ~ Console {
+    let mut b: [u8; 1024] = [0_u8; 1024];
+    let mut w: [u64; 8] = [0_u64; 8];
+    let mut n = ac_ln(&mut b, 0, "lui x5, 0x10000");
+    n = ac_ln(&mut b, n, "addi x6, x0, 0x4F");
+    n = ac_ln(&mut b, n, "sb x6, 0(x5)");
+    n = ac_ln(&mut b, n, "addi x6, x0, 0x4B");
+    n = ac_ln(&mut b, n, "sb x6, 0(x5)");
+    n = ac_ln(&mut b, n, "addi x6, x0, 10");
+    n = ac_ln(&mut b, n, "sb x6, 0(x5)");
+    n = ac_ln(&mut b, n, "ebreak");
+    w[0] = 0x100002B7_u64; w[1] = 0x04F00313_u64; w[2] = 0x00628023_u64; w[3] = 0x04B00313_u64;
+    w[4] = 0x00628023_u64; w[5] = 0x00A00313_u64; w[6] = 0x00628023_u64; w[7] = 0x00100073_u64;
+    ac_prog(st, "serial", &b, n, &w, 8);
+    n = ac_ln(&mut b, 0, "addi x1, x0, 0");
+    n = ac_ln(&mut b, n, "addi x2, x0, 10");
+    n = ac_ln(&mut b, n, "again: add x1, x1, x2");
+    n = ac_ln(&mut b, n, "addi x2, x2, -1");
+    n = ac_ln(&mut b, n, "bne x2, x0, again");
+    n = ac_ln(&mut b, n, "ebreak");
+    w[0] = 0x00000093_u64; w[1] = 0x00A00113_u64; w[2] = 0x002080B3_u64; w[3] = 0xFFF10113_u64;
+    w[4] = 0xFE011CE3_u64; w[5] = 0x00100073_u64;
+    ac_prog(st, "sum", &b, n, &w, 6);
+}
+
+// Labels before and after .word and .org, used forward and backward.
+// Offsets: start 0x00, the .word 0x04, mid 0x08, bne 0x0C, zeros at 0x10
+// and 0x14, the second .word 0x18, end 0x1C, the last jal 0x20.
+//   00  jal x0, +0x1C     0x01C0006F    04  0xDEADBEEF
+//   08  beq x1, x2, -8    0xFE208CE3    0C  bne x1, x2, +0x10   0x00209863
+//   1C  blt x3, x4, -0x14 0xFE41C6E3    20  jal x1, -0x20       0xFE1FF0EF
+fn ac_p_layout(st: &mut AcSt) ~ Console {
+    let mut b: [u8; 1024] = [0_u8; 1024];
+    let mut w: [u64; 9] = [0_u64; 9];
+    let mut n = ac_ln(&mut b, 0, "start: jal x0, end");
+    n = ac_ln(&mut b, n, ".word 0xDEADBEEF");
+    n = ac_ln(&mut b, n, "mid: beq x1, x2, start");
+    n = ac_ln(&mut b, n, "bne x1, x2, end");
+    n = ac_ln(&mut b, n, ".org 0x18");
+    n = ac_ln(&mut b, n, ".word 7");
+    n = ac_ln(&mut b, n, "end: blt x3, x4, mid");
+    n = ac_ln(&mut b, n, "jal x1, start");
+    w[0] = 0x01C0006F_u64; w[1] = 0xDEADBEEF_u64; w[2] = 0xFE208CE3_u64; w[3] = 0x00209863_u64;
+    w[6] = 7_u64; w[7] = 0xFE41C6E3_u64; w[8] = 0xFE1FF0EF_u64;
+    ac_prog(st, "labels", &b, n, &w, 9);
+    // A label on a line of its own, two labels at one offset, a label at
+    // the end of the image, .org to the present location and .org 0.
+    n = ac_ln(&mut b, 0, ".org 0");
+    n = ac_ln(&mut b, n, "a:");
+    n = ac_ln(&mut b, n, "b: jal x0, z");
+    n = ac_ln(&mut b, n, ".org 4");
+    n = ac_ln(&mut b, n, "beq x0, x0, a");
+    n = ac_ln(&mut b, n, "bne x0, x0, b");
+    n = ac_ln(&mut b, n, "z:");
+    // jal +12 = 0x00C0006F, beq -4 = 0xFE000EE3, bne -8 = 0xFE001CE3
+    w[0] = 0x00C0006F_u64; w[1] = 0xFE000EE3_u64; w[2] = 0xFE001CE3_u64;
+    ac_prog(st, "label places", &b, n, &w, 3);
+}
+
+// Comments, blank lines, a tab, a carriage return before the line feed,
+// and a last line with no line feed. The comment on line 5 holds an
+// instruction, which must not be assembled.
+//   00  addi x1, x0, 1   0x00100093    04  beq x1, x0, -4   0xFE008EE3
+//   08  ecall            0x00000073
+fn ac_p_comments(st: &mut AcSt) ~ Console {
+    let mut b: [u8; 1024] = [0_u8; 1024];
+    let mut w: [u64; 3] = [0_u64; 3];
+    let mut n = ac_ln(&mut b, 0, "# a comment on the first line");
+    n = ac_ln(&mut b, n, "");
+    n = ac_ln(&mut b, n, "   # a comment after spaces");
+    n = ac_ln(&mut b, n, "start:   # a label and a comment");
+    n = ac_ln(&mut b, n, "        addi x1, x0, 1   # jal x0, start");
+    n = ad_ch(&mut b, n, 9_u8);
+    n = ac_ln(&mut b, n, "");
+    n = ad_ch(&mut b, n, 9_u8);
+    n = ad_put(&mut b, n, "beq x1, x0, start");
+    n = ad_ch(&mut b, n, 13_u8);
+    n = ad_ch(&mut b, n, 10_u8);
+    n = ad_put(&mut b, n, "ecall");
+    w[0] = 0x00100093_u64; w[1] = 0xFE008EE3_u64; w[2] = 0x00000073_u64;
+    ac_prog(st, "comments", &b, n, &w, 3);
+    ac_prog(st, "empty", &b, 0, &w, 0);
+    n = ac_ln(&mut b, 0, "# only a comment");
+    n = ac_ln(&mut b, n, "only_a_label:");
+    ac_prog(st, "no statement", &b, n, &w, 0);
+}
+
+fn ac_programs(st: &mut AcSt) ~ Console {
+    ac_p_timer(st);
+    ac_p_trap(st);
+    ac_p_small(st);
+    ac_p_layout(st);
+    ac_p_comments(st);
+}

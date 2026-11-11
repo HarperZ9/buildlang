@@ -1,0 +1,1 @@
+same tests/mulatomic.s: 200 bytes, file tests/emu-mulatomic.img has 200 bytes, equal=true

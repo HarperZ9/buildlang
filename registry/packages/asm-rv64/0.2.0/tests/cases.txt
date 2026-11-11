@@ -1,0 +1,46 @@
+# mode golden args... (run from the package folder)
+# hand cases: single statements, programs, files with errors, and the limits
+exact tests/golden-acases.txt acases
+# seeded property runs against the encoder and decoder of emu-rv64, no second assembler
+exact tests/golden-aprops-1.txt aprops 1 20000
+exact tests/golden-aprops-7.txt aprops 7 50000
+# every planted defect must be refused by the cases and by the properties
+exact tests/golden-acontrols.txt acontrols
+# the timer program of emu-rv64: the words, the bytes, and three comparisons
+exact tests/golden-asm-timer.txt asm tests/timer.s
+exact tests/golden-bytes-timer.txt bytes tests/timer.s
+exact tests/golden-match-timer.txt match tests/timer.s timer
+exact tests/golden-same-timer.txt same tests/timer.s tests/emu-timer.img
+exact tests/golden-dis-timer.txt dis tests/golden-asm-timer.txt
+# the trap-handler, serial and sum programs of emu-rv64
+exact tests/golden-asm-trap.txt asm tests/trap.s
+exact tests/golden-match-trap.txt match tests/trap.s trap
+exact tests/golden-asm-serial.txt asm tests/serial.s
+exact tests/golden-asm-sum.txt asm tests/sum.s
+# the hand cases of emu-rv64 as text, compared with the words in its golden files
+exact tests/golden-asm-hand-cases.txt asm tests/hand-cases.s
+exact tests/golden-hand-cases.txt hand tests/hand-cases.s tests/emu-golden-cases.txt
+exact tests/golden-asm-hand-mcases.txt asm tests/hand-mcases.s
+exact tests/golden-hand-mcases.txt hand tests/hand-mcases.s tests/emu-golden-mcases.txt
+exact tests/golden-asm-hand-icases.txt asm tests/hand-icases.s
+exact tests/golden-hand-icases.txt hand tests/hand-icases.s tests/emu-golden-icases.txt
+# every mnemonic: text to words, words to text, and that text to the same words
+exact tests/golden-asm-all.txt asm tests/all.s
+exact tests/golden-dis-all.txt dis tests/golden-asm-all.txt
+exact tests/golden-asm-all.txt asm tests/golden-dis-all.txt
+# refusals: a file with errors, a missing file, text that is not hex words, and two comparisons that must differ
+exact tests/golden-asm-errors.txt asm tests/errors.s
+exact tests/golden-bytes-errors.txt bytes tests/errors.s
+exact tests/golden-asm-missing.txt asm tests/no-such.s
+exact tests/golden-dis-bad.txt dis tests/timer.s
+exact tests/golden-match-differs.txt match tests/trap.s timer
+exact tests/golden-hand-differs.txt hand tests/hand-cases.s tests/emu-golden-mcases.txt
+# the M and A extensions: the hand cases of `emu-rv64 xcases` as text, compared with the words in its golden file
+exact tests/golden-asm-hand-xcases.txt asm tests/hand-xcases.s
+exact tests/golden-hand-xcases.txt hand tests/hand-xcases.s tests/emu-golden-xcases.txt
+# the program with MUL, DIV, REM and an LR/SC retry loop: the words, the bytes, the image emu-rv64 runs, and the text of the words
+exact tests/golden-asm-mulatomic.txt asm tests/mulatomic.s
+exact tests/golden-bytes-mulatomic.txt bytes tests/mulatomic.s
+exact tests/golden-same-mulatomic.txt same tests/mulatomic.s tests/emu-mulatomic.img
+exact tests/golden-dis-mulatomic.txt dis tests/golden-asm-mulatomic.txt
+exact tests/golden-asm-mulatomic.txt asm tests/golden-dis-mulatomic.txt

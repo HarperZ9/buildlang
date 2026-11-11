@@ -1,0 +1,27 @@
+replay image=tests/timer.img bytes=88 ram=65536 steps=25000 interval=1000
+  step 1000 hash=328ef849392d8caf
+  step 2000 hash=43e2cac2cb690d76
+  step 3000 hash=62bc5e1c380d2ce9
+  step 4000 hash=c94897dccbc6b9e4
+  step 5000 hash=1f5850bc5cabc2ab
+  step 6000 hash=0a48b89b9832930d
+  step 7000 hash=269d67e26d250eb6
+  step 8000 hash=a030eb8d91ab3f30
+  step 9000 hash=f80c72596badbe0f
+  step 10000 hash=97c89756f2969aae
+  step 11000 hash=e15bc0439df987ff
+  step 12000 hash=6bb999af28f612ca
+  step 13000 hash=8bd90f9adbd2bbb6
+  step 14000 hash=09081aa1e4c028e7
+  step 15000 hash=7dc1f57eaa541ae0
+  step 16000 hash=a7ed65c42180bb38
+  step 17000 hash=5225ea81eca51118
+  step 18000 hash=be615c53d4804c75
+  step 19000 hash=2a70f1053bc425a6
+  step 20000 hash=8b6184523e464457
+  step 21000 hash=1e7012762785085c
+  step 22000 hash=303911872f9dd90d
+  step 23000 hash=d1be94e193d0d5f1
+  step 24000 hash=4a4f291d73cc921c
+  step 25000 hash=fe036f68e96f06af
+  runs agree at 25 of 25 checkpoints

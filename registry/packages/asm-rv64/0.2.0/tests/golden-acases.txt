@@ -1,0 +1,468 @@
+acase 1 `add x3, x1, x2` words=1 errors=0 word=002081b3 pass=true
+acase 2 `sub x3, x1, x2` words=1 errors=0 word=402081b3 pass=true
+acase 3 `sll x3, x1, x2` words=1 errors=0 word=002091b3 pass=true
+acase 4 `slt x3, x1, x2` words=1 errors=0 word=0020a1b3 pass=true
+acase 5 `sltu x3, x1, x2` words=1 errors=0 word=0020b1b3 pass=true
+acase 6 `xor x3, x1, x2` words=1 errors=0 word=0020c1b3 pass=true
+acase 7 `srl x3, x1, x2` words=1 errors=0 word=0020d1b3 pass=true
+acase 8 `sra x3, x1, x2` words=1 errors=0 word=4020d1b3 pass=true
+acase 9 `or x3, x1, x2` words=1 errors=0 word=0020e1b3 pass=true
+acase 10 `and x3, x1, x2` words=1 errors=0 word=0020f1b3 pass=true
+acase 11 `addw x3, x1, x2` words=1 errors=0 word=002081bb pass=true
+acase 12 `subw x3, x1, x2` words=1 errors=0 word=402081bb pass=true
+acase 13 `sllw x3, x1, x2` words=1 errors=0 word=002091bb pass=true
+acase 14 `srlw x3, x1, x2` words=1 errors=0 word=0020d1bb pass=true
+acase 15 `sraw x3, x1, x2` words=1 errors=0 word=4020d1bb pass=true
+acase 16 `add x0, x0, x0` words=1 errors=0 word=00000033 pass=true
+acase 17 `add x31, x31, x31` words=1 errors=0 word=01ff8fb3 pass=true
+acase 18 `sub x10, x20, x30` words=1 errors=0 word=41ea0533 pass=true
+acase 19 `and x9, x19, x29` words=1 errors=0 word=01d9f4b3 pass=true
+acase 20 `addi x3, x1, -2048` words=1 errors=0 word=80008193 pass=true
+acase 21 `addi x3, x1, -1` words=1 errors=0 word=fff08193 pass=true
+acase 22 `addi x3, x1, 0` words=1 errors=0 word=00008193 pass=true
+acase 23 `addi x3, x1, 2047` words=1 errors=0 word=7ff08193 pass=true
+acase 24 `slti x3, x1, -2048` words=1 errors=0 word=8000a193 pass=true
+acase 25 `slti x3, x1, -1` words=1 errors=0 word=fff0a193 pass=true
+acase 26 `slti x3, x1, 0` words=1 errors=0 word=0000a193 pass=true
+acase 27 `slti x3, x1, 2047` words=1 errors=0 word=7ff0a193 pass=true
+acase 28 `sltiu x3, x1, -2048` words=1 errors=0 word=8000b193 pass=true
+acase 29 `sltiu x3, x1, -1` words=1 errors=0 word=fff0b193 pass=true
+acase 30 `sltiu x3, x1, 0` words=1 errors=0 word=0000b193 pass=true
+acase 31 `sltiu x3, x1, 2047` words=1 errors=0 word=7ff0b193 pass=true
+acase 32 `xori x3, x1, -2048` words=1 errors=0 word=8000c193 pass=true
+acase 33 `xori x3, x1, -1` words=1 errors=0 word=fff0c193 pass=true
+acase 34 `xori x3, x1, 0` words=1 errors=0 word=0000c193 pass=true
+acase 35 `xori x3, x1, 2047` words=1 errors=0 word=7ff0c193 pass=true
+acase 36 `ori x3, x1, -2048` words=1 errors=0 word=8000e193 pass=true
+acase 37 `ori x3, x1, -1` words=1 errors=0 word=fff0e193 pass=true
+acase 38 `ori x3, x1, 0` words=1 errors=0 word=0000e193 pass=true
+acase 39 `ori x3, x1, 2047` words=1 errors=0 word=7ff0e193 pass=true
+acase 40 `andi x3, x1, -2048` words=1 errors=0 word=8000f193 pass=true
+acase 41 `andi x3, x1, -1` words=1 errors=0 word=fff0f193 pass=true
+acase 42 `andi x3, x1, 0` words=1 errors=0 word=0000f193 pass=true
+acase 43 `andi x3, x1, 2047` words=1 errors=0 word=7ff0f193 pass=true
+acase 44 `addiw x3, x1, -2048` words=1 errors=0 word=8000819b pass=true
+acase 45 `addiw x3, x1, -1` words=1 errors=0 word=fff0819b pass=true
+acase 46 `addiw x3, x1, 0` words=1 errors=0 word=0000819b pass=true
+acase 47 `addiw x3, x1, 2047` words=1 errors=0 word=7ff0819b pass=true
+acase 48 `slli x3, x1, 0` words=1 errors=0 word=00009193 pass=true
+acase 49 `slli x3, x1, 1` words=1 errors=0 word=00109193 pass=true
+acase 50 `slli x3, x1, 63` words=1 errors=0 word=03f09193 pass=true
+acase 51 `srli x3, x1, 0` words=1 errors=0 word=0000d193 pass=true
+acase 52 `srli x3, x1, 1` words=1 errors=0 word=0010d193 pass=true
+acase 53 `srli x3, x1, 63` words=1 errors=0 word=03f0d193 pass=true
+acase 54 `srai x3, x1, 0` words=1 errors=0 word=4000d193 pass=true
+acase 55 `srai x3, x1, 1` words=1 errors=0 word=4010d193 pass=true
+acase 56 `srai x3, x1, 63` words=1 errors=0 word=43f0d193 pass=true
+acase 57 `slliw x3, x1, 0` words=1 errors=0 word=0000919b pass=true
+acase 58 `slliw x3, x1, 1` words=1 errors=0 word=0010919b pass=true
+acase 59 `slliw x3, x1, 31` words=1 errors=0 word=01f0919b pass=true
+acase 60 `srliw x3, x1, 0` words=1 errors=0 word=0000d19b pass=true
+acase 61 `srliw x3, x1, 1` words=1 errors=0 word=0010d19b pass=true
+acase 62 `srliw x3, x1, 31` words=1 errors=0 word=01f0d19b pass=true
+acase 63 `sraiw x3, x1, 0` words=1 errors=0 word=4000d19b pass=true
+acase 64 `sraiw x3, x1, 1` words=1 errors=0 word=4010d19b pass=true
+acase 65 `sraiw x3, x1, 31` words=1 errors=0 word=41f0d19b pass=true
+acase 66 `lb x3, -2048(x1)` words=1 errors=0 word=80008183 pass=true
+acase 67 `lb x3, 2047(x1)` words=1 errors=0 word=7ff08183 pass=true
+acase 68 `lh x3, -2048(x1)` words=1 errors=0 word=80009183 pass=true
+acase 69 `lh x3, 2047(x1)` words=1 errors=0 word=7ff09183 pass=true
+acase 70 `lw x3, -2048(x1)` words=1 errors=0 word=8000a183 pass=true
+acase 71 `lw x3, 2047(x1)` words=1 errors=0 word=7ff0a183 pass=true
+acase 72 `ld x3, -2048(x1)` words=1 errors=0 word=8000b183 pass=true
+acase 73 `ld x3, 2047(x1)` words=1 errors=0 word=7ff0b183 pass=true
+acase 74 `lbu x3, -2048(x1)` words=1 errors=0 word=8000c183 pass=true
+acase 75 `lbu x3, 2047(x1)` words=1 errors=0 word=7ff0c183 pass=true
+acase 76 `lhu x3, -2048(x1)` words=1 errors=0 word=8000d183 pass=true
+acase 77 `lhu x3, 2047(x1)` words=1 errors=0 word=7ff0d183 pass=true
+acase 78 `lwu x3, -2048(x1)` words=1 errors=0 word=8000e183 pass=true
+acase 79 `lwu x3, 2047(x1)` words=1 errors=0 word=7ff0e183 pass=true
+acase 80 `lb x3, -1(x1)` words=1 errors=0 word=fff08183 pass=true
+acase 81 `lb x3, 0(x1)` words=1 errors=0 word=00008183 pass=true
+acase 82 `ld x31, 8(x30)` words=1 errors=0 word=008f3f83 pass=true
+acase 83 `lbu x3, 5(x1)` words=1 errors=0 word=0050c183 pass=true
+acase 84 `jalr x3, -2048(x1)` words=1 errors=0 word=800081e7 pass=true
+acase 85 `jalr x3, -1(x1)` words=1 errors=0 word=fff081e7 pass=true
+acase 86 `jalr x3, 0(x1)` words=1 errors=0 word=000081e7 pass=true
+acase 87 `jalr x3, 2047(x1)` words=1 errors=0 word=7ff081e7 pass=true
+acase 88 `jalr x0, 0(x1)` words=1 errors=0 word=00008067 pass=true
+acase 89 `jalr x1, 5(x31)` words=1 errors=0 word=005f80e7 pass=true
+acase 90 `sb x2, -2048(x1)` words=1 errors=0 word=80208023 pass=true
+acase 91 `sb x2, -1(x1)` words=1 errors=0 word=fe208fa3 pass=true
+acase 92 `sb x2, 0(x1)` words=1 errors=0 word=00208023 pass=true
+acase 93 `sb x2, 2047(x1)` words=1 errors=0 word=7e208fa3 pass=true
+acase 94 `sh x2, -2048(x1)` words=1 errors=0 word=80209023 pass=true
+acase 95 `sh x2, -1(x1)` words=1 errors=0 word=fe209fa3 pass=true
+acase 96 `sh x2, 0(x1)` words=1 errors=0 word=00209023 pass=true
+acase 97 `sh x2, 2047(x1)` words=1 errors=0 word=7e209fa3 pass=true
+acase 98 `sw x2, -2048(x1)` words=1 errors=0 word=8020a023 pass=true
+acase 99 `sw x2, -1(x1)` words=1 errors=0 word=fe20afa3 pass=true
+acase 100 `sw x2, 0(x1)` words=1 errors=0 word=0020a023 pass=true
+acase 101 `sw x2, 2047(x1)` words=1 errors=0 word=7e20afa3 pass=true
+acase 102 `sd x2, -2048(x1)` words=1 errors=0 word=8020b023 pass=true
+acase 103 `sd x2, -1(x1)` words=1 errors=0 word=fe20bfa3 pass=true
+acase 104 `sd x2, 0(x1)` words=1 errors=0 word=0020b023 pass=true
+acase 105 `sd x2, 2047(x1)` words=1 errors=0 word=7e20bfa3 pass=true
+acase 106 `sd x2, 8(x1)` words=1 errors=0 word=0020b423 pass=true
+acase 107 `sw x5, 0x155(x6)` words=1 errors=0 word=14532aa3 pass=true
+acase 108 `sb x7, -86(x8)` words=1 errors=0 word=fa740523 pass=true
+acase 109 `sh x31, 1(x0)` words=1 errors=0 word=01f010a3 pass=true
+acase 110 `sd x0, 32(x31)` words=1 errors=0 word=020fb023 pass=true
+acase 111 `beq x1, x2, -4096` words=1 errors=0 word=80208063 pass=true
+acase 112 `beq x1, x2, -2` words=1 errors=0 word=fe208fe3 pass=true
+acase 113 `beq x1, x2, 0` words=1 errors=0 word=00208063 pass=true
+acase 114 `beq x1, x2, 4094` words=1 errors=0 word=7e208fe3 pass=true
+acase 115 `bne x1, x2, -4096` words=1 errors=0 word=80209063 pass=true
+acase 116 `bne x1, x2, -2` words=1 errors=0 word=fe209fe3 pass=true
+acase 117 `bne x1, x2, 0` words=1 errors=0 word=00209063 pass=true
+acase 118 `bne x1, x2, 4094` words=1 errors=0 word=7e209fe3 pass=true
+acase 119 `blt x1, x2, -4096` words=1 errors=0 word=8020c063 pass=true
+acase 120 `blt x1, x2, -2` words=1 errors=0 word=fe20cfe3 pass=true
+acase 121 `blt x1, x2, 0` words=1 errors=0 word=0020c063 pass=true
+acase 122 `blt x1, x2, 4094` words=1 errors=0 word=7e20cfe3 pass=true
+acase 123 `bge x1, x2, -4096` words=1 errors=0 word=8020d063 pass=true
+acase 124 `bge x1, x2, -2` words=1 errors=0 word=fe20dfe3 pass=true
+acase 125 `bge x1, x2, 0` words=1 errors=0 word=0020d063 pass=true
+acase 126 `bge x1, x2, 4094` words=1 errors=0 word=7e20dfe3 pass=true
+acase 127 `bltu x1, x2, -4096` words=1 errors=0 word=8020e063 pass=true
+acase 128 `bltu x1, x2, -2` words=1 errors=0 word=fe20efe3 pass=true
+acase 129 `bltu x1, x2, 0` words=1 errors=0 word=0020e063 pass=true
+acase 130 `bltu x1, x2, 4094` words=1 errors=0 word=7e20efe3 pass=true
+acase 131 `bgeu x1, x2, -4096` words=1 errors=0 word=8020f063 pass=true
+acase 132 `bgeu x1, x2, -2` words=1 errors=0 word=fe20ffe3 pass=true
+acase 133 `bgeu x1, x2, 0` words=1 errors=0 word=0020f063 pass=true
+acase 134 `bgeu x1, x2, 4094` words=1 errors=0 word=7e20ffe3 pass=true
+acase 135 `beq x1, x2, 6` words=1 errors=0 word=00208363 pass=true
+acase 136 `beq x1, x2, 2048` words=1 errors=0 word=002080e3 pass=true
+acase 137 `beq x1, x2, 32` words=1 errors=0 word=02208063 pass=true
+acase 138 `bne x31, x30, -8` words=1 errors=0 word=ffef9ce3 pass=true
+acase 139 `self: beq x1, x2, self` words=1 errors=0 word=00208063 pass=true
+acase 140 `jal x1, -1048576` words=1 errors=0 word=800000ef pass=true
+acase 141 `jal x1, -2` words=1 errors=0 word=fffff0ef pass=true
+acase 142 `jal x1, 0` words=1 errors=0 word=000000ef pass=true
+acase 143 `jal x1, 1048574` words=1 errors=0 word=7ffff0ef pass=true
+acase 144 `jal x0, -4` words=1 errors=0 word=ffdff06f pass=true
+acase 145 `jal x3, 8192` words=1 errors=0 word=000021ef pass=true
+acase 146 `jal x1, 2048` words=1 errors=0 word=001000ef pass=true
+acase 147 `jal x1, 4096` words=1 errors=0 word=000010ef pass=true
+acase 148 `jal x1, 0x80000` words=1 errors=0 word=000800ef pass=true
+acase 149 `jal x31, 2` words=1 errors=0 word=00200fef pass=true
+acase 150 `self: jal x0, self` words=1 errors=0 word=0000006f pass=true
+acase 151 `lui x3, 0` words=1 errors=0 word=000001b7 pass=true
+acase 152 `lui x3, 1` words=1 errors=0 word=000011b7 pass=true
+acase 153 `lui x3, 0x80000` words=1 errors=0 word=800001b7 pass=true
+acase 154 `lui x3, 0xFFFFF` words=1 errors=0 word=fffff1b7 pass=true
+acase 155 `lui x3, 1048575` words=1 errors=0 word=fffff1b7 pass=true
+acase 156 `auipc x3, 0` words=1 errors=0 word=00000197 pass=true
+acase 157 `auipc x3, 1` words=1 errors=0 word=00001197 pass=true
+acase 158 `auipc x3, 0x80000` words=1 errors=0 word=80000197 pass=true
+acase 159 `auipc x3, 0xFFFFF` words=1 errors=0 word=fffff197 pass=true
+acase 160 `auipc x3, 1048575` words=1 errors=0 word=fffff197 pass=true
+acase 161 `lui x5, 0x2004` words=1 errors=0 word=020042b7 pass=true
+acase 162 `lui x31, 0x12345` words=1 errors=0 word=12345fb7 pass=true
+acase 163 `csrrw x3, mscratch, x1` words=1 errors=0 word=340091f3 pass=true
+acase 164 `csrrs x3, mscratch, x1` words=1 errors=0 word=3400a1f3 pass=true
+acase 165 `csrrc x3, mscratch, x1` words=1 errors=0 word=3400b1f3 pass=true
+acase 166 `csrrwi x3, mscratch, 0` words=1 errors=0 word=340051f3 pass=true
+acase 167 `csrrwi x3, mscratch, 21` words=1 errors=0 word=340ad1f3 pass=true
+acase 168 `csrrwi x3, mscratch, 31` words=1 errors=0 word=340fd1f3 pass=true
+acase 169 `csrrsi x3, mscratch, 0` words=1 errors=0 word=340061f3 pass=true
+acase 170 `csrrsi x3, mscratch, 21` words=1 errors=0 word=340ae1f3 pass=true
+acase 171 `csrrsi x3, mscratch, 31` words=1 errors=0 word=340fe1f3 pass=true
+acase 172 `csrrci x3, mscratch, 0` words=1 errors=0 word=340071f3 pass=true
+acase 173 `csrrci x3, mscratch, 21` words=1 errors=0 word=340af1f3 pass=true
+acase 174 `csrrci x3, mscratch, 31` words=1 errors=0 word=340ff1f3 pass=true
+acase 175 `csrrw x1, 0, x2` words=1 errors=0 word=000110f3 pass=true
+acase 176 `csrrw x1, 4095, x2` words=1 errors=0 word=fff110f3 pass=true
+acase 177 `csrrs x3, 0x7c0, x0` words=1 errors=0 word=7c0021f3 pass=true
+acase 178 `csrrs x3, 0xC00, x0` words=1 errors=0 word=c00021f3 pass=true
+acase 179 `csrrc x31, 0x340, x31` words=1 errors=0 word=340fbff3 pass=true
+acase 180 `csrrwi x0, 0xfff, 31` words=1 errors=0 word=ffffd073 pass=true
+acase 181 `csrrsi x0, mstatus, 8` words=1 errors=0 word=30046073 pass=true
+acase 182 `csrrw x0, 773, x7` words=1 errors=0 word=30539073 pass=true
+acase 183 `csrrs x3, mstatus, x0` words=1 errors=0 word=300021f3 pass=true
+acase 184 `csrrs x3, misa, x0` words=1 errors=0 word=301021f3 pass=true
+acase 185 `csrrs x3, mie, x0` words=1 errors=0 word=304021f3 pass=true
+acase 186 `csrrs x3, mtvec, x0` words=1 errors=0 word=305021f3 pass=true
+acase 187 `csrrs x3, mscratch, x0` words=1 errors=0 word=340021f3 pass=true
+acase 188 `csrrs x3, mepc, x0` words=1 errors=0 word=341021f3 pass=true
+acase 189 `csrrs x3, mcause, x0` words=1 errors=0 word=342021f3 pass=true
+acase 190 `csrrs x3, mtval, x0` words=1 errors=0 word=343021f3 pass=true
+acase 191 `csrrs x3, mip, x0` words=1 errors=0 word=344021f3 pass=true
+acase 192 `csrrs x3, mvendorid, x0` words=1 errors=0 word=f11021f3 pass=true
+acase 193 `csrrs x3, marchid, x0` words=1 errors=0 word=f12021f3 pass=true
+acase 194 `csrrs x3, mimpid, x0` words=1 errors=0 word=f13021f3 pass=true
+acase 195 `csrrs x3, mhartid, x0` words=1 errors=0 word=f14021f3 pass=true
+acase 196 `csrrs x3, mconfigptr, x0` words=1 errors=0 word=f15021f3 pass=true
+acase 197 `ecall` words=1 errors=0 word=00000073 pass=true
+acase 198 `ebreak` words=1 errors=0 word=00100073 pass=true
+acase 199 `mret` words=1 errors=0 word=30200073 pass=true
+acase 200 `wfi` words=1 errors=0 word=10500073 pass=true
+acase 201 `fence x0, x0, 0x0ff` words=1 errors=0 word=0ff0000f pass=true
+acase 202 `fence x0, x0, 0` words=1 errors=0 word=0000000f pass=true
+acase 203 `fence x31, x31, 4095` words=1 errors=0 word=ffff8f8f pass=true
+acase 204 `fence x1, x2, 0x800` words=1 errors=0 word=8001008f pass=true
+acase 205 `.word 0` words=1 errors=0 word=00000000 pass=true
+acase 206 `.word 0xFFFFFFFF` words=1 errors=0 word=ffffffff pass=true
+acase 207 `.word 4294967295` words=1 errors=0 word=ffffffff pass=true
+acase 208 `.word 0xdeadBEEF` words=1 errors=0 word=deadbeef pass=true
+acase 209 `.word 0x04009193` words=1 errors=0 word=04009193 pass=true
+acase 210 `.word +7` words=1 errors=0 word=00000007 pass=true
+acase 211 `addi x1,x2,3` words=1 errors=0 word=00310093 pass=true
+acase 212 `   addi   x1 ,  x2 ,  3   ` words=1 errors=0 word=00310093 pass=true
+acase 213 `here: addi x1, x2, 3` words=1 errors=0 word=00310093 pass=true
+acase 214 `here:addi x1, x2, 3` words=1 errors=0 word=00310093 pass=true
+acase 215 `addi x1, x2, 3 # note` words=1 errors=0 word=00310093 pass=true
+acase 216 `addi x1, x2, 3#tight` words=1 errors=0 word=00310093 pass=true
+acase 217 `addi x1, x2, 0x7ff` words=1 errors=0 word=7ff10093 pass=true
+acase 218 `addi x1, x2, 0x7FF` words=1 errors=0 word=7ff10093 pass=true
+acase 219 `addi x1, x2, -0x800` words=1 errors=0 word=80010093 pass=true
+acase 220 `addi x1, x2, -0x1` words=1 errors=0 word=fff10093 pass=true
+acase 221 `addi x1, x2, 007` words=1 errors=0 word=00710093 pass=true
+acase 222 `addi x1, x2, -0` words=1 errors=0 word=00010093 pass=true
+acase 223 `addi x1, x2, +2047` words=1 errors=0 word=7ff10093 pass=true
+acase 224 `addi x1, x2, 0x0000000000000010` words=1 errors=0 word=01010093 pass=true
+acase 225 `lb x3, 0x10( x1 )` words=1 errors=0 word=01008183 pass=true
+acase 226 `lb x3, -0x10 (x1)` words=1 errors=0 word=ff008183 pass=true
+acase 227 `beq x1, x2, +8` words=1 errors=0 word=00208463 pass=true
+acase 228 `beq x1, x2, -0x10` words=1 errors=0 word=fe2088e3 pass=true
+acase 229 `jal x0, 0x10` words=1 errors=0 word=0100006f pass=true
+acase 230 `ecall # mret` words=1 errors=0 word=00000073 pass=true
+acase 231 `addi x1, x2, 3 # , x4` words=1 errors=0 word=00310093 pass=true
+acase 232 `foo x1, x2, x3` words=0 errors=1 refused: unknown mnemonic pass=true
+acase 233 `ADD x1, x2, x3` words=0 errors=1 refused: unknown mnemonic pass=true
+acase 234 `addq x1, x2, x3` words=0 errors=1 refused: unknown mnemonic pass=true
+acase 235 `nop` words=0 errors=1 refused: unknown mnemonic pass=true
+acase 236 `, x1` words=0 errors=1 refused: unknown mnemonic pass=true
+acase 237 `add x1, x2, x32` words=0 errors=1 refused: bad register, expected x0 to x31 pass=true
+acase 238 `add x1, y2, x3` words=0 errors=1 refused: bad register, expected x0 to x31 pass=true
+acase 239 `add x1, x02, x3` words=0 errors=1 refused: bad register, expected x0 to x31 pass=true
+acase 240 `add x1, 5, x3` words=0 errors=1 refused: bad register, expected x0 to x31 pass=true
+acase 241 `add x1, x2, x` words=0 errors=1 refused: bad register, expected x0 to x31 pass=true
+acase 242 `add X1, x2, x3` words=0 errors=1 refused: bad register, expected x0 to x31 pass=true
+acase 243 `add a0, x2, x3` words=0 errors=1 refused: bad register, expected x0 to x31 pass=true
+acase 244 `lb x1, 0(y2)` words=0 errors=1 refused: bad register, expected x0 to x31 pass=true
+acase 245 `sb x1, 0(x32)` words=0 errors=1 refused: bad register, expected x0 to x31 pass=true
+acase 246 `addi x1, x2, 2048` words=0 errors=1 refused: immediate out of range for its field pass=true
+acase 247 `addi x1, x2, -2049` words=0 errors=1 refused: immediate out of range for its field pass=true
+acase 248 `addi x1, x2, 0xFFF` words=0 errors=1 refused: immediate out of range for its field pass=true
+acase 249 `addi x1, x2, 0xFFFFFFFFFFFFFFFF` words=0 errors=1 refused: immediate out of range for its field pass=true
+acase 250 `andi x1, x2, 4095` words=0 errors=1 refused: immediate out of range for its field pass=true
+acase 251 `addiw x1, x2, 2048` words=0 errors=1 refused: immediate out of range for its field pass=true
+acase 252 `slli x1, x2, 64` words=0 errors=1 refused: immediate out of range for its field pass=true
+acase 253 `srai x1, x2, -1` words=0 errors=1 refused: immediate out of range for its field pass=true
+acase 254 `slliw x1, x2, 32` words=0 errors=1 refused: immediate out of range for its field pass=true
+acase 255 `sraiw x1, x2, 32` words=0 errors=1 refused: immediate out of range for its field pass=true
+acase 256 `lui x1, 0x100000` words=0 errors=1 refused: immediate out of range for its field pass=true
+acase 257 `lui x1, -1` words=0 errors=1 refused: immediate out of range for its field pass=true
+acase 258 `auipc x1, 1048576` words=0 errors=1 refused: immediate out of range for its field pass=true
+acase 259 `lb x1, 2048(x2)` words=0 errors=1 refused: immediate out of range for its field pass=true
+acase 260 `ld x1, -2049(x2)` words=0 errors=1 refused: immediate out of range for its field pass=true
+acase 261 `sb x1, 2048(x2)` words=0 errors=1 refused: immediate out of range for its field pass=true
+acase 262 `sd x1, -2049(x2)` words=0 errors=1 refused: immediate out of range for its field pass=true
+acase 263 `jalr x1, 2048(x2)` words=0 errors=1 refused: immediate out of range for its field pass=true
+acase 264 `csrrwi x1, mscratch, 32` words=0 errors=1 refused: immediate out of range for its field pass=true
+acase 265 `csrrci x1, mscratch, -1` words=0 errors=1 refused: immediate out of range for its field pass=true
+acase 266 `csrrw x1, 4096, x2` words=0 errors=1 refused: immediate out of range for its field pass=true
+acase 267 `csrrw x1, -1, x2` words=0 errors=1 refused: immediate out of range for its field pass=true
+acase 268 `fence x0, x0, 4096` words=0 errors=1 refused: immediate out of range for its field pass=true
+acase 269 `.word 0x100000000` words=0 errors=1 refused: immediate out of range for its field pass=true
+acase 270 `.word -1` words=0 errors=1 refused: immediate out of range for its field pass=true
+acase 271 `beq x1, x2, 3` words=0 errors=1 refused: branch or jump offset is odd pass=true
+acase 272 `beq x1, x2, -1` words=0 errors=1 refused: branch or jump offset is odd pass=true
+acase 273 `beq x1, x2, 4097` words=0 errors=1 refused: branch or jump offset is odd pass=true
+acase 274 `jal x1, 1` words=0 errors=1 refused: branch or jump offset is odd pass=true
+acase 275 `jal x1, -1048577` words=0 errors=1 refused: branch or jump offset is odd pass=true
+acase 276 `beq x1, x2, 4096` words=0 errors=1 refused: branch or jump target out of range pass=true
+acase 277 `bgeu x1, x2, -4098` words=0 errors=1 refused: branch or jump target out of range pass=true
+acase 278 `jal x1, 1048576` words=0 errors=1 refused: branch or jump target out of range pass=true
+acase 279 `jal x1, -1048578` words=0 errors=1 refused: branch or jump target out of range pass=true
+acase 280 `beq x1, x2, nowhere` words=0 errors=1 refused: undefined label pass=true
+acase 281 `jal x0, nowhere` words=0 errors=1 refused: undefined label pass=true
+acase 282 `here: jal x0, Here` words=0 errors=1 refused: undefined label pass=true
+acase 283 `beq x1, x2, a.b` words=0 errors=1 refused: bad label name pass=true
+acase 284 `jal x0, (x1)` words=0 errors=1 refused: bad label name pass=true
+acase 285 `1abc: ecall` words=0 errors=1 refused: bad label name pass=true
+acase 286 `a.b: ecall` words=0 errors=1 refused: bad label name pass=true
+acase 287 `: ecall` words=0 errors=1 refused: bad label name pass=true
+acase 288 `a2345678901234567890123456789012: ecall` words=0 errors=1 refused: bad label name pass=true
+acase 289 `add x1, x2` words=0 errors=1 refused: wrong operand count pass=true
+acase 290 `add x1, x2, x3, x4` words=0 errors=1 refused: wrong operand count pass=true
+acase 291 `add` words=0 errors=1 refused: wrong operand count pass=true
+acase 292 `ecall x1` words=0 errors=1 refused: wrong operand count pass=true
+acase 293 `mret 0` words=0 errors=1 refused: wrong operand count pass=true
+acase 294 `lb x1` words=0 errors=1 refused: wrong operand count pass=true
+acase 295 `lb x1, 0, x2` words=0 errors=1 refused: wrong operand count pass=true
+acase 296 `jal x1` words=0 errors=1 refused: wrong operand count pass=true
+acase 297 `jal x1, x2, 8` words=0 errors=1 refused: wrong operand count pass=true
+acase 298 `lui x1, x2, 5` words=0 errors=1 refused: wrong operand count pass=true
+acase 299 `csrrw x1, mscratch` words=0 errors=1 refused: wrong operand count pass=true
+acase 300 `.word` words=0 errors=1 refused: wrong operand count pass=true
+acase 301 `.word 1, 2` words=0 errors=1 refused: wrong operand count pass=true
+acase 302 `.org` words=0 errors=1 refused: wrong operand count pass=true
+acase 303 `add x1, x2, x3 x4` words=0 errors=1 refused: trailing text after an operand pass=true
+acase 304 `add x1 x2, x3, x4` words=0 errors=1 refused: trailing text after an operand pass=true
+acase 305 `addi x1, x2, 5 6` words=0 errors=1 refused: trailing text after an operand pass=true
+acase 306 `lb x1, 0(x2) x3` words=0 errors=1 refused: trailing text after an operand pass=true
+acase 307 `beq x1, x2, 8 8` words=0 errors=1 refused: trailing text after an operand pass=true
+acase 308 `jal x0, lab el` words=0 errors=1 refused: trailing text after an operand pass=true
+acase 309 `csrrw x1, mscratch x, x2` words=0 errors=1 refused: trailing text after an operand pass=true
+acase 310 `.word 1 2` words=0 errors=1 refused: trailing text after an operand pass=true
+acase 311 `ecall ecall` words=0 errors=1 refused: wrong operand count pass=true
+acase 312 `addi x1, x2, 0x` words=0 errors=1 refused: bad number pass=true
+acase 313 `addi x1, x2, 12a` words=0 errors=1 refused: bad number pass=true
+acase 314 `addi x1, x2, 0xg` words=0 errors=1 refused: bad number pass=true
+acase 315 `addi x1, x2, --1` words=0 errors=1 refused: bad number pass=true
+acase 316 `addi x1, x2, -` words=0 errors=1 refused: bad number pass=true
+acase 317 `addi x1, x2, x3` words=0 errors=1 refused: bad number pass=true
+acase 318 `addi x1, x2, 1.5` words=0 errors=1 refused: bad number pass=true
+acase 319 `addi x1, x2, 0X10` words=0 errors=1 refused: bad number pass=true
+acase 320 `addi x1, x2, 18446744073709551616` words=0 errors=1 refused: bad number pass=true
+acase 321 `addi x1, x2, 0x10000000000000000` words=0 errors=1 refused: bad number pass=true
+acase 322 `beq x1, x2, 8x` words=0 errors=1 refused: bad number pass=true
+acase 323 `lb x1, 12a(x2)` words=0 errors=1 refused: bad number pass=true
+acase 324 `lb x1, x2` words=0 errors=1 refused: expected imm(rs1) pass=true
+acase 325 `lb x1, 8` words=0 errors=1 refused: expected imm(rs1) pass=true
+acase 326 `lb x1, (x2)` words=0 errors=1 refused: expected imm(rs1) pass=true
+acase 327 `lb x1, 0(x2` words=0 errors=1 refused: expected imm(rs1) pass=true
+acase 328 `sb x1, 0 x2)` words=0 errors=1 refused: expected imm(rs1) pass=true
+acase 329 `jalr x1, x2` words=0 errors=1 refused: expected imm(rs1) pass=true
+acase 330 `csrrw x1, mfoo, x2` words=0 errors=1 refused: unknown CSR name pass=true
+acase 331 `csrrw x1, MSTATUS, x2` words=0 errors=1 refused: unknown CSR name pass=true
+acase 332 `csrrs x1, sstatus, x0` words=0 errors=1 refused: unknown CSR name pass=true
+acase 333 `.byte 1` words=0 errors=1 refused: unknown directive pass=true
+acase 334 `.zero 4` words=0 errors=1 refused: unknown directive pass=true
+acase 335 `.` words=0 errors=1 refused: unknown directive pass=true
+acase 336 `add x1, , x3` words=0 errors=1 refused: empty operand pass=true
+acase 337 `add x1, x2,` words=0 errors=1 refused: empty operand pass=true
+acase 338 `lui , 5` words=0 errors=1 refused: empty operand pass=true
+acase 339 `.org 2` words=0 errors=1 refused: .org offset is not a multiple of 4 or lies before the location pass=true
+acase 340 `.org -4` words=0 errors=1 refused: .org offset is not a multiple of 4 or lies before the location pass=true
+acase 341 `.org 0x10004` words=0 errors=1 refused: image larger than 65536 bytes pass=true
+acase 342 `.org x1` words=0 errors=1 refused: bad number pass=true
+acase 343 program timer: words=22 errors=0 image of emu-rv64 has 88 bytes pass=true
+acase 344 program trap: words=21 errors=0 image of emu-rv64 has 84 bytes pass=true
+acase 345 program serial: words=8 errors=0 want 8 words pass=true
+acase 346 program sum: words=6 errors=0 want 6 words pass=true
+acase 347 program labels: words=9 errors=0 want 9 words pass=true
+acase 348 program label places: words=3 errors=0 want 3 words pass=true
+acase 349 program comments: words=3 errors=0 want 3 words pass=true
+acase 350 program empty: words=0 errors=0 want 0 words pass=true
+acase 351 program no statement: words=0 errors=0 want 0 words pass=true
+acase 352 program three errors: words=0 errors=3 want 3 errors pass=true
+  line 2: undefined label
+  line 3: duplicate label
+  line 4: immediate out of range for its field
+acase 353 program two errors on one line: words=0 errors=2 want 2 errors pass=true
+  line 2: bad label name
+  line 2: unknown mnemonic
+acase 354 program duplicate label: words=0 errors=1 want 1 errors pass=true
+  line 3: duplicate label
+acase 355 program line numbers: words=0 errors=1 want 1 errors pass=true
+  line 3: immediate out of range for its field
+acase 356 program .org before the location: words=0 errors=1 want 1 errors pass=true
+  line 3: .org offset is not a multiple of 4 or lies before the location
+acase 357 program .org forward: words=5 errors=0 want 5 words pass=true
+acase 358 program image limit: words=16384 errors=0, then errors=1 pass=true
+acase 359 program label limit: 1024 labels errors=0, 1025 labels errors=1 pass=true
+acase 360 `mul x3, x1, x2` words=1 errors=0 word=022081b3 pass=true
+acase 361 `mulh x3, x1, x2` words=1 errors=0 word=022091b3 pass=true
+acase 362 `mulhsu x3, x1, x2` words=1 errors=0 word=0220a1b3 pass=true
+acase 363 `mulhu x3, x1, x2` words=1 errors=0 word=0220b1b3 pass=true
+acase 364 `div x3, x1, x2` words=1 errors=0 word=0220c1b3 pass=true
+acase 365 `divu x3, x1, x2` words=1 errors=0 word=0220d1b3 pass=true
+acase 366 `rem x3, x1, x2` words=1 errors=0 word=0220e1b3 pass=true
+acase 367 `remu x3, x1, x2` words=1 errors=0 word=0220f1b3 pass=true
+acase 368 `mulw x3, x1, x2` words=1 errors=0 word=022081bb pass=true
+acase 369 `divw x3, x1, x2` words=1 errors=0 word=0220c1bb pass=true
+acase 370 `divuw x3, x1, x2` words=1 errors=0 word=0220d1bb pass=true
+acase 371 `remw x3, x1, x2` words=1 errors=0 word=0220e1bb pass=true
+acase 372 `remuw x3, x1, x2` words=1 errors=0 word=0220f1bb pass=true
+acase 373 `mul x0, x0, x0` words=1 errors=0 word=02000033 pass=true
+acase 374 `mul x31, x31, x31` words=1 errors=0 word=03ff8fb3 pass=true
+acase 375 `divu x10, x20, x30` words=1 errors=0 word=03ea5533 pass=true
+acase 376 `remw x9, x19, x29` words=1 errors=0 word=03d9e4bb pass=true
+acase 377 `mulhsu x7, x8, x9` words=1 errors=0 word=029423b3 pass=true
+acase 378 `lr.w x3, (x1)` words=1 errors=0 word=1000a1af pass=true
+acase 379 `sc.w x3, x2, (x1)` words=1 errors=0 word=1820a1af pass=true
+acase 380 `amoswap.w x3, x2, (x1)` words=1 errors=0 word=0820a1af pass=true
+acase 381 `amoadd.w x3, x2, (x1)` words=1 errors=0 word=0020a1af pass=true
+acase 382 `amoxor.w x3, x2, (x1)` words=1 errors=0 word=2020a1af pass=true
+acase 383 `amoand.w x3, x2, (x1)` words=1 errors=0 word=6020a1af pass=true
+acase 384 `amoor.w x3, x2, (x1)` words=1 errors=0 word=4020a1af pass=true
+acase 385 `amomin.w x3, x2, (x1)` words=1 errors=0 word=8020a1af pass=true
+acase 386 `amomax.w x3, x2, (x1)` words=1 errors=0 word=a020a1af pass=true
+acase 387 `amominu.w x3, x2, (x1)` words=1 errors=0 word=c020a1af pass=true
+acase 388 `amomaxu.w x3, x2, (x1)` words=1 errors=0 word=e020a1af pass=true
+acase 389 `lr.d x3, (x1)` words=1 errors=0 word=1000b1af pass=true
+acase 390 `sc.d x3, x2, (x1)` words=1 errors=0 word=1820b1af pass=true
+acase 391 `amoswap.d x3, x2, (x1)` words=1 errors=0 word=0820b1af pass=true
+acase 392 `amoadd.d x3, x2, (x1)` words=1 errors=0 word=0020b1af pass=true
+acase 393 `amoxor.d x3, x2, (x1)` words=1 errors=0 word=2020b1af pass=true
+acase 394 `amoand.d x3, x2, (x1)` words=1 errors=0 word=6020b1af pass=true
+acase 395 `amoor.d x3, x2, (x1)` words=1 errors=0 word=4020b1af pass=true
+acase 396 `amomin.d x3, x2, (x1)` words=1 errors=0 word=8020b1af pass=true
+acase 397 `amomax.d x3, x2, (x1)` words=1 errors=0 word=a020b1af pass=true
+acase 398 `amominu.d x3, x2, (x1)` words=1 errors=0 word=c020b1af pass=true
+acase 399 `amomaxu.d x3, x2, (x1)` words=1 errors=0 word=e020b1af pass=true
+acase 400 `lr.w x5, (x10)` words=1 errors=0 word=100522af pass=true
+acase 401 `sc.w x5, x12, (x10)` words=1 errors=0 word=18c522af pass=true
+acase 402 `amoswap.w.aq x6, x5, (x10)` words=1 errors=0 word=0c55232f pass=true
+acase 403 `amoswap.w.rl x0, x0, (x10)` words=1 errors=0 word=0a05202f pass=true
+acase 404 `lr.w.aq x3, (x1)` words=1 errors=0 word=1400a1af pass=true
+acase 405 `lr.d.rl x3, (x1)` words=1 errors=0 word=1200b1af pass=true
+acase 406 `lr.d.aqrl x3, (x1)` words=1 errors=0 word=1600b1af pass=true
+acase 407 `sc.w.rl x3, x2, (x1)` words=1 errors=0 word=1a20a1af pass=true
+acase 408 `sc.d.aq x3, x2, (x1)` words=1 errors=0 word=1c20b1af pass=true
+acase 409 `sc.d.aqrl x3, x2, (x1)` words=1 errors=0 word=1e20b1af pass=true
+acase 410 `amoadd.d.aqrl x31, x30, (x29)` words=1 errors=0 word=07eebfaf pass=true
+acase 411 `amomaxu.w.aqrl x31, x31, (x31)` words=1 errors=0 word=e7ffafaf pass=true
+acase 412 `amomin.d.aq x9, x8, (x7)` words=1 errors=0 word=8483b4af pass=true
+acase 413 `lr.w x0, (x0)` words=1 errors=0 word=1000202f pass=true
+acase 414 `lr.d x31, (x31)` words=1 errors=0 word=100fbfaf pass=true
+acase 415 `sc.w x0, x0, (x0)` words=1 errors=0 word=1800202f pass=true
+acase 416 `sc.d x1, x31, (x2)` words=1 errors=0 word=19f130af pass=true
+acase 417 `amoor.d x4, x5, (x6)` words=1 errors=0 word=4053322f pass=true
+acase 418 `lr.w x5,(x10)` words=1 errors=0 word=100522af pass=true
+acase 419 `lr.w  x5 , ( x10 )` words=1 errors=0 word=100522af pass=true
+acase 420 `sc.d   x5,x12,( x10)` words=1 errors=0 word=18c532af pass=true
+acase 421 `amoadd.w x1, x2, (x3) # note` words=1 errors=0 word=0021a0af pass=true
+acase 422 `here: amoxor.d x4, x5, (x6)` words=1 errors=0 word=2053322f pass=true
+acase 423 `  mulw x4,x5,x6` words=1 errors=0 word=0262823b pass=true
+acase 424 `lr.w x1, x2` words=0 errors=1 refused: expected (rs1) pass=true
+acase 425 `lr.w x1, 0(x2)` words=0 errors=1 refused: expected (rs1) pass=true
+acase 426 `lr.d x1, 8(x2)` words=0 errors=1 refused: expected (rs1) pass=true
+acase 427 `lr.w x1, (x2` words=0 errors=1 refused: expected (rs1) pass=true
+acase 428 `lr.w x1, (x2) x3` words=0 errors=1 refused: trailing text after an operand pass=true
+acase 429 `lr.w x1, (x32)` words=0 errors=1 refused: bad register, expected x0 to x31 pass=true
+acase 430 `lr.w x1, ()` words=0 errors=1 refused: bad register, expected x0 to x31 pass=true
+acase 431 `lr.w x1, (5)` words=0 errors=1 refused: bad register, expected x0 to x31 pass=true
+acase 432 `lr.w x1, (x2), x3` words=0 errors=1 refused: wrong operand count pass=true
+acase 433 `lr.w x1` words=0 errors=1 refused: wrong operand count pass=true
+acase 434 `lr.w (x2)` words=0 errors=1 refused: wrong operand count pass=true
+acase 435 `lr.w 1, (x2)` words=0 errors=1 refused: bad register, expected x0 to x31 pass=true
+acase 436 `sc.w x1, (x2)` words=0 errors=1 refused: wrong operand count pass=true
+acase 437 `sc.w x1, x2, x3` words=0 errors=1 refused: expected (rs1) pass=true
+acase 438 `sc.d x1, 3, (x2)` words=0 errors=1 refused: bad register, expected x0 to x31 pass=true
+acase 439 `sc.d x1, (x2), x3` words=0 errors=1 refused: bad register, expected x0 to x31 pass=true
+acase 440 `amoadd.w x1, x2, 0(x3)` words=0 errors=1 refused: expected (rs1) pass=true
+acase 441 `amoadd.w x1, x2, (x3))` words=0 errors=1 refused: trailing text after an operand pass=true
+acase 442 `amoadd.w x1, x2, (x3), x4` words=0 errors=1 refused: wrong operand count pass=true
+acase 443 `amoadd.w x1, , (x3)` words=0 errors=1 refused: empty operand pass=true
+acase 444 `amoswap.d x1, x2` words=0 errors=1 refused: wrong operand count pass=true
+acase 445 `mul.aq x1, x2, x3` words=0 errors=1 refused: unknown mnemonic pass=true
+acase 446 `add.aqrl x1, x2, x3` words=0 errors=1 refused: unknown mnemonic pass=true
+acase 447 `lr.w.rlaq x1, (x2)` words=0 errors=1 refused: unknown mnemonic pass=true
+acase 448 `lr.w.aq.rl x1, (x2)` words=0 errors=1 refused: unknown mnemonic pass=true
+acase 449 `lr.q x1, (x2)` words=0 errors=1 refused: unknown mnemonic pass=true
+acase 450 `lr x1, (x2)` words=0 errors=1 refused: unknown mnemonic pass=true
+acase 451 `amoadd x1, x2, (x3)` words=0 errors=1 refused: unknown mnemonic pass=true
+acase 452 `LR.W x1, (x2)` words=0 errors=1 refused: unknown mnemonic pass=true
+acase 453 `amoadd.w.AQ x1, x2, (x3)` words=0 errors=1 refused: unknown mnemonic pass=true
+acase 454 `.aq x1, (x2)` words=0 errors=1 refused: unknown directive pass=true
+acase 455 `mulhsu x1, x2` words=0 errors=1 refused: wrong operand count pass=true
+acase 456 `divw x1, x2, 3` words=0 errors=1 refused: bad register, expected x0 to x31 pass=true
+acase 457 `rem x1, x2, x3, x4` words=0 errors=1 refused: wrong operand count pass=true
+acase 458 `mulh x1, x2, (x3)` words=0 errors=1 refused: bad register, expected x0 to x31 pass=true
+acase 459 program mulatomic: words=50 errors=0 retired=100 traps=0 pc=80000078 cell=1052 failed_sc=1 pass=true
+acases: 459 run, 0 failed

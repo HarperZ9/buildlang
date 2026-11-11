@@ -19,18 +19,25 @@
       }
     },
     "asm-rv64": {
-      "version": "0.1.0",
-      "description": "RV64I text assembler grown from the encoder of emu-rv64: one instruction per line, labels, .word and .org, the RV64I user set, Zicsr, MRET and WFI, with a renderer for the reverse direction; it holds no bit layout of its own and is checked by hand cases, the hand-assembled words and images of emu-rv64, property rules against that encoder and decoder, and planted controls",
+      "version": "0.2.0",
+      "description": "RV64IMA text assembler grown from the encoder of emu-rv64: one instruction per line, labels, .word and .org, the RV64I user set, Zicsr, MRET, WFI and the M and A extensions, with a renderer for the reverse direction; it holds no bit layout of its own and is checked by hand cases, the hand-assembled words and images of emu-rv64, property rules against that encoder and decoder, and planted controls",
       "author": "Zain Dana Harper",
       "license": "AGPL-3.0-only",
-      "checksum": "sha256:83cb1416abc679f3439e7d46c6e632b9ec8f413bdbef5ce7008891f2584bbd8b",
-      "path": "packages/asm-rv64/0.1.0",
+      "checksum": "sha256:2aedd9c7ba2e1e51380fdeeb4541c345a91ce86bb09cd940fba1aedff3fd252d",
+      "path": "packages/asm-rv64/0.2.0",
       "versions": {
         "0.1.0": {
           "path": "packages/asm-rv64/0.1.0",
           "checksum": "sha256:83cb1416abc679f3439e7d46c6e632b9ec8f413bdbef5ce7008891f2584bbd8b",
           "dependencies": {
             "emu-rv64": "=0.4.0"
+          }
+        },
+        "0.2.0": {
+          "path": "packages/asm-rv64/0.2.0",
+          "checksum": "sha256:2aedd9c7ba2e1e51380fdeeb4541c345a91ce86bb09cd940fba1aedff3fd252d",
+          "dependencies": {
+            "emu-rv64": "=0.5.0"
           }
         }
       }
@@ -68,12 +75,12 @@
       }
     },
     "emu-rv64": {
-      "version": "0.4.0",
-      "description": "RV64I machine emulator core with Zicsr, machine-mode CSRs, traps, MRET, a step-counted timer, machine interrupts, a flat image loader and a replay check that compares the state hash of two runs every 1000 steps: decoder, encoder and deterministic step function with flat memory and one serial device, checked by hand-computed cases, a reference model, differential fuzz, property rules and planted controls",
+      "version": "0.5.0",
+      "description": "RV64IMA machine emulator core with Zicsr, machine-mode CSRs, traps, MRET, a step-counted timer, machine interrupts, the M and A extensions on one hart, a flat image loader and a replay check that compares the state hash of two runs every 1000 steps: decoder, encoder and deterministic step function with flat memory and one serial device, checked by hand-computed cases, an oracle script outside the package, a reference model, differential fuzz, property rules and planted controls",
       "author": "Zain Dana Harper",
       "license": "AGPL-3.0-only",
-      "checksum": "sha256:9135a29af6c1d768064757ef08be98df75fe88611840d49859f5fd855af14afb",
-      "path": "packages/emu-rv64/0.4.0",
+      "checksum": "sha256:eeb77ab1c45088588a329e694457832c79ab9ace4d046b29f93add30c4490b6d",
+      "path": "packages/emu-rv64/0.5.0",
       "versions": {
         "0.1.0": {
           "path": "packages/emu-rv64/0.1.0",
@@ -93,6 +100,11 @@
         "0.4.0": {
           "path": "packages/emu-rv64/0.4.0",
           "checksum": "sha256:9135a29af6c1d768064757ef08be98df75fe88611840d49859f5fd855af14afb",
+          "dependencies": {}
+        },
+        "0.5.0": {
+          "path": "packages/emu-rv64/0.5.0",
+          "checksum": "sha256:eeb77ab1c45088588a329e694457832c79ab9ace4d046b29f93add30c4490b6d",
           "dependencies": {}
         }
       }

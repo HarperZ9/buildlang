@@ -1,0 +1,183 @@
+// Property check for the M and A extensions of emu-rv64, first part: the
+// round trips and the rules of the M extension. It uses no reference
+// model and none of the arithmetic of lib6.bld: each rule is a fact that
+// must hold for any correct core, tested by running single instructions
+// through the step function of variant v. `step` in a refusal is the
+// round.
+//
+//   70  decode(encode(i)) equals i for a generated M or A instruction
+//   71  a word with the opcode OP, OP-32 or AMO decodes to "no instruction"
+//       or encodes back to itself
+//   72  MUL, MULH and MULHU give the same result with the operands swapped
+//   73  MUL and MULHU are the two halves of a product worked out here by
+//       long multiplication on 16-bit digits; MULH and MULHSU are the upper
+//       half of the product of the magnitudes, negated at 128 bits when
+//       the signs ask for it
+//   74  with a divisor that is not 0 and no overflow, quotient * divisor +
+//       remainder is the dividend, the remainder is smaller in magnitude
+//       than the divisor, and a nonzero signed remainder has the sign of
+//       the dividend
+//   75  a divisor of 0 gives a quotient of all ones and the dividend as
+//       remainder; the most negative number divided by -1 gives itself and
+//       the remainder 0
+//   76  each 32-bit form equals the sign extension of bits 31 to 0 of the
+//       64-bit form on operands extended from 32 bits
+// Kinds 77 to 83 are in xprops2.bld.
+
+struct XpOut { ok: bool, val: u64 }
+
+// Runs `op x3, x1, x2` once and returns x3. ok is false when the step did
+// not retire or moved x1 or x2.
+fn xp_m(v: u64, op: u64, a: u64, b: u64) -> XpOut {
+    let mut m = emu_new_machine();
+    let mut x: [u64; 32] = [0_u64; 32];
+    let mut ram: [u8; 64] = [0_u8; 64];
+    let mut out: [u8; 8] = [0_u8; 8];
+    x[1] = a;
+    x[2] = b;
+    let d = Insn { op: op, rd: 3_u64, rs1: 1_u64, rs2: 2_u64, imm: 0_u64 };
+    emu_poke(&mut ram, EMU_RAM_BASE, 4_u64, emu_encode(&d));
+    let rc = xstep_v(v, &mut m, &mut x, &mut ram, &mut out);
+    XpOut { ok: rc == EMU_OK && x[1] == a && x[2] == b && m.pc == EMU_RAM_BASE + 4_u64, val: x[3] }
+}
+
+// x3 after `op x3, x1, x2`, or the complement of `other` when the step
+// failed, so that a comparison with `other` fails too.
+fn xp_val(v: u64, op: u64, a: u64, b: u64, other: u64) -> u64 {
+    let o = xp_m(v, op, a, b);
+    if !o.ok { return !other; }
+    o.val
+}
+
+struct XpWide { hi: u64, lo: u64 }
+
+// The product of two unsigned numbers by long multiplication on digits of
+// 16 bits. A digit product plus a digit plus a carry stays below 2^32.
+fn xp_long_mul(a: u64, b: u64) -> XpWide {
+    let mut acc: [u64; 8] = [0_u64; 8];
+    let mut i: u64 = 0_u64;
+    while i < 4_u64 {
+        let da = (a >> (16_u64 * i)) & 0xFFFF_u64;
+        let mut carry: u64 = 0_u64;
+        let mut j: u64 = 0_u64;
+        while j < 4_u64 {
+            let db = (b >> (16_u64 * j)) & 0xFFFF_u64;
+            let at = (i + j) as usize;
+            let t = acc[at] + da * db + carry;
+            acc[at] = t & 0xFFFF_u64;
+            carry = t >> 16_u64;
+            j = j + 1_u64;
+        }
+        acc[(i + 4_u64) as usize] = carry;
+        i = i + 1_u64;
+    }
+    let lo = acc[0] | (acc[1] << 16_u64) | (acc[2] << 32_u64) | (acc[3] << 48_u64);
+    let hi = acc[4] | (acc[5] << 16_u64) | (acc[6] << 32_u64) | (acc[7] << 48_u64);
+    XpWide { hi: hi, lo: lo }
+}
+
+fn xp_abs(v: u64) -> u64 {
+    if (v >> 63_u64) == 1_u64 { return (!v).wrapping_add(1_u64); }
+    v
+}
+
+// The upper half of the product when a is signed and, if sb, b too: the
+// product of the magnitudes, with all 128 bits negated when exactly one
+// operand is negative.
+fn xp_high_signed(a: u64, b: u64, sb: bool) -> u64 {
+    let na = (a >> 63_u64) == 1_u64;
+    let nb = sb && (b >> 63_u64) == 1_u64;
+    let mut mb = b;
+    if nb { mb = xp_abs(b); }
+    let p = xp_long_mul(xp_abs(a), mb);
+    if na == nb { return p.hi; }
+    if p.lo == 0_u64 { return (!p.hi).wrapping_add(1_u64); }
+    !p.hi
+}
+
+// Kinds 72 and 73 for one pair of operands.
+fn xp_mul_rules(v: u64, i: u64, a: u64, b: u64) -> Refusal {
+    let p = xp_long_mul(a, b);
+    let lo = xp_val(v, OP_MUL, a, b, p.lo);
+    let hu = xp_val(v, OP_MULHU, a, b, p.hi);
+    let hs = xp_val(v, OP_MULH, a, b, 0_u64);
+    if lo != xp_val(v, OP_MUL, b, a, lo) { return fz_refuse(72, i, lo, OP_MUL); }
+    if hu != xp_val(v, OP_MULHU, b, a, hu) { return fz_refuse(72, i, hu, OP_MULHU); }
+    if hs != xp_val(v, OP_MULH, b, a, hs) { return fz_refuse(72, i, hs, OP_MULH); }
+    if lo != p.lo { return fz_refuse(73, i, lo, p.lo); }
+    if hu != p.hi { return fz_refuse(73, i, hu, p.hi); }
+    let want_s = xp_high_signed(a, b, true);
+    if hs != want_s { return fz_refuse(73, i, hs, want_s); }
+    let want_su = xp_high_signed(a, b, false);
+    let hsu = xp_val(v, OP_MULHSU, a, b, want_su);
+    if hsu != want_su { return fz_refuse(73, i, hsu, want_su); }
+    fz_refuse(0, i, 0_u64, 0_u64)
+}
+
+// Kind 75 for a dividend a, at 64 bits.
+fn xp_div_edges(v: u64, i: u64, a: u64) -> Refusal {
+    let ones = !0_u64;
+    if xp_val(v, OP_DIV, a, 0_u64, ones) != ones { return fz_refuse(75, i, a, OP_DIV); }
+    if xp_val(v, OP_DIVU, a, 0_u64, ones) != ones { return fz_refuse(75, i, a, OP_DIVU); }
+    if xp_val(v, OP_REM, a, 0_u64, a) != a { return fz_refuse(75, i, a, OP_REM); }
+    if xp_val(v, OP_REMU, a, 0_u64, a) != a { return fz_refuse(75, i, a, OP_REMU); }
+    let q = xp_val(v, OP_DIV, EMU_SIGN, ones, EMU_SIGN);
+    if q != EMU_SIGN { return fz_refuse(75, i, q, EMU_SIGN); }
+    let r = xp_val(v, OP_REM, EMU_SIGN, ones, 0_u64);
+    if r != 0_u64 { return fz_refuse(75, i, r, 0_u64); }
+    fz_refuse(0, i, 0_u64, 0_u64)
+}
+
+// Kind 74 for one pair; b is not 0 and the pair is not the overflow pair.
+fn xp_div_rules(v: u64, i: u64, a: u64, b: u64) -> Refusal {
+    let q = xp_val(v, OP_DIV, a, b, 0_u64);
+    let r = xp_val(v, OP_REM, a, b, 0_u64);
+    if q.wrapping_mul(b).wrapping_add(r) != a { return fz_refuse(74, i, q, r); }
+    if xp_abs(r) >= xp_abs(b) { return fz_refuse(74, i, r, b); }
+    if r != 0_u64 && (r >> 63_u64) != (a >> 63_u64) { return fz_refuse(74, i, r, a); }
+    let qu = xp_val(v, OP_DIVU, a, b, 0_u64);
+    let ru = xp_val(v, OP_REMU, a, b, 0_u64);
+    if qu.wrapping_mul(b).wrapping_add(ru) != a { return fz_refuse(74, i, qu, ru); }
+    if ru >= b { return fz_refuse(74, i, ru, b); }
+    if xp_long_mul(qu, b).hi != 0_u64 { return fz_refuse(74, i, qu, b); }
+    fz_refuse(0, i, 0_u64, 0_u64)
+}
+
+// Kind 76 for one pair: the five 32-bit forms against the 64-bit forms.
+fn xp_word_rules(v: u64, i: u64, a: u64, b: u64) -> Refusal {
+    let sa = emu_sext(a, 32_u64);
+    let sb = emu_sext(b, 32_u64);
+    let za = a & 0xFFFFFFFF_u64;
+    let zb = b & 0xFFFFFFFF_u64;
+    let w1 = emu_sext(xp_val(v, OP_MUL, a, b, 0_u64), 32_u64);
+    let g1 = xp_val(v, OP_MULW, a, b, w1);
+    if g1 != w1 { return fz_refuse(76, i, g1, w1); }
+    let w2 = emu_sext(xp_val(v, OP_DIV, sa, sb, 0_u64), 32_u64);
+    let g2 = xp_val(v, OP_DIVW, a, b, w2);
+    if g2 != w2 { return fz_refuse(76, i, g2, w2); }
+    let w3 = emu_sext(xp_val(v, OP_DIVU, za, zb, 0_u64), 32_u64);
+    let g3 = xp_val(v, OP_DIVUW, a, b, w3);
+    if g3 != w3 { return fz_refuse(76, i, g3, w3); }
+    let w4 = emu_sext(xp_val(v, OP_REM, sa, sb, 0_u64), 32_u64);
+    let g4 = xp_val(v, OP_REMW, a, b, w4);
+    if g4 != w4 { return fz_refuse(76, i, g4, w4); }
+    let w5 = emu_sext(xp_val(v, OP_REMU, za, zb, 0_u64), 32_u64);
+    let g5 = xp_val(v, OP_REMUW, a, b, w5);
+    if g5 != w5 { return fz_refuse(76, i, g5, w5); }
+    fz_refuse(0, i, 0_u64, 0_u64)
+}
+
+// Kinds 72 to 76 for round i, on two operands from the edge generator.
+fn xp_m_round(v: u64, r: &mut Rng, i: u64) -> Refusal {
+    let a = maz_edge(r);
+    let b = maz_edge(r);
+    let f = xp_mul_rules(v, i, a, b);
+    if f.kind != 0 { return f; }
+    let g = xp_div_edges(v, i, a);
+    if g.kind != 0 { return g; }
+    if b != 0_u64 && !(a == EMU_SIGN && b == !0_u64) {
+        let h = xp_div_rules(v, i, a, b);
+        if h.kind != 0 { return h; }
+    }
+    xp_word_rules(v, i, a, b)
+}

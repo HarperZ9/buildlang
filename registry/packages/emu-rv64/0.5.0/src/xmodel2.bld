@@ -1,0 +1,117 @@
+// Reference model for the A extension of emu-rv64. Built a different way
+// from lib7.bld on purpose:
+//   - the reservation lives in slots RC_RES and RC_RADDR of the caller
+//     array `c`, not in the Machine;
+//   - alignment is read from single address bits;
+//   - memory and the timer registers are read and written one byte per
+//     turn, and a timer byte is found by walking the sixteen addresses;
+//   - minimum and maximum come from the bit-scanning comparisons of
+//     model.bld, and the 32-bit unsigned forms compare the low halves.
+// It calls no function of lib6.bld or lib7.bld. Nothing outside the checks
+// calls this file.
+
+// True when all n bytes from addr are bytes of one timer register.
+fn ref_timer_span(addr: u64, n: u64) -> bool {
+    let first = ref_timer_slot(addr);
+    let mut i: u64 = 0_u64;
+    while i < n {
+        let s = ref_timer_slot(ref_add(addr, i));
+        if s == 0_u64 { return false; }
+        if (s > 8_u64) != (first > 8_u64) { return false; }
+        i = i + 1_u64;
+    }
+    true
+}
+
+// Reads n bytes at addr, the byte at the lowest address into bits 7 to 0.
+fn ref_a_rd(ram: &[u8], c: &[u64], addr: u64, n: u64, timer: bool) -> u64 {
+    if !timer { return ref_rd(ram, addr, n); }
+    let mut val: u64 = 0_u64;
+    let mut i: u64 = 0_u64;
+    while i < n {
+        let slot = ref_timer_slot(ref_add(addr, i));
+        if slot > 8_u64 {
+            val = ref_put(val, 8_u64 * i, c[RC_TIME], 8_u64 * (slot - 9_u64), 8_u64);
+        } else {
+            val = ref_put(val, 8_u64 * i, c[RC_CMP], 8_u64 * (slot - 1_u64), 8_u64);
+        }
+        i = i + 1_u64;
+    }
+    val
+}
+
+// Writes the low n bytes of v at addr, one byte per turn.
+fn ref_a_wr(ram: &mut [u8], c: &mut [u64], addr: u64, n: u64, timer: bool, v: u64) {
+    let mut i: u64 = 0_u64;
+    while i < n {
+        if timer {
+            let slot = ref_timer_slot(ref_add(addr, i));
+            if slot > 8_u64 {
+                c[RC_TIME] = ref_byte_set(c[RC_TIME], slot - 9_u64, v, i);
+            } else {
+                c[RC_CMP] = ref_byte_set(c[RC_CMP], slot - 1_u64, v, i);
+            }
+        } else {
+            let at = ref_add(addr, i) - 0x80000000_u64;
+            ram[at as usize] = ref_low(ref_shift(v, 8_u64 * i, 1_u64), 8_u64) as u8;
+        }
+        i = i + 1_u64;
+    }
+}
+
+// The value AMO kind k stores: 3 swap, 4 add, 5 xor, 6 and, 7 or, 8 min,
+// 9 max, 10 unsigned min, 11 unsigned max. For the 32-bit forms old and b
+// are sign-extended from bit 31, and the unsigned forms compare bits 31
+// to 0 alone.
+fn ref_amo(k: u64, wide: bool, old: u64, b: u64) -> u64 {
+    if k == 3_u64 { return b; }
+    if k == 4_u64 { return ref_add(old, b); }
+    if k == 5_u64 { return old ^ b; }
+    if k == 6_u64 { return old & b; }
+    if k == 7_u64 { return old | b; }
+    let mut less = ref_lt(old, b);
+    if k >= 10_u64 {
+        less = ref_ltu(old, b);
+        if !wide { less = ref_ltu(ref_low(old, 32_u64), ref_low(b, 32_u64)); }
+    }
+    let wants_min = k == 8_u64 || k == 10_u64;
+    if (less == 1_u64) == wants_min { return old; }
+    b
+}
+
+// One atomic word of the reference machine. op is 74 to 95.
+// Order: alignment (cause 4 for LR, 6 for the others), then the range of
+// the access (cause 5 for LR, 7 for the others), then the effect.
+fn ref_a_step(m: &mut Machine, x: &mut [u64], ram: &mut [u8], c: &mut [u64], w: u64, op: u64) -> i64 {
+    let wide = op >= 85_u64;
+    let mut n: u64 = 4_u64;
+    let mut k = op - 73_u64;
+    if wide { n = 8_u64; k = op - 84_u64; }
+    let rd = ref_put(0_u64, 0_u64, w, 7_u64, 5_u64);
+    let addr = x[ref_put(0_u64, 0_u64, w, 15_u64, 5_u64) as usize];
+    let mut b = x[ref_put(0_u64, 0_u64, w, 20_u64, 5_u64) as usize];
+    let mut off = ref_bit(addr, 0_u64) | ref_bit(addr, 1_u64);
+    if wide { off = off | ref_bit(addr, 2_u64); }
+    let mut cause: u64 = 6_u64;
+    if k == 1_u64 { cause = 4_u64; }
+    if off == 1_u64 { return ref_trap(m, c, cause, addr); }
+    let timer = ref_timer_span(addr, n);
+    let len = ram.len() as u64;
+    if !timer && !ref_ram_ok(len, addr, n) { return ref_trap(m, c, cause + 1_u64, ref_first_bad(len, addr, n)); }
+    let mut old = ref_a_rd(ram, c, addr, n, timer);
+    if !wide { old = ref_w(old); b = ref_w(b); }
+    let mut val = old;
+    if k == 1_u64 { c[RC_RES] = n; c[RC_RADDR] = addr; }
+    if k == 2_u64 {
+        let held = c[RC_RES] == n && c[RC_RADDR] == addr;
+        c[RC_RES] = 0_u64;
+        c[RC_RADDR] = 0_u64;
+        val = 1_u64;
+        if held { ref_a_wr(ram, c, addr, n, timer, b); val = 0_u64; }
+    }
+    if k >= 3_u64 { ref_a_wr(ram, c, addr, n, timer, ref_amo(k, wide, old, b)); }
+    if rd != 0_u64 { x[rd as usize] = val; }
+    m.pc = ref_add(m.pc, 4_u64);
+    m.steps = ref_add(m.steps, 1_u64);
+    0
+}
