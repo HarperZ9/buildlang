@@ -82,6 +82,14 @@ impl fmt::Display for TypeErrorWithSpan {
 
 impl std::error::Error for TypeErrorWithSpan {}
 
+/// The tail of a duplicate-definition message: where the first one is.
+fn first_definition_note(first_line: &Option<u32>) -> String {
+    match first_line {
+        Some(line) => format!(" is already defined on line {line}"),
+        None => String::new(),
+    }
+}
+
 /// Type errors.
 #[derive(Debug, Clone, Error)]
 pub enum TypeError {
@@ -405,9 +413,13 @@ pub enum TypeError {
     // =========================================================================
     // OTHER ERRORS
     // =========================================================================
-    /// Duplicate definition.
-    #[error("duplicate definition: `{name}`")]
-    DuplicateDefinition { name: String },
+    /// Duplicate definition. `first_line` is the line of the earlier
+    /// definition when the source text was at hand.
+    #[error("duplicate definition: `{name}`{}", first_definition_note(.first_line))]
+    DuplicateDefinition {
+        name: String,
+        first_line: Option<u32>,
+    },
 
     /// Type annotation required.
     #[error("type annotations needed")]

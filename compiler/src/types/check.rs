@@ -198,6 +198,14 @@ impl<'ctx> TypeChecker<'ctx> {
         self.errors
             .extend(super::recursive::infinite_size_errors(module));
 
+        // Two constants or statics of one name (G29); the C compiler used to
+        // be the one to report it.
+        self.errors
+            .extend(super::duplicates::duplicate_value_errors(
+                module,
+                self.source_text.as_deref(),
+            ));
+
         // Register built-in trait stubs AFTER user types so DefIds are consistent
         self.ctx.register_builtin_traits();
 
