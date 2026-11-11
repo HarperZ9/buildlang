@@ -180,6 +180,10 @@ pub struct TypeInfer<'ctx> {
     /// Active borrow-context depth. When `> 0`, a use of a value is a borrow
     /// (`&x`) and must NOT consume a linear value; when `0`, it is a move.
     borrow_depth: u32,
+    /// Set while the operand of a unary `-` is inferred and that operand is an
+    /// integer literal: `-128_i8` is the minimum of `i8`, although `128` alone
+    /// does not fit.
+    negated_literal: bool,
     /// Number of enclosing loop scopes. Consuming a linear value declared
     /// outside the current loop is a potential double-use (the loop may repeat).
     loop_depth: u32,
@@ -501,6 +505,7 @@ impl<'ctx> TypeInfer<'ctx> {
             linear_slots: HashMap::new(),
             unsafe_depth: 0,
             borrow_depth: 0,
+            negated_literal: false,
             loop_depth: 0,
             linear_loop_markers: Vec::new(),
             linear_shadow_stack: Vec::new(),
@@ -549,6 +554,7 @@ impl<'ctx> TypeInfer<'ctx> {
             linear_slots: HashMap::new(),
             unsafe_depth: 0,
             borrow_depth: 0,
+            negated_literal: false,
             loop_depth: 0,
             linear_loop_markers: Vec::new(),
             linear_shadow_stack: Vec::new(),
@@ -3328,9 +3334,27 @@ impl<'ctx> TypeInfer<'ctx> {
         }
     }
 
+    /// The value of `expr` when it is an integer literal, parentheses aside.
+    fn int_literal_of(expr: &ast::Expr) -> Option<u128> {
+        match &expr.kind {
+            ExprKind::Literal(AstLiteral::Int { value, .. }) => Some(*value),
+            ExprKind::Paren(inner) => Self::int_literal_of(inner),
+            _ => None,
+        }
+    }
+
+    /// Whether `value` is one above the maximum of the signed type `int_ty`,
+    /// so that its negation is exactly the minimum (`128` for `i8`).
+    fn is_signed_min_magnitude(value: u128, int_ty: IntTy) -> bool {
+        int_ty.is_signed() && value == Self::signed_bounds(int_ty).1 as u128 + 1
+    }
+
     fn check_literal_range(&mut self, value: u128, suffix: Option<ast::IntSuffix>, span: Span) {
         if let Some(suffix) = suffix {
             let int_ty = Self::int_suffix_ty(suffix);
+            if self.negated_literal && Self::is_signed_min_magnitude(value, int_ty) {
+                return;
+            }
             if !Self::int_literal_fits_ty(value, int_ty) {
                 self.error(
                     TypeError::IntegerLiteralOutOfRange {
@@ -3362,6 +3386,13 @@ impl<'ctx> TypeInfer<'ctx> {
                 op: UnaryOp::Neg,
                 expr: inner,
             } => {
+                // The minimum of a signed type, written as a negated literal.
+                if Self::int_literal_of(inner)
+                    .is_some_and(|v| Self::is_signed_min_magnitude(v, int_ty))
+                {
+                    let (min, _) = Self::signed_bounds(int_ty);
+                    return ConstIntegerEval::Value(ConstInteger::Signed(min));
+                }
                 let Some(value) = Self::eval_const_integer_expr(inner, int_ty).value() else {
                     return match Self::eval_const_integer_expr(inner, int_ty) {
                         ConstIntegerEval::Overflow { op } => ConstIntegerEval::Overflow { op },
@@ -3497,10 +3528,10 @@ impl<'ctx> TypeInfer<'ctx> {
                 if let Some(suffix) = suffix {
                     self.check_literal_range(*value, Some(*suffix), Span::dummy());
                     Ty::int(Self::int_suffix_ty(*suffix))
-                } else if *value > i64::MAX as u128 {
+                } else if *value > i64::MAX as u128 + u128::from(self.negated_literal) {
                     // Exceeds i64 -> must be i128 (would silently truncate otherwise).
                     Ty::int(IntTy::I128)
-                } else if *value > i32::MAX as u128 {
+                } else if *value > i32::MAX as u128 + u128::from(self.negated_literal) {
                     // Exceeds i32 -> widen to i64 instead of defaulting to i32,
                     // which would silently truncate (money in cents, 64-bit hashes).
                     Ty::int(IntTy::I64)
@@ -4021,7 +4052,9 @@ impl<'ctx> TypeInfer<'ctx> {
         if is_borrow {
             self.borrow_depth += 1;
         }
+        self.negated_literal = op == UnaryOp::Neg && Self::int_literal_of(expr).is_some();
         let inner_ty = self.infer_expr(expr);
+        self.negated_literal = false;
         if is_borrow {
             self.borrow_depth = self.borrow_depth.saturating_sub(1);
         }

@@ -1452,6 +1452,11 @@ impl<'ctx> MirLowerer<'ctx> {
         if matches!(op, AstUnaryOp::Neg) {
             match &inner_val {
                 MirValue::Const(MirConst::Int(v, ty)) => {
+                    // `-170141183460469231731687303715884105728_i128`: the literal
+                    // 2^127 is already stored as the minimum, its own negation.
+                    if *v == i128::MIN && *ty == MirType::Int(IntSize::I128, true) {
+                        return Ok(inner_val);
+                    }
                     let Some(negated) = v.checked_neg() else {
                         return Err(CodegenError::TypeError(
                             "integer overflow in unary `-` during constant lowering".to_string(),
