@@ -236,7 +236,7 @@ pub(crate) fn rvalue_mentions(r: &MirRValue, id: LocalId) -> bool {
         MirRValue::Aggregate { operands, .. } => operands.iter().any(v),
         MirRValue::Repeat { value, .. } => v(value),
         MirRValue::Discriminant(place) | MirRValue::Len(place) => p(place),
-        MirRValue::NullaryOp(..) => false,
+        MirRValue::NullaryOp(..) | MirRValue::AddressOfGlobal { .. } => false,
         MirRValue::FieldAccess { base, .. } => v(base),
         MirRValue::VariantField { base, .. } => v(base),
         MirRValue::IndexAccess { base, index, .. } => v(base) || v(index),

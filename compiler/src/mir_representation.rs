@@ -420,6 +420,10 @@ fn collect_rvalue(
         MirRValue::Deref { .. } => {
             memory.deref_reads = true;
         }
+        MirRValue::AddressOfGlobal { is_mut, .. } => {
+            memory.references = true;
+            memory.mutable_references |= *is_mut;
+        }
         MirRValue::TextureSample { .. } => {}
     }
 }
@@ -560,6 +564,7 @@ fn rvalue_name(rvalue: &MirRValue) -> &'static str {
         MirRValue::IndexAccess { .. } => "IndexAccess",
         MirRValue::Deref { .. } => "Deref",
         MirRValue::TextureSample { .. } => "TextureSample",
+        MirRValue::AddressOfGlobal { .. } => "AddressOfGlobal",
     }
 }
 
@@ -895,6 +900,13 @@ fn write_mir_const(output: &mut String, label: &str, value: &MirConst) {
                 write_mir_const(output, &format!("{label}.field[{index}]"), field);
             }
         }
+        MirConst::Array(elem, values) => {
+            push_line(output, format!("{label} Array elements={}", values.len()));
+            write_mir_type(output, &format!("{label}.element_type"), elem);
+            for (index, value) in values.iter().enumerate() {
+                write_mir_const(output, &format!("{label}.element[{index}]"), value);
+            }
+        }
     }
 }
 
@@ -1042,6 +1054,13 @@ fn write_mir_rvalue(output: &mut String, label: &str, rvalue: &MirRValue) {
             write_mir_value(output, &format!("{label}.texture"), texture);
             write_mir_value(output, &format!("{label}.sampler"), sampler);
             write_mir_value(output, &format!("{label}.coords"), coords);
+        }
+        MirRValue::AddressOfGlobal { is_mut, name } => {
+            push_line(output, format!("{label}.is_mut {is_mut}"));
+            push_line(
+                output,
+                format!("{label}.name {}", json_string(name.as_ref())),
+            );
         }
     }
 }

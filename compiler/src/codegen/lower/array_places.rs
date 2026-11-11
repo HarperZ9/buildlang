@@ -53,10 +53,11 @@ fn element_mismatch(what: &str, have: &MirType, elem: &MirType, span: Span) -> C
 
 impl<'ctx> MirLowerer<'ctx> {
     /// Whether `expr` is a fixed array held by value that is reached through
-    /// a projection (`s.w`, `a[i]`, `(*p).w`), not a plain name.
+    /// a projection (`s.w`, `a[i]`, `(*p).w`), or is a mutable global array,
+    /// rather than a plain local.
     pub(super) fn is_projected_array(&mut self, expr: &ast::Expr) -> CodegenResult<bool> {
         if is_named(expr) {
-            return Ok(false);
+            return Ok(self.is_global_array_name(expr));
         }
         if matches!(self.infer_expr_type(expr), MirType::Array(..)) {
             return Ok(true);
@@ -71,7 +72,7 @@ impl<'ctx> MirLowerer<'ctx> {
     }
 
     /// `s.w[i] = v`, `a[i][j] = v`, `xs[i].w[j] += v`: store through the
-    /// address of the element. `None` when the indexed array is a plain name
+    /// address of the element. `None` when the indexed array is a plain local
     /// or is not a fixed array, which the caller's own paths handle.
     pub(super) fn store_into_projected_array(
         &mut self,

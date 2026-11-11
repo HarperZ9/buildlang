@@ -1133,6 +1133,11 @@ impl WasmBackend {
                 };
                 self.emit_line(load_instr);
             }
+            MirRValue::AddressOfGlobal { name, .. } => {
+                return Err(CodegenError::Unsupported(format!(
+                    "the WASM backend does not take the address of global `{name}`; use the C backend"
+                )));
+            }
             MirRValue::TextureSample { .. } => {
                 // GPU-only operation; push zero placeholder in WASM
                 self.emit_line(";; texture_sample: GPU-only, not supported in WASM");
@@ -1211,6 +1216,11 @@ impl WasmBackend {
             MirConst::Struct(_, _) => {
                 // Struct constants not yet supported in WASM backend
                 self.emit_line("i32.const 0 ;; struct const stub");
+            }
+            MirConst::Array(..) => {
+                return Err(CodegenError::Unsupported(
+                    "the WASM backend has no array constants; use the C backend".to_string(),
+                ));
             }
         }
 
@@ -1659,6 +1669,9 @@ impl WasmBackend {
                 MirConst::Zeroed(ty) => Ok(ty.clone()),
                 MirConst::Undef(ty) => Ok(ty.clone()),
                 MirConst::Struct(name, _) => Ok(MirType::Struct(name.clone())),
+                MirConst::Array(elem, vals) => {
+                    Ok(MirType::Array(Box::new(elem.clone()), vals.len() as u64))
+                }
             },
             MirValue::Global(_) => Ok(MirType::i32()),
             MirValue::Function(_) => Ok(MirType::i32()),

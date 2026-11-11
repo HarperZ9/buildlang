@@ -22,6 +22,8 @@ use crate::codegen::runtime;
 use crate::codegen::{GeneratedCode, OutputFormat};
 
 mod aggregates;
+mod array_params;
+mod globals;
 mod header;
 pub(crate) mod lowlevel;
 mod parallel;
@@ -129,6 +131,9 @@ pub struct CBackend {
     /// takes its width from a global operand before a literal one, so
     /// `TICKS + 1` with `static mut TICKS: u64` calls `bl_uadd_u64` (G6).
     global_int_types: std::collections::HashMap<String, (IntSize, bool)>,
+    /// The type of each module global, by name. `&GLOBAL` of an array global
+    /// is the array's name, which decays to a pointer to its first element.
+    global_types: std::collections::HashMap<String, MirType>,
     /// Field names and types of each struct, for building a struct with an
     /// array member one member at a time (see `c/aggregates.rs`).
     struct_fields: aggregates::StructFields,
@@ -160,6 +165,7 @@ impl CBackend {
             current_fn_flag_block_frees: std::collections::HashMap::new(),
             experimental_free_override_for_test: None,
             global_int_types: std::collections::HashMap::new(),
+            global_types: std::collections::HashMap::new(),
         }
     }
 
@@ -1936,24 +1942,20 @@ impl CBackend {
                 self.global_int_types
                     .insert(global.name.to_string(), (*size, *signed));
             }
-            let c_type = self.type_to_c(&global.ty);
-
+            self.global_types
+                .insert(global.name.to_string(), global.ty.clone());
             // A foreign `static` is an external declaration, never a definition.
             // If a header backs it, the header declares it and we emit nothing;
             // otherwise emit a bare `extern` declaration to reference the symbol.
             if global.is_extern_decl {
                 if global.link_header.is_none() {
-                    self.output
-                        .push_str(&format!("extern {} {};\n", c_type, global.name));
+                    let declarator = self.global_declarator(global);
+                    self.output.push_str(&format!("extern {};\n", declarator));
                 }
                 continue;
             }
 
-            let mut decl = if global.is_mut {
-                format!("{} {}", c_type, global.name)
-            } else {
-                format!("const {} {}", c_type, global.name)
-            };
+            let mut decl = self.global_declarator(global);
 
             if let Some(init) = &global.init {
                 decl.push_str(" = ");
@@ -2247,6 +2249,8 @@ impl CBackend {
                 // Function pointers need: `ret (*name)(params)`
                 if matches!(local.ty, MirType::Array(_, _)) {
                     write!(self.output, "{};\n", self.fmt_array_decl(&local.ty, &name)).unwrap();
+                } else if let Some(decl) = self.nested_array_ptr_decl(&local.ty, &name) {
+                    write!(self.output, "{};\n", decl).unwrap();
                 } else if let MirType::FnPtr(ref sig) = local.ty {
                     let ret = self.type_to_c(&sig.ret);
                     let params: Vec<_> = sig.params.iter().map(|p| self.type_to_c(p)).collect();
@@ -2278,7 +2282,8 @@ impl CBackend {
         // uses a disambiguated name (e.g., `x_0`). Emit `type x_0 = x;` so the
         // body can reference the parameter by its MIR name.
         for local in &func.locals {
-            if local.is_param && !matches!(local.ty, MirType::Void) {
+            if local.is_param && !matches!(local.ty, MirType::Void) && !Self::is_array_param(local)
+            {
                 let mir_name = self.local_name(local.id, &func.locals);
                 if let Some(ref orig) = local.name {
                     let orig_str = orig.to_string();
@@ -2301,6 +2306,9 @@ impl CBackend {
                 }
             }
         }
+
+        // By-value array parameters get a private copy (see `c/array_params.rs`).
+        self.emit_array_param_copies(func);
 
         // Vector buffers and lengths loaded once, when nothing in the function
         // can resize or replace a vector (see `c/vec_hoist.rs`).
@@ -2762,10 +2770,15 @@ impl CBackend {
                         }
                     })
                     .unwrap_or_else(|| format!("arg{}", i));
-                // Arrays need special C parameter syntax: `type name[size]`
+                // Arrays need special C parameter syntax: `type name[size]`.
+                // The pointer it decays to gets its own name; the body copies
+                // the array into a local under the parameter's name (G33).
                 // Function pointers need: `ret (*name)(params)`
                 if matches!(param.ty, MirType::Array(_, _)) {
-                    write!(self.output, "{}", self.fmt_array_decl(&param.ty, &name)).unwrap();
+                    let incoming = Self::array_param_incoming_name(param);
+                    write!(self.output, "{}", self.fmt_array_decl(&param.ty, &incoming)).unwrap();
+                } else if let Some(decl) = self.nested_array_ptr_decl(&param.ty, &name) {
+                    write!(self.output, "{}", decl).unwrap();
                 } else if let MirType::FnPtr(ref sig) = param.ty {
                     let ret = self.type_to_c(&sig.ret);
                     let fn_params: Vec<_> = sig.params.iter().map(|p| self.type_to_c(p)).collect();
@@ -3031,6 +3044,9 @@ impl CBackend {
                 write!(self.output, "{}.{} = {};\n", base_name, field, rvalue).unwrap();
             }
             MirStmtKind::GlobalStore { name, value } => {
+                if self.emit_global_array_store(name, value, locals)? {
+                    return Ok(());
+                }
                 // `GLOBAL = value;` - the C global identifier matches the
                 // definition and the read path (value_to_c on MirValue::Global).
                 self.write_indent();
@@ -3088,6 +3104,7 @@ impl CBackend {
                     write!(self.output, "{} = {};\n", target, rvalue).unwrap();
                 } else if let Some(target) =
                     Self::array_element_access(base, &base_str, &index_str, locals)
+                        .or_else(|| self.global_array_element_access(base, &base_str, &index_str))
                 {
                     // Fixed-array store: `base[bl_idx_chk(i, N)] = value`.
                     write!(self.output, "{} = {};\n", target, rvalue).unwrap();
@@ -4320,6 +4337,9 @@ impl CBackend {
                 let field_strs: Vec<String> = fields.iter().map(|f| self.const_to_c(f)).collect();
                 format!("({}){{ {} }}", name, field_strs.join(", "))
             }
+            // An array constant only initializes a global (G34); C has no
+            // array value outside an initializer.
+            MirConst::Array(..) => self.const_to_c_static(c),
         }
     }
 
@@ -4338,6 +4358,10 @@ impl CBackend {
                 format!("{{ {} }}", field_strs.join(", "))
             }
             MirConst::Zeroed(_) => "{0}".to_string(),
+            MirConst::Array(_, values) => {
+                let parts: Vec<String> = values.iter().map(|v| self.const_to_c_static(v)).collect();
+                format!("{{ {} }}", parts.join(", "))
+            }
             _ => self.const_to_c(c),
         }
     }
@@ -4939,6 +4963,10 @@ impl CBackend {
                         Self::array_element_access(base, &base_str, &index_str, locals)
                     {
                         access
+                    } else if let Some(access) =
+                        self.global_array_element_access(base, &base_str, &index_str)
+                    {
+                        access
                     } else {
                         format!("{}[{}]", base_str, index_str)
                     }
@@ -4952,6 +4980,7 @@ impl CBackend {
                 // GPU-only operation; emit a zero placeholder in C
                 "/* texture_sample: GPU-only */ 0".to_string()
             }
+            MirRValue::AddressOfGlobal { name, .. } => self.global_address_to_c(name),
         })
     }
 

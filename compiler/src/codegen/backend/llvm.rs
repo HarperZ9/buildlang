@@ -1738,6 +1738,11 @@ impl LlvmBackend {
                 )
                 .unwrap();
             }
+            MirRValue::AddressOfGlobal { name, .. } => {
+                return Err(CodegenError::Unsupported(format!(
+                    "the LLVM backend does not take the address of global `{name}`; use the C backend"
+                )));
+            }
             MirRValue::TextureSample { .. } => {
                 // GPU-only operation; store zeroed placeholder in LLVM IR
                 writeln!(
@@ -2595,6 +2600,9 @@ impl LlvmBackend {
                     fields.iter().map(|f| self.llvm_const(f)).collect();
                 Ok(format!("{{ {} }}", parts?.join(", ")))
             }
+            MirConst::Array(..) => Err(CodegenError::Unsupported(
+                "the LLVM backend has no array constants; use the C backend".to_string(),
+            )),
         }
     }
 
@@ -2830,6 +2838,9 @@ impl LlvmBackend {
                 MirConst::Zeroed(ty) => Ok(ty.clone()),
                 MirConst::Undef(ty) => Ok(ty.clone()),
                 MirConst::Struct(name, _) => Ok(MirType::Struct(name.clone())),
+                MirConst::Array(elem, vals) => {
+                    Ok(MirType::Array(Box::new(elem.clone()), vals.len() as u64))
+                }
             },
             MirValue::Global(_) => Ok(MirType::Ptr(Box::new(MirType::Void))),
             MirValue::Function(_) => Ok(MirType::Ptr(Box::new(MirType::Void))),

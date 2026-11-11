@@ -713,9 +713,10 @@ impl RustBackend {
             }
             MirRValue::Discriminant(_)
             | MirRValue::VariantField { .. }
+            | MirRValue::AddressOfGlobal { .. }
             | MirRValue::TextureSample { .. } => {
                 return Err(CodegenError::Unsupported(
-                    "Rust backend does not yet lower enum discriminants, variant fields, or texture samples"
+                    "Rust backend does not yet lower enum discriminants, variant fields, global addresses or texture samples"
                         .to_string(),
                 ));
             }
@@ -891,6 +892,10 @@ impl RustBackend {
                 } else {
                     format!("{}::default()", type_name)
                 }
+            }
+            MirConst::Array(_, values) => {
+                let parts: Vec<String> = values.iter().map(|v| self.const_to_rust(v)).collect();
+                format!("[{}]", parts.join(", "))
             }
         }
     }
@@ -1082,7 +1087,7 @@ impl RustBackend {
             | MirConst::Null(_)
             | MirConst::Unit => true,
             MirConst::Zeroed(ty) | MirConst::Undef(ty) => Self::is_copy_like_type(ty),
-            MirConst::Struct(_, _) => false,
+            MirConst::Struct(_, _) | MirConst::Array(..) => false,
         }
     }
 
@@ -1100,6 +1105,9 @@ impl RustBackend {
             }
             MirConst::Unit => MirType::Void,
             MirConst::Struct(name, _) => MirType::Struct(name.clone()),
+            MirConst::Array(elem, vals) => {
+                MirType::Array(Box::new(elem.clone()), vals.len() as u64)
+            }
         }
     }
 

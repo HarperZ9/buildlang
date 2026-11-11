@@ -743,6 +743,14 @@ pub enum MirRValue {
     /// Address of.
     AddressOf { is_mut: bool, place: MirPlace },
 
+    /// The address of a module global or mutable static: `&GLOBAL`. A place
+    /// is rooted at a local, so a store into a field or an element of a
+    /// global (`TABLE.w[i] = v`) and a borrow of it (`&mut TABLE`) take this
+    /// address into a pointer local and project from `*ptr`. Before it
+    /// existed the borrow pointed at a copy of the global and the store was
+    /// refused (G35). The destination local has the type `Ptr(global type)`.
+    AddressOfGlobal { is_mut: bool, name: Arc<str> },
+
     /// Cast.
     Cast {
         kind: CastKind,
@@ -1447,6 +1455,9 @@ pub enum MirConst {
     Undef(MirType),
     /// Struct constant: (struct_name, field_values).
     Struct(Arc<str>, Vec<MirConst>),
+    /// Fixed array constant: (element type, element values), one value per
+    /// element. The initializer of a `static` or `const` of array type (G34).
+    Array(MirType, Vec<MirConst>),
 }
 
 impl fmt::Display for MirConst {
@@ -1471,6 +1482,16 @@ impl fmt::Display for MirConst {
                     write!(f, "{}", fv)?;
                 }
                 write!(f, "}}")
+            }
+            MirConst::Array(elem, values) => {
+                write!(f, "[")?;
+                for (i, v) in values.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", v)?;
+                }
+                write!(f, "]:{}", elem)
             }
         }
     }

@@ -573,6 +573,7 @@ fn moved_by_rvalue(func: &MirFunction, value: &MirRValue, out: &mut Vec<LocalId>
         // Borrows and reads do NOT move.
         MirRValue::Ref { .. }
         | MirRValue::AddressOf { .. }
+        | MirRValue::AddressOfGlobal { .. }
         | MirRValue::FieldAccess { .. }
         | MirRValue::IndexAccess { .. }
         | MirRValue::Deref { .. }
@@ -628,6 +629,7 @@ fn read_by_rvalue(func: &MirFunction, value: &MirRValue, out: &mut Vec<LocalId>)
         | MirRValue::Cast { .. }
         | MirRValue::VariantField { .. }
         | MirRValue::NullaryOp(..)
+        | MirRValue::AddressOfGlobal { .. }
         | MirRValue::TextureSample { .. } => {}
     }
 }

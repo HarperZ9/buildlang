@@ -97,6 +97,7 @@ fn swap_rvalue(rv: &mut MirRValue, old: &str, new: &str) {
         }
         MirRValue::Ref { .. }
         | MirRValue::AddressOf { .. }
+        | MirRValue::AddressOfGlobal { .. }
         | MirRValue::Discriminant(_)
         | MirRValue::Len(_)
         | MirRValue::NullaryOp(..) => {}
