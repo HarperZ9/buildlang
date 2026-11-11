@@ -1,0 +1,225 @@
+// cg-rv64: the operands of the MIR. A value is {"Local": id},
+// {"Const": c}, {"Global": name} or {"Function": name}.
+//
+// A register always holds a scalar in the form of its type: the low bits
+// of the type, extended to 64 bits by its sign (a Bool is 0 or 1).
+
+// The type and the frame offset of local id.
+fn cv_lty(g: &Cg, id: u64) -> u64 {
+    if (id as usize) >= g.lty.len() { return CG_NONE; }
+    g.lty[id as usize]
+}
+
+fn cv_loff(g: &Cg, id: u64) -> u64 {
+    if (id as usize) >= g.loff.len() { return 0_u64; }
+    g.loff[id as usize]
+}
+
+fn cv_is_local(d: &CjDoc, v: u64) -> bool { cj_tag_is(d, v, "Local") }
+
+fn cv_local(d: &CjDoc, v: u64) -> u64 { cj_mag(d, cj_body(d, v)) }
+
+// The constant inside a value, or CG_NONE.
+fn cv_const(d: &CjDoc, v: u64) -> u64 {
+    if !cj_tag_is(d, v, "Const") { return CG_NONE; }
+    cj_body(d, v)
+}
+
+// True when the value is an integer constant: {"Int": [n, type]} or
+// {"Uint": [n, type]} with n in 64 bits.
+fn cv_is_int(d: &CjDoc, v: u64) -> bool {
+    let c = cv_const(d, v);
+    (cj_tag_is(d, c, "Int") || cj_tag_is(d, c, "Uint")) && cj_kind(d, cj_first(d, cj_body(d, c))) == CJ_NUM
+}
+
+// The bits of an integer constant and the type the MIR gives it.
+fn cv_int_bits(d: &CjDoc, v: u64) -> u64 { cj_bits(d, cj_first(d, cj_body(d, cv_const(d, v)))) }
+
+fn cv_int_ty(d: &CjDoc, v: u64) -> u64 { cj_next(d, cj_first(d, cj_body(d, cv_const(d, v)))) }
+
+fn cv_is_bool(d: &CjDoc, v: u64) -> bool { cj_tag_is(d, cv_const(d, v), "Bool") }
+
+// The global a value names: an entry of the global table that is not
+// mutable and whose initial value is an integer. CG_NONE for any other.
+fn cv_global(g: &Cg, d: &CjDoc, v: u64) -> u64 {
+    if !cj_tag_is(d, v, "Global") { return CG_NONE; }
+    let name = cj_body(d, v);
+    let mut e = cj_first(d, g.globals);
+    while e != CG_NONE {
+        if cj_same_str(d, cj_get(d, e, "name"), name) {
+            let init = cj_get(d, e, "init");
+            let num = cj_kind(d, cj_first(d, cj_body(d, init))) == CJ_NUM;
+            let isint = (cj_tag_is(d, init, "Int") || cj_tag_is(d, init, "Uint")) && num;
+            if cj_kind(d, cj_get(d, e, "is_mut")) != CJ_FALSE || !isint { return CG_NONE; }
+            return e;
+        }
+        e = cj_next(d, e);
+    }
+    CG_NONE
+}
+
+// The type of a value that has a storage type: a local or a global.
+// CG_NONE for a constant.
+fn cv_ty(g: &Cg, d: &CjDoc, v: u64) -> u64 {
+    if cv_is_local(d, v) { return cv_lty(g, cv_local(d, v)); }
+    cj_get(d, cv_global(g, d, v), "ty")
+}
+
+// v brought to the form of integer type t: cut to its width, extended by
+// its sign. This is the conversion C applies to an integer.
+fn cv_canon(d: &CjDoc, v: u64, t: u64) -> u64 {
+    let bits = ct_bits(d, t);
+    if bits >= 64_u64 { return v; }
+    let low = v & ((1_u64 << bits) - 1_u64);
+    if ct_signed(d, t) && (low >> (bits - 1_u64)) == 1_u64 { return low | (!0_u64 << bits); }
+    low
+}
+
+// True when the integer constant v has, in type t, the value the MIR
+// wrote: it is in the range of t.
+fn cv_fits(d: &CjDoc, v: u64, t: u64) -> bool {
+    if ct_kind(d, t) != CT_INT { return false; }
+    let c = cv_const(d, v);
+    let n = cj_first(d, cj_body(d, c));
+    let bits = cj_bits(d, n);
+    if cj_tag_is(d, c, "Uint") && ct_signed(d, t) { return false; }
+    if cj_neg(d, n) && !ct_signed(d, t) { return false; }
+    if !cj_neg(d, n) && ct_signed(d, t) && (bits >> 63_u64) == 1_u64 { return false; }
+    cv_canon(d, bits, t) == bits
+}
+
+// The bytes of string constant number idx of the module, decoded, into
+// buf. Returns false when the string is missing or holds an escape the
+// generator does not decode.
+fn cv_string(g: &Cg, d: &CjDoc, idx: u64, buf: &mut Vec<u8>) -> bool {
+    let s = cj_at(d, g.strings, idx);
+    if cj_kind(d, s) != CJ_STR { return false; }
+    let start = cj_sstart(d, s);
+    let len = cj_slen(d, s);
+    let mut ok = true;
+    let mut i: u64 = 0_u64;
+    while i < len {
+        let mut c = d.src[(start + i) as usize];
+        if c == 92_u8 && i + 1_u64 < len {
+            i = i + 1_u64;
+            c = cv_escape(d.src[(start + i) as usize]);
+            if c == 0_u8 { ok = false; }
+        }
+        if c == 0_u8 { ok = false; }
+        buf.push(c);
+        i = i + 1_u64;
+    }
+    ok
+}
+
+// The byte an escape letter stands for, or 0 for \u and unknown letters.
+fn cv_escape(e: u8) -> u8 {
+    if e == 110_u8 { return 10_u8; }
+    if e == 116_u8 { return 9_u8; }
+    if e == 114_u8 { return 13_u8; }
+    if e == 34_u8 || e == 92_u8 || e == 47_u8 { return e; }
+    0_u8
+}
+
+// reg = the address of the bytes of buf followed by a zero byte. The
+// bytes are kept in the code: jal steps over them and leaves their
+// address in reg. Four bytes to a word, first byte lowest.
+fn cv_bytes(g: &mut Cg, reg: u64, n: u64, second: bool) {
+    let words = n / 4_u64 + 1_u64;
+    ci_open(g, "jal");
+    co_x(g, reg);
+    co_s(g, ", ");
+    co_u(g, 4_u64 * (words + 1_u64));
+    co_ch(g, 10_u8);
+    let mut w: u64 = 0_u64;
+    while w < words {
+        let mut word: u64 = 0_u64;
+        let mut k: u64 = 0_u64;
+        while k < 4_u64 {
+            let at = 4_u64 * w + k;
+            let mut c: u64 = 0_u64;
+            if at < n && second { c = g.lit[at as usize] as u64; }
+            if at < n && !second { c = g.fmt[at as usize] as u64; }
+            word = word | (c << (8_u64 * k));
+            k = k + 1_u64;
+        }
+        ci_word(g, word);
+        w = w + 1_u64;
+    }
+}
+
+// reg = the address of the text s, for the runtime and for trap messages.
+fn cv_text(g: &mut Cg, reg: u64, s: str) {
+    g.lit.clear();
+    cg_push_str(&mut g.lit, s);
+    let n = g.lit.len() as u64;
+    cv_bytes(g, reg, n, true);
+}
+
+// reg = the value v as type t. A local or a global must have exactly the
+// type t. An integer constant is converted to t as C converts it.
+fn cv_load(g: &mut Cg, d: &CjDoc, reg: u64, v: u64, t: u64) {
+    if cv_is_local(d, v) {
+        let id = cv_local(d, v);
+        if !ct_same(d, cv_lty(g, id), t) || !ct_scalar(d, t) {
+            cg_refuse(g, d, "a local is used as a type that is not its own");
+            return;
+        }
+        ci_load(g, d, reg, 2_u64, cv_loff(g, id), t);
+        return;
+    }
+    let gl = cv_global(g, d, v);
+    if gl != CG_NONE {
+        if !ct_same(d, cj_get(d, gl, "ty"), t) || ct_kind(d, t) != CT_INT {
+            cg_refuse(g, d, "a global is used as a type that is not its own");
+            return;
+        }
+        ci_li(g, reg, cv_canon(d, cj_bits(d, cj_first(d, cj_body(d, cj_get(d, gl, "init")))), t));
+        return;
+    }
+    cv_load_const(g, d, reg, v, t);
+}
+
+fn cv_load_const(g: &mut Cg, d: &CjDoc, reg: u64, v: u64, t: u64) {
+    let c = cv_const(d, v);
+    let k = ct_kind(d, t);
+    if cv_is_int(d, v) && k == CT_INT {
+        ci_li(g, reg, cv_canon(d, cv_int_bits(d, v), t));
+        return;
+    }
+    if cv_is_bool(d, v) && k == CT_BOOL {
+        let mut b: u64 = 0_u64;
+        if cj_kind(d, cj_body(d, c)) == CJ_TRUE { b = 1_u64; }
+        ci_li(g, reg, b);
+        return;
+    }
+    if cj_tag_is(d, c, "Str") && k == CT_PTR {
+        g.fmt.clear();
+        let mut tmp: Vec<u8> = Vec::new();
+        if !cv_string(g, d, cj_mag(d, cj_body(d, c)), &mut tmp) {
+            cg_refuse(g, d, "a string constant with an escape outside \\n \\t \\r \\\" \\\\ \\/");
+            return;
+        }
+        let mut i: usize = 0;
+        while i < tmp.len() {
+            g.fmt.push(tmp[i]);
+            i = i + 1;
+        }
+        cv_bytes(g, reg, tmp.len() as u64, false);
+        return;
+    }
+    cg_refuse_tag(g, d, "operand of a kind or type the generator does not cover:", v);
+}
+
+// reg = the value v in its own type: the type of the local or global,
+// or the type the MIR wrote on the constant. Returns that type.
+fn cv_load_own(g: &mut Cg, d: &CjDoc, reg: u64, v: u64) -> u64 {
+    let mut t = cv_ty(g, d, v);
+    if t == CG_NONE && cv_is_int(d, v) { t = cv_int_ty(d, v); }
+    if t == CG_NONE {
+        cg_refuse_tag(g, d, "operand with no integer type:", v);
+        return CG_NONE;
+    }
+    cv_load(g, d, reg, v, t);
+    t
+}

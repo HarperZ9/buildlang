@@ -1,0 +1,1 @@
+error: image tests/golden-cases.txt has 5633 bytes and memory has 256

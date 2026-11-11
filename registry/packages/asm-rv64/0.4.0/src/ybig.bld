@@ -1,0 +1,116 @@
+// asm-rv64 command line, the commands for large programs, since 0.4.0:
+//
+//   asm-rv64 asmx FILE          as asm, with the large limits
+//   asm-rv64 bytesx FILE        as bytes, with the large limits
+//   asm-rv64 serial FILE MAX    assemble FILE, run the image on the serial
+//                               run of emu-rv64 for at most MAX steps and
+//                               print the bytes it sent, and nothing else
+//   asm-rv64 serial-check FILE MAX   assemble, run twice, print a summary
+//
+// The large limits: a source of at most 8388608 bytes, an image of at most
+// 1048576 bytes, at most 65536 labels. ser_run, ser_print, ser_ram,
+// ser_show, ser_fnv and ser_status are functions of emu-rv64.
+
+// Reads a file into a vector, at most one byte more than the limit.
+// Returns its length, or minus the exit status after printing why the
+// file was refused.
+fn ay_load(path: str, src: &mut Vec<u8>) -> i64 ~ Console + FileSystem {
+    if !file_exists(path) {
+        println!("error: cannot read {}", path);
+        return -3;
+    }
+    let s = read_bytes(path);
+    let b = s.as_bytes();
+    if s.len() > AS_BIG_SRC {
+        println!("error: {} has {} bytes and the limit is {}", path, s.len(), AS_BIG_SRC);
+        return -5;
+    }
+    let mut i: usize = 0;
+    while i < s.len() {
+        src.push(b[i]);
+        i = i + 1;
+    }
+    s.len() as i64
+}
+
+// Assembles a file into o with the large limits. Returns 0, or the exit
+// status after printing the reason.
+fn ay_file(path: str, o: &mut AsOut) -> i64 ~ Console + FileSystem {
+    let mut src: Vec<u8> = Vec::new();
+    let n = ay_load(path, &mut src);
+    if n < 0 { return 0 - n; }
+    if as_assemble_big(0_u64, &src, n as usize, o) != 0_u64 {
+        ax_errors(path, o);
+        return 1;
+    }
+    0
+}
+
+// The image of o as bytes.
+fn ay_image(o: &AsOut, img: &mut Vec<u8>) {
+    let n = (o.count as usize) * 4;
+    let mut i: usize = 0;
+    while i < n {
+        img.push(as_byte(o, i));
+        i = i + 1;
+    }
+}
+
+fn ay_cmd_asmx(path: str) -> i64 ~ Console + FileSystem {
+    let mut o = as_out_new();
+    let rc = ay_file(path, &mut o);
+    if rc != 0 { return rc; }
+    let mut i: usize = 0;
+    while (i as u64) < o.count {
+        println!("{:08x}", o.words[i]);
+        i = i + 1;
+    }
+    0
+}
+
+fn ay_cmd_bytesx(path: str) -> i64 ~ Console + FileSystem {
+    let mut o = as_out_new();
+    let rc = ay_file(path, &mut o);
+    if rc != 0 { return rc; }
+    let mut img: Vec<u8> = Vec::new();
+    ay_image(&o, &mut img);
+    hex_dump(&img, img.len());
+    0
+}
+
+fn ay_cmd_serial(path: str, max: u64, check: bool) -> i64 ~ Console + FileSystem {
+    let mut o = as_out_new();
+    let rc = ay_file(path, &mut o);
+    if rc != 0 { return rc; }
+    let mut img: Vec<u8> = Vec::new();
+    ay_image(&o, &mut img);
+    let mut ram = ser_ram(SER_RAM);
+    let mut a: Vec<u8> = Vec::new();
+    let r = ser_run(&img, img.len(), &mut ram, max, &mut a);
+    if !check {
+        let bad = ser_print(&a);
+        eprintln!("serial: halted={} code={} steps={} serial_len={} serial_fnv={:016x} hash={:016x}",
+                  r.halted, r.code, r.steps, a.len(), ser_fnv(&a), r.hash);
+        return ser_status(&r, bad);
+    }
+    let mut b: Vec<u8> = Vec::new();
+    let q = ser_run(&img, img.len(), &mut ram, max, &mut b);
+    println!("serial-check source={} bytes={} ram={} max={}", path, img.len(), SER_RAM, max);
+    let same = ser_show(&r, &q, &a, &b);
+    if same && r.halted { return 0; }
+    1
+}
+
+// Runs a command for large programs. Returns -1 when the first argument
+// is not one, else the exit status.
+fn ay_main() -> i64 ~ Console + FileSystem + Process + Environment {
+    let cmd = args_get(1);
+    let argc = args_count();
+    if cmd == "asmx" && argc >= 3 { return ay_cmd_asmx(args_get(2)); }
+    if cmd == "bytesx" && argc >= 3 { return ay_cmd_bytesx(args_get(2)); }
+    if (cmd == "serial" || cmd == "serial-check") && argc >= 4 {
+        let max = args_get(3).parse_int() as u64;
+        return ay_cmd_serial(args_get(2), max, cmd == "serial-check");
+    }
+    -1
+}

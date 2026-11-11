@@ -1,0 +1,1 @@
+same tests/sv39.s: 4132 bytes, file tests/emu-sv39.img has 4132 bytes, equal=true

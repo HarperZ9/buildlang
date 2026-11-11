@@ -1,0 +1,152 @@
+// Hand cases for the M and A extensions of emu-rv64: the harness. The case
+// tables are xvec_m*.bld and xvec_a*.bld. Every instruction word and every
+// expected value in those tables was computed outside this package, by the
+// script tests/tools/ma_oracle.py, which is written from the sentences
+// of the manual with the unbounded integers of its language and shares no
+// code and no table with this package. No emulator produced them.
+//
+// An M case runs one word, `op x3, x1, x2`, with x1 = a and x2 = b on a
+// machine in the trap profile with 512 bytes of memory, and passes when
+// the step retires, x3 holds the expected value and nothing else moved.
+//
+// An A case runs up to four words in order from 0x80000000. Its input is
+// an array of 15 numbers:
+//   0-3 the words, 4 how many of them run, 5 x1, 6 x2, 7 x5, 8 x6,
+//   9 and 10 the two doublewords at 0x80000100 and 0x80000108,
+//   11 and 12 the reservation (width and address), 13 mtime, 14 mtimecmp.
+// The machine starts with mstatus = 0x1808, mtvec = 0x80000180 and mie = 0,
+// so no interrupt is taken. The run stops after a step that traps. The
+// expected state is an array of 19 numbers:
+//   0 the code of the last step, 1 x1, 2 x2, 3-6 x10 to x13,
+//   7 and 8 the two doublewords, 9 and 10 the reservation,
+//   11 instructions retired, 12 traps, 13 mcause, 14 mtval, 15 mepc,
+//   16 pc, 17 mtime, 18 mtimecmp.
+// Every byte of memory outside the words and the two doublewords must
+// still be 0, and x0 must be 0.
+
+// v: the variant under test. fail: the first failing case, or 0. bad: how
+// many cases fail.
+struct XSt { v: u64, show: bool, fail: u64, count: u64, bad: u64 }
+
+fn xv_note(st: &mut XSt, ok: bool) {
+    if ok { return; }
+    st.bad = st.bad + 1_u64;
+    if st.fail == 0_u64 { st.fail = st.count; }
+}
+
+// True when every byte from `from` up to `to` is 0.
+fn xv_zero(ram: &[u8], from: usize, to: usize) -> bool {
+    let mut i = from;
+    while i < to {
+        if ram[i] != 0_u8 { return false; }
+        i = i + 1;
+    }
+    true
+}
+
+fn xv_m(st: &mut XSt, word: u64, a: u64, b: u64, want: u64) ~ Console {
+    st.count = st.count + 1_u64;
+    let mut m = emu_new_machine();
+    let mut x: [u64; 32] = [0_u64; 32];
+    let mut ram: [u8; 512] = [0_u8; 512];
+    let mut out: [u8; 8] = [0_u8; 8];
+    x[1] = a;
+    x[2] = b;
+    emu_poke(&mut ram, V_B, 4_u64, word);
+    let rc = xstep_v(st.v, &mut m, &mut x, &mut ram, &mut out);
+    let regs = x[0] == 0_u64 && x[1] == a && x[2] == b && x[3] == want;
+    let mach = m.pc == V_N && m.steps == 1_u64 && m.traps == 0_u64 && m.res == 0_u64 &&
+               m.mcause == 0_u64 && m.mstatus == MS_MPP && m.out_len == 0_u64;
+    let ok = rc == EMU_OK && regs && mach && xv_zero(&ram, 4, 512);
+    if st.show {
+        println!("xcase {} word={:08x} a={:x} b={:x} rc={} x3={:x} pass={}", st.count, word, a, b, rc, x[3], ok);
+    }
+    xv_note(st, ok);
+}
+
+fn xv_a_start(i: &[u64]) -> Machine {
+    let mut m = emu_new_machine();
+    m.mstatus = MV_ST;
+    m.mtvec = 0x80000180_u64;
+    m.res = i[11];
+    m.res_addr = i[12];
+    m.mtime = i[13];
+    m.mtimecmp = i[14];
+    m
+}
+
+fn xv_a_regs(x: &[u64], i: &[u64], e: &[u64]) -> bool {
+    x[0] == 0_u64 && x[1] == e[1] && x[2] == e[2] && x[5] == i[7] && x[6] == i[8] &&
+    x[10] == e[3] && x[11] == e[4] && x[12] == e[5] && x[13] == e[6]
+}
+
+fn xv_a_mach(m: &Machine, e: &[u64]) -> bool {
+    m.res == e[9] && m.res_addr == e[10] && m.steps == e[11] && m.traps == e[12] &&
+    m.mcause == e[13] && m.mtval == e[14] && m.mepc == e[15] && m.pc == e[16] &&
+    m.mtime == e[17] && m.mtimecmp == e[18] && m.out_len == 0_u64 && m.mie == 0_u64 &&
+    ((e[12] == 0_u64 && m.mstatus == MV_ST) || (e[12] == 1_u64 && m.mstatus == MV_ST_TRAP))
+}
+
+fn xv_a(st: &mut XSt, i: &[u64], e: &[u64]) ~ Console {
+    st.count = st.count + 1_u64;
+    let mut m = xv_a_start(i);
+    let mut x: [u64; 32] = [0_u64; 32];
+    let mut ram: [u8; 512] = [0_u8; 512];
+    let mut out: [u8; 8] = [0_u8; 8];
+    x[1] = i[5];
+    x[2] = i[6];
+    x[5] = i[7];
+    x[6] = i[8];
+    let mut k: u64 = 0_u64;
+    while k < 4_u64 {
+        emu_poke(&mut ram, V_B + 4_u64 * k, 4_u64, i[k as usize]);
+        k = k + 1_u64;
+    }
+    emu_poke(&mut ram, V_P, 8_u64, i[9]);
+    emu_poke(&mut ram, V_P + 8_u64, 8_u64, i[10]);
+    let mut rc: i64 = EMU_OK;
+    k = 0_u64;
+    while k < i[4] && rc == EMU_OK {
+        rc = xstep_v(st.v, &mut m, &mut x, &mut ram, &mut out);
+        k = k + 1_u64;
+    }
+    let d0 = emu_peek(&ram, V_P, 8_u64);
+    let d1 = emu_peek(&ram, V_P + 8_u64, 8_u64);
+    let mem = d0 == e[7] && d1 == e[8] && xv_zero(&ram, 16, 256) && xv_zero(&ram, 272, 512);
+    let ok = rc == e[0] as i64 && xv_a_regs(&x, i, e) && xv_a_mach(&m, e) && mem;
+    if st.show {
+        println!("xcase {} word={:08x} rc={} x10={:x} x11={:x} d0={:x} d1={:x} res={}:{:x} mcause={:x} mtval={:x} pass={}",
+                 st.count, i[0], rc, x[10], x[11], d0, d1, m.res, m.res_addr, m.mcause, m.mtval, ok);
+    }
+    xv_note(st, ok);
+}
+
+// A word of the M or A extension in the report profile, where every
+// instruction added since 0.1.0 is illegal. The step reports -1 and
+// changes nothing.
+fn xv_report(st: &mut XSt, word: u64) ~ Console {
+    st.count = st.count + 1_u64;
+    let mut m = emu_new();
+    let mut x: [u64; 32] = [0_u64; 32];
+    let mut ram: [u8; 512] = [0_u8; 512];
+    let mut out: [u8; 8] = [0_u8; 8];
+    x[1] = V_P;
+    x[2] = 9_u64;
+    emu_poke(&mut ram, V_B, 4_u64, word);
+    let rc = emu_step(&mut m, &mut x, &mut ram, &mut out);
+    let same = m.pc == V_B && m.steps == 0_u64 && m.traps == 0_u64 && m.res == 0_u64 && m.mcause == 0_u64;
+    let ok = rc == EMU_ILLEGAL && same && x[1] == V_P && x[2] == 9_u64 && x[3] == 0_u64 && xv_zero(&ram, 4, 512);
+    if st.show {
+        println!("xcase {} word={:08x} report profile rc={} pc={:08x} pass={}", st.count, word, rc, m.pc, ok);
+    }
+    xv_note(st, ok);
+}
+
+// Runs every case through variant v and returns the tally: `fail` is the
+// first failing case, or 0, and `bad` the number of failing cases.
+fn xvec_run(v: u64, show: bool) -> XSt ~ Console {
+    let mut st = XSt { v: v, show: show, fail: 0_u64, count: 0_u64, bad: 0_u64 };
+    xv_tables(&mut st);
+    if show { println!("xcases: {} run, {} fail, first failure {}", st.count, st.bad, st.fail); }
+    st
+}

@@ -1,0 +1,50 @@
+auipc x5, 0x0
+addi x5, x5, 192
+lui x6, 0x10000
+addi x10, x0, 12
+addi x11, x0, -7
+mul x12, x10, x11
+addi x13, x0, 5
+div x14, x12, x13
+rem x15, x12, x13
+mulh x7, x12, x12
+divu x8, x13, x0
+sub x14, x0, x14
+sub x15, x0, x15
+jal x0, 8
+lr.d x16, (x5)
+add x17, x16, x14
+sc.d x18, x17, (x5)
+add x26, x26, x18
+bne x18, x0, -16
+addi x19, x19, 1
+addi x20, x0, 3
+bne x19, x20, -28
+amoadd.d x21, x15, (x5)
+ld x22, 0(x5)
+addi x27, x0, 1052
+bne x22, x27, 24
+addi x28, x0, 1
+bne x26, x28, 16
+addi x29, x0, 80
+sb x29, 0(x6)
+jal x0, 0
+jal x0, 0
+.word 0x00000000
+.word 0x00000000
+.word 0x00000000
+.word 0x00000000
+.word 0x00000000
+.word 0x00000000
+.word 0x00000000
+.word 0x00000000
+.word 0x00000000
+.word 0x00000000
+.word 0x00000000
+.word 0x00000000
+.word 0x00000000
+.word 0x00000000
+.word 0x00000000
+.word 0x00000000
+.word 0x000003e8
+.word 0x00000000

@@ -1,0 +1,7 @@
+replay image=tests/mulatomic.img bytes=200 ram=256 steps=5000 interval=1000
+  step 1000 hash=3c483e866d029773
+  step 2000 hash=b9722bb2f7f50cf3
+  step 3000 hash=222c90763d8fda73
+  step 4000 hash=f14baae859644eb3
+  step 5000 hash=5a177a91ef57a513
+  runs agree at 5 of 5 checkpoints

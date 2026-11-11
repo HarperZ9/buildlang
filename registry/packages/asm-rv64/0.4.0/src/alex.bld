@@ -1,0 +1,188 @@
+// asm-rv64, the byte level: the source text is a slice of bytes, and every
+// function here reads the bytes from index lo up to, not including, hi.
+// Byte values used below: tab 9, line feed 10, carriage return 13, space
+// 32, # 35, ( 40, ) 41, + 43, comma 44, - 45, . 46, 0 to 9 are 48 to 57,
+// : 58, A to Z are 65 to 90, _ 95, a to z are 97 to 122, x 120.
+
+// The state of one pass over the source. v: the planted defect, 0 for
+// none. pass: 1 collects labels, 2 encodes. loc: byte offset of the next
+// word. line: number of the line being read, from 1. err: the first error
+// of the statement being read, 0 for none. big, since 0.4.0: the assembly
+// has the large limits.
+struct AsSt { v: u64, pass: u64, loc: u64, line: u64, err: u64, big: bool }
+
+// A number as written: a sign and a magnitude. end is the index after its
+// last character. ok is false when the text is not a number.
+struct AsNum { ok: bool, neg: bool, mag: u64, end: usize }
+
+// Records the first error of a statement. Later ones are dropped.
+fn as_fail(st: &mut AsSt, code: u64) {
+    if st.err == 0_u64 { st.err = code; }
+}
+
+// A space, a tab or a carriage return.
+fn as_space(c: u8) -> bool { c == 32_u8 || c == 9_u8 || c == 13_u8 }
+
+fn as_digit(c: u8) -> bool { c >= 48_u8 && c <= 57_u8 }
+
+fn as_alpha(c: u8) -> bool {
+    (c >= 97_u8 && c <= 122_u8) || (c >= 65_u8 && c <= 90_u8) || c == 95_u8
+}
+
+// A character of a word: a letter, a digit, an underscore or a dot.
+fn as_wordch(c: u8) -> bool { as_alpha(c) || as_digit(c) || c == 46_u8 }
+
+// The first index from lo on that holds no space, or hi.
+fn as_skip(src: &[u8], lo: usize, hi: usize) -> usize {
+    let mut i = lo;
+    while i < hi && as_space(src[i]) { i = i + 1; }
+    i
+}
+
+// The index after the word that starts at lo. Equal to lo when no word
+// starts there.
+fn as_word_end(src: &[u8], lo: usize, hi: usize) -> usize {
+    let mut i = lo;
+    while i < hi && as_wordch(src[i]) { i = i + 1; }
+    i
+}
+
+// True when the bytes lo to hi are exactly the text s.
+fn as_is(src: &[u8], lo: usize, hi: usize, s: str) -> bool {
+    if hi < lo || hi - lo != s.len() { return false; }
+    let b = s.as_bytes();
+    let mut same = true;
+    let mut i: usize = 0;
+    while i < s.len() {
+        if src[lo + i] != b[i] { same = false; }
+        i = i + 1;
+    }
+    same
+}
+
+// True when two ranges of the source hold the same bytes.
+fn as_same(src: &[u8], a: usize, an: usize, b: usize, bn: usize) -> bool {
+    if an != bn { return false; }
+    let mut same = true;
+    let mut i: usize = 0;
+    while i < an {
+        if src[a + i] != src[b + i] { same = false; }
+        i = i + 1;
+    }
+    same
+}
+
+// The value of a digit character, 0 to 15, or 99 for any other character.
+// Hex digits may be in either case.
+fn as_digit_val(c: u8) -> u64 {
+    if as_digit(c) { return (c - 48_u8) as u64; }
+    if c >= 97_u8 && c <= 102_u8 { return (c - 87_u8) as u64; }
+    if c >= 65_u8 && c <= 70_u8 { return (c - 55_u8) as u64; }
+    99_u64
+}
+
+// Reads the digits lo to hi in the given base. `limit` is the base that
+// decides which digit characters are legal. The result has ok false when
+// there is no digit, a character is not a legal digit, or the value does
+// not fit 64 bits.
+fn as_digits(src: &[u8], lo: usize, hi: usize, base: u64, limit: u64) -> AsNum {
+    let mut r = AsNum { ok: hi > lo, neg: false, mag: 0_u64, end: hi };
+    let mut i = lo;
+    while i < hi {
+        let d = as_digit_val(src[i]);
+        if d >= limit { r.ok = false; }
+        if r.ok && r.mag > (0xFFFFFFFFFFFFFFFF_u64 - d) / base { r.ok = false; }
+        if r.ok { r.mag = r.mag * base + d; }
+        i = i + 1;
+    }
+    r
+}
+
+// Reads a number that starts at lo: an optional sign, then decimal digits,
+// or 0x and hex digits. The number ends where its word ends. Defect 3
+// drops the minus sign. Defect 7 reads the digits after 0x in base 10.
+fn as_num(v: u64, src: &[u8], lo: usize, hi: usize) -> AsNum {
+    let mut i = lo;
+    let mut neg = false;
+    if i < hi && (src[i] == 45_u8 || src[i] == 43_u8) {
+        neg = src[i] == 45_u8;
+        i = i + 1;
+    }
+    if v == ACTL_SIGN { neg = false; }
+    let e = as_word_end(src, i, hi);
+    let mut r = AsNum { ok: false, neg: neg, mag: 0_u64, end: e };
+    if e > i + 2 && src[i] == 48_u8 && src[i + 1] == 120_u8 {
+        let mut base: u64 = 16_u64;
+        if v == ACTL_HEX { base = 10_u64; }
+        r = as_digits(src, i + 2, e, base, 16_u64);
+    } else {
+        r = as_digits(src, i, e, 10_u64, 10_u64);
+    }
+    r.neg = neg;
+    r
+}
+
+// The value of a number as a 64-bit word in two's complement, after the
+// range check: a negative number may have a magnitude up to lo_mag, any
+// other number a value up to hi. Defect 4 accepts hi + 1.
+fn as_imm(st: &mut AsSt, n: &AsNum, lo_mag: u64, hi: u64) -> u64 {
+    let mut top = hi;
+    if st.v == ACTL_RANGE { top = hi + 1_u64; }
+    if n.neg {
+        if n.mag > lo_mag { as_fail(st, AE_RANGE); }
+        return 0_u64.wrapping_sub(n.mag);
+    }
+    if n.mag > top { as_fail(st, AE_RANGE); }
+    n.mag
+}
+
+// The register number of the word lo to hi, or 32 when the word is not
+// x0 to x31. A second digit after a leading 0 is refused: x07 is no name.
+fn as_reg_val(src: &[u8], lo: usize, hi: usize) -> u64 {
+    if hi < lo + 2 || hi > lo + 3 || src[lo] != 120_u8 { return 32_u64; }
+    if !as_digit(src[lo + 1]) { return 32_u64; }
+    let d1 = (src[lo + 1] - 48_u8) as u64;
+    if hi == lo + 2 { return d1; }
+    if d1 == 0_u64 || !as_digit(src[lo + 2]) { return 32_u64; }
+    let n = d1 * 10_u64 + (src[lo + 2] - 48_u8) as u64;
+    if n > 31_u64 { return 32_u64; }
+    n
+}
+
+// True when the word lo to hi can name a label: a letter or underscore,
+// then letters, digits and underscores, at most 31 characters.
+fn as_ident_ok(src: &[u8], lo: usize, hi: usize) -> bool {
+    if hi <= lo || hi - lo > AS_NAME_MAX || !as_alpha(src[lo]) { return false; }
+    let mut ok = true;
+    let mut i = lo;
+    while i < hi {
+        if src[i] == 46_u8 { ok = false; }
+        i = i + 1;
+    }
+    ok
+}
+
+// One operand that is a register. Returns its number, 0 after an error.
+fn as_f_reg(st: &mut AsSt, src: &[u8], lo: usize, hi: usize) -> u64 {
+    let a = as_skip(src, lo, hi);
+    let e = as_word_end(src, a, hi);
+    let r = as_reg_val(src, a, e);
+    if r > 31_u64 {
+        as_fail(st, AE_REG);
+        return 0_u64;
+    }
+    if as_skip(src, e, hi) != hi { as_fail(st, AE_TRAIL); }
+    r
+}
+
+// One operand that is a number and nothing else.
+fn as_f_num(st: &mut AsSt, src: &[u8], lo: usize, hi: usize) -> AsNum {
+    let a = as_skip(src, lo, hi);
+    let n = as_num(st.v, src, a, hi);
+    if !n.ok {
+        as_fail(st, AE_NUMBER);
+        return n;
+    }
+    if as_skip(src, n.end, hi) != hi { as_fail(st, AE_TRAIL); }
+    n
+}

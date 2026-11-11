@@ -1,0 +1,92 @@
+// Hand cases for the system profile of emu-rv64: the permission matrix and
+// the command. The rows are in svec_p*.bld, computed by the oracle script.
+//
+// A row is one access to the page at virtual address 0x40403000 by a
+// machine in the mode of the row. The page tables are the same for every
+// row: the root table at 0x80001000, entry 1 of it points to the table at
+// 0x80002000, entry 2 of that to the table at 0x80003000, and entry 3 of
+// that maps the page to 0x80004000 with the flags of the row. Entry 2 of
+// the root is a gigapage that maps the code at 0x80000000 where it lies,
+// with the U bit set when the mode of the row is U. Nothing is delegated,
+// so a fault is taken in M-mode.
+//   fetch: the pc is the address of the page, which holds `addi x10, x0, 77`
+//   load:  `ld x10, 0(x1)` with x1 the address of the page
+//   store: `sd x2, 0(x1)`
+// A row passes when the access succeeds exactly when the oracle says so,
+// and when a fault has the cause of the row, the address of the page as
+// its trap value, and no effect on x10 or the page.
+
+fn sv_px_fill(ram: &mut [u8], flags: u64, prv: u64, acc: u64) {
+    let mut code: u64 = 0xCF_u64;
+    if prv == PRIV_U { code = 0xDF_u64; }
+    emu_poke(ram, 0x80001010_u64, 8_u64, (0x80000_u64 << 10_u64) | code);
+    emu_poke(ram, 0x80001008_u64, 8_u64, (0x80002_u64 << 10_u64) | 1_u64);
+    emu_poke(ram, 0x80002010_u64, 8_u64, (0x80003_u64 << 10_u64) | 1_u64);
+    emu_poke(ram, 0x80003018_u64, 8_u64, (0x80004_u64 << 10_u64) | flags);
+    emu_poke(ram, 0x80004000_u64, 8_u64, sv_px_word(0_u64));
+    emu_poke(ram, EMU_RAM_BASE, 4_u64, sv_px_word(acc));
+}
+
+// True when the state after a row that must succeed is right.
+fn sv_px_done(m: &Machine, x: &[u64], ram: &[u8], acc: u64, pc0: u64) -> bool {
+    let page = emu_peek(ram, 0x80004000_u64, 8_u64);
+    let mut ok = m.traps == 0_u64 && m.steps == 1_u64 && m.pc == pc0 + 4_u64;
+    if acc == 0_u64 { ok = ok && x[10] == 77_u64 && page == sv_px_word(0_u64); }
+    if acc == 1_u64 { ok = ok && x[10] == sv_px_word(0_u64) && page == sv_px_word(0_u64); }
+    if acc == 2_u64 { ok = ok && x[10] == 0_u64 && page == sv_px_stored(); }
+    ok
+}
+
+fn sv_px(st: &mut XSt, row: u64) ~ Console {
+    st.count = st.count + 1_u64;
+    let prv = (row >> 8_u64) & 3_u64;
+    let acc = (row >> 15_u64) & 3_u64;
+    let want = (row >> 24_u64) & 0xFF_u64;
+    let mut m = emu_new_system();
+    let mut x: [u64; 32] = [0_u64; 32];
+    let mut ram: [u8; 32768] = [0_u8; 32768];
+    let mut out: [u8; 8] = [0_u8; 8];
+    sv_px_fill(&mut ram, row & 0xFF_u64, prv, acc);
+    m.prv = prv;
+    m.mstatus = MS_XL | (((row >> 11_u64) & 3_u64) << 11_u64) | (((row >> 10_u64) & 1_u64) << 17_u64) |
+                (((row >> 13_u64) & 3_u64) << 18_u64);
+    m.satp = (8_u64 << 60_u64) | 0x80001_u64;
+    m.mtvec = MV_TVEC;
+    if acc == 0_u64 { m.pc = sv_px_va(); }
+    let pc0 = m.pc;
+    let st0 = m.mstatus;
+    x[1] = sv_px_va();
+    x[2] = sv_px_stored();
+    let rc = sys_step_v(st.v, &mut m, &mut x, &mut ram, &mut out);
+    let mut ok = rc == EMU_OK && m.prv == prv && m.mstatus == st0 && sv_px_done(&m, &x, &ram, acc, pc0);
+    if want != 0_u64 {
+        let page = emu_peek(&ram, 0x80004000_u64, 8_u64) == sv_px_word(0_u64) && x[10] == 0_u64;
+        let csr = m.mcause == want && m.mtval == sv_px_va() && m.mepc == pc0 && m.pc == MV_TVEC;
+        let stack = m.prv == PRIV_M && ((m.mstatus >> 11_u64) & 3_u64) == prv;
+        ok = rc == EMU_TRAP && page && csr && stack && m.traps == 1_u64 && m.steps == 0_u64;
+    }
+    if st.show && !ok { println!("smatrix row {:x} rc={} mcause={:x} mtval={:x} x10={:x} pass=false", row, rc, m.mcause, m.mtval, x[10]); }
+    xv_note(st, ok);
+}
+
+fn sv_rows(st: &mut XSt, r: &[u64]) ~ Console {
+    let mut k: usize = 0;
+    while k < r.len() {
+        sv_px(st, r[k]);
+        k = k + 1;
+    }
+}
+
+// Runs every generic case and every row through variant v and returns the
+// tally: `fail` is the first failing case, or 0, and `bad` the number of
+// failing cases. Rows are numbered on from the last generic case.
+fn svec_run(v: u64, show: bool) -> XSt ~ Console {
+    let mut st = XSt { v: v, show: show, fail: 0_u64, count: 0_u64, bad: 0_u64 };
+    sv_tables(&mut st);
+    let generic = st.count;
+    let bad = st.bad;
+    if show { println!("scases: {} run, {} fail, first failure {}", st.count, st.bad, st.fail); }
+    sv_matrix(&mut st);
+    if show { println!("smatrix: {} rows run, {} fail", st.count - generic, st.bad - bad); }
+    st
+}

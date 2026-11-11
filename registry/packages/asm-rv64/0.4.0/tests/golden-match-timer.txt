@@ -1,0 +1,1 @@
+match tests/timer.s: 88 bytes, built-in image timer of emu-rv64 has 88 bytes, equal=true

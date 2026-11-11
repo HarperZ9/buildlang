@@ -1,0 +1,60 @@
+// asm-rv64 command line.
+//
+//   asm-rv64 asm FILE | bytes FILE | dis FILE
+//   asm-rv64 match FILE NAME | same FILE IMAGE | hand FILE GOLDEN
+//   asm-rv64 acases | aprops SEED STEPS | acontrols
+//
+// The file commands are in acmd.bld, the checks in acase.bld to acase8.bld,
+// aprop.bld to aprop3.bld and actl.bld.
+
+fn ax_usage() ~ Console {
+    println!("usage: asm-rv64 asm FILE | bytes FILE | dis FILE");
+    println!("       asm-rv64 match FILE NAME | same FILE IMAGE | hand FILE GOLDEN");
+    println!("       asm-rv64 acases | aprops SEED STEPS | acontrols");
+    println!("       asm-rv64 asmx FILE | bytesx FILE | serial FILE MAX | serial-check FILE MAX");
+}
+
+// Runs a file command. Returns -1 when the first argument is not one,
+// else the exit status.
+fn ax_file_main() -> i64 ~ Console + FileSystem + Process + Environment {
+    let cmd = args_get(1);
+    let argc = args_count();
+    if cmd == "asm" && argc >= 3 { return ax_cmd_asm(args_get(2)); }
+    if cmd == "bytes" && argc >= 3 { return ax_cmd_bytes(args_get(2)); }
+    if cmd == "dis" && argc >= 3 { return ax_cmd_dis(args_get(2)); }
+    if cmd == "match" && argc >= 4 { return ax_cmd_match(args_get(2), args_get(3)); }
+    if cmd == "same" && argc >= 4 { return ax_cmd_same(args_get(2), args_get(3)); }
+    if cmd == "hand" && argc >= 4 { return ax_cmd_hand(args_get(2), args_get(3)); }
+    ay_main()
+}
+
+// Runs a check command. Returns -1 when the first argument is not one,
+// else the exit status.
+fn ax_check_main() -> i64 ~ Console + Process + Environment {
+    let cmd = args_get(1);
+    if cmd == "acases" {
+        let st = ac_run(0_u64, true);
+        if st.fails.len() > 0 { return 1; }
+        return 0;
+    }
+    if cmd == "aprops" && args_count() >= 4 {
+        let seed = args_get(2).parse_int() as u64;
+        let steps = args_get(3).parse_int() as u64;
+        println!("aprops seed={} steps={}", seed, steps);
+        return ap_show(0_u64, seed, steps);
+    }
+    if cmd == "acontrols" {
+        if ac_controls(1_u64, 20000_u64) != 0 { return 1; }
+        return 0;
+    }
+    -1
+}
+
+fn main() ~ Console + FileSystem + Process + Environment {
+    let mut rc = ax_file_main();
+    if rc < 0 { rc = ax_check_main(); }
+    if rc == 0 { return; }
+    if rc > 0 { exit(rc as i32); }
+    ax_usage();
+    exit(2);
+}

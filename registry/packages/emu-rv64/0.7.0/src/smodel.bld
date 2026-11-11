@@ -1,0 +1,157 @@
+// Reference model for the system profile of emu-rv64, first part: the
+// CSRs, trap entry, the two returns and the interrupt scan. It continues
+// the older model files and, like them, is built a different way from the
+// core on purpose:
+//   - all the state the profile adds lives in a caller array `c` of 34
+//     slots, not in the Machine, and the privilege mode is one of them;
+//   - every field of mstatus has a slot of its own, 0 or 1 (0, 1 or 3 for
+//     MPP), and the register value is composed one field at a time when it
+//     is read, where the core keeps one word and masks;
+//   - the CSR numbers are a table that is scanned;
+//   - the interrupt order is one table of six causes, scanned once, with
+//     the destination worked out per cause;
+//   - the vectored handler address adds the cause four times.
+// It calls no function of sys1.bld to sys5.bld. Nothing outside the checks
+// calls this file.
+
+// Puts the model array in the reset state of the system profile.
+fn sref_reset(c: &mut [u64]) {
+    let mut i: usize = 0;
+    while i < RS_COUNT {
+        c[i] = 0_u64;
+        i = i + 1;
+    }
+    c[RC_CMP] = ref_fill(0_u64, 0_u64, 1_u64);
+    c[RS_MPP] = 3_u64;
+    c[RS_PRV] = 3_u64;
+}
+
+// 1 when CSR n exists. One row per register.
+fn sref_csr_has(n: u64) -> u64 {
+    let t: [u64; 29] = [0x100_u64, 0x104_u64, 0x105_u64, 0x106_u64, 0x10A_u64, 0x140_u64, 0x141_u64,
+        0x142_u64, 0x143_u64, 0x144_u64, 0x180_u64, 0x300_u64, 0x301_u64, 0x302_u64, 0x303_u64,
+        0x304_u64, 0x305_u64, 0x306_u64, 0x30A_u64, 0x340_u64, 0x341_u64, 0x342_u64, 0x343_u64,
+        0x344_u64, 0xF11_u64, 0xF12_u64, 0xF13_u64, 0xF14_u64, 0xF15_u64];
+    let mut i: usize = 0;
+    while i < 29 {
+        if t[i] == n { return 1_u64; }
+        i = i + 1;
+    }
+    0_u64
+}
+
+// mstatus, or its supervisor view, composed from the field slots. UXL and
+// SXL are the constant 2.
+fn sref_status(c: &[u64], view: bool) -> u64 {
+    let mut v = ref_put(0_u64, 1_u64, c[RS_SIE], 0_u64, 1_u64);
+    v = ref_put(v, 5_u64, c[RS_SPIE], 0_u64, 1_u64);
+    v = ref_put(v, 8_u64, c[RS_SPP], 0_u64, 1_u64);
+    v = ref_put(v, 18_u64, c[RS_SUM], 0_u64, 1_u64);
+    v = ref_put(v, 19_u64, c[RS_MXR], 0_u64, 1_u64);
+    v = ref_put(v, 32_u64, 2_u64, 0_u64, 2_u64);
+    if view { return v; }
+    v = ref_put(v, 3_u64, c[RC_MIE], 0_u64, 1_u64);
+    v = ref_put(v, 7_u64, c[RC_MPIE], 0_u64, 1_u64);
+    v = ref_put(v, 11_u64, c[RS_MPP], 0_u64, 2_u64);
+    v = ref_put(v, 17_u64, c[RS_MPRV], 0_u64, 1_u64);
+    v = ref_put(v, 20_u64, c[RS_TVM], 0_u64, 1_u64);
+    v = ref_put(v, 21_u64, c[RS_TW], 0_u64, 1_u64);
+    v = ref_put(v, 22_u64, c[RS_TSR], 0_u64, 1_u64);
+    ref_put(v, 34_u64, 2_u64, 0_u64, 2_u64)
+}
+
+// A write to mstatus or to its supervisor view, field by field. A write of
+// 2 to MPP leaves the field.
+fn sref_status_set(c: &mut [u64], v: u64, view: bool) {
+    c[RS_SIE] = ref_bit(v, 1_u64);
+    c[RS_SPIE] = ref_bit(v, 5_u64);
+    c[RS_SPP] = ref_bit(v, 8_u64);
+    c[RS_SUM] = ref_bit(v, 18_u64);
+    c[RS_MXR] = ref_bit(v, 19_u64);
+    if view { return; }
+    c[RC_MIE] = ref_bit(v, 3_u64);
+    c[RC_MPIE] = ref_bit(v, 7_u64);
+    let mpp = ref_put(0_u64, 0_u64, v, 11_u64, 2_u64);
+    if mpp != 2_u64 { c[RS_MPP] = mpp; }
+    c[RS_MPRV] = ref_bit(v, 17_u64);
+    c[RS_TVM] = ref_bit(v, 20_u64);
+    c[RS_TW] = ref_bit(v, 21_u64);
+    c[RS_TSR] = ref_bit(v, 22_u64);
+}
+
+// mip as software reads it: the bits of ref_pending and the three
+// supervisor bits machine-mode software wrote.
+fn sref_pending(c: &[u64]) -> u64 {
+    let a = ref_put(ref_pending(c), 1_u64, c[RC_IP], 1_u64, 1_u64);
+    let b = ref_put(a, 5_u64, c[RC_IP], 5_u64, 1_u64);
+    ref_put(b, 9_u64, c[RC_IP], 9_u64, 1_u64)
+}
+
+// v with only the bits of the three supervisor interrupts: 1, 5 and 9.
+fn sref_sbits(v: u64) -> u64 {
+    let a = ref_put(0_u64, 1_u64, v, 1_u64, 1_u64);
+    let b = ref_put(a, 5_u64, v, 5_u64, 1_u64);
+    ref_put(b, 9_u64, v, 9_u64, 1_u64)
+}
+
+// The value CSR n reads. The caller has checked that the access is legal.
+fn sref_csr_get(c: &[u64], n: u64) -> u64 {
+    if n == 0x300_u64 { return sref_status(c, false); }
+    if n == 0x100_u64 { return sref_status(c, true); }
+    if n == 0x301_u64 { return ref_csr_get(c, n) | (1_u64 << 18_u64) | (1_u64 << 20_u64); }
+    if n == 0x344_u64 { return sref_pending(c); }
+    if n == 0x144_u64 { return sref_pending(c) & c[RS_MIDELEG]; }
+    if n == 0x104_u64 { return c[RC_IE] & c[RS_MIDELEG]; }
+    if n == 0x302_u64 { return c[RS_MEDELEG]; }
+    if n == 0x303_u64 { return c[RS_MIDELEG]; }
+    if n == 0x105_u64 { return c[RS_STVEC]; }
+    if n == 0x140_u64 { return c[RS_SSCRATCH]; }
+    if n == 0x141_u64 { return c[RS_SEPC]; }
+    if n == 0x142_u64 { return c[RS_SCAUSE]; }
+    if n == 0x143_u64 { return c[RS_STVAL]; }
+    if n == 0x180_u64 { return c[RS_SATP]; }
+    if n == 0x30A_u64 { return c[RS_MENV]; }
+    if n == 0x10A_u64 { return c[RS_SENV]; }
+    if n == 0x306_u64 || n == 0x106_u64 { return 0_u64; }
+    ref_csr_get(c, n)
+}
+
+// A write to an interrupt or delegation register. Returns false when n is
+// none of them.
+fn sref_csr_set_irq(c: &mut [u64], n: u64, v: u64) -> bool {
+    let dl = c[RS_MIDELEG];
+    if n == 0x304_u64 { c[RC_IE] = ref_irq_bits(v) | sref_sbits(v); return true; }
+    if n == 0x104_u64 { c[RC_IE] = (c[RC_IE] & !dl) | (v & dl); return true; }
+    if n == 0x344_u64 { c[RC_IP] = ref_irq_bits(c[RC_IP]) | sref_sbits(v); return true; }
+    if n == 0x144_u64 {
+        if ref_bit(dl, 1_u64) == 1_u64 { c[RC_IP] = (c[RC_IP] & !2_u64) | (v & 2_u64); }
+        return true;
+    }
+    if n == 0x302_u64 {
+        c[RS_MEDELEG] = ref_put(ref_put(ref_put(0_u64, 0_u64, v, 0_u64, 10_u64), 12_u64, v, 12_u64, 2_u64), 15_u64, v, 15_u64, 1_u64);
+        return true;
+    }
+    if n == 0x303_u64 { c[RS_MIDELEG] = sref_sbits(v); return true; }
+    false
+}
+
+// A write to CSR n. satp keeps MODE 8 with the PPN, takes all zeros for
+// MODE 0 and ignores a write of any other MODE.
+fn sref_csr_set(c: &mut [u64], n: u64, v: u64) {
+    if sref_csr_set_irq(c, n, v) { return; }
+    if n == 0x300_u64 { sref_status_set(c, v, false); return; }
+    if n == 0x100_u64 { sref_status_set(c, v, true); return; }
+    if n == 0x105_u64 { c[RS_STVEC] = ref_put(ref_bit(v, 0_u64), 2_u64, v, 2_u64, 62_u64); }
+    if n == 0x140_u64 { c[RS_SSCRATCH] = v; }
+    if n == 0x141_u64 { c[RS_SEPC] = ref_put(0_u64, 2_u64, v, 2_u64, 62_u64); }
+    if n == 0x142_u64 { c[RS_SCAUSE] = v; }
+    if n == 0x143_u64 { c[RS_STVAL] = v; }
+    if n == 0x30A_u64 { c[RS_MENV] = ref_bit(v, 0_u64); }
+    if n == 0x10A_u64 { c[RS_SENV] = ref_bit(v, 0_u64); }
+    if n == 0x180_u64 {
+        let mode = ref_put(0_u64, 0_u64, v, 60_u64, 4_u64);
+        if mode == 0_u64 { c[RS_SATP] = 0_u64; }
+        if mode == 8_u64 { c[RS_SATP] = ref_put(1_u64 << 63_u64, 0_u64, v, 0_u64, 44_u64); }
+    }
+    if n == 0x305_u64 || (n >= 0x340_u64 && n <= 0x343_u64) { ref_csr_set(c, n, v); }
+}

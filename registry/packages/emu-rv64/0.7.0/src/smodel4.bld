@@ -1,0 +1,129 @@
+// Reference model for the system profile of emu-rv64, fourth part: the
+// privileged instructions, the Zicsr instructions and the step. Nothing
+// outside the checks calls this file.
+
+// An illegal-instruction trap of the model: cause 2, the word as value.
+fn sref_ill(m: &mut Machine, c: &mut [u64], w: u64) -> i64 {
+    sref_trap(m, c, 2_u64, w, 0_u64)
+}
+
+// A retired instruction that changes nothing but the pc.
+fn sref_nop(m: &mut Machine) -> i64 {
+    m.pc = ref_add(m.pc, 4_u64);
+    m.steps = ref_add(m.steps, 1_u64);
+    0
+}
+
+// The words of the PRIV group: ECALL, EBREAK, SRET, MRET, WFI and
+// SFENCE.VMA, one row each. Returns -9 when w is none of them.
+fn sref_priv(m: &mut Machine, c: &mut [u64], w: u64) -> i64 {
+    let prv = c[RS_PRV];
+    let codes: [u64; 4] = [8_u64, 9_u64, 0_u64, 11_u64];
+    if ref_hit(w, 0xFFFFFFFF_u64, 0x00000073_u64) { return sref_trap(m, c, codes[prv as usize], 0_u64, 0_u64); }
+    if ref_hit(w, 0xFFFFFFFF_u64, 0x00100073_u64) { return sref_trap(m, c, 3_u64, 0_u64, 0_u64); }
+    if ref_hit(w, 0xFFFFFFFF_u64, 0x30200073_u64) {
+        if prv != 3_u64 { return sref_ill(m, c, w); }
+        return sref_xret(m, c, 3_u64);
+    }
+    if ref_hit(w, 0xFFFFFFFF_u64, 0x10200073_u64) {
+        if prv == 0_u64 || (prv == 1_u64 && c[RS_TSR] == 1_u64) { return sref_ill(m, c, w); }
+        return sref_xret(m, c, 1_u64);
+    }
+    if ref_hit(w, 0xFFFFFFFF_u64, 0x10500073_u64) {
+        if prv != 3_u64 && c[RS_TW] == 1_u64 { return sref_ill(m, c, w); }
+        return sref_nop(m);
+    }
+    if ref_hit(w, 0xFE007FFF_u64, 0x12000073_u64) {
+        if prv == 0_u64 || (prv == 1_u64 && c[RS_TVM] == 1_u64) { return sref_ill(m, c, w); }
+        return sref_nop(m);
+    }
+    -9
+}
+
+// One Zicsr word of the model. f3 is 1, 2, 3, 5, 6 or 7. The access is
+// illegal when the register does not exist, when bits 9 and 8 of its
+// number name a mode above the present one, when bits 11 and 10 are both
+// set and the instruction writes, or when it is satp in S-mode under TVM.
+fn sref_csr_step(m: &mut Machine, x: &mut [u64], c: &mut [u64], w: u64, f3: u64) -> i64 {
+    let n = ref_put(0_u64, 0_u64, w, 20_u64, 12_u64);
+    let field = ref_put(0_u64, 0_u64, w, 15_u64, 5_u64);
+    let rd = ref_put(0_u64, 0_u64, w, 7_u64, 5_u64);
+    let mode = ref_low(f3, 2_u64);
+    let prv = c[RS_PRV];
+    let mut touch = true;
+    if mode != 1_u64 && field == 0_u64 { touch = false; }
+    let mut bad = sref_csr_has(n) == 0_u64;
+    if ref_put(0_u64, 0_u64, n, 8_u64, 2_u64) > prv { bad = true; }
+    if ref_bit(n, 11_u64) == 1_u64 && ref_bit(n, 10_u64) == 1_u64 && touch { bad = true; }
+    if n == 0x180_u64 && prv == 1_u64 && c[RS_TVM] == 1_u64 { bad = true; }
+    if bad { return sref_ill(m, c, w); }
+    let old = sref_csr_get(c, n);
+    let mut src = field;
+    if ref_bit(f3, 2_u64) == 0_u64 { src = x[field as usize]; }
+    if touch { sref_csr_set(c, n, ref_csr_mix(mode, old, src)); }
+    if rd != 0_u64 { x[rd as usize] = old; }
+    sref_nop(m)
+}
+
+// A word of RV64I that is no load, no store and no system word: a jump,
+// a branch, arithmetic or FENCE. op is its number from ref_match.
+fn sref_plain(m: &mut Machine, x: &mut [u64], c: &mut [u64], w: u64, op: u64) -> i64 {
+    let rd = ref_put(0_u64, 0_u64, w, 7_u64, 5_u64);
+    let a = x[ref_put(0_u64, 0_u64, w, 15_u64, 5_u64) as usize];
+    let b = x[ref_put(0_u64, 0_u64, w, 20_u64, 5_u64) as usize];
+    let mut e = RefEff { rc: 0, wr: false, val: 0_u64, next: ref_add(m.pc, 4_u64) };
+    if op >= 3_u64 && op <= 10_u64 { e = ref_flow(op, w, m.pc, a, b); }
+    if e.rc != 0 { return sref_trap(m, c, 0_u64, e.next, 0_u64); }
+    if op <= 2_u64 || (op >= 22_u64 && op <= 49_u64) { e.wr = true; e.val = ref_value(op, w, m.pc, a, b); }
+    if e.wr && rd != 0_u64 { x[rd as usize] = e.val; }
+    m.pc = e.next;
+    m.steps = ref_add(m.steps, 1_u64);
+    0
+}
+
+// Executes the word w.
+fn sref_exec(m: &mut Machine, x: &mut [u64], ram: &mut [u8], out: &mut [u8], c: &mut [u64], w: u64) -> i64 {
+    let p = sref_priv(m, c, w);
+    if p != -9 { return p; }
+    let f3 = ref_put(0_u64, 0_u64, w, 12_u64, 3_u64);
+    if ref_hit(w, 0x7F_u64, 0x73_u64) && !ref_hit(w, 0x3000_u64, 0_u64) { return sref_csr_step(m, x, c, w, f3); }
+    let xo = ref_ma_match(w);
+    if xo >= 74_u64 { return sref_atomic(m, x, ram, out, c, w, xo); }
+    if xo != 0_u64 { return ref_m_step(m, x, w, xo); }
+    let op = ref_match(w);
+    if op == 0_u64 || op >= 51_u64 { return sref_ill(m, c, w); }
+    if op >= 11_u64 && op <= 21_u64 { return sref_mem(m, x, ram, out, c, w, op); }
+    sref_plain(m, x, c, w, op)
+}
+
+// The fetch: each of the four bytes at the pc is translated as a fetch in
+// the present mode and must lie in memory.
+fn sref_run(m: &mut Machine, x: &mut [u64], ram: &mut [u8], out: &mut [u8], c: &mut [u64]) -> i64 {
+    if ref_bit(m.pc, 0_u64) == 1_u64 || ref_bit(m.pc, 1_u64) == 1_u64 { return sref_trap(m, c, 0_u64, m.pc, 0_u64); }
+    let mut w: u64 = 0_u64;
+    let mut k: u64 = 0_u64;
+    while k < 4_u64 {
+        let t = sref_xlate(c, ram, ref_add(m.pc, k), 0_u64);
+        if t.cause != 0_u64 { return sref_trap(m, c, t.cause, m.pc, 0_u64); }
+        if !ref_ram_ok(ram.len() as u64, t.pa, 1_u64) { return sref_trap(m, c, 1_u64, m.pc, 0_u64); }
+        w = w | ((ram[(t.pa - 0x80000000_u64) as usize] as u64) << (8_u64 * k));
+        k = k + 1_u64;
+    }
+    sref_exec(m, x, ram, out, c, w)
+}
+
+// One step of the reference machine in the system profile. Same contract
+// as sys_step_v with variant 0: the interrupt scan, then the interrupt or
+// one instruction, then the tick.
+fn sref_step(m: &mut Machine, x: &mut [u64], ram: &mut [u8], out: &mut [u8], c: &mut [u64]) -> i64 {
+    if x.len() < 32 { return -4; }
+    let cause = sref_irq_scan(c);
+    let mut rc: i64 = 3;
+    if cause != 0_u64 {
+        rc = sref_trap(m, c, cause, 0_u64, 1_u64);
+    } else {
+        rc = sref_run(m, x, ram, out, c);
+    }
+    if rc == 0 || rc == 3 { c[RC_TIME] = ref_add(c[RC_TIME], 1_u64); }
+    rc
+}

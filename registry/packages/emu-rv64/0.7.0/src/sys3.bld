@@ -1,0 +1,142 @@
+// emu-rv64 core, system profile, third part: Sv39 address translation.
+//
+// A page is 4096 bytes of memory. A page table is one page that holds 512
+// page table entries (PTEs) of 8 bytes. Translation turns a virtual
+// address, the address a program uses, into a physical address, the
+// address of the byte in the machine, by walking three levels of page
+// tables from the root that satp names. The walk follows the numbered
+// steps of "Virtual Address Translation Process" in supervisor.adoc, with
+// LEVELS = 3 and PTESIZE = 8. Rules: SPEC.md, "Sv39 translation".
+//
+// Access kinds: 0 a fetch, 1 a load, 2 a store.
+
+// The result of a translation: cause 0 and the physical address, or the
+// exception code of the fault.
+struct Xl { cause: u64, pa: u64 }
+
+// The exception code of a fault of access kind acc: a page fault (12, 13,
+// 15) or an access fault (1, 5, 7).
+fn sys_fault(v: u64, acc: u64, page: bool) -> u64 {
+    if !page { return 1_u64 + 4_u64 * acc - 2_u64 * (acc / 2_u64); }
+    if acc == 2_u64 && v != SC_CAUSE { return EXC_STORE_PAGE; }
+    EXC_INSN_PAGE + (acc + 1_u64) / 2_u64
+}
+
+// The privilege mode an access is checked in. "When MPRV=1, load and store
+// memory addresses are translated and protected, and endianness is
+// applied, as though the current privilege mode were set to MPP.
+// Instruction address-translation and protection are unaffected by the
+// setting of MPRV."
+fn sys_eff_prv(v: u64, m: &Machine, acc: u64) -> u64 {
+    let mprv = (m.mstatus & MS_MPRV) != 0_u64;
+    if mprv && (acc != 0_u64 || v == SC_MPRV) { return (m.mstatus >> 11_u64) & 3_u64; }
+    m.prv
+}
+
+// Step 3 of the walk: "If pte.v=0, or if pte.r=0 and pte.w=1, or if any
+// bits or encodings that are reserved for future standard use are set
+// within pte, stop and raise a page-fault exception". Bits 63 to 54 are
+// reserved here: Svnapot and Svpbmt are not implemented, and for bits 60
+// to 54 "If any of these bits are set, a page-fault exception is raised".
+fn sys_pte_bad(v: u64, pte: u64) -> bool {
+    if (pte & PTE_V) == 0_u64 { return true; }
+    if (pte & PTE_R) == 0_u64 && (pte & PTE_W) != 0_u64 && v != SC_WONLY { return true; }
+    (pte >> 54_u64) != 0_u64
+}
+
+// Step 4: "If pte.r=1 or pte.x=1, go to step 5. Otherwise, this PTE is a
+// pointer to the next level of the page table."
+fn sys_pte_leaf(v: u64, pte: u64) -> bool {
+    if (pte & (PTE_R | PTE_X)) != 0_u64 { return true; }
+    v == SC_WONLY && (pte & PTE_W) != 0_u64
+}
+
+// Steps 6 to 9 for a leaf PTE: the U bit with SUM, the permission bits
+// with MXR, then the accessed and dirty bits.
+//
+// "U-mode software may only access the page when U=1. If the SUM bit in
+// the sstatus register is set, supervisor mode software may also access
+// pages with U=1." "Irrespective of SUM, the supervisor may not execute
+// code on pages with U=1."
+// "When MXR=1, loads from pages marked either readable or executable (R=1
+// or X=1) will succeed."
+// A and D follow the Svade scheme: "when a virtual page is accessed and
+// the A bit is clear, or is written and the D bit is clear, a page-fault
+// exception is raised." The machine never writes a PTE.
+fn sys_leaf_ok(v: u64, m: &Machine, pte: u64, acc: u64, prv: u64) -> bool {
+    let user = (pte & PTE_U) != 0_u64;
+    if v != SC_UBIT {
+        if prv == PRIV_U && !user { return false; }
+        if prv == PRIV_S && user && acc == 0_u64 { return false; }
+        if prv == PRIV_S && user && (m.mstatus & MS_SUM) == 0_u64 && v != SC_SUM { return false; }
+    }
+    let mxr = (m.mstatus & MS_MXR) != 0_u64 && v != SC_MXR;
+    let exec = (pte & PTE_X) != 0_u64;
+    if acc == 0_u64 && !exec { return false; }
+    if acc == 1_u64 && (pte & PTE_R) == 0_u64 && !(mxr && exec) { return false; }
+    if acc == 2_u64 && (pte & PTE_W) == 0_u64 { return false; }
+    if (pte & PTE_A) == 0_u64 && v != SC_ABIT { return false; }
+    if acc == 2_u64 && (pte & PTE_D) == 0_u64 && v != SC_DBIT { return false; }
+    true
+}
+
+// Steps 5 to 10 for the leaf PTE found at level i. A superpage is a leaf
+// above level 0: it maps 2 MiB at level 1 and 1 GiB at level 2. "If i>0
+// and pte.ppn[i-1:0] != 0, this is a misaligned superpage; stop and raise
+// a page-fault exception". The address: "pa.pgoff = va.pgoff. If i>0, then
+// this is a superpage translation and pa.ppn[i-1:0] = va.vpn[i-1:0].
+// pa.ppn[LEVELS-1:i] = pte.ppn[LEVELS-1:i]."
+fn sys_leaf(v: u64, m: &Machine, pte: u64, va: u64, acc: u64, prv: u64, i: u64) -> Xl {
+    let page = Xl { cause: sys_fault(v, acc, true), pa: 0_u64 };
+    let ppn = (pte >> 10_u64) & SATP_PPN;
+    let low = (1_u64 << (9_u64 * i)) - 1_u64;
+    if (ppn & low) != 0_u64 && v != SC_SUPER { return page; }
+    if !sys_leaf_ok(v, m, pte, acc, prv) { return page; }
+    let mask = (1_u64 << (12_u64 + 9_u64 * i)) - 1_u64;
+    Xl { cause: 0_u64, pa: ((ppn << 12_u64) & !mask) | (va & mask) }
+}
+
+// The walk. A canonical address is one whose bits 63 to 39 all equal bit
+// 38: addresses "must have bits 63-39 all equal to bit 38, or else a
+// page-fault exception will occur". A PTE is read from memory only: when
+// its address is outside memory the access fault of the access kind is
+// raised, "If accessing pte violates a PMA or PMP check, raise an
+// access-fault exception corresponding to the original access type." In a
+// PTE that points to the next level the D, A and U bits "are reserved for
+// future standard use", so one that has any of them set faults by step 3.
+fn sys_walk(v: u64, m: &Machine, ram: &[u8], va: u64, acc: u64, prv: u64) -> Xl {
+    let page = Xl { cause: sys_fault(v, acc, true), pa: 0_u64 };
+    let top = va >> 38_u64;
+    if top != 0_u64 && top != 0x3FFFFFF_u64 && v != SC_CANON { return page; }
+    let mut i: u64 = 3_u64;
+    if v == SC_TWO { i = 2_u64; }
+    if v == SC_FOUR { i = 4_u64; }
+    let mut a = (m.satp & SATP_PPN) << 12_u64;
+    while i > 0_u64 {
+        i = i - 1_u64;
+        let at = a + ((va >> (12_u64 + 9_u64 * i)) & 0x1FF_u64) * 8_u64;
+        if !emu_in_ram(ram.len() as u64, at, 8_u64) {
+            return Xl { cause: sys_fault(v, acc, false), pa: 0_u64 };
+        }
+        let pte = emu_peek(ram, at, 8_u64);
+        if sys_pte_bad(v, pte) { return page; }
+        if sys_pte_leaf(v, pte) { return sys_leaf(v, m, pte, va, acc, prv, i); }
+        if (pte & (PTE_D | PTE_A | PTE_U)) != 0_u64 { return page; }
+        a = ((pte >> 10_u64) & SATP_PPN) << 12_u64;
+    }
+    page
+}
+
+// Translates va for an access of kind acc. In M-mode, and with satp MODE
+// 0, the physical address is the virtual address: "When MODE=Bare,
+// supervisor virtual addresses are equal to supervisor physical addresses,
+// and there is no additional memory protection beyond the physical memory
+// protection scheme". There is no physical memory protection: "If no PMP
+// entry matches an S-mode or U-mode memory operation, the operation fails
+// if at least one PMP entry is implemented and succeeds otherwise", and
+// none is implemented.
+fn sys_translate(v: u64, m: &Machine, ram: &[u8], va: u64, acc: u64) -> Xl {
+    let prv = sys_eff_prv(v, m, acc);
+    if prv == PRIV_M || (m.satp >> 60_u64) != 8_u64 { return Xl { cause: 0_u64, pa: va }; }
+    sys_walk(v, m, ram, va, acc, prv)
+}

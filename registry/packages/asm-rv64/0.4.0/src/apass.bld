@@ -1,0 +1,243 @@
+// asm-rv64: lines, labels, directives and the two passes.
+//
+// Pass 1 reads every line to learn the offset of each label. Pass 2 reads
+// every line again and encodes. Both passes run the same code, so a label
+// has the offset the image gives it. The image is a list of 32-bit words:
+// the location counter is always a multiple of 4.
+
+// The reason for an error code, as the command asm prints it.
+fn as_err_text(code: u64) -> str {
+    if code == AE_MNEMONIC { return "unknown mnemonic"; }
+    if code == AE_REG { return "bad register, expected x0 to x31"; }
+    if code == AE_RANGE { return "immediate out of range for its field"; }
+    if code == AE_ALIGN { return "branch or jump offset is odd"; }
+    if code == AE_FAR { return "branch or jump target out of range"; }
+    if code == AE_UNDEF { return "undefined label"; }
+    if code == AE_DUP { return "duplicate label"; }
+    if code == AE_COUNT { return "wrong operand count"; }
+    if code == AE_TRAIL { return "trailing text after an operand"; }
+    if code == AE_NUMBER { return "bad number"; }
+    if code == AE_MEM { return "expected imm(rs1)"; }
+    if code == AE_CSR { return "unknown CSR name"; }
+    if code == AE_ORG { return ".org offset is not a multiple of 4 or lies before the location"; }
+    if code == AE_DIRECTIVE { return "unknown directive"; }
+    if code == AE_BIG { return "image larger than 65536 bytes"; }
+    if code == AE_LABEL { return "bad label name"; }
+    if code == AE_EMPTY { return "empty operand"; }
+    if code == AE_LABELS { return "more than 1024 labels"; }
+    if code == AE_ADDR { return "expected (rs1)"; }
+    if code == AE_BIG2 { return "image larger than 1048576 bytes"; }
+    if code == AE_LABELS2 { return "more than 65536 labels"; }
+    "encoder refused the instruction"
+}
+
+fn as_out_new() -> AsOut {
+    AsOut { count: 0_u64, words: Vec::new(), errs: Vec::new(), errs1: Vec::new(), errs2: Vec::new(), labs: Vec::new() }
+}
+
+// Empties o, so that one record serves many assemblies.
+fn as_out_reset(o: &mut AsOut) {
+    o.count = 0_u64;
+    o.words.clear();
+    o.errs.clear();
+    o.errs1.clear();
+    o.errs2.clear();
+    o.labs.clear();
+}
+
+// The most words an image of this assembly may hold.
+fn as_words_max(st: &AsSt) -> u64 {
+    if st.big { return AS_BIG_WORDS; }
+    AS_WORDS_MAX
+}
+
+// The error code for an image past that limit.
+fn as_big_code(st: &AsSt) -> u64 {
+    if st.big { return AE_BIG2; }
+    AE_BIG
+}
+
+// Places one word at the location counter. Pass 1 only counts.
+fn as_emit(st: &mut AsSt, o: &mut AsOut, w: u64) {
+    if st.loc >= 4_u64 * as_words_max(st) {
+        as_fail(st, as_big_code(st));
+        return;
+    }
+    if st.pass == 2_u64 { o.words.push(w); }
+    st.loc = st.loc + 4_u64;
+}
+
+// A label definition. Only pass 1 records it. Defect 9 accepts a second
+// definition of a name and keeps using the first.
+fn as_label(st: &mut AsSt, src: &[u8], lo: usize, hi: usize, o: &mut AsOut) {
+    if st.pass != 1_u64 { return; }
+    let mut code: u64 = 0_u64;
+    if !as_ident_ok(src, lo, hi) {
+        code = AE_LABEL;
+    } else if st.v != ACTL_DUP && as_lab_find(src, &o.labs, lo, hi) != AS_NONE {
+        code = AE_DUP;
+    } else if !st.big && o.labs.len() >= 3 * AS_LABELS_MAX {
+        code = AE_LABELS;
+    } else if o.labs.len() >= 3 * AS_BIG_LABELS {
+        code = AE_LABELS2;
+    }
+    if code != 0_u64 {
+        o.errs1.push(st.line);
+        o.errs1.push(code);
+        return;
+    }
+    o.labs.push(lo as u64);
+    o.labs.push((hi - lo) as u64);
+    o.labs.push(st.loc);
+}
+
+// .word VALUE places one word, 0 to 0xFFFFFFFF. Defect 5 does not count
+// the word in pass 1, so every later label is 4 bytes short.
+fn as_dir_word(st: &mut AsSt, src: &[u8], f: &AsFields, o: &mut AsOut) {
+    let n = as_f_num(st, src, f.a0, f.b0);
+    let w = as_imm(st, &n, 0_u64, 0xFFFFFFFF_u64);
+    if st.v == ACTL_WORD && st.pass == 1_u64 { return; }
+    as_emit(st, o, w);
+}
+
+// .org OFFSET moves the location counter forward to OFFSET and fills the
+// gap with zero words. After an error the location stays where it was.
+fn as_dir_org(st: &mut AsSt, src: &[u8], f: &AsFields, o: &mut AsOut) {
+    let n = as_f_num(st, src, f.a0, f.b0);
+    if st.err != 0_u64 { return; }
+    if n.neg || (n.mag & 3_u64) != 0_u64 || n.mag < st.loc {
+        as_fail(st, AE_ORG);
+        return;
+    }
+    if n.mag > 4_u64 * as_words_max(st) {
+        as_fail(st, as_big_code(st));
+        return;
+    }
+    while st.loc < n.mag { as_emit(st, o, 0_u64); }
+}
+
+// A statement whose first word starts with a dot.
+fn as_directive(st: &mut AsSt, src: &[u8], lo: usize, hi: usize, f: &AsFields, o: &mut AsOut) {
+    let word = as_is(src, lo, hi, ".word");
+    if !word && !as_is(src, lo, hi, ".org") {
+        as_fail(st, AE_DIRECTIVE);
+        return;
+    }
+    if f.n != 1 {
+        as_fail(st, AE_COUNT);
+        return;
+    }
+    if word { as_dir_word(st, src, f, o); } else { as_dir_org(st, src, f, o); }
+}
+
+// One statement: a directive or an instruction. An instruction takes 4
+// bytes also when it has an error, so later labels keep their offsets.
+fn as_stmt(st: &mut AsSt, src: &[u8], lo: usize, hi: usize, o: &mut AsOut) {
+    let e = as_word_end(src, lo, hi);
+    let f = as_fields(src, e, hi);
+    if e > lo && src[lo] == 46_u8 {
+        as_directive(st, src, lo, e, &f, o);
+        return;
+    }
+    let ord = as_order(src, lo, e);
+    let op = as_op_atomic(st.v, as_op_find(src, lo, ord.end), ord.bits);
+    let mut w: u64 = 0_u64;
+    if op == 0_u64 {
+        as_fail(st, AE_MNEMONIC);
+    } else {
+        let mut d = as_insn(st, src, &o.labs, op, &f);
+        if emu_class(op) == CL_A { d.imm = ord.bits; }
+        if st.err == 0_u64 && st.pass == 2_u64 {
+            w = emu_encode(&d);
+            if w == 0_u64 { as_fail(st, AE_INTERNAL); }
+        }
+    }
+    as_emit(st, o, w);
+}
+
+// One line without its comment: an optional label, then an optional
+// statement. Pass 2 records the error of the statement.
+fn as_line(st: &mut AsSt, src: &[u8], lo: usize, hi: usize, o: &mut AsOut) {
+    st.err = 0_u64;
+    let mut a = as_skip(src, lo, hi);
+    let e = as_word_end(src, a, hi);
+    let c = as_skip(src, e, hi);
+    if c < hi && src[c] == 58_u8 {
+        as_label(st, src, a, e, o);
+        a = as_skip(src, c + 1, hi);
+    }
+    if a < hi { as_stmt(st, src, a, hi, o); }
+    if st.err != 0_u64 && st.pass == 2_u64 {
+        o.errs2.push(st.line);
+        o.errs2.push(st.err);
+    }
+}
+
+// One pass over the n bytes of the source. A line ends at a line feed and
+// a statement at the first #. Defect 8 reads the text after a # as one
+// more line.
+fn as_pass(st: &mut AsSt, src: &[u8], n: usize, o: &mut AsOut) {
+    st.loc = 0_u64;
+    st.line = 1_u64;
+    let mut lo: usize = 0;
+    while lo < n {
+        let mut e = lo;
+        while e < n && src[e] != 10_u8 && src[e] != 35_u8 { e = e + 1; }
+        as_line(st, src, lo, e, o);
+        if st.v != ACTL_COMMENT {
+            while e < n && src[e] != 10_u8 { e = e + 1; }
+        }
+        if e < n && src[e] == 10_u8 { st.line = st.line + 1_u64; }
+        lo = e + 1;
+    }
+}
+
+// Puts the errors of both passes in line order into o.errs. Each list is
+// in line order already. On one line a label error comes first.
+fn as_merge(o: &mut AsOut) {
+    let mut i: usize = 0;
+    let mut j: usize = 0;
+    while i < o.errs1.len() || j < o.errs2.len() {
+        let take1 = i < o.errs1.len() && (j >= o.errs2.len() || o.errs1[i] <= o.errs2[j]);
+        if take1 {
+            o.errs.push(o.errs1[i]);
+            o.errs.push(o.errs1[i + 1]);
+            i = i + 2;
+        } else {
+            o.errs.push(o.errs2[j]);
+            o.errs.push(o.errs2[j + 1]);
+            j = j + 2;
+        }
+    }
+}
+
+// Assembles the first n bytes of src with planted defect v, 0 for none.
+// o is empty on entry. Returns the number of errors. With no error o.words holds the image and
+// o.count its length in words; with any error o.count is 0 and the words
+// are not an image.
+fn as_assemble(v: u64, src: &[u8], n: usize, o: &mut AsOut) -> u64 {
+    as_assemble_lim(v, false, src, n, o)
+}
+
+// Since 0.4.0: the same with the large limits, an image of at most
+// 1048576 bytes and at most 65536 labels.
+fn as_assemble_big(v: u64, src: &[u8], n: usize, o: &mut AsOut) -> u64 {
+    as_assemble_lim(v, true, src, n, o)
+}
+
+fn as_assemble_lim(v: u64, big: bool, src: &[u8], n: usize, o: &mut AsOut) -> u64 {
+    let mut st = AsSt { v: v, pass: 1_u64, loc: 0_u64, line: 1_u64, err: 0_u64, big: big };
+    as_pass(&mut st, src, n, o);
+    st.pass = 2_u64;
+    as_pass(&mut st, src, n, o);
+    as_merge(o);
+    let bad = (o.errs.len() / 2) as u64;
+    o.count = 0_u64;
+    if bad == 0_u64 { o.count = o.words.len() as u64; }
+    bad
+}
+
+// Byte i of an image of words, least significant byte of a word first.
+fn as_byte(o: &AsOut, i: usize) -> u8 {
+    ((o.words[i / 4] >> (8_u64 * ((i % 4) as u64))) & 0xFF_u64) as u8
+}

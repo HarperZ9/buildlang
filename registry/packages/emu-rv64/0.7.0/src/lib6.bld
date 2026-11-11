@@ -1,0 +1,167 @@
+// emu-rv64 core, sixth part: the M extension (integer multiply and divide)
+// and the A extension (atomic instructions). Since 0.5.0, trap profile only.
+//
+// Each rule below carries the sentence of the RISC-V manual it follows, as a
+// quotation. The files are src/unpriv/m-st-ext.adoc, zalrsc.adoc, zaamo.adoc
+// and rv-32-64g.adoc of riscv/riscv-isa-manual at commit d50ad50f. The
+// encodings are rows of the instruction listing in rv-32-64g.adoc.
+// Rules: SPEC.md, "M extension", "A extension" and "Reservation".
+
+// OP-32 with funct7 0000001: funct3 000 MULW, 100 DIVW, 101 DIVUW,
+// 110 REMW, 111 REMUW. The other three values are no instruction.
+fn emu_dec_mulw(f3: u64) -> u64 {
+    if f3 == 0_u64 { return OP_MULW; }
+    if f3 >= 4_u64 { return OP_DIVW + f3 - 4_u64; }
+    0_u64
+}
+
+// The funct5 field, word bits 31 to 27, of atomic kind k. Kinds: 0 LR,
+// 1 SC, 2 AMOSWAP, 3 AMOADD, 4 AMOXOR, 5 AMOAND, 6 AMOOR, 7 AMOMIN,
+// 8 AMOMAX, 9 AMOMINU, 10 AMOMAXU. Listing: LR 00010, SC 00011,
+// AMOSWAP 00001, AMOADD 00000, AMOXOR 00100, AMOAND 01100, AMOOR 01000,
+// AMOMIN 10000, AMOMAX 10100, AMOMINU 11000, AMOMAXU 11100.
+fn emu_a_funct5(k: u64) -> u64 {
+    if k == 0_u64 { return 0x02_u64; }
+    if k == 1_u64 { return 0x03_u64; }
+    if k == 2_u64 { return 0x01_u64; }
+    if k == 3_u64 { return 0x00_u64; }
+    if k == 4_u64 { return 0x04_u64; }
+    if k == 5_u64 { return 0x0C_u64; }
+    if k == 6_u64 { return 0x08_u64; }
+    if k == 7_u64 { return 0x10_u64; }
+    if k == 8_u64 { return 0x14_u64; }
+    if k == 9_u64 { return 0x18_u64; }
+    0x1C_u64
+}
+
+// Opcode AMO, 0101111. funct3 010 is the 32-bit width and 011 the 64-bit
+// width. LR has 00000 in the rs2 field; any other value there is no
+// instruction. Bits 26 (aq) and 25 (rl) do not select the operation.
+fn emu_dec_atomic(w: u64, f3: u64) -> u64 {
+    if f3 != 2_u64 && f3 != 3_u64 { return 0_u64; }
+    let f5 = w >> 27_u64;
+    let mut k: u64 = 0_u64;
+    while k <= 10_u64 {
+        if emu_a_funct5(k) == f5 {
+            if k == 0_u64 && ((w >> 20_u64) & 31_u64) != 0_u64 { return 0_u64; }
+            return OP_LR_W + k + 11_u64 * (f3 - 2_u64);
+        }
+        k = k + 1_u64;
+    }
+    0_u64
+}
+
+// The upper 64 bits of the 128-bit product of two unsigned 64-bit numbers,
+// from four products of 32-bit limbs. No partial sum can pass 64 bits:
+// each product is at most (2^32 - 1)^2 and `mid` adds three numbers below
+// 2^32.
+fn emu_mulhu(a: u64, b: u64) -> u64 {
+    let a0 = a & 0xFFFFFFFF_u64;
+    let a1 = a >> 32_u64;
+    let b0 = b & 0xFFFFFFFF_u64;
+    let b1 = b >> 32_u64;
+    let p00 = a0.wrapping_mul(b0);
+    let p01 = a0.wrapping_mul(b1);
+    let p10 = a1.wrapping_mul(b0);
+    let p11 = a1.wrapping_mul(b1);
+    let mid = (p00 >> 32_u64) + (p01 & 0xFFFFFFFF_u64) + (p10 & 0xFFFFFFFF_u64);
+    p11 + (p01 >> 32_u64) + (p10 >> 32_u64) + (mid >> 32_u64)
+}
+
+// "MUL performs an XLEN-bit x XLEN-bit multiplication of rs1 by rs2 and
+// places the lower XLEN bits in the destination register. MULH, MULHU, and
+// MULHSU perform the same multiplication but return the upper XLEN bits of
+// the full 2 x XLEN-bit product, for signed x signed, unsigned x unsigned,
+// and rs1 x unsigned rs2 multiplication."
+// A negative operand read as unsigned is 2^64 too large, so the unsigned
+// upper half is corrected by the other operand once for each negative one.
+fn emu_mul(op: u64, a: u64, b: u64) -> u64 {
+    if op == OP_MUL { return a.wrapping_mul(b); }
+    let mut hi = emu_mulhu(a, b);
+    if op == OP_MULHU { return hi; }
+    if (a >> 63_u64) == 1_u64 { hi = hi.wrapping_sub(b); }
+    if op == OP_MULH && (b >> 63_u64) == 1_u64 { hi = hi.wrapping_sub(a); }
+    hi
+}
+
+// 0 minus v, modulo 2^64.
+fn emu_neg(v: u64) -> u64 { (!v).wrapping_add(1_u64) }
+
+// Unsigned division. "The quotient of division by zero has all bits set,
+// and the remainder of division by zero equals the dividend."
+fn emu_divu(rem: bool, a: u64, b: u64) -> u64 {
+    if b == 0_u64 {
+        if rem { return a; }
+        return !0_u64;
+    }
+    if rem { return a % b; }
+    a / b
+}
+
+// Signed division, "rounding towards zero", on the magnitudes. "For REM,
+// the sign of a nonzero result equals the sign of the dividend." "Signed
+// division overflow occurs only when the most-negative integer is divided
+// by -1. The quotient of a signed division with overflow is equal to the
+// dividend, and the remainder is zero."
+fn emu_divs(rem: bool, a: u64, b: u64) -> u64 {
+    if b == 0_u64 {
+        if rem { return a; }
+        return !0_u64;
+    }
+    if a == EMU_SIGN && b == !0_u64 {
+        if rem { return 0_u64; }
+        return a;
+    }
+    let na = (a >> 63_u64) == 1_u64;
+    let nb = (b >> 63_u64) == 1_u64;
+    let mut ma = a;
+    let mut mb = b;
+    if na { ma = emu_neg(a); }
+    if nb { mb = emu_neg(b); }
+    if rem {
+        if na { return emu_neg(ma % mb); }
+        return ma % mb;
+    }
+    if na != nb { return emu_neg(ma / mb); }
+    ma / mb
+}
+
+// The 32-bit forms. "MULW is an RV64 instruction that multiplies the lower
+// 32 bits of the source registers, placing the sign extension of the lower
+// 32 bits of the result into the destination register." "DIVW and DIVUW
+// are RV64 instructions that divide the lower 32 bits of rs1 by the lower
+// 32 bits of rs2, treating them as signed and unsigned integers, placing
+// the 32-bit quotient in rd, sign-extended to 64 bits." "Both REMW and
+// REMUW always sign-extend the 32-bit result to 64 bits, including on a
+// divide by zero."
+fn emu_m_word(op: u64, a: u64, b: u64) -> u64 {
+    let sa = emu_sext(a, 32_u64);
+    let sb = emu_sext(b, 32_u64);
+    let ua = a & 0xFFFFFFFF_u64;
+    let ub = b & 0xFFFFFFFF_u64;
+    if op == OP_MULW { return emu_sext(a.wrapping_mul(b), 32_u64); }
+    if op == OP_DIVW { return emu_sext(emu_divs(false, sa, sb), 32_u64); }
+    if op == OP_DIVUW { return emu_sext(emu_divu(false, ua, ub), 32_u64); }
+    if op == OP_REMW { return emu_sext(emu_divs(true, sa, sb), 32_u64); }
+    emu_sext(emu_divu(true, ua, ub), 32_u64)
+}
+
+// The value an M instruction writes to rd.
+fn emu_m_value(op: u64, a: u64, b: u64) -> u64 {
+    if op <= OP_MULHU { return emu_mul(op, a, b); }
+    if op == OP_DIV { return emu_divs(false, a, b); }
+    if op == OP_DIVU { return emu_divu(false, a, b); }
+    if op == OP_REM { return emu_divs(true, a, b); }
+    if op == OP_REMU { return emu_divu(true, a, b); }
+    emu_m_word(op, a, b)
+}
+
+// One M instruction. It cannot trap: division by zero and overflow give
+// the values above.
+fn emu_m_exec(m: &mut Machine, x: &mut [u64], d: &Insn) -> i64 {
+    let v = emu_m_value(d.op, x[d.rs1 as usize], x[d.rs2 as usize]);
+    if d.rd != 0_u64 { x[d.rd as usize] = v; }
+    m.pc = m.pc.wrapping_add(4_u64);
+    m.steps = m.steps + 1_u64;
+    EMU_OK
+}

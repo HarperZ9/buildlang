@@ -1,0 +1,1 @@
+image timer: 88 bytes, file tests/timer.img has 88 bytes, equal=true

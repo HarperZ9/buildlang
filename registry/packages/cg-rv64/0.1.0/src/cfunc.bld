@@ -1,0 +1,233 @@
+// cg-rv64: one function. Every local has a slot in the frame; nothing
+// lives in a register across two statements.
+//
+// Frame, from the stack pointer up:
+//   outgoing stack arguments, 8 bytes each
+//   the locals, each at a multiple of 8
+//   the hidden result address, when the result is an aggregate
+//   the return address
+// The frame size is a multiple of 16. The caller's stack arguments start
+// at the frame size.
+
+// The most arguments any call in the function passes, counting a hidden
+// result address for every call.
+fn cf_max_args(d: &CjDoc, f: u64) -> u64 {
+    let mut most: u64 = 0_u64;
+    let mut b = cj_first(d, cj_get(d, f, "blocks"));
+    while b != CG_NONE {
+        let call = cj_get(d, cj_get(d, b, "terminator"), "Call");
+        let n = cj_count(d, cj_get(d, call, "args")) + 1_u64;
+        if call != CG_NONE && n > most { most = n; }
+        b = cj_next(d, b);
+    }
+    most
+}
+
+// Gives every local its type and its frame offset, and sets the frame
+// size. Refuses a local whose type the generator cannot hold.
+fn cf_layout(g: &mut Cg, d: &CjDoc, f: u64) {
+    g.lty.clear();
+    g.loff.clear();
+    let most = cf_max_args(d, f);
+    let mut off: u64 = 0_u64;
+    if most > CG_ARG_REGS { off = 8_u64 * (most - CG_ARG_REGS); }
+    let mut loc = cj_first(d, cj_get(d, f, "locals"));
+    let mut i: u64 = 0_u64;
+    while loc != CG_NONE {
+        let t = cj_get(d, loc, "ty");
+        if cj_mag(d, cj_get(d, loc, "id")) != i || cj_kind(d, cj_get(d, loc, "id")) != CJ_NUM || !ct_known(g, d, t) {
+            cg_refuse_tag(g, d, "local of a type the generator does not cover:", t);
+        }
+        g.lty.push(t);
+        g.loff.push(off);
+        off = off + ct_round(ct_size(g, d, t), 8_u64);
+        i = i + 1_u64;
+        loc = cj_next(d, loc);
+    }
+    g.frame = ct_round(off + 16_u64, 16_u64);
+}
+
+// Moves the incoming arguments into their locals. Parameter k is local
+// k. Defect 10 reads a stack argument one slot too high.
+fn cf_params(g: &mut Cg, d: &CjDoc, f: u64) {
+    let mut pt = cj_first(d, cj_get(d, cj_get(d, f, "sig"), "params"));
+    let mut k: u64 = 0_u64;
+    while pt != CG_NONE {
+        let loc = cj_at(d, cj_get(d, f, "locals"), k);
+        let a = k + g.hid;
+        let mut reg = 10_u64 + a;
+        if cj_kind(d, cj_get(d, loc, "is_param")) != CJ_TRUE || !ct_same(d, cv_lty(g, k), pt) {
+            cg_refuse(g, d, "parameter whose local does not have the type of the signature");
+            return;
+        }
+        if a >= CG_ARG_REGS {
+            let mut slot = g.frame + 8_u64 * (a - CG_ARG_REGS);
+            if g.v == CGC_STACKARG { slot = slot + 8_u64; }
+            ci_mem(g, "ld", 5_u64, 2_u64, slot);
+            reg = 5_u64;
+        }
+        if ct_scalar(d, pt) {
+            ci_store(g, d, reg, 2_u64, cv_loff(g, k), pt);
+        } else if ct_agg(d, pt) {
+            ci_i(g, "addi", 7_u64, reg, 0_u64);
+            ci_add(g, 6_u64, 2_u64, cv_loff(g, k));
+            ci_copy(g, 6_u64, 7_u64, ct_size(g, d, pt));
+        } else {
+            cg_refuse(g, d, "parameter of a type the generator does not cover");
+        }
+        k = k + 1_u64;
+        pt = cj_next(d, pt);
+    }
+}
+
+// Entry code: make the frame, check the stack limit, save the return
+// address and the hidden result address, store the parameters.
+fn cf_enter(g: &mut Cg, d: &CjDoc, f: u64) {
+    ci_add(g, 2_u64, 2_u64, (0_u64).wrapping_sub(g.frame));
+    ci_skip(g, "bgeu", 2_u64, 27_u64, 1_u64);
+    ci_trap(g, "rt_stack");
+    ci_mem(g, "sd", 1_u64, 2_u64, g.frame - 8_u64);
+    if g.hid == 1_u64 { ci_mem(g, "sd", 10_u64, 2_u64, g.frame - 16_u64); }
+    cf_params(g, d, f);
+}
+
+// Return. A scalar goes back in x10. An aggregate is copied to the
+// hidden result address. Defect 15 copies its first 8 bytes only.
+fn cf_return(g: &mut Cg, d: &CjDoc, v: u64) {
+    let rk = ct_kind(d, g.ret);
+    let vt = cv_ty(g, d, v);
+    let isnone = cj_kind(d, v) == CJ_NULL || cj_str_is(d, cv_const(d, v), "Unit");
+    let isvoid = cv_is_local(d, v) && ct_kind(d, vt) == CT_VOID;
+    if rk == CT_VOID && !isnone && !isvoid {
+        cg_refuse(g, d, "return of a value from a function with no result");
+    } else if ct_scalar(d, g.ret) {
+        cv_load(g, d, 10_u64, v, g.ret);
+    } else if ct_agg(d, g.ret) {
+        if !cv_is_local(d, v) || !ct_same(d, vt, g.ret) {
+            cg_refuse(g, d, "return of an aggregate that is not a local of the result type");
+            return;
+        }
+        let mut n = ct_size(g, d, g.ret);
+        if g.v == CGC_RETAGG && n > 8_u64 { n = 8_u64; }
+        ci_mem(g, "ld", 6_u64, 2_u64, g.frame - 16_u64);
+        ci_add(g, 7_u64, 2_u64, cv_loff(g, cv_local(d, v)));
+        ci_copy(g, 6_u64, 7_u64, n);
+    } else if rk != CT_VOID {
+        cg_refuse(g, d, "result type the generator does not cover");
+    }
+    ci_mem(g, "ld", 1_u64, 2_u64, g.frame - 8_u64);
+    ci_add(g, 2_u64, 2_u64, g.frame);
+    ci_m(g, "jalr", 0_u64, 0_u64, 1_u64);
+}
+
+// If: the condition is a Bool local or constant.
+fn cf_if(g: &mut Cg, d: &CjDoc, body: u64) {
+    let cond = cj_get(d, body, "cond");
+    let t = cv_ty(g, d, cond);
+    if ct_kind(d, t) == CT_BOOL {
+        cv_load(g, d, 5_u64, cond, t);
+    } else if cv_is_bool(d, cond) {
+        ci_li(g, 5_u64, 0_u64);
+        if cj_kind(d, cj_body(d, cv_const(d, cond))) == CJ_TRUE { ci_li(g, 5_u64, 1_u64); }
+    } else {
+        cg_refuse(g, d, "branch on a value that is not a Bool");
+        return;
+    }
+    ci_skip(g, "beq", 5_u64, 0_u64, 1_u64);
+    ci_goto(g, cj_mag(d, cj_get(d, body, "then_block")));
+    ci_goto(g, cj_mag(d, cj_get(d, body, "else_block")));
+}
+
+// Switch: the value is an integer local; each target is an integer
+// constant in the range of its type and a block.
+fn cf_switch(g: &mut Cg, d: &CjDoc, body: u64) {
+    let v = cj_get(d, body, "value");
+    let t = cv_ty(g, d, v);
+    if ct_kind(d, t) != CT_INT {
+        cg_refuse(g, d, "switch on a value that is not an integer local");
+        return;
+    }
+    cv_load(g, d, 5_u64, v, t);
+    let mut tg = cj_first(d, cj_get(d, body, "targets"));
+    while tg != CG_NONE {
+        let c = cj_first(d, tg);
+        let n = cj_first(d, cj_body(d, c));
+        let isint = (cj_tag_is(d, c, "Int") || cj_tag_is(d, c, "Uint")) && cj_kind(d, n) == CJ_NUM;
+        if !isint || cv_canon(d, cj_bits(d, n), t) != cj_bits(d, n) || (cj_tag_is(d, c, "Uint") && ct_signed(d, t)) || (cj_neg(d, n) && !ct_signed(d, t)) {
+            cg_refuse(g, d, "switch target that is not an integer in the range of the switched type");
+            return;
+        }
+        ci_li(g, 6_u64, cj_bits(d, n));
+        ci_skip(g, "bne", 5_u64, 6_u64, 1_u64);
+        ci_goto(g, cj_mag(d, cj_next(d, c)));
+        tg = cj_next(d, tg);
+    }
+    ci_goto(g, cj_mag(d, cj_get(d, body, "default")));
+}
+
+fn cf_term(g: &mut Cg, d: &CjDoc, term: u64) {
+    let body = cj_body(d, term);
+    if cj_tag_is(d, term, "Goto") && cj_kind(d, body) == CJ_NUM {
+        ci_goto(g, cj_mag(d, body));
+    } else if cj_tag_is(d, term, "If") {
+        cf_if(g, d, body);
+    } else if cj_tag_is(d, term, "Switch") {
+        cf_switch(g, d, body);
+    } else if cj_tag_is(d, term, "Call") {
+        cc_call(g, d, body);
+    } else if cj_tag_is(d, term, "Return") {
+        cf_return(g, d, body);
+    } else {
+        cg_refuse_tag(g, d, "terminator", term);
+    }
+}
+
+// Marks the blocks that can be reached from block 0. A block that cannot
+// be reached is not compiled, so a construct in it is not refused.
+// Returns false when a terminator names a block the function lacks.
+fn cf_reach(d: &CjDoc, blocks: u64, seen: &mut Vec<u64>) -> bool {
+    let n = cj_count(d, blocks);
+    let mut i: u64 = 0_u64;
+    while i < n {
+        seen.push(0_u64);
+        i = i + 1_u64;
+    }
+    let mut ok = n > 0_u64;
+    let mut work: Vec<u64> = Vec::new();
+    work.push(0_u64);
+    let mut q: usize = 0;
+    while q < work.len() {
+        let b = work[q];
+        q = q + 1;
+        if b >= n {
+            ok = false;
+        } else if seen[b as usize] == 0_u64 {
+            seen[b as usize] = 1_u64;
+            let blk = cj_at(d, blocks, b);
+            if cj_mag(d, cj_get(d, blk, "id")) != b { ok = false; }
+            cf_succ(d, cj_get(d, blk, "terminator"), &mut work);
+        }
+    }
+    ok
+}
+
+// Pushes the blocks a terminator can go to.
+fn cf_succ(d: &CjDoc, term: u64, work: &mut Vec<u64>) {
+    let body = cj_body(d, term);
+    if cj_tag_is(d, term, "Goto") { work.push(cj_mag(d, body)); }
+    if cj_tag_is(d, term, "If") {
+        work.push(cj_mag(d, cj_get(d, body, "then_block")));
+        work.push(cj_mag(d, cj_get(d, body, "else_block")));
+    }
+    if cj_tag_is(d, term, "Call") && cj_kind(d, cj_get(d, body, "target")) == CJ_NUM {
+        work.push(cj_mag(d, cj_get(d, body, "target")));
+    }
+    if cj_tag_is(d, term, "Switch") {
+        work.push(cj_mag(d, cj_get(d, body, "default")));
+        let mut tg = cj_first(d, cj_get(d, body, "targets"));
+        while tg != CG_NONE {
+            work.push(cj_mag(d, cj_next(d, cj_first(d, tg))));
+            tg = cj_next(d, tg);
+        }
+    }
+}

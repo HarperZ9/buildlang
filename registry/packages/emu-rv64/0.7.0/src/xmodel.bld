@@ -1,0 +1,161 @@
+// Reference model for the M extension of emu-rv64. It continues the model
+// files and, like them, is built a different way from the core on purpose:
+//   - a word is matched against (mask, value) rows;
+//   - a product is formed at 128 bits by shift and add, one bit of the
+//     multiplier per turn, with both operands extended to 128 bits first,
+//     so the signed forms need no correction step;
+//   - a quotient is formed by restoring division, one bit per turn;
+//   - division by zero and overflow are rows of the table in the manual,
+//     tested before any arithmetic, also for the 32-bit forms.
+// It calls no function of lib6.bld or lib7.bld. Nothing outside the checks
+// calls this file.
+
+// The operation number of an M or A word, 61 to 95, or 0.
+fn ref_ma_match(w: u64) -> u64 {
+    let mut f: u64 = 0_u64;
+    while f < 8_u64 {
+        if ref_hit(w, 0xFE00707F_u64, 0x02000033_u64 | (f << 12_u64)) { return 61_u64 + f; }
+        f = f + 1_u64;
+    }
+    if ref_hit(w, 0xFE00707F_u64, 0x0200003B_u64) { return 69_u64; }
+    if ref_hit(w, 0xFE00707F_u64, 0x0200403B_u64) { return 70_u64; }
+    if ref_hit(w, 0xFE00707F_u64, 0x0200503B_u64) { return 71_u64; }
+    if ref_hit(w, 0xFE00707F_u64, 0x0200603B_u64) { return 72_u64; }
+    if ref_hit(w, 0xFE00707F_u64, 0x0200703B_u64) { return 73_u64; }
+    let a = ref_a_match(w, 0x202F_u64);
+    if a != 0_u64 { return 73_u64 + a; }
+    let b = ref_a_match(w, 0x302F_u64);
+    if b != 0_u64 { return 84_u64 + b; }
+    0_u64
+}
+
+// 1 to 11 for LR, SC, AMOSWAP, AMOADD, AMOXOR, AMOAND, AMOOR, AMOMIN,
+// AMOMAX, AMOMINU, AMOMAXU of the width whose funct3 and opcode bits are
+// `low`, or 0. The LR row also demands zeros in the rs2 field.
+fn ref_a_match(w: u64, low: u64) -> u64 {
+    if ref_hit(w, 0xF9F0707F_u64, 0x10000000_u64 | low) { return 1_u64; }
+    if ref_hit(w, 0xF800707F_u64, 0x18000000_u64 | low) { return 2_u64; }
+    if ref_hit(w, 0xF800707F_u64, 0x08000000_u64 | low) { return 3_u64; }
+    if ref_hit(w, 0xF800707F_u64, 0x00000000_u64 | low) { return 4_u64; }
+    if ref_hit(w, 0xF800707F_u64, 0x20000000_u64 | low) { return 5_u64; }
+    if ref_hit(w, 0xF800707F_u64, 0x60000000_u64 | low) { return 6_u64; }
+    if ref_hit(w, 0xF800707F_u64, 0x40000000_u64 | low) { return 7_u64; }
+    if ref_hit(w, 0xF800707F_u64, 0x80000000_u64 | low) { return 8_u64; }
+    if ref_hit(w, 0xF800707F_u64, 0xA0000000_u64 | low) { return 9_u64; }
+    if ref_hit(w, 0xF800707F_u64, 0xC0000000_u64 | low) { return 10_u64; }
+    if ref_hit(w, 0xF800707F_u64, 0xE0000000_u64 | low) { return 11_u64; }
+    0_u64
+}
+
+// A number of 128 bits, or a quotient (lo) with its remainder (hi).
+struct RefWide { hi: u64, lo: u64 }
+
+// The product of two numbers of 128 bits, modulo 2^128. Turn i adds the
+// multiplicand, shifted left by i, when bit i of the multiplier is set.
+fn ref_mul128(ah: u64, al: u64, bh: u64, bl: u64) -> RefWide {
+    let mut acc = RefWide { hi: 0_u64, lo: 0_u64 };
+    let mut sh = ah;
+    let mut sl = al;
+    let mut i: u64 = 0_u64;
+    while i < 128_u64 {
+        let mut bit = ref_bit(bl, i & 63_u64);
+        if i >= 64_u64 { bit = ref_bit(bh, i - 64_u64); }
+        if bit == 1_u64 {
+            let lo = ref_add(acc.lo, sl);
+            acc.hi = ref_add(ref_add(acc.hi, sh), ref_ltu(lo, sl));
+            acc.lo = lo;
+        }
+        sh = ref_shift(sh, 1_u64, 0_u64) | ref_bit(sl, 63_u64);
+        sl = ref_shift(sl, 1_u64, 0_u64);
+        i = i + 1_u64;
+    }
+    acc
+}
+
+// The 128-bit product of a and b. sa and sb say which operand is signed: a
+// signed operand is extended with copies of its bit 63, an unsigned one
+// with zeros.
+fn ref_product(sa: bool, sb: bool, a: u64, b: u64) -> RefWide {
+    let mut ah: u64 = 0_u64;
+    let mut bh: u64 = 0_u64;
+    if sa { ah = ref_fill(0_u64, 0_u64, ref_bit(a, 63_u64)); }
+    if sb { bh = ref_fill(0_u64, 0_u64, ref_bit(b, 63_u64)); }
+    ref_mul128(ah, a, bh, b)
+}
+
+// Restoring division of unsigned numbers; b is not 0. The quotient is in
+// lo and the remainder in hi. `top` is the bit shifted out of the partial
+// remainder, which is then 2^64 or more and so not below b.
+fn ref_udiv(a: u64, b: u64) -> RefWide {
+    let mut q: u64 = 0_u64;
+    let mut r: u64 = 0_u64;
+    let mut i: u64 = 64_u64;
+    while i > 0_u64 {
+        i = i - 1_u64;
+        let top = ref_bit(r, 63_u64);
+        r = ref_shift(r, 1_u64, 0_u64) | ref_bit(a, i);
+        if top == 1_u64 || ref_ltu(r, b) == 0_u64 {
+            r = ref_sub(r, b);
+            q = q | (1_u64 << i);
+        }
+    }
+    RefWide { hi: r, lo: q }
+}
+
+// Signed division at `bits` bits, 32 or 64; a and b are sign-extended to
+// 64 bits. Rows of the table: divisor 0 gives quotient -1 and remainder x;
+// -2^(L-1) by -1 gives quotient -2^(L-1) and remainder 0.
+fn ref_sdiv(a: u64, b: u64, bits: u64) -> RefWide {
+    let ones = ref_fill(0_u64, 0_u64, 1_u64);
+    let least = ref_fill(0_u64, bits - 1_u64, 1_u64);
+    if b == 0_u64 { return RefWide { hi: a, lo: ones }; }
+    if a == least && b == ones { return RefWide { hi: 0_u64, lo: least }; }
+    let na = ref_bit(a, 63_u64);
+    let nb = ref_bit(b, 63_u64);
+    let mut pa = a;
+    let mut pb = b;
+    if na == 1_u64 { pa = ref_sub(0_u64, a); }
+    if nb == 1_u64 { pb = ref_sub(0_u64, b); }
+    let mut d = ref_udiv(pa, pb);
+    if na != nb { d.lo = ref_sub(0_u64, d.lo); }
+    if na == 1_u64 { d.hi = ref_sub(0_u64, d.hi); }
+    d
+}
+
+// Unsigned division; row of the table: divisor 0 gives quotient 2^L - 1
+// and remainder x. The caller cuts the quotient to L bits.
+fn ref_udiv0(a: u64, b: u64) -> RefWide {
+    if b == 0_u64 { return RefWide { hi: a, lo: ref_fill(0_u64, 0_u64, 1_u64) }; }
+    ref_udiv(a, b)
+}
+
+// The value an M word of operation `op`, 61 to 73, writes.
+fn ref_m_value(op: u64, a: u64, b: u64) -> u64 {
+    if op == 61_u64 { return ref_product(false, false, a, b).lo; }
+    if op == 62_u64 { return ref_product(true, true, a, b).hi; }
+    if op == 63_u64 { return ref_product(true, false, a, b).hi; }
+    if op == 64_u64 { return ref_product(false, false, a, b).hi; }
+    if op == 65_u64 { return ref_sdiv(a, b, 64_u64).lo; }
+    if op == 66_u64 { return ref_udiv0(a, b).lo; }
+    if op == 67_u64 { return ref_sdiv(a, b, 64_u64).hi; }
+    if op == 68_u64 { return ref_udiv0(a, b).hi; }
+    let za = ref_low(a, 32_u64);
+    let zb = ref_low(b, 32_u64);
+    if op == 69_u64 { return ref_w(ref_product(false, false, za, zb).lo); }
+    if op == 70_u64 { return ref_w(ref_sdiv(ref_w(a), ref_w(b), 32_u64).lo); }
+    if op == 71_u64 { return ref_w(ref_udiv0(za, zb).lo); }
+    if op == 72_u64 { return ref_w(ref_sdiv(ref_w(a), ref_w(b), 32_u64).hi); }
+    ref_w(ref_udiv0(za, zb).hi)
+}
+
+// One M word of the reference machine.
+fn ref_m_step(m: &mut Machine, x: &mut [u64], w: u64, op: u64) -> i64 {
+    let rd = ref_put(0_u64, 0_u64, w, 7_u64, 5_u64);
+    let a = x[ref_put(0_u64, 0_u64, w, 15_u64, 5_u64) as usize];
+    let b = x[ref_put(0_u64, 0_u64, w, 20_u64, 5_u64) as usize];
+    let val = ref_m_value(op, a, b);
+    if rd != 0_u64 { x[rd as usize] = val; }
+    m.pc = ref_add(m.pc, 4_u64);
+    m.steps = ref_add(m.steps, 1_u64);
+    0
+}

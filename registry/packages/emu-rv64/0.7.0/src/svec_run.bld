@@ -1,0 +1,268 @@
+// Hand cases of the system profile: the list of tables. Written by
+// tests/tools/sv39_oracle.py; do not edit by hand.
+
+fn sv_tables_1(st: &mut XSt) ~ Console {
+    sv_g1_1(st);
+    sv_g1_2(st);
+    sv_g1_3(st);
+    sv_g1_4(st);
+    sv_g1_5(st);
+    sv_g1_6(st);
+    sv_g1_7(st);
+    sv_g2_1(st);
+    sv_g2_2(st);
+    sv_g2_3(st);
+    sv_g2_4(st);
+    sv_g2_5(st);
+    sv_g2_6(st);
+    sv_g2_7(st);
+    sv_g3_1(st);
+    sv_g3_2(st);
+    sv_g3_3(st);
+    sv_g3_4(st);
+    sv_g3_5(st);
+    sv_g3_6(st);
+    sv_g4_1(st);
+    sv_g4_2(st);
+    sv_g4_3(st);
+    sv_g4_4(st);
+    sv_g4_5(st);
+    sv_g4_6(st);
+    sv_g5_1(st);
+    sv_g5_2(st);
+    sv_g5_3(st);
+    sv_g5_4(st);
+    sv_g5_5(st);
+    sv_g5_6(st);
+    sv_g6_1(st);
+    sv_g6_2(st);
+    sv_g6_3(st);
+    sv_g6_4(st);
+    sv_g6_5(st);
+    sv_g6_6(st);
+    sv_g7_1(st);
+    sv_g7_2(st);
+}
+
+fn sv_tables_2(st: &mut XSt) ~ Console {
+    sv_g7_3(st);
+    sv_g7_4(st);
+    sv_g7_5(st);
+    sv_g7_6(st);
+    sv_g8_1(st);
+    sv_g8_2(st);
+    sv_g8_3(st);
+    sv_g8_4(st);
+    sv_g8_5(st);
+    sv_g8_6(st);
+    sv_g9_1(st);
+    sv_g9_2(st);
+    sv_g9_3(st);
+    sv_g9_4(st);
+    sv_g9_5(st);
+    sv_g9_6(st);
+    sv_g10_1(st);
+    sv_g10_2(st);
+    sv_g10_3(st);
+    sv_g10_4(st);
+    sv_g10_5(st);
+    sv_g10_6(st);
+    sv_g11_1(st);
+    sv_g11_2(st);
+    sv_g11_3(st);
+    sv_g11_4(st);
+    sv_g11_5(st);
+    sv_g11_6(st);
+    sv_g12_1(st);
+    sv_g12_2(st);
+    sv_g12_3(st);
+    sv_g12_4(st);
+    sv_g12_5(st);
+    sv_g12_6(st);
+    sv_g13_1(st);
+    sv_g13_2(st);
+    sv_g13_3(st);
+    sv_g13_4(st);
+    sv_g13_5(st);
+    sv_g13_6(st);
+}
+
+fn sv_tables_3(st: &mut XSt) ~ Console {
+    sv_g14_1(st);
+    sv_g14_2(st);
+    sv_g14_3(st);
+    sv_g14_4(st);
+    sv_g14_5(st);
+    sv_g14_6(st);
+    sv_g15_1(st);
+    sv_g15_2(st);
+    sv_g15_3(st);
+    sv_g15_4(st);
+    sv_g15_5(st);
+    sv_g15_6(st);
+    sv_g16_1(st);
+    sv_g16_2(st);
+    sv_g16_3(st);
+    sv_g16_4(st);
+    sv_g16_5(st);
+    sv_g16_6(st);
+    sv_g17_1(st);
+    sv_g17_2(st);
+    sv_g17_3(st);
+    sv_g17_4(st);
+    sv_g17_5(st);
+    sv_g17_6(st);
+    sv_g18_1(st);
+    sv_g18_2(st);
+    sv_g18_3(st);
+    sv_g18_4(st);
+    sv_g18_5(st);
+    sv_g18_6(st);
+    sv_g19_1(st);
+    sv_g19_2(st);
+    sv_g19_3(st);
+    sv_g19_4(st);
+    sv_g19_5(st);
+    sv_g19_6(st);
+    sv_g20_1(st);
+    sv_g20_2(st);
+    sv_g20_3(st);
+    sv_g20_4(st);
+}
+
+fn sv_tables_4(st: &mut XSt) ~ Console {
+    sv_g20_5(st);
+    sv_g20_6(st);
+    sv_g21_1(st);
+    sv_g21_2(st);
+    sv_g21_3(st);
+    sv_g21_4(st);
+    sv_g21_5(st);
+    sv_g21_6(st);
+    sv_g22_1(st);
+    sv_g22_2(st);
+    sv_g22_3(st);
+    sv_g22_4(st);
+    sv_g22_5(st);
+    sv_g22_6(st);
+    sv_g23_1(st);
+    sv_g23_2(st);
+    sv_g23_3(st);
+    sv_g23_4(st);
+    sv_g23_5(st);
+    sv_g23_6(st);
+    sv_g24_1(st);
+    sv_g24_2(st);
+    sv_g24_3(st);
+    sv_g24_4(st);
+    sv_g24_5(st);
+    sv_g24_6(st);
+    sv_g25_1(st);
+    sv_g25_2(st);
+    sv_g25_3(st);
+    sv_g25_4(st);
+    sv_g25_5(st);
+    sv_g25_6(st);
+    sv_g26_1(st);
+    sv_g26_2(st);
+    sv_g26_3(st);
+    sv_g26_4(st);
+    sv_g26_5(st);
+    sv_g26_6(st);
+    sv_g27_1(st);
+    sv_g27_2(st);
+}
+
+fn sv_tables_5(st: &mut XSt) ~ Console {
+    sv_g27_3(st);
+    sv_g27_4(st);
+    sv_g27_5(st);
+    sv_g27_6(st);
+    sv_g28_1(st);
+    sv_g28_2(st);
+    sv_g28_3(st);
+    sv_g28_4(st);
+    sv_g28_5(st);
+    sv_g28_6(st);
+    sv_g29_1(st);
+    sv_g29_2(st);
+    sv_g29_3(st);
+    sv_g29_4(st);
+    sv_g29_5(st);
+    sv_g29_6(st);
+    sv_g30_1(st);
+    sv_g30_2(st);
+    sv_g30_3(st);
+    sv_g30_4(st);
+    sv_g30_5(st);
+    sv_g31_1(st);
+    sv_g31_2(st);
+    sv_g31_3(st);
+    sv_g31_4(st);
+    sv_g31_5(st);
+    sv_g31_6(st);
+    sv_g32_1(st);
+    sv_g32_2(st);
+    sv_g32_3(st);
+    sv_g32_4(st);
+    sv_g32_5(st);
+    sv_g32_6(st);
+    sv_g33_1(st);
+    sv_g33_2(st);
+    sv_g33_3(st);
+    sv_g33_4(st);
+    sv_g33_5(st);
+    sv_g33_6(st);
+    sv_g34_1(st);
+}
+
+fn sv_tables_6(st: &mut XSt) ~ Console {
+    sv_g34_2(st);
+    sv_g34_3(st);
+    sv_g34_4(st);
+    sv_g34_5(st);
+    sv_g34_6(st);
+    sv_g34_7(st);
+}
+
+// Cases 1 to 875 are generic cases. The 3456 rows of the permission matrix
+// follow them.
+fn sv_tables(st: &mut XSt) ~ Console {
+    sv_tables_1(st);
+    sv_tables_2(st);
+    sv_tables_3(st);
+    sv_tables_4(st);
+    sv_tables_5(st);
+    sv_tables_6(st);
+}
+
+fn sv_matrix(st: &mut XSt) ~ Console {
+    sv_p1_1(st);
+    sv_p1_2(st);
+    sv_p1_3(st);
+    sv_p1_4(st);
+    sv_p1_5(st);
+    sv_p2_1(st);
+    sv_p2_2(st);
+    sv_p2_3(st);
+    sv_p2_4(st);
+    sv_p2_5(st);
+    sv_p3_1(st);
+    sv_p3_2(st);
+    sv_p3_3(st);
+    sv_p3_4(st);
+}
+
+// The words and numbers the matrix runner needs, from the encoder of the
+// oracle: `addi x10, x0, 77`, `ld x10, 0(x1)`, `sd x2, 0(x1)`, the value
+// stored and the virtual address of the page.
+fn sv_px_word(acc: u64) -> u64 {
+    if acc == 0_u64 { return 0x4D00513_u64; }
+    if acc == 1_u64 { return 0xB503_u64; }
+    0x20B023_u64
+}
+
+fn sv_px_stored() -> u64 { 0xA5A5A5A55A5A5A5A_u64 }
+
+fn sv_px_va() -> u64 { 0x40403000_u64 }
+

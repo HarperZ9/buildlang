@@ -1,0 +1,174 @@
+// emu-rv64 core, system profile, second part: trap entry with delegation,
+// MRET, SRET, WFI, SFENCE.VMA and the choice of an interrupt.
+//
+// Delegation means that a trap goes to the supervisor handler directly,
+// without passing through machine mode. Rules: SPEC.md, "Traps in the
+// system profile" and "Interrupts in the system profile".
+
+// Entry into S-mode. "When a trap is delegated to S-mode, the scause
+// register is written with the trap cause; the sepc register is written
+// with the virtual address of the instruction that took the trap; the
+// stval register is written with an exception-specific datum; the SPP
+// field of mstatus is written with the active privilege mode at the time
+// of the trap; the SPIE field of mstatus is written with the value of the
+// SIE field at the time of the trap; and the SIE field of mstatus is
+// cleared. The mcause, mepc, and mtval registers and the MPP and MPIE
+// fields of mstatus are not written."
+fn sys_enter_s(m: &mut Machine, code: u64, tval: u64) {
+    m.sepc = m.pc & !3_u64;
+    m.scause = code;
+    m.stval = tval;
+    let mut s = m.mstatus & !(MS_SIE | MS_SPIE | MS_SPP);
+    if (m.mstatus & MS_SIE) != 0_u64 { s = s | MS_SPIE; }
+    if m.prv != PRIV_U { s = s | MS_SPP; }
+    m.mstatus = s;
+    m.prv = PRIV_S;
+}
+
+// Entry into M-mode. "When a trap is taken from privilege mode y into
+// privilege mode x, xPIE is set to the value of xIE; xIE is set to 0; and
+// xPP is set to y."
+fn sys_enter_m(m: &mut Machine, code: u64, tval: u64) {
+    m.mepc = m.pc & !3_u64;
+    m.mcause = code;
+    m.mtval = tval;
+    let mut s = m.mstatus & !(MS_MIE | MS_MPIE | MS_MPP);
+    if (m.mstatus & MS_MIE) != 0_u64 { s = s | MS_MPIE; }
+    m.mstatus = s | (m.prv << 11_u64);
+    m.prv = PRIV_M;
+}
+
+// Takes a trap with exception code `cause`; irq says it is an interrupt.
+// "setting a bit in medeleg or mideleg will delegate the corresponding
+// trap, when occurring in S-mode or U-mode, to the S-mode trap handler."
+// "Traps never transition from a more-privileged mode to a less-privileged
+// mode." The handler address follows the vector register of the mode that
+// takes the trap: BASE, or BASE + 4 * cause for an interrupt in vectored
+// mode. The reservation is left as it is. Returns EMU_TRAP.
+fn sys_take(v: u64, m: &mut Machine, cause: u64, tval: u64, irq: bool) -> i64 {
+    let mut del = m.medeleg;
+    if irq { del = m.mideleg; }
+    let bit = ((del >> cause) & 1_u64) == 1_u64;
+    let to_s = bit && (m.prv != PRIV_M || v == SC_DELEG);
+    let mut code = cause;
+    if irq { code = EMU_SIGN | cause; }
+    let mut tvec = m.mtvec;
+    if to_s {
+        tvec = m.stvec;
+        sys_enter_s(m, code, tval);
+    } else {
+        sys_enter_m(m, code, tval);
+    }
+    m.pc = tvec & !3_u64;
+    if irq && (tvec & 1_u64) != 0_u64 { m.pc = (tvec & !3_u64).wrapping_add(4_u64 * cause); }
+    m.traps = m.traps + 1_u64;
+    EMU_TRAP
+}
+
+// Takes a synchronous trap.
+fn sys_trap(v: u64, m: &mut Machine, cause: u64, tval: u64) -> i64 {
+    sys_take(v, m, cause, tval, false)
+}
+
+// MRET. "When executing an xRET instruction, supposing xPP holds the value
+// y, xIE is set to xPIE; the privilege mode is changed to y; xPIE is set
+// to 1; and xPP is set to the least-privileged supported mode (U if U-mode
+// is implemented, else M). If y != M, xRET also sets MPRV=0." "Attempting
+// to execute an xRET instruction in a mode less privileged than x will
+// raise an illegal-instruction exception." The reservation stays: "the
+// xRET instruction is allowed to clear any outstanding LR address
+// reservation but is not required to."
+fn sys_mret(v: u64, m: &mut Machine, w: u64) -> i64 {
+    if m.prv != PRIV_M { return sys_trap(v, m, EXC_ILLEGAL, w); }
+    let y = (m.mstatus >> 11_u64) & 3_u64;
+    let mut s = m.mstatus & !(MS_MIE | MS_MPP);
+    if (m.mstatus & MS_MPIE) != 0_u64 { s = s | MS_MIE; }
+    s = s | MS_MPIE;
+    if y != PRIV_M { s = s & !MS_MPRV; }
+    m.mstatus = s;
+    m.prv = y;
+    m.pc = m.mepc;
+    m.steps = m.steps + 1_u64;
+    EMU_OK
+}
+
+// SRET. The same rule with x = S: the mode comes from SPP, which then
+// becomes 0, and MPRV is cleared because the new mode is never M. "When
+// TSR=1, attempts to execute SRET while executing in S-mode will raise an
+// illegal-instruction exception."
+fn sys_sret(v: u64, m: &mut Machine, w: u64) -> i64 {
+    let tsr = (m.mstatus & MS_TSR) != 0_u64 && v != SC_TSR;
+    if m.prv == PRIV_U || (m.prv == PRIV_S && tsr) { return sys_trap(v, m, EXC_ILLEGAL, w); }
+    let mut y = (m.mstatus >> 8_u64) & 1_u64;
+    if v == SC_SRET { y = PRIV_S; }
+    let mut s = m.mstatus & !(MS_SIE | MS_SPP | MS_MPRV);
+    if (m.mstatus & MS_SPIE) != 0_u64 { s = s | MS_SIE; }
+    m.mstatus = s | MS_SPIE;
+    m.prv = y;
+    m.pc = m.sepc;
+    m.steps = m.steps + 1_u64;
+    EMU_OK
+}
+
+// WFI. It retires as a no-op, as in the trap profile. With TW set it is
+// illegal below M-mode: "An implementation may have WFI always raise an
+// illegal-instruction exception in modes less privileged than M when
+// TW=1".
+fn sys_wfi(v: u64, m: &mut Machine, w: u64) -> i64 {
+    let tw = (m.mstatus & MS_TW) != 0_u64 && v != SC_TW;
+    if m.prv != PRIV_M && tw { return sys_trap(v, m, EXC_ILLEGAL, w); }
+    emu_wfi(m)
+}
+
+// SFENCE.VMA. The machine keeps no address-translation cache: every access
+// walks the page tables, so the instruction has nothing to do beyond its
+// privilege check. It is a supervisor instruction, illegal in U-mode, and
+// illegal in S-mode while TVM is set.
+fn sys_sfence(v: u64, m: &mut Machine, w: u64) -> i64 {
+    let tvm = (m.mstatus & MS_TVM) != 0_u64 && v != SC_TVM;
+    if m.prv == PRIV_U || (m.prv == PRIV_S && tvm) { return sys_trap(v, m, EXC_ILLEGAL, w); }
+    m.pc = m.pc.wrapping_add(4_u64);
+    m.steps = m.steps + 1_u64;
+    EMU_OK
+}
+
+// The cause of the first pending interrupt in p. "Multiple simultaneous
+// interrupts destined for M-mode are handled in the following decreasing
+// priority order: MEI, MSI, MTI, SEI, SSI, STI". For S-mode the order is
+// "SEI, SSI, STI", the tail of the same list.
+fn sys_irq_first(p: u64) -> u64 {
+    if (p & MI_MEIP) != 0_u64 { return IRQ_EXT; }
+    if (p & MI_MSIP) != 0_u64 { return IRQ_SOFT; }
+    if (p & MI_MTIP) != 0_u64 { return IRQ_TIMER; }
+    if (p & 0x200_u64) != 0_u64 { return 9_u64; }
+    if (p & 0x2_u64) != 0_u64 { return 1_u64; }
+    if (p & 0x20_u64) != 0_u64 { return 5_u64; }
+    0_u64
+}
+
+// The cause of the interrupt to take now, or 0 for none.
+//
+// To M-mode: "An interrupt i will trap to M-mode (causing the privilege
+// mode to change to M-mode) if all of the following are true: (a) either
+// the current privilege mode is M and the MIE bit in the mstatus register
+// is set, or the current privilege mode has less privilege than M-mode;
+// (b) bit i is set in both mip and mie; and (c) if register mideleg
+// exists, bit i is not set in mideleg."
+// To S-mode: "An interrupt i will trap to S-mode if both of the following
+// are true: (a) either the current privilege mode is S and the SIE bit in
+// the sstatus register is set, or the current privilege mode has less
+// privilege than S-mode; and (b) bit i is set in both sip and sie."
+// "Interrupts to M-mode take priority over any interrupts to lower
+// privilege modes."
+fn sys_irq_pick(v: u64, m: &Machine) -> u64 {
+    let p = sys_mip_now(m) & m.mie;
+    let pm = p & !m.mideleg;
+    let ps = p & m.mideleg;
+    let m_on = m.prv != PRIV_M || (m.mstatus & MS_MIE) != 0_u64;
+    if m_on && pm != 0_u64 { return sys_irq_first(pm); }
+    let sie = (m.mstatus & MS_SIE) != 0_u64;
+    let mut s_on = m.prv == PRIV_U || (m.prv == PRIV_S && sie);
+    if v == SC_SIE && !sie { s_on = false; }
+    if s_on && ps != 0_u64 { return sys_irq_first(ps); }
+    0_u64
+}

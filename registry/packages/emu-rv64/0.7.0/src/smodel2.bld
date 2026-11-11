@@ -1,0 +1,190 @@
+// Reference model for the system profile of emu-rv64, second part: trap
+// entry, MRET and SRET, the interrupt scan and the Sv39 walk. Built a
+// different way from sys2.bld and sys3.bld on purpose:
+//   - the status stack moves between field slots;
+//   - the canonical test compares bits 39 to 63 with bit 38 one at a time;
+//   - the walk is written out level by level through one function that
+//     calls itself for the next level, and the page number fields of the
+//     result are assembled one field at a time, as step 10 of the manual
+//     words it, where the core masks;
+//   - the permission test is arithmetic on single bits.
+// Nothing outside the checks calls this file.
+
+// Trap entry of the model. irq is 1 for an interrupt. Returns the step
+// code 3.
+fn sref_trap(m: &mut Machine, c: &mut [u64], cause: u64, tval: u64, irq: u64) -> i64 {
+    let mut dl = c[RS_MEDELEG];
+    if irq == 1_u64 { dl = c[RS_MIDELEG]; }
+    let code = ref_put(cause, 63_u64, irq, 0_u64, 1_u64);
+    let from = c[RS_PRV];
+    let mut vec = c[RC_MTVEC];
+    if from != 3_u64 && ref_bit(dl, cause) == 1_u64 {
+        c[RS_SEPC] = ref_put(0_u64, 2_u64, m.pc, 2_u64, 62_u64);
+        c[RS_SCAUSE] = code;
+        c[RS_STVAL] = tval;
+        c[RS_SPIE] = c[RS_SIE];
+        c[RS_SIE] = 0_u64;
+        c[RS_SPP] = ref_bit(from, 0_u64);
+        c[RS_PRV] = 1_u64;
+        vec = c[RS_STVEC];
+    } else {
+        c[RC_MEPC] = ref_put(0_u64, 2_u64, m.pc, 2_u64, 62_u64);
+        c[RC_MCAUSE] = code;
+        c[RC_MTVAL] = tval;
+        c[RC_MPIE] = c[RC_MIE];
+        c[RC_MIE] = 0_u64;
+        c[RS_MPP] = from;
+        c[RS_PRV] = 3_u64;
+    }
+    let mut to = ref_put(0_u64, 2_u64, vec, 2_u64, 62_u64);
+    let mut i: u64 = 0_u64;
+    while i < 4_u64 && irq == 1_u64 && ref_bit(vec, 0_u64) == 1_u64 {
+        to = ref_add(to, cause);
+        i = i + 1_u64;
+    }
+    m.pc = to;
+    m.traps = ref_add(m.traps, 1_u64);
+    3
+}
+
+// MRET (which = 3) or SRET (which = 1) of the model, after the privilege
+// check: the enable takes the stacked enable, the stacked enable becomes
+// 1, the mode takes the stacked mode, the stacked mode becomes U, and MPRV
+// is cleared unless the new mode is M.
+fn sref_xret(m: &mut Machine, c: &mut [u64], which: u64) -> i64 {
+    let mut to = c[RS_MPP];
+    if which == 3_u64 {
+        c[RC_MIE] = c[RC_MPIE];
+        c[RC_MPIE] = 1_u64;
+        c[RS_MPP] = 0_u64;
+        m.pc = c[RC_MEPC];
+    } else {
+        to = c[RS_SPP];
+        c[RS_SIE] = c[RS_SPIE];
+        c[RS_SPIE] = 1_u64;
+        c[RS_SPP] = 0_u64;
+        m.pc = c[RS_SEPC];
+    }
+    if to != 3_u64 { c[RS_MPRV] = 0_u64; }
+    c[RS_PRV] = to;
+    m.steps = ref_add(m.steps, 1_u64);
+    0
+}
+
+// The interrupt to take, or 0. The table holds the six causes in the
+// order of the manual. A cause that is not delegated goes to M-mode and
+// needs MIE only while in M-mode. A delegated cause goes to S-mode: never
+// while in M-mode, always while in U-mode, and in S-mode when SIE is set.
+// The first cause of the table that may go to M-mode wins. When there is
+// none, the first that may go to S-mode wins.
+fn sref_irq_scan(c: &[u64]) -> u64 {
+    let order: [u64; 6] = [11_u64, 3_u64, 7_u64, 9_u64, 1_u64, 5_u64];
+    let pend = sref_pending(c);
+    let prv = c[RS_PRV];
+    let mut pick: u64 = 0_u64;
+    let mut pick_s: u64 = 0_u64;
+    let mut i: usize = 0;
+    while i < 6 {
+        let k = order[i];
+        let live = ref_bit(pend, k) == 1_u64 && ref_bit(c[RC_IE], k) == 1_u64;
+        let to_s = ref_bit(c[RS_MIDELEG], k) == 1_u64;
+        let m_ok = prv != 3_u64 || c[RC_MIE] == 1_u64;
+        let s_ok = prv == 0_u64 || (prv == 1_u64 && c[RS_SIE] == 1_u64);
+        if live && !to_s && m_ok && pick == 0_u64 { pick = k; }
+        if live && to_s && s_ok && pick_s == 0_u64 { pick_s = k; }
+        i = i + 1;
+    }
+    if pick != 0_u64 { return pick; }
+    pick_s
+}
+
+// The result of a model translation: cause 0 and the address, or the
+// exception code.
+struct SrefXl { cause: u64, pa: u64 }
+
+// 12, 13 or 15 for a page fault of access kind acc (0 fetch, 1 load, 2
+// store); 1, 5 or 7 for an access fault.
+fn sref_fault(acc: u64, page: bool) -> u64 {
+    let pf: [u64; 3] = [12_u64, 13_u64, 15_u64];
+    let af: [u64; 3] = [1_u64, 5_u64, 7_u64];
+    if page { return pf[acc as usize]; }
+    af[acc as usize]
+}
+
+// 1 when a leaf PTE allows the access: who may touch the page, what the
+// page allows for this kind, and the accessed and dirty bits.
+fn sref_allow(c: &[u64], pte: u64, acc: u64, prv: u64) -> u64 {
+    let r = ref_bit(pte, 1_u64);
+    let w = ref_bit(pte, 2_u64);
+    let x = ref_bit(pte, 3_u64);
+    let u = ref_bit(pte, 4_u64);
+    let mut data: u64 = 1_u64;
+    if acc == 0_u64 { data = 0_u64; }
+    let mut who = u;
+    if prv == 1_u64 { who = (1_u64 ^ u) | (u & c[RS_SUM] & data); }
+    let mut what = x;
+    if acc == 1_u64 { what = r | (x & c[RS_MXR]); }
+    if acc == 2_u64 { what = w; }
+    let mut seen = ref_bit(pte, 6_u64);
+    if acc == 2_u64 { seen = seen & ref_bit(pte, 7_u64); }
+    who & what & seen
+}
+
+// The physical address a leaf PTE at `level` gives for va: the page
+// offset, then for each level below the leaf the VPN field of va, and for
+// the leaf level and above the PPN field of the PTE. PPN[2] has 26 bits.
+fn sref_compose(pte: u64, va: u64, level: u64) -> u64 {
+    let mut pa = ref_put(0_u64, 0_u64, va, 0_u64, 12_u64);
+    let mut k: u64 = 0_u64;
+    while k < 3_u64 {
+        let mut width: u64 = 9_u64;
+        if k == 2_u64 { width = 26_u64; }
+        if k < level {
+            pa = ref_put(pa, 12_u64 + 9_u64 * k, va, 12_u64 + 9_u64 * k, 9_u64);
+        } else {
+            pa = ref_put(pa, 12_u64 + 9_u64 * k, pte, 10_u64 + 9_u64 * k, width);
+        }
+        k = k + 1_u64;
+    }
+    pa
+}
+
+// One level of the walk: reads the PTE of va in the table at `table` and
+// either finishes or goes one level down.
+fn sref_level(c: &[u64], ram: &[u8], va: u64, acc: u64, prv: u64, table: u64, level: u64) -> SrefXl {
+    let page = SrefXl { cause: sref_fault(acc, true), pa: 0_u64 };
+    let at = ref_add(table, ref_put(0_u64, 3_u64, va, 12_u64 + 9_u64 * level, 9_u64));
+    if !ref_ram_ok(ram.len() as u64, at, 8_u64) { return SrefXl { cause: sref_fault(acc, false), pa: 0_u64 }; }
+    let pte = ref_rd(ram, at, 8_u64);
+    let r = ref_bit(pte, 1_u64);
+    let w = ref_bit(pte, 2_u64);
+    let x = ref_bit(pte, 3_u64);
+    if ref_bit(pte, 0_u64) == 0_u64 || (r == 0_u64 && w == 1_u64) { return page; }
+    if ref_put(0_u64, 0_u64, pte, 54_u64, 10_u64) != 0_u64 { return page; }
+    if (r | x) == 0_u64 {
+        if (ref_bit(pte, 4_u64) | ref_bit(pte, 6_u64) | ref_bit(pte, 7_u64)) == 1_u64 { return page; }
+        if level == 0_u64 { return page; }
+        let next = ref_put(0_u64, 12_u64, pte, 10_u64, 44_u64);
+        return sref_level(c, ram, va, acc, prv, next, level - 1_u64);
+    }
+    if ref_put(0_u64, 0_u64, pte, 10_u64, 9_u64 * level) != 0_u64 { return page; }
+    if sref_allow(c, pte, acc, prv) == 0_u64 { return page; }
+    SrefXl { cause: 0_u64, pa: sref_compose(pte, va, level) }
+}
+
+// Translates one address. The mode of the check is MPP when MPRV is set
+// and the access is not a fetch. No translation in M-mode or with satp
+// MODE other than 8.
+fn sref_xlate(c: &[u64], ram: &[u8], va: u64, acc: u64) -> SrefXl {
+    let mut prv = c[RS_PRV];
+    if c[RS_MPRV] == 1_u64 && acc != 0_u64 { prv = c[RS_MPP]; }
+    if prv == 3_u64 || ref_put(0_u64, 0_u64, c[RS_SATP], 60_u64, 4_u64) != 8_u64 {
+        return SrefXl { cause: 0_u64, pa: va };
+    }
+    let mut k: u64 = 39_u64;
+    while k < 64_u64 {
+        if ref_bit(va, k) != ref_bit(va, 38_u64) { return SrefXl { cause: sref_fault(acc, true), pa: 0_u64 }; }
+        k = k + 1_u64;
+    }
+    sref_level(c, ram, va, acc, prv, ref_put(0_u64, 12_u64, c[RS_SATP], 0_u64, 44_u64), 2_u64)
+}

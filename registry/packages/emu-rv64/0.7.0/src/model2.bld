@@ -1,0 +1,169 @@
+// Reference model, second part: memory and the step function.
+
+struct RefEff { rc: i64, wr: bool, val: u64, next: u64 }
+
+fn ref_low(v: u64, bits: u64) -> u64 { ref_put(0_u64, 0_u64, v, 0_u64, bits) }
+
+fn ref_ram_ok(len: u64, addr: u64, n: u64) -> bool {
+    if addr < 0x80000000_u64 { return false; }
+    let first = addr - 0x80000000_u64;
+    if first >= len { return false; }
+    n <= len - first
+}
+
+fn ref_uart_ok(addr: u64, n: u64) -> bool {
+    n == 1_u64 && addr >= 0x10000000_u64 && addr <= 0x10000007_u64
+}
+
+// Reads n bytes, most significant first.
+fn ref_rd(ram: &[u8], addr: u64, n: u64) -> u64 {
+    let first = addr - 0x80000000_u64;
+    let mut r: u64 = 0_u64;
+    let mut i: u64 = n;
+    while i > 0_u64 {
+        i = i - 1_u64;
+        r = (r << 8_u64) | (ram[(first + i) as usize] as u64);
+    }
+    r
+}
+
+fn ref_cond(op: u64, a: u64, b: u64) -> bool {
+    if op == 5_u64 { return a == b; }
+    if op == 6_u64 { return a != b; }
+    if op == 7_u64 { return ref_lt(a, b) == 1_u64; }
+    if op == 8_u64 { return ref_lt(a, b) == 0_u64; }
+    if op == 9_u64 { return ref_ltu(a, b) == 1_u64; }
+    ref_ltu(a, b) == 0_u64
+}
+
+fn ref_flow(op: u64, w: u64, pc: u64, a: u64, b: u64) -> RefEff {
+    let pc4 = ref_add(pc, 4_u64);
+    let mut e = RefEff { rc: 0, wr: false, val: pc4, next: pc4 };
+    let mut go = false;
+    let mut to = pc4;
+    if op == 3_u64 { go = true; e.wr = true; to = ref_add(pc, ref_imm(w, 5_u64)); }
+    if op == 4_u64 {
+        go = true;
+        e.wr = true;
+        let sum = ref_add(a, ref_imm(w, 1_u64));
+        to = ref_put(0_u64, 1_u64, sum, 1_u64, 63_u64);
+    }
+    if op >= 5_u64 && ref_cond(op, a, b) { go = true; to = ref_add(pc, ref_imm(w, 3_u64)); }
+    if go {
+        if ref_bit(to, 0_u64) == 1_u64 || ref_bit(to, 1_u64) == 1_u64 { e.rc = -3; }
+        e.next = to;
+    }
+    e
+}
+
+fn ref_load(op: u64, w: u64, pc: u64, ram: &[u8], a: u64) -> RefEff {
+    let mut e = RefEff { rc: 0, wr: true, val: 0_u64, next: ref_add(pc, 4_u64) };
+    let addr = ref_add(a, ref_imm(w, 1_u64));
+    let mut n: u64 = 1_u64;
+    if op == 12_u64 || op == 16_u64 { n = 2_u64; }
+    if op == 13_u64 || op == 17_u64 { n = 4_u64; }
+    if op == 14_u64 { n = 8_u64; }
+    if ref_uart_ok(addr, n) {
+        if addr == 0x10000005_u64 { e.val = 0x60_u64; }
+        return e;
+    }
+    if !ref_ram_ok(ram.len() as u64, addr, n) { e.rc = -2; return e; }
+    e.val = ref_rd(ram, addr, n);
+    if op <= 13_u64 { e.val = ref_fill(e.val, 8_u64 * n, ref_bit(e.val, 8_u64 * n - 1_u64)); }
+    e
+}
+
+fn ref_store(op: u64, w: u64, m: &mut Machine, ram: &mut [u8], out: &mut [u8], a: u64, b: u64) -> i64 {
+    let addr = ref_add(a, ref_imm(w, 2_u64));
+    let mut n: u64 = 1_u64;
+    if op == 19_u64 { n = 2_u64; }
+    if op == 20_u64 { n = 4_u64; }
+    if op == 21_u64 { n = 8_u64; }
+    if ref_uart_ok(addr, n) {
+        if addr != 0x10000000_u64 { return 0; }
+        if m.out_len >= out.len() as u64 { return -4; }
+        out[m.out_len as usize] = ref_low(b, 8_u64) as u8;
+        m.out_len = m.out_len + 1_u64;
+        return 0;
+    }
+    if !ref_ram_ok(ram.len() as u64, addr, n) { return -2; }
+    let first = addr - 0x80000000_u64;
+    let mut i: u64 = 0_u64;
+    while i < n {
+        ram[(first + i) as usize] = ref_low(ref_shift(b, 8_u64 * i, 1_u64), 8_u64) as u8;
+        i = i + 1_u64;
+    }
+    0
+}
+
+// Register-immediate arithmetic, operations 22 to 30 and 41 to 44.
+fn ref_arith_imm(op: u64, w: u64, a: u64) -> u64 {
+    let imm = ref_imm(w, 1_u64);
+    let s6 = ref_put(0_u64, 0_u64, w, 20_u64, 6_u64);
+    let s5 = ref_put(0_u64, 0_u64, w, 20_u64, 5_u64);
+    if op == 22_u64 { return ref_add(a, imm); }
+    if op == 23_u64 { return ref_lt(a, imm); }
+    if op == 24_u64 { return ref_ltu(a, imm); }
+    if op == 25_u64 { return a ^ imm; }
+    if op == 26_u64 { return a | imm; }
+    if op == 27_u64 { return a & imm; }
+    if op == 28_u64 { return ref_shift(a, s6, 0_u64); }
+    if op == 29_u64 { return ref_shift(a, s6, 1_u64); }
+    if op == 30_u64 { return ref_shift(a, s6, 2_u64); }
+    if op == 41_u64 { return ref_w(ref_add(a, imm)); }
+    if op == 42_u64 { return ref_w(ref_shift(a, s5, 0_u64)); }
+    if op == 43_u64 { return ref_w(ref_shift(ref_low(a, 32_u64), s5, 1_u64)); }
+    ref_w(ref_shift(ref_w(a), s5, 2_u64))
+}
+
+// Register-register arithmetic, operations 31 to 40 and 45 to 49.
+fn ref_arith_reg(op: u64, a: u64, b: u64) -> u64 {
+    let s6 = ref_low(b, 6_u64);
+    let s5 = ref_low(b, 5_u64);
+    if op == 31_u64 { return ref_add(a, b); }
+    if op == 32_u64 { return ref_sub(a, b); }
+    if op == 33_u64 { return ref_shift(a, s6, 0_u64); }
+    if op == 34_u64 { return ref_lt(a, b); }
+    if op == 35_u64 { return ref_ltu(a, b); }
+    if op == 36_u64 { return a ^ b; }
+    if op == 37_u64 { return ref_shift(a, s6, 1_u64); }
+    if op == 38_u64 { return ref_shift(a, s6, 2_u64); }
+    if op == 39_u64 { return a | b; }
+    if op == 40_u64 { return a & b; }
+    if op == 45_u64 { return ref_w(ref_add(a, b)); }
+    if op == 46_u64 { return ref_w(ref_sub(a, b)); }
+    if op == 47_u64 { return ref_w(ref_shift(a, s5, 0_u64)); }
+    if op == 48_u64 { return ref_w(ref_shift(ref_low(a, 32_u64), s5, 1_u64)); }
+    ref_w(ref_shift(ref_w(a), s5, 2_u64))
+}
+
+fn ref_value(op: u64, w: u64, pc: u64, a: u64, b: u64) -> u64 {
+    if op == 1_u64 { return ref_imm(w, 4_u64); }
+    if op == 2_u64 { return ref_add(pc, ref_imm(w, 4_u64)); }
+    if (op >= 22_u64 && op <= 30_u64) || (op >= 41_u64 && op <= 44_u64) { return ref_arith_imm(op, w, a); }
+    ref_arith_reg(op, a, b)
+}
+
+// One step of the reference machine. Same contract as emu_step.
+fn ref_step(m: &mut Machine, x: &mut [u64], ram: &mut [u8], out: &mut [u8]) -> i64 {
+    if ref_bit(m.pc, 0_u64) == 1_u64 || ref_bit(m.pc, 1_u64) == 1_u64 { return -3; }
+    if !ref_ram_ok(ram.len() as u64, m.pc, 4_u64) { return -2; }
+    let w = ref_rd(ram, m.pc, 4_u64);
+    let op = ref_match(w);
+    if op == 0_u64 { return -1; }
+    if op == 51_u64 { return 2; }
+    if op == 52_u64 { return 1; }
+    let rd = ref_put(0_u64, 0_u64, w, 7_u64, 5_u64);
+    let a = x[ref_put(0_u64, 0_u64, w, 15_u64, 5_u64) as usize];
+    let b = x[ref_put(0_u64, 0_u64, w, 20_u64, 5_u64) as usize];
+    let mut e = RefEff { rc: 0, wr: false, val: 0_u64, next: ref_add(m.pc, 4_u64) };
+    if op >= 3_u64 && op <= 10_u64 { e = ref_flow(op, w, m.pc, a, b); }
+    if op >= 11_u64 && op <= 17_u64 { e = ref_load(op, w, m.pc, ram, a); }
+    if op >= 18_u64 && op <= 21_u64 { e.rc = ref_store(op, w, m, ram, out, a, b); }
+    if op <= 2_u64 || (op >= 22_u64 && op <= 49_u64) { e.wr = true; e.val = ref_value(op, w, m.pc, a, b); }
+    if e.rc != 0 { return e.rc; }
+    if e.wr && rd != 0_u64 { x[rd as usize] = e.val; }
+    m.pc = e.next;
+    m.steps = ref_add(m.steps, 1_u64);
+    0
+}

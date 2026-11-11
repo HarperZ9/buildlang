@@ -1,0 +1,171 @@
+// emu-rv64 command line: runs the checks of the RV64I machine core.
+//
+//   emu-rv64 cases              hand-computed instruction cases and two programs
+//   emu-rv64 fuzz SEED STEPS    differential run against the reference model
+//   emu-rv64 props SEED STEPS   property run, no model
+//   emu-rv64 controls           shows that every planted defect is refused
+// The trap profile is in main2.bld, the timer in main3.bld, flat images and
+// replay in main4.bld and main5.bld, the M and A extensions in main6.bld.
+
+// Loads `n` words at the start of memory and runs until the machine stops.
+fn run_words(words: &[u64], n: u64, m: &mut Machine, x: &mut [u64], ram: &mut [u8], out: &mut [u8]) -> i64 {
+    let mut i: u64 = 0_u64;
+    while i < n {
+        emu_poke(ram, EMU_RAM_BASE + 4_u64 * i, 4_u64, words[i as usize]);
+        i = i + 1_u64;
+    }
+    emu_run(m, x, ram, out, 1000_u64)
+}
+
+// Program 1 writes the three bytes 4F 4B 0A ("OK" and a line feed) to the
+// serial device, then stops on EBREAK after 7 instructions.
+fn program_serial() ~ Console {
+    let mut words: [u64; 8] = [0_u64; 8];
+    words[0] = 0x100002B7_u64;
+    words[1] = 0x04F00313_u64;
+    words[2] = 0x00628023_u64;
+    words[3] = 0x04B00313_u64;
+    words[4] = 0x00628023_u64;
+    words[5] = 0x00A00313_u64;
+    words[6] = 0x00628023_u64;
+    words[7] = 0x00100073_u64;
+    let mut m = emu_new();
+    let mut x: [u64; 32] = [0_u64; 32];
+    let mut ram: [u8; 256] = [0_u8; 256];
+    let mut out: [u8; 8] = [0_u8; 8];
+    let rc = run_words(&words, 8_u64, &mut m, &mut x, &mut ram, &mut out);
+    println!("program serial: rc={} steps={} pc={:08x} out_len={} out={:02x} {:02x} {:02x}",
+             rc, m.steps, m.pc, m.out_len, out[0] as u64, out[1] as u64, out[2] as u64);
+}
+
+// Program 2 adds 10 + 9 + ... + 1 in a loop: 2 setup instructions, then 10
+// rounds of 3, so 32 instructions before EBREAK, and x1 = 55.
+fn program_sum() ~ Console {
+    let mut words: [u64; 8] = [0_u64; 8];
+    words[0] = 0x00000093_u64;
+    words[1] = 0x00A00113_u64;
+    words[2] = 0x002080B3_u64;
+    words[3] = 0xFFF10113_u64;
+    words[4] = 0xFE011CE3_u64;
+    words[5] = 0x00100073_u64;
+    let mut m = emu_new();
+    let mut x: [u64; 32] = [0_u64; 32];
+    let mut ram: [u8; 256] = [0_u8; 256];
+    let mut out: [u8; 8] = [0_u8; 8];
+    let rc = run_words(&words, 6_u64, &mut m, &mut x, &mut ram, &mut out);
+    println!("program sum: rc={} steps={} pc={:08x} x1={} x2={}", rc, m.steps, m.pc, x[1], x[2]);
+}
+
+fn stats_new() -> Stats {
+    Stats { ok: 0_u64, illegal: 0_u64, bus: 0_u64, align: 0_u64, loads: 0_u64, stores: 0_u64, jumps: 0_u64 }
+}
+
+// Runs one check (0 differential, 1 properties) for variant v.
+// Returns 1 when the check refuses the variant, else 0.
+fn check_one(check: u64, v: u64, seed: u64, steps: u64) -> i64 ~ Console {
+    let mut st = stats_new();
+    let mut f = fz_refuse(0, 0_u64, 0_u64, 0_u64);
+    if check == 0_u64 {
+        f = fuzz_run(v, seed, steps, &mut st);
+    } else {
+        f = prop_run(v, seed, steps);
+    }
+    if f.kind != 0 {
+        show_refusal(&f);
+        return 1;
+    }
+    if check == 0_u64 {
+        println!("  accepted, {} steps: ok={} illegal={} bus={} align={} loads={} stores={} jumps={}",
+                 steps, st.ok, st.illegal, st.bus, st.align, st.loads, st.stores, st.jumps);
+    } else {
+        println!("  accepted, {} cases, {} round trips, {} raw words", 61, steps, steps);
+    }
+    0
+}
+
+fn control_name(v: u64) ~ Console {
+    if v == 0_u64 { println!("variant 0: the core"); }
+    if v == 1_u64 { println!("control 1: branch offset bit 11 read from the wrong word bit"); }
+    if v == 2_u64 { println!("control 2: arithmetic right shift decoded as logical"); }
+    if v == 3_u64 { println!("control 3: 12-bit immediates zero-extended"); }
+    if v == 4_u64 { println!("control 4: jump offset bits 19 to 12 dropped"); }
+    if v == 5_u64 { println!("control 5: writes to register 0 land"); }
+    if v == 6_u64 { println!("control 6: ADDIW result not sign-extended"); }
+}
+
+// Every control must be refused by both checks, and the core must pass both.
+fn controls() -> i64 ~ Console {
+    let mut bad: i64 = 0;
+    let mut v: u64 = 0_u64;
+    while v <= CTL_COUNT {
+        control_name(v);
+        println!(" differential:");
+        let d = check_one(0_u64, v, 1_u64, 20000_u64);
+        println!(" properties:");
+        let q = check_one(1_u64, v, 1_u64, 20000_u64);
+        if v == 0_u64 && (d + q) != 0 { bad = bad + 1; }
+        if v != 0_u64 && (d == 0 || q == 0) {
+            println!("  ACCEPTED A PLANTED DEFECT");
+            bad = bad + 1;
+        }
+        v = v + 1_u64;
+    }
+    if bad == 0 {
+        println!("result: core accepted, 6 of 6 controls refused by both checks");
+    } else {
+        println!("result: FAILED, {} variants judged wrongly", bad);
+    }
+    bad
+}
+
+fn main() ~ Console + FileSystem + Process + Environment {
+    let cmd = args_get(1);
+    if cmd == "cases" {
+        let bad = vectors_run(0_u64, true);
+        program_serial();
+        program_sum();
+        if bad != 0_u64 { exit(1); }
+        return;
+    }
+    if cmd == "controls" {
+        if controls() != 0 { exit(1); }
+        return;
+    }
+    if cmd == "fuzz" || cmd == "props" {
+        let seed = args_get(2).parse_int() as u64;
+        let steps = args_get(3).parse_int() as u64;
+        let mut check: u64 = 0_u64;
+        if cmd == "props" { check = 1_u64; }
+        println!("{} seed={} steps={}", cmd, seed, steps);
+        if check_one(check, 0_u64, seed, steps) != 0 { exit(1); }
+        return;
+    }
+    let mc = machine_main();
+    if mc == 0 { return; }
+    if mc > 0 { exit(1); }
+    let ic = irq_main();
+    if ic == 0 { return; }
+    if ic > 0 { exit(1); }
+    let rc = replay_main();
+    if rc == 0 { return; }
+    if rc > 0 { exit(rc as i32); }
+    let xc = ma_main();
+    if xc == 0 { return; }
+    if xc > 0 { exit(1); }
+    let sc = sys_main();
+    if sc == 0 { return; }
+    if sc > 0 { exit(1); }
+    let zc = serial_main();
+    if zc == 0 { return; }
+    if zc > 0 { exit(zc as i32); }
+    println!("usage: emu-rv64 cases | controls | fuzz SEED STEPS | props SEED STEPS");
+    println!("       emu-rv64 mcases | mcontrols | mfuzz SEED STEPS | mprops SEED STEPS");
+    println!("       emu-rv64 icases | icontrols | ifuzz SEED STEPS | iprops SEED STEPS");
+    println!("       emu-rv64 run IMAGE STEPS [RAM] | replay IMAGE STEPS [RAM] | image NAME [FILE]");
+    println!("       emu-rv64 rcases | rcontrols | rprops SEED STEPS");
+    println!("       emu-rv64 xcases | xcontrols | xfuzz SEED STEPS | xprops SEED STEPS");
+    println!("       emu-rv64 scases | scontrols | sfuzz SEED STEPS | sprops SEED STEPS");
+    println!("       emu-rv64 srun IMAGE STEPS | sreplay IMAGE STEPS");
+    println!("       emu-rv64 serial IMAGE MAX | serial-check IMAGE MAX");
+    exit(2);
+}

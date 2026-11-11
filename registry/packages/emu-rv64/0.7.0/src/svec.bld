@@ -1,0 +1,106 @@
+// Hand cases for the system profile of emu-rv64: the harness of the
+// generic cases. The case tables are svec_g*.bld. Every instruction word
+// and every expected value in those tables was computed outside this
+// package, by the script tests/tools/sv39_oracle.py, which is written from
+// the sentences of the manual and shares no code and no table with this
+// package. No emulator produced them.
+//
+// A generic case runs up to four words on a machine in the system profile
+// with 32768 bytes of memory, eight pages. The run stops after a step that
+// traps. The input is a list of pairs, index and value, into an array of
+// 32 numbers that starts as zeros:
+//   0-3 the words, 4 how many steps run, 5 the privilege mode, 6 mstatus,
+//   7 satp, 8 medeleg, 9 mideleg, 10 mie, 11 mip, 12 pc, 13 the physical
+//   address the words are placed at, 14 x1, 15 x2,
+//   16-27 six pairs of a physical address and a doubleword written there
+//   before the run (address 0: no write),
+//   28 stvec, 29 mtvec, 30 sepc, 31 mepc.
+// Bit 7 of the mip input asks for a pending timer interrupt: mtimecmp is
+// set to 0. The expected state is an array of 22 numbers:
+//   0 the code of the last step, 1 pc, 2 the privilege mode, 3 mstatus,
+//   4 mcause, 5 mepc, 6 mtval, 7 scause, 8 sepc, 9 stval, 10 x10, 11 x11,
+//   12 instructions retired, 13 traps, 14 satp, 15 the doubleword at the
+//   address of the sixth write after the run (0 when there is none),
+//   16 the stored bits of mip, 17 mie, 18 and 19 the reservation,
+//   20 medeleg, 21 mideleg.
+// x0 must be 0, and x1 and x2 must hold what they started with.
+
+// Copies the pairs of p into the input array.
+fn sv_expand(p: &[u64], i: &mut [u64]) {
+    let mut k: usize = 0;
+    while k + 1 < p.len() {
+        i[p[k] as usize] = p[k + 1];
+        k = k + 2;
+    }
+}
+
+fn sv_start(i: &[u64]) -> Machine {
+    let mut m = emu_new_system();
+    m.prv = i[5];
+    m.mstatus = i[6];
+    m.satp = i[7];
+    m.medeleg = i[8];
+    m.mideleg = i[9];
+    m.mie = i[10];
+    m.mip = i[11] & !MI_MTIP;
+    if (i[11] & MI_MTIP) != 0_u64 { m.mtimecmp = 0_u64; }
+    m.pc = i[12];
+    m.stvec = i[28];
+    m.mtvec = i[29];
+    m.sepc = i[30];
+    m.mepc = i[31];
+    m
+}
+
+// Places the words and the six doublewords in memory. A write outside
+// memory is skipped.
+fn sv_fill(i: &[u64], ram: &mut [u8]) {
+    let len = ram.len() as u64;
+    let mut k: u64 = 0_u64;
+    while k < 4_u64 {
+        if emu_in_ram(len, i[13] + 4_u64 * k, 4_u64) { emu_poke(ram, i[13] + 4_u64 * k, 4_u64, i[k as usize]); }
+        k = k + 1_u64;
+    }
+    k = 0_u64;
+    while k < 6_u64 {
+        let at = i[(16_u64 + 2_u64 * k) as usize];
+        if at != 0_u64 && emu_in_ram(len, at, 8_u64) { emu_poke(ram, at, 8_u64, i[(17_u64 + 2_u64 * k) as usize]); }
+        k = k + 1_u64;
+    }
+}
+
+fn sv_mach_ok(m: &Machine, e: &[u64]) -> bool {
+    let trap = m.mcause == e[4] && m.mepc == e[5] && m.mtval == e[6] && m.scause == e[7] &&
+               m.sepc == e[8] && m.stval == e[9];
+    let irq = m.mip == e[16] && m.mie == e[17] && m.medeleg == e[20] && m.mideleg == e[21];
+    m.pc == e[1] && m.prv == e[2] && m.mstatus == e[3] && trap && irq && m.steps == e[12] &&
+    m.traps == e[13] && m.satp == e[14] && m.res == e[18] && m.res_addr == e[19] && m.out_len == 0_u64
+}
+
+fn sv_g(st: &mut XSt, p: &[u64], e: &[u64]) ~ Console {
+    st.count = st.count + 1_u64;
+    let mut i: [u64; 32] = [0_u64; 32];
+    sv_expand(p, &mut i);
+    let mut m = sv_start(&i);
+    let mut x: [u64; 32] = [0_u64; 32];
+    let mut ram: [u8; 32768] = [0_u8; 32768];
+    let mut out: [u8; 8] = [0_u8; 8];
+    x[1] = i[14];
+    x[2] = i[15];
+    sv_fill(&i, &mut ram);
+    let mut rc: i64 = EMU_OK;
+    let mut k: u64 = 0_u64;
+    while k < i[4] && rc == EMU_OK {
+        rc = sys_step_v(st.v, &mut m, &mut x, &mut ram, &mut out);
+        k = k + 1_u64;
+    }
+    let mut probe: u64 = 0_u64;
+    if i[26] != 0_u64 { probe = emu_peek(&ram, i[26], 8_u64); }
+    let regs = x[0] == 0_u64 && x[1] == i[14] && x[2] == i[15] && x[10] == e[10] && x[11] == e[11];
+    let ok = rc == e[0] as i64 && regs && sv_mach_ok(&m, e) && probe == e[15];
+    if st.show {
+        println!("scase {} rc={} pc={:x} prv={} mstatus={:x} mcause={:x} mtval={:x} scause={:x} stval={:x} x10={:x} x11={:x} mem={:x} pass={}",
+                 st.count, rc, m.pc, m.prv, m.mstatus, m.mcause, m.mtval, m.scause, m.stval, x[10], x[11], probe, ok);
+    }
+    xv_note(st, ok);
+}
