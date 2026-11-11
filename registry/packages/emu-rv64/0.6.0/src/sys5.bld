@@ -1,0 +1,59 @@
+// emu-rv64 core, system profile, fifth part: executing one instruction and
+// the step function. Rules: SPEC.md, "Order within a step" and "Traps in
+// the system profile".
+
+// Applies one decoded instruction in the system profile. w is the
+// instruction word. ECALL: "When executed in U-mode, S-mode, or M-mode, it
+// generates an environment-call-from-U-mode exception,
+// environment-call-from-S-mode exception, or environment-call-from-M-mode
+// exception, respectively": causes 8, 9 and 11.
+fn sys_exec(v: u64, m: &mut Machine, x: &mut [u64], ram: &mut [u8], out: &mut [u8], d: &Insn, w: u64) -> i64 {
+    let c = emu_class(d.op);
+    if c == 0_u64 { return sys_trap(v, m, EXC_ILLEGAL, w); }
+    if d.op == OP_MRET { return sys_mret(v, m, w); }
+    if d.op == OP_SRET { return sys_sret(v, m, w); }
+    if d.op == OP_WFI { return sys_wfi(v, m, w); }
+    if d.op == OP_SFENCE { return sys_sfence(v, m, w); }
+    if c == CL_CSR { return sys_csr_exec(v, m, x, d, w); }
+    if c == CL_A { return sys_atomic(v, m, x, ram, d); }
+    if d.op >= OP_MUL { return emu_m_exec(m, x, d); }
+    if d.op >= OP_LB && d.op <= OP_LWU { return sys_load(v, m, x, ram, d); }
+    if d.op >= OP_SB && d.op <= OP_SD { return sys_store(v, m, x, ram, out, d); }
+    if d.op == OP_ECALL { return sys_trap(v, m, EXC_ECALL_U + m.prv, 0_u64); }
+    if d.op == OP_EBREAK { return sys_trap(v, m, EXC_BREAK, 0_u64); }
+    let a = x[d.rs1 as usize];
+    let b = x[d.rs2 as usize];
+    let rc = emu_exec(m, x, ram, out, d);
+    if rc == EMU_ALIGN { return sys_trap(v, m, EXC_INSN_ALIGN, emu_eff_flow(m.pc, d, a, b).next); }
+    rc
+}
+
+// The fetch and execute part of a step. The pc is translated as a fetch in
+// the present mode. "Attempting to fetch an instruction from a page that
+// does not have execute permissions raises a fetch page-fault exception."
+// A fault of the fetch has the pc as its trap value.
+fn sys_run(v: u64, m: &mut Machine, x: &mut [u64], ram: &mut [u8], out: &mut [u8]) -> i64 {
+    if (m.pc & 3_u64) != 0_u64 { return sys_trap(v, m, EXC_INSN_ALIGN, m.pc); }
+    let f = sys_translate(v, m, ram, m.pc, 0_u64);
+    if f.cause != 0_u64 { return sys_trap(v, m, f.cause, m.pc); }
+    if !emu_in_ram(ram.len() as u64, f.pa, 4_u64) { return sys_trap(v, m, EXC_INSN_ACCESS, m.pc); }
+    let w = emu_peek(ram, f.pa, 4_u64);
+    let d = emu_decode(w);
+    sys_exec(v, m, x, ram, out, &d, w)
+}
+
+// One step of variant v in the system profile, in the order of the trap
+// profile: the interrupt check, then either the interrupt or one
+// instruction, then the tick of mtime.
+fn sys_step_v(v: u64, m: &mut Machine, x: &mut [u64], ram: &mut [u8], out: &mut [u8]) -> i64 {
+    if x.len() < 32 { return EMU_SMALL; }
+    let cause = sys_irq_pick(v, m);
+    let mut rc: i64 = EMU_TRAP;
+    if cause != 0_u64 {
+        rc = sys_take(v, m, cause, 0_u64, true);
+    } else {
+        rc = sys_run(v, m, x, ram, out);
+    }
+    emu_tick(m, rc);
+    rc
+}

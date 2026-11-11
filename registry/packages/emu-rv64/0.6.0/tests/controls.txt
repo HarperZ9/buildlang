@@ -1,0 +1,47 @@
+# id | where | planted defect | refused by (kind)
+1 | ctl_decode | branch offset bit 11 is read from word bit 20 instead of word bit 7 | differential 2 (pc), property 41
+2 | ctl_decode | the shift decoder ignores word bit 30, so SRAI reads as SRLI | differential 3 (register), property 41
+3 | ctl_decode | 12-bit immediates are zero-extended instead of sign-extended | differential 3 (register), property 41
+4 | ctl_decode | the jump decoder drops offset bits 19 to 12 | differential 2 (pc), property 41
+5 | step_v | register 0 is an ordinary register, so a write to it lands | differential 6 (register 0), hand-computed case 22
+6 | step_v | ADDIW leaves the upper 32 bits clear instead of copying bit 31 | differential 3 (register), hand-computed case 32
+# trap profile (command mcontrols): step and case numbers are those of seed 1, 20000 steps
+7 | mctl_after | a trap saves pc + 4 in mepc instead of pc | differential 13 (mepc) at step 0, hand-computed case 13
+8 | mctl_after | ECALL from machine mode reports cause 8 instead of 11 | differential 14 (mcause) at step 5, hand-computed case 36
+9 | mstep_v | MRET leaves MIE as it was instead of copying MPIE into it | differential 11 (mstatus) at step 102, hand-computed case 53
+10 | mstep_v | CSRRS and CSRRSI with rs1 = 0 count as a write, so reading a read-only CSR traps | differential 1 (result code) at step 15, hand-computed case 16
+11 | mstep_v | CSRRC and CSRRCI set the bits instead of clearing them | differential 14 (mcause) at step 74, hand-computed case 23
+12 | mctl_decode | the decoder sign-extends the 12-bit CSR number | differential 1 (result code) at step 15, property 42 at round 0
+# timer and interrupts (command icontrols): step and case numbers are those of seed 1, 20000 steps.
+# The hand-computed case is the first that fails; the command prints every failing case.
+# The last entry is the stream property (kinds 46 to 50) run alone.
+13 | ictl_pick | an interrupt is taken while mstatus.MIE is 0 | differential 14 (mcause) at step 12, hand-computed case 29, property 46 at step 15
+14 | ictl_take | an interrupt leaves bit 63 of mcause clear | differential 14 (mcause) at step 98, hand-computed case 31, property 47 at step 52
+15 | ictl_take | an interrupt saves pc + 4 in mepc instead of pc | differential 13 (mepc) at step 98, hand-computed case 31, property 48 at step 52
+16 | ictl_take | the vectored handler address is BASE + cause instead of BASE + 4 * cause | differential 2 (pc) at step 135, hand-computed case 42, property 49 at step 101
+17 | ictl_mip | the timer interrupt is pending only while mtime > mtimecmp, so it is one step late | differential 1 (result code) at step 900, hand-computed case 22, property 47 at step 2884
+18 | ictl_pick | the timer interrupt is taken before the software interrupt | differential 2 (pc) at step 324, hand-computed case 37, property 46 at step 278
+19 | istep_v | mtime rises before the interrupt check of a step instead of after the step | differential 19 (mtime) at step 31, hand-computed case 9, property 46 at step 2883
+# image loader and replay (command rcontrols): rounds are those of seed 1, 20000 steps.
+# The hand-computed case is the first that fails; the command prints every failing case.
+# The last entry is the first property rule (kinds 52 to 59) that refuses, and its round.
+20 | rctl_load | the loader drops the last byte of the image | hand-computed case 1, property 52 at round 0
+21 | rctl_load | the loader places the image one byte late, at 0x80000001 | hand-computed case 1, property 52 at round 0
+22 | rctl_load | the loader does not clear memory, so bytes of an earlier run stay | hand-computed case 2, property 52 at round 1
+23 | rctl_hash | the state hash leaves mtime out | hand-computed case 12, property 58 at round 24
+24 | rctl_hash | the state hash leaves the serial output out: the buffer and the record of emptied bytes | hand-computed case 13, property 58 at round 1
+25 | rctl_boot | the second run of a replay starts with mtime = 1 | hand-computed case 10, property 54 at round 0
+26 | rctl_diff | the checkpoint compare looks only at the last hash | hand-computed case 17, property 59 at round 1
+# M and A extensions (command xcontrols): step, round and case numbers are those of seed 1, 20000 steps.
+# Each entry gives the differential refusal, the property rule (kinds 70 to 83) that refuses first, and the hand cases that fail.
+27 | xctl_div_fix | a division by zero gives the quotient 0 instead of all ones | differential 3 (register) at step 107, property 75 at round 0, 22 hand cases from case 73
+28 | xctl_div_fix | the most negative number divided by -1 gives the largest positive number instead of the dividend | differential 3 (register) at step 1948, property 75 at round 0, 3 hand cases from case 78
+29 | xctl_div_fix | a nonzero remainder takes the sign of the divisor instead of the dividend | differential 3 (register) at step 132, property 74 at round 0, 9 hand cases from case 112
+30 | xctl_m_fix | MULHSU reads rs2 as a signed number | differential 3 (register) at step 158, property 73 at round 0, 6 hand cases from case 37
+31 | xctl_m_fix, xctl_atomic | a 32-bit result is not sign-extended: MULW, DIVW, DIVUW, REMW, REMUW, LR.W and the 32-bit AMOs leave the upper half of rd 0 | differential 3 (register) at step 24, property 76 at round 0, 60 hand cases from case 154
+32 | xctl_atomic | SC succeeds when no reservation is held | differential 3 (register) at step 1, property 77 at round 0, 6 hand cases from case 242
+33 | xctl_atomic | a successful SC writes 1 to rd instead of 0 | differential 3 (register) at step 26, property 77 at round 0, 18 hand cases from case 241
+34 | xctl_atomic | the reservation survives an SC, so a second SC succeeds | differential 21 (reservation) at step 26, property 77 at round 0, 31 hand cases from case 241
+35 | xctl_atomic | AMOMIN compares as unsigned numbers | differential 4 (memory) at step 11, property 78 at round 15, 6 hand cases from case 313
+36 | xctl_atomic | an AMO writes the new value of memory to rd instead of the old one | differential 3 (register) at step 11, property 79 at round 1, 72 hand cases from case 256
+37 | xctl_loose | an atomic access at an address that is not a multiple of its width is carried out instead of refused | differential 1 (result code) at step 20, property 80 at round 0, 14 hand cases from case 235

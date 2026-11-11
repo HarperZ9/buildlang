@@ -1,0 +1,192 @@
+// emu-rv64 core, system profile, first part: the control and status
+// registers. Since 0.6.0.
+//
+// The system profile is the trap profile with two more privilege modes,
+// supervisor (S) and user (U), and with Sv39 virtual memory. Each rule
+// carries the sentence of the RISC-V manual it follows, as a quotation.
+// The files are src/priv/csrs.adoc, machine.adoc and supervisor.adoc of
+// riscv/riscv-isa-manual at commit d50ad50f. Rules: SPEC.md, "System
+// profile" and the sections after it.
+//
+// Every function of the system profile takes a variant number `v` first.
+// Variant 0 is the machine. Variants 38 to 57 each plant one defect; only
+// the checks pass them (sctl.bld).
+
+// 0: no such CSR. 1: the register exists.
+fn sys_csr_kind(n: u64) -> u64 {
+    if emu_csr_kind(n) != 0_u64 { return 1_u64; }
+    if n == CSR_MEDELEG || n == CSR_MIDELEG || n == CSR_MCOUNTEREN || n == CSR_MENVCFG { return 1_u64; }
+    if n == CSR_SSTATUS || n == CSR_SIE || n == CSR_STVEC || n == CSR_SCOUNTEREN { return 1_u64; }
+    if n == CSR_SENVCFG || n == CSR_SATP { return 1_u64; }
+    if n >= CSR_SSCRATCH && n <= CSR_SIP { return 1_u64; }
+    0_u64
+}
+
+// True when an instruction in the present mode may access CSR n.
+//
+// "The top two bits (csr[11:10]) indicate whether the register is
+// read/write (00, 01, or 10) or read-only (11). The next two bits
+// (csr[9:8]) encode the lowest privilege level that can access the CSR".
+// "Attempts to access a CSR address without sufficient privilege raise
+// illegal-instruction exceptions". "Attempts to write a read-only CSR
+// address raise illegal-instruction exceptions."
+// TVM: "When TVM=1, attempts to read or write the satp CSR or execute an
+// SFENCE.VMA or SINVAL.VMA instruction while executing in S-mode will raise
+// an illegal-instruction exception."
+fn sys_csr_ok(v: u64, m: &Machine, n: u64, writes: bool) -> bool {
+    if sys_csr_kind(n) == 0_u64 { return false; }
+    if ((n >> 8_u64) & 3_u64) > m.prv { return false; }
+    if (n >> 10_u64) == 3_u64 && writes { return false; }
+    let tvm = (m.mstatus & MS_TVM) != 0_u64 && v != SC_TVM;
+    if n == CSR_SATP && m.prv == PRIV_S && tvm { return false; }
+    true
+}
+
+// mip as software reads it. MTIP, bit 7, comes from the timer. MSIP, bit 3,
+// and MEIP, bit 11, are the bits the host set. SSIP, STIP and SEIP, bits 1,
+// 5 and 9, are the bits machine-mode software wrote.
+fn sys_mip_now(m: &Machine) -> u64 {
+    let mut p = m.mip & (MI_MSIP | MI_MEIP | SI_BITS);
+    if m.mtime >= m.mtimecmp { p = p | MI_MTIP; }
+    p
+}
+
+// The value a CSR instruction reads from a supervisor register. sstatus,
+// sie and sip are views: "The sstatus register is a subset of the mstatus
+// register." "If an interrupt is delegated to S-mode by setting a bit in
+// the mideleg register, it becomes visible in the sip register and is
+// maskable using the sie register. Otherwise, the corresponding bits in
+// sip and sie are read-only zero."
+fn sys_csr_read_s(v: u64, m: &Machine, n: u64) -> u64 {
+    if n == CSR_SSTATUS {
+        if v == SC_SSTATUS { return m.mstatus; }
+        return m.mstatus & SS_R;
+    }
+    if n == CSR_SIE { return m.mie & m.mideleg; }
+    if n == CSR_SIP { return sys_mip_now(m) & m.mideleg; }
+    if n == CSR_STVEC { return m.stvec; }
+    if n == CSR_SSCRATCH { return m.sscratch; }
+    if n == CSR_SEPC { return m.sepc; }
+    if n == CSR_SCAUSE { return m.scause; }
+    if n == CSR_STVAL { return m.stval; }
+    if n == CSR_SATP { return m.satp; }
+    if n == CSR_SENVCFG { return m.senvcfg; }
+    0_u64
+}
+
+// The value a CSR instruction reads. The caller has checked sys_csr_ok.
+// mcounteren and scounteren read 0: "any of the bits may be read-only
+// zero".
+fn sys_csr_read(v: u64, m: &Machine, n: u64) -> u64 {
+    if ((n >> 8_u64) & 3_u64) == PRIV_S { return sys_csr_read_s(v, m, n); }
+    if n == CSR_MISA { return MISA_SYS; }
+    if n == CSR_MIP { return sys_mip_now(m); }
+    if n == CSR_MEDELEG { return m.medeleg; }
+    if n == CSR_MIDELEG { return m.mideleg; }
+    if n == CSR_MENVCFG { return m.menvcfg; }
+    if n == CSR_MCOUNTEREN { return 0_u64; }
+    emu_csr_read(m, n)
+}
+
+// Writes the bits of `mask` in mstatus. MPP is WARL: "xPP fields are WARL
+// fields that can hold only privilege mode x and any implemented privilege
+// mode lower than x." The value 2 names no mode of this machine, so a
+// write of 2 leaves MPP as it was. UXL and SXL stay 2: "an implementation
+// may make SXL be a read-only field whose value always ensures that
+// SXLEN=MXLEN."
+fn sys_status_write(m: &mut Machine, val: u64, mask: u64) {
+    let mut s = (m.mstatus & !mask) | (val & mask);
+    if (s & MS_MPP) == 0x1000_u64 { s = (s & !MS_MPP) | (m.mstatus & MS_MPP); }
+    m.mstatus = s;
+}
+
+// A write to satp. "Implementations are not required to support all MODE
+// settings, and if satp is written with an unsupported MODE, the entire
+// write has no effect; no fields in satp are modified." MODE 0 is Bare and
+// MODE 8 is Sv39. A write of MODE 0 stores 0 in every field: "To select
+// MODE=Bare, software must write zero to the remaining fields of satp".
+// No ASID bit is implemented: "The number of ASID bits is UNSPECIFIED and
+// may be zero."
+fn sys_satp_write(v: u64, m: &mut Machine, val: u64) {
+    let mode = val >> 60_u64;
+    if mode == 0_u64 { m.satp = 0_u64; return; }
+    if mode == 8_u64 { m.satp = (8_u64 << 60_u64) | (val & SATP_PPN); return; }
+    if v == SC_SATP { m.satp = val; }
+}
+
+// Writes a supervisor register. sip: "If implemented, SEIP is read-only in
+// sip", "If implemented, STIP is read-only in sip", "If implemented, SSIP
+// is writable in sip". So only bit 1 is written, and only when delegated.
+fn sys_csr_write_s(v: u64, m: &mut Machine, n: u64, val: u64) {
+    if n == CSR_SSTATUS { sys_status_write(m, val, SS_W); }
+    if n == CSR_SIE { m.mie = (m.mie & !m.mideleg) | (val & m.mideleg); }
+    if n == CSR_SIP {
+        let w = m.mideleg & 2_u64;
+        m.mip = (m.mip & !w) | (val & w);
+    }
+    if n == CSR_STVEC { m.stvec = val & !2_u64; }
+    if n == CSR_SSCRATCH { m.sscratch = val; }
+    if n == CSR_SEPC { m.sepc = val & !3_u64; }
+    if n == CSR_SCAUSE { m.scause = val; }
+    if n == CSR_STVAL { m.stval = val; }
+    if n == CSR_SATP { sys_satp_write(v, m, val); }
+    if n == CSR_SENVCFG { m.senvcfg = val & 1_u64; }
+}
+
+// Writes a CSR. Each register keeps only the bits it implements.
+// mip: "SEIP is writable in mip", "If the stimecmp register is not
+// implemented, STIP is writable in mip", "SSIP is writable in mip"; MEIP,
+// MTIP and MSIP are read-only there.
+// medeleg: "medeleg[11] is read-only zero." Bits are writable for the
+// exception codes this machine can raise below M-mode.
+// mideleg: the three supervisor interrupts can be delegated. The machine
+// interrupts cannot: "an implementation shall not fix as read-only one any
+// bits of mideleg corresponding to machine-level interrupts", and they
+// are read-only zero here.
+fn sys_csr_write(v: u64, m: &mut Machine, n: u64, val: u64) {
+    if ((n >> 8_u64) & 3_u64) == PRIV_S { sys_csr_write_s(v, m, n, val); return; }
+    if n == CSR_MSTATUS { sys_status_write(m, val, MS_SYS_W); return; }
+    if n == CSR_MIE { m.mie = val & MI_ALL; return; }
+    if n == CSR_MIP { m.mip = (m.mip & !SI_BITS) | (val & SI_BITS); return; }
+    if n == CSR_MEDELEG { m.medeleg = val & MEDELEG_W; return; }
+    if n == CSR_MIDELEG { m.mideleg = val & SI_BITS; return; }
+    if n == CSR_MENVCFG { m.menvcfg = val & 1_u64; return; }
+    if n == CSR_MCOUNTEREN || n == CSR_MISA { return; }
+    emu_csr_write(m, n, val);
+}
+
+// One Zicsr instruction in the system profile. d.imm is the CSR number and
+// w the instruction word, which the trap value receives when the
+// instruction is illegal.
+fn sys_csr_exec(v: u64, m: &mut Machine, x: &mut [u64], d: &Insn, w: u64) -> i64 {
+    let swap = d.op == OP_CSRRW || d.op == OP_CSRRWI;
+    let writes = swap || d.rs1 != 0_u64;
+    if !sys_csr_ok(v, m, d.imm, writes) { return sys_trap(v, m, EXC_ILLEGAL, w); }
+    let old = sys_csr_read(v, m, d.imm);
+    let mut src = d.rs1;
+    if d.op <= OP_CSRRC { src = x[d.rs1 as usize]; }
+    let mut value = src;
+    if d.op == OP_CSRRS || d.op == OP_CSRRSI { value = old | src; }
+    if d.op == OP_CSRRC || d.op == OP_CSRRCI { value = old & !src; }
+    if writes { sys_csr_write(v, m, d.imm, value); }
+    if d.rd != 0_u64 { x[d.rd as usize] = old; }
+    m.pc = m.pc.wrapping_add(4_u64);
+    m.steps = m.steps + 1_u64;
+    EMU_OK
+}
+
+// The hash of the state the system profile adds, in the order of the
+// Machine record.
+fn fnv_system(h: u64, m: &Machine) -> u64 {
+    let mut r = fnv_word(h, m.prv);
+    r = fnv_word(r, m.medeleg);
+    r = fnv_word(r, m.mideleg);
+    r = fnv_word(r, m.stvec);
+    r = fnv_word(r, m.sscratch);
+    r = fnv_word(r, m.sepc);
+    r = fnv_word(r, m.scause);
+    r = fnv_word(r, m.stval);
+    r = fnv_word(r, m.satp);
+    r = fnv_word(r, m.menvcfg);
+    fnv_word(r, m.senvcfg)
+}

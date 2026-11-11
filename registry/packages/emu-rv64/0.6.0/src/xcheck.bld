@@ -1,0 +1,172 @@
+// Differential check for the M and A extensions of emu-rv64 (command
+// xfuzz). The stream starts from the trap-profile stream of mcheck.bld and
+// replaces 11 words in 16: 5 are M instructions on edge operands and 6 are
+// atomic instructions on a prepared address. A core variant and the
+// reference model (xmodel.bld, xmodel2.bld and the older model files)
+// receive the same stream, and the full state is compared after every
+// step, the reservation included.
+//
+// Counters live in a caller array `ct` of 32 slots. Slots 0 to 19 are
+// those of mcheck.bld; causes 4 and 6 land in slots 4 and 6. 20 counts
+// retired M instructions, 21 divisions by zero among them, 22 signed
+// overflows, 23 retired LR, 24 SC that stored, 25 SC that did not, 26
+// retired AMOs, 27 retired atomics on a timer register.
+
+// An operand from the edges of the integer range: 0, 1, -1, the most
+// negative and the most positive number, the numbers around 2^31 and 2^32,
+// a small number, or noise.
+fn maz_edge(r: &mut Rng) -> u64 {
+    let pick = rng_next(r);
+    let k = pick % 16_u64;
+    if k == 0_u64 { return 0_u64; }
+    if k == 1_u64 { return 1_u64; }
+    if k == 2_u64 { return !0_u64; }
+    if k == 3_u64 { return EMU_SIGN; }
+    if k == 4_u64 { return EMU_SIGN - 1_u64; }
+    if k == 5_u64 { return 0x100000000_u64; }
+    if k == 6_u64 { return 0xFFFFFFFF_u64; }
+    if k == 7_u64 { return 0x80000000_u64; }
+    if k == 8_u64 { return 0x7FFFFFFF_u64; }
+    if k == 9_u64 { return 0xFFFFFFFF80000000_u64; }
+    if k == 10_u64 { return 2_u64; }
+    if k == 11_u64 { return (pick >> 8_u64) & 0xFF_u64; }
+    if k == 12_u64 { return !((pick >> 8_u64) & 0xFF_u64); }
+    rng_next(r)
+}
+
+// An M instruction on registers 8 and 9, which get fresh edge operands in
+// both machines. One word in eight names register 8 twice.
+fn maz_m(r: &mut Rng, xa: &mut [u64], xb: &mut [u64]) -> u64 {
+    let pick = rng_next(r);
+    xa[8] = maz_edge(r);
+    xb[8] = xa[8];
+    xa[9] = maz_edge(r);
+    xb[9] = xa[9];
+    let mut rs2: u64 = 9_u64;
+    if ((pick >> 16_u64) & 7_u64) == 0_u64 { rs2 = 8_u64; }
+    let d = Insn { op: OP_MUL + pick % 13_u64, rd: (pick >> 8_u64) & 31_u64, rs1: 8_u64, rs2: rs2, imm: 0_u64 };
+    emu_encode(&d)
+}
+
+// An address for an atomic instruction of n bytes. Of 16: 9 name one of
+// two doublewords in the upper half of memory (or their upper words), 2
+// are that with low bits set, 1 is a timer register, 1 is drawn like any
+// register value, 2 lie at the end of memory and 1 is any aligned place.
+fn maz_addr(r: &mut Rng, n: u64) -> u64 {
+    let pick = rng_next(r);
+    let sel = pick % 16_u64;
+    let mut hot = EMU_RAM_BASE + 512_u64 + 8_u64 * ((pick >> 8_u64) & 1_u64);
+    if n == 4_u64 && ((pick >> 12_u64) & 3_u64) == 0_u64 { hot = hot + 4_u64; }
+    if sel < 9_u64 { return hot; }
+    if sel < 11_u64 { return hot + 1_u64 + (pick >> 16_u64) % 7_u64; }
+    if sel == 11_u64 {
+        let mut t = EMU_MTIMECMP;
+        if ((pick >> 20_u64) & 1_u64) == 1_u64 { t = EMU_MTIME; }
+        return t + 4_u64 * ((pick >> 24_u64) & 1_u64);
+    }
+    if sel == 12_u64 { return gen_value(r); }
+    if sel < 15_u64 { return EMU_RAM_BASE + FZ_RAM - 4_u64 * ((pick >> 28_u64) % 4_u64); }
+    EMU_RAM_BASE + 8_u64 * ((pick >> 32_u64) % 128_u64)
+}
+
+// An atomic instruction: the address in register 10, the source in
+// register 11. Of 8: 2 LR, 2 SC, 4 AMOs. Half of the SC words take the
+// address and the width of the reservation the core holds, so that SC
+// stores often.
+fn maz_a(r: &mut Rng, ma: &Machine, xa: &mut [u64], xb: &mut [u64]) -> u64 {
+    let pick = rng_next(r);
+    let sel = pick % 8_u64;
+    let mut k: u64 = 2_u64 + (pick >> 8_u64) % 9_u64;
+    if sel < 2_u64 { k = 0_u64; }
+    if sel == 2_u64 || sel == 3_u64 { k = 1_u64; }
+    let mut n: u64 = 4_u64 + 4_u64 * ((pick >> 16_u64) & 1_u64);
+    let mut addr = maz_addr(r, n);
+    if sel == 2_u64 && ma.res != 0_u64 { n = ma.res; addr = ma.res_addr; }
+    xa[10] = addr;
+    xb[10] = addr;
+    xa[11] = maz_edge(r);
+    xb[11] = xa[11];
+    let mut op = OP_LR_W + k;
+    if n == 8_u64 { op = OP_LR_D + k; }
+    let d = Insn { op: op, rd: (pick >> 24_u64) & 31_u64, rs1: 10_u64, rs2: 11_u64, imm: (pick >> 32_u64) & 3_u64 };
+    emu_encode(&emu_canon(&d))
+}
+
+// The word of step i. w is the word the stream of mcheck.bld would run.
+fn maz_word(r: &mut Rng, ma: &Machine, xa: &mut [u64], xb: &mut [u64], w: u64) -> u64 {
+    let sel = rng_next(r) % 16_u64;
+    if sel < 5_u64 { return maz_m(r, xa, xb); }
+    if sel < 11_u64 { return maz_a(r, ma, xa, xb); }
+    w
+}
+
+// What a retired M or A word did, from the state before the step. `was`
+// and `x` are the machine and the registers before it.
+fn maz_count(ct: &mut [u64], w: u64, was: &Machine, a: u64, b: u64) {
+    let d = emu_decode(w);
+    if d.op < OP_MUL { return; }
+    if emu_class(d.op) != CL_A {
+        ct[20] = ct[20] + 1_u64;
+        let word = d.op >= OP_MULW;
+        let zero = (word && (b & 0xFFFFFFFF_u64) == 0_u64) || (!word && b == 0_u64);
+        if d.op >= OP_DIV && d.op != OP_MULW && zero { ct[21] = ct[21] + 1_u64; }
+        if (d.op == OP_DIV || d.op == OP_REM) && a == EMU_SIGN && b == !0_u64 { ct[22] = ct[22] + 1_u64; }
+        return;
+    }
+    let n = emu_a_width(d.op);
+    let k = emu_a_kind(d.op);
+    if k == 0_u64 { ct[23] = ct[23] + 1_u64; }
+    if k == 1_u64 && was.res == n && was.res_addr == a { ct[24] = ct[24] + 1_u64; }
+    if k == 1_u64 && !(was.res == n && was.res_addr == a) { ct[25] = ct[25] + 1_u64; }
+    if k >= 2_u64 { ct[26] = ct[26] + 1_u64; }
+    if emu_timer_reg(a, n) != 0_u64 { ct[27] = ct[27] + 1_u64; }
+}
+
+// Compares everything after step i. Kinds as mfuzz_run lists them, and 21
+// and 22 for the width and the address of the reservation.
+fn maz_cmp(i: u64, ca: i64, cb: i64, ma: &Machine, mb: &Machine, c: &[u64]) -> Refusal {
+    let f = ifz_cmp(i, ca, cb, ma, mb, c);
+    if f.kind != 0 { return f; }
+    mfz_cmp_csr(i, ma, c)
+}
+
+// Runs `steps` steps of the M and A stream through variant v and the
+// model.
+fn mafz_run(v: u64, seed: u64, steps: u64, ct: &mut [u64]) -> Refusal {
+    let mut r = Rng { s: seed };
+    let mut xa: [u64; 32] = [0_u64; 32];
+    let mut xb: [u64; 32] = [0_u64; 32];
+    let mut ra: [u8; 1024] = [0_u8; 1024];
+    let mut rb: [u8; 1024] = [0_u8; 1024];
+    let mut oa: [u8; 64] = [0_u8; 64];
+    let mut ob: [u8; 64] = [0_u8; 64];
+    let mut c: [u64; 13] = [0_u64; 13];
+    ref_reset(&mut c);
+    let mut ma = emu_new_machine();
+    let mut mb = emu_new();
+    let mut i: u64 = 0_u64;
+    while i < steps {
+        if i % 4_u64 == 0_u64 { fz_seed(&mut r, &mut xa, &mut xb); }
+        mfz_prep(&mut r, i, &mut ma, &mut mb, &mut c, ct);
+        let base = mfz_word(&mut r);
+        let w = maz_word(&mut r, &ma, &mut xa, &mut xb, base);
+        if mfz_pc_ok(ma.pc) {
+            emu_poke(&mut ra, ma.pc, 4_u64, w);
+            emu_poke(&mut rb, mb.pc, 4_u64, w);
+        }
+        let was = ipr_copy(&ma);
+        let d = emu_decode(w);
+        let a = xa[d.rs1 as usize];
+        let b = xa[d.rs2 as usize];
+        let ca = xstep_v(v, &mut ma, &mut xa, &mut ra, &mut oa);
+        let cb = ref_mstep(&mut mb, &mut xb, &mut rb, &mut ob, &mut c);
+        let f = maz_cmp(i, ca, cb, &ma, &mb, &c);
+        if f.kind != 0 { return f; }
+        let g = fz_cmp(i, &xa, &xb, &ra, &rb, &oa, &ob);
+        if g.kind != 0 { return g; }
+        mfz_count(ct, ca, ma.mcause, w);
+        if ca == EMU_OK { maz_count(ct, w, &was, a, b); }
+        i = i + 1_u64;
+    }
+    fz_refuse(0, steps, 0_u64, 0_u64)
+}

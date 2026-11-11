@@ -1,0 +1,119 @@
+// Planted controls for the M and A extensions of emu-rv64, variants 27 to
+// 37. Each is the core with one defect put in on purpose. The checks must
+// refuse every one; `emu-rv64 xcontrols` shows the refusals. Nothing
+// outside the checks calls these.
+//
+//   27  a division by zero gives the quotient 0, not all ones
+//   28  the most negative number divided by -1 gives the largest positive
+//       number, not the dividend
+//   29  a nonzero remainder takes the sign of the divisor
+//   30  MULHSU reads rs2 as a signed number
+//   31  a 32-bit result is not sign-extended: the upper 32 bits of rd are 0
+//   32  SC succeeds when no reservation is held
+//   33  a successful SC writes 1 to rd
+//   34  the reservation survives an SC
+//   35  AMOMIN compares as unsigned numbers
+//   36  an AMO writes the new value of memory to rd, not the old one
+//   37  an atomic access at an address that is not a multiple of its width
+//       is carried out, not refused
+
+// The quotient or remainder variant v leaves in rd for M operation op,
+// where the core left `got`. a and b are the operands before the step.
+fn xctl_div_fix(v: u64, op: u64, a: u64, b: u64, got: u64) -> u64 {
+    let word = op >= OP_MULW;
+    let mut sa = a;
+    let mut sb = b;
+    let mut least = EMU_SIGN;
+    if word { sa = emu_sext(a, 32_u64); sb = emu_sext(b, 32_u64); least = emu_sext(0x80000000_u64, 32_u64); }
+    let quot = op == OP_DIV || op == OP_DIVU || op == OP_DIVW || op == OP_DIVUW;
+    let signed_rem = op == OP_REM || op == OP_REMW;
+    let zero = (word && (b & 0xFFFFFFFF_u64) == 0_u64) || (!word && b == 0_u64);
+    if v == 27_u64 && quot && zero { return 0_u64; }
+    if v == 28_u64 && (op == OP_DIV || op == OP_DIVW) && sa == least && sb == !0_u64 { return !least; }
+    if v == 29_u64 && signed_rem && !zero && got != 0_u64 && (sa >> 63_u64) != (sb >> 63_u64) {
+        if word { return emu_sext(got.wrapping_add(sb), 32_u64); }
+        return got.wrapping_add(sb);
+    }
+    got
+}
+
+// What variant v leaves in rd after an M instruction.
+fn xctl_m_fix(v: u64, op: u64, a: u64, b: u64, got: u64) -> u64 {
+    if v == 30_u64 && op == OP_MULHSU && (b >> 63_u64) == 1_u64 { return got.wrapping_sub(a); }
+    if v == 31_u64 && op >= OP_MULW { return got & 0xFFFFFFFF_u64; }
+    xctl_div_fix(v, op, a, b, got)
+}
+
+// True when variant 37 carries out the access the core would refuse for
+// its alignment: every byte is in memory or in one timer register.
+fn xctl_loose(v: u64, ram: &[u8], addr: u64, n: u64) -> bool {
+    if v != 37_u64 || (addr & (n - 1_u64)) == 0_u64 { return false; }
+    emu_timer_reg(addr, n) != 0_u64 || emu_in_ram(ram.len() as u64, addr, n)
+}
+
+// One atomic instruction as variant v executes it. addr is the value of
+// rs1 before the step.
+fn xctl_atomic(v: u64, m: &mut Machine, x: &mut [u64], ram: &mut [u8], out: &mut [u8], d0: &Insn, w: u64) -> i64 {
+    let mut d = Insn { op: d0.op, rd: d0.rd, rs1: d0.rs1, rs2: d0.rs2, imm: d0.imm };
+    let n = emu_a_width(d.op);
+    let k = emu_a_kind(d.op);
+    let addr = x[d.rs1 as usize];
+    let res = m.res;
+    let res_addr = m.res_addr;
+    if v == 35_u64 && k == 7_u64 { d.op = d.op + 2_u64; }
+    if v == 32_u64 && k == 1_u64 && res == 0_u64 { m.res = n; m.res_addr = addr; }
+    let mut rc: i64 = EMU_TRAP;
+    if xctl_loose(v, ram, addr, n) {
+        rc = emu_a_apply(m, x, ram, &d, addr, emu_timer_reg(addr, n));
+    } else {
+        rc = emu_mexec(m, x, ram, out, &d, w);
+    }
+    if rc != EMU_OK {
+        m.res = res;
+        m.res_addr = res_addr;
+        return rc;
+    }
+    if v == 34_u64 && k == 1_u64 { m.res = res; m.res_addr = res_addr; }
+    if d.rd == 0_u64 { return rc; }
+    let rd = d.rd as usize;
+    if v == 33_u64 && k == 1_u64 && x[rd] == 0_u64 { x[rd] = 1_u64; }
+    if v == 36_u64 && k >= 2_u64 {
+        x[rd] = emu_a_read(m, ram, addr, n, emu_timer_reg(addr, n));
+        if n == 4_u64 { x[rd] = emu_sext(x[rd], 32_u64); }
+    }
+    if v == 31_u64 && n == 4_u64 && k != 1_u64 { x[rd] = x[rd] & 0xFFFFFFFF_u64; }
+    rc
+}
+
+// The fetch and execute part of a step of variant v. Words that are not M
+// or A instructions take the path of the core.
+fn xctl_run(v: u64, m: &mut Machine, x: &mut [u64], ram: &mut [u8], out: &mut [u8]) -> i64 {
+    if (m.pc & 3_u64) != 0_u64 || !emu_in_ram(ram.len() as u64, m.pc, 4_u64) {
+        return emu_mstep_run(m, x, ram, out);
+    }
+    let w = emu_peek(ram, m.pc, 4_u64);
+    let d = emu_decode(w);
+    if d.op < OP_MUL { return emu_mstep_run(m, x, ram, out); }
+    if emu_class(d.op) == CL_A { return xctl_atomic(v, m, x, ram, out, &d, w); }
+    let a = x[d.rs1 as usize];
+    let b = x[d.rs2 as usize];
+    let rc = emu_mexec(m, x, ram, out, &d, w);
+    if d.rd != 0_u64 { x[d.rd as usize] = xctl_m_fix(v, d.op, a, b, x[d.rd as usize]); }
+    rc
+}
+
+// One step of variant v in the trap profile. Variants below 27 are those
+// of ictl.bld and mcontrols.bld.
+fn xstep_v(v: u64, m: &mut Machine, x: &mut [u64], ram: &mut [u8], out: &mut [u8]) -> i64 {
+    if v < XCTL_FIRST { return istep_v(v, m, x, ram, out); }
+    if x.len() < 32 { return EMU_SMALL; }
+    let cause = emu_irq_pick(m);
+    let mut rc: i64 = EMU_TRAP;
+    if cause != 0_u64 {
+        rc = emu_irq_take(m, cause);
+    } else {
+        rc = xctl_run(v, m, x, ram, out);
+    }
+    emu_tick(m, rc);
+    rc
+}

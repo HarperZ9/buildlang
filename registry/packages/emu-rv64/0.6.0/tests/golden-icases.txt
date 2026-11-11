@@ -1,0 +1,119 @@
+icase 1 word=0000b183 rc=0 x3=1122334455667788 pc=80000004 mstatus=1800 mepc=80000040 mcause=55 mtval=66
+  mtime=1 mtimecmp=1122334455667788 pass=true
+icase 2 word=0040a183 rc=0 x3=11223344 pc=80000004 mstatus=1800 mepc=80000040 mcause=55 mtval=66
+  mtime=1 mtimecmp=1122334455667788 pass=true
+icase 3 word=0000a183 rc=0 x3=fffffffff5667788 pc=80000004 mstatus=1800 mepc=80000040 mcause=55 mtval=66
+  mtime=1 mtimecmp=11223344f5667788 pass=true
+icase 4 word=0000e183 rc=0 x3=f5667788 pc=80000004 mstatus=1800 mepc=80000040 mcause=55 mtval=66
+  mtime=1 mtimecmp=11223344f5667788 pass=true
+icase 5 word=00309183 rc=0 x3=4455 pc=80000004 mstatus=1800 mepc=80000040 mcause=55 mtval=66
+  mtime=1 mtimecmp=1122334455667788 pass=true
+icase 6 word=0060d183 rc=0 x3=9122 pc=80000004 mstatus=1800 mepc=80000040 mcause=55 mtval=66
+  mtime=1 mtimecmp=9122334455667788 pass=true
+icase 7 word=00708183 rc=0 x3=ffffffffffffff91 pc=80000004 mstatus=1800 mepc=80000040 mcause=55 mtval=66
+  mtime=1 mtimecmp=9122334455667788 pass=true
+icase 8 word=0070c183 rc=0 x3=91 pc=80000004 mstatus=1800 mepc=80000040 mcause=55 mtval=66
+  mtime=1 mtimecmp=9122334455667788 pass=true
+icase 9 word=0000b183 rc=0 x3=123456789abcdef pc=80000004 mstatus=1800 mepc=80000040 mcause=55 mtval=66
+  mtime=123456789abcdf0 mtimecmp=ffffffffffffffff pass=true
+icase 10 word=0040a183 rc=0 x3=1234567 pc=80000004 mstatus=1800 mepc=80000040 mcause=55 mtval=66
+  mtime=123456789abcdf0 mtimecmp=ffffffffffffffff pass=true
+icase 11 word=0010b183 rc=3 x3=0 pc=80000100 mstatus=1800 mepc=80000000 mcause=5 mtval=2004001
+  mtime=1 mtimecmp=ffffffffffffffff pass=true
+icase 12 word=fff08183 rc=3 x3=0 pc=80000100 mstatus=1800 mepc=80000000 mcause=5 mtval=2003fff
+  mtime=1 mtimecmp=ffffffffffffffff pass=true
+icase 13 word=00808183 rc=3 x3=0 pc=80000100 mstatus=1800 mepc=80000000 mcause=5 mtval=200c000
+  mtime=1 mtimecmp=ffffffffffffffff pass=true
+icase 14 word=0020b223 rc=3 x3=0 pc=80000100 mstatus=1800 mepc=80000000 mcause=7 mtval=2004004
+  mtime=1 mtimecmp=ffffffffffffffff pass=true
+icase 15 word=0020b023 rc=0 x3=0 pc=80000004 mstatus=1800 mepc=80000040 mcause=55 mtval=66
+  mtime=1 mtimecmp=1122334455667788 pass=true
+icase 16 word=0020a223 rc=0 x3=0 pc=80000004 mstatus=1800 mepc=80000040 mcause=55 mtval=66
+  mtime=1 mtimecmp=11223344ffffffff pass=true
+icase 17 word=002091a3 rc=0 x3=0 pc=80000004 mstatus=1800 mepc=80000040 mcause=55 mtval=66
+  mtime=1 mtimecmp=beef000000 pass=true
+icase 18 word=002083a3 rc=0 x3=0 pc=80000004 mstatus=1800 mepc=80000040 mcause=55 mtval=66
+  mtime=1 mtimecmp=12ffffffffffffff pass=true
+icase 19 word=0020b023 rc=0 x3=0 pc=80000004 mstatus=1800 mepc=80000040 mcause=55 mtval=66
+  mtime=1001 mtimecmp=ffffffffffffffff pass=true
+icase 20 word=002080a3 rc=0 x3=0 pc=80000004 mstatus=1800 mepc=80000040 mcause=55 mtval=66
+  mtime=800 mtimecmp=ffffffffffffffff pass=true
+icase 21 word=344021f3 rc=0 x3=0 pc=80000004 mstatus=1800 mepc=80000040 mcause=55 mtval=66
+  mtime=64 mtimecmp=64 pass=true
+icase 22 word=344021f3 rc=0 x3=80 pc=80000004 mstatus=1800 mepc=80000040 mcause=55 mtval=66
+  mtime=65 mtimecmp=64 pass=true
+icase 23 word=344021f3 rc=0 x3=80 pc=80000004 mstatus=1800 mepc=80000040 mcause=55 mtval=66
+  mtime=66 mtimecmp=64 pass=true
+icase 24 word=344021f3 rc=0 x3=80 pc=80000004 mstatus=1800 mepc=80000040 mcause=55 mtval=66
+  mtime=8000000000000001 mtimecmp=1 pass=true
+icase 25 word=344021f3 rc=0 x3=0 pc=80000004 mstatus=1800 mepc=80000040 mcause=55 mtval=66
+  mtime=2 mtimecmp=8000000000000000 pass=true
+icase 26 word=344021f3 rc=0 x3=808 pc=80000004 mstatus=1800 mepc=80000040 mcause=55 mtval=66
+  mtime=1 mtimecmp=ffffffffffffffff pass=true
+icase 27 word=344091f3 rc=0 x3=0 pc=80000004 mstatus=1800 mepc=80000040 mcause=55 mtval=66
+  mtime=1 mtimecmp=ffffffffffffffff pass=true
+icase 28 word=344091f3 rc=0 x3=80 pc=80000004 mstatus=1800 mepc=80000040 mcause=55 mtval=66
+  mtime=6 mtimecmp=5 pass=true
+icase 29 word=00100193 rc=0 x3=1 pc=80000004 mstatus=1800 mepc=80000040 mcause=55 mtval=66
+  mtime=6 mtimecmp=5 pass=true
+icase 30 word=00100193 rc=0 x3=1 pc=80000004 mstatus=1808 mepc=80000040 mcause=55 mtval=66
+  mtime=6 mtimecmp=5 pass=true
+icase 31 word=00100193 rc=3 x3=0 pc=80000100 mstatus=1880 mepc=80000000 mcause=8000000000000007 mtval=0
+  mtime=6 mtimecmp=5 pass=true
+icase 32 word=00100193 rc=3 x3=0 pc=80000100 mstatus=1880 mepc=80000000 mcause=8000000000000003 mtval=0
+  mtime=1 mtimecmp=ffffffffffffffff pass=true
+icase 33 word=00100193 rc=3 x3=0 pc=80000100 mstatus=1880 mepc=80000000 mcause=800000000000000b mtval=0
+  mtime=1 mtimecmp=ffffffffffffffff pass=true
+icase 34 word=00100193 rc=0 x3=1 pc=80000004 mstatus=1808 mepc=80000040 mcause=55 mtval=66
+  mtime=1 mtimecmp=ffffffffffffffff pass=true
+icase 35 word=00100193 rc=0 x3=1 pc=80000004 mstatus=1808 mepc=80000040 mcause=55 mtval=66
+  mtime=1 mtimecmp=ffffffffffffffff pass=true
+icase 36 word=00100193 rc=3 x3=0 pc=80000100 mstatus=1880 mepc=80000000 mcause=800000000000000b mtval=0
+  mtime=1 mtimecmp=ffffffffffffffff pass=true
+icase 37 word=00100193 rc=3 x3=0 pc=80000100 mstatus=1880 mepc=80000000 mcause=8000000000000003 mtval=0
+  mtime=6 mtimecmp=5 pass=true
+icase 38 word=00100193 rc=3 x3=0 pc=80000100 mstatus=1880 mepc=80000000 mcause=800000000000000b mtval=0
+  mtime=6 mtimecmp=5 pass=true
+icase 39 word=00100193 rc=3 x3=0 pc=80000100 mstatus=1880 mepc=80000000 mcause=800000000000000b mtval=0
+  mtime=6 mtimecmp=5 pass=true
+icase 40 word=00100193 rc=3 x3=0 pc=80000100 mstatus=1880 mepc=80000000 mcause=8000000000000003 mtval=0
+  mtime=6 mtimecmp=5 pass=true
+icase 41 word=00100193 rc=3 x3=0 pc=80000100 mstatus=1880 mepc=80000000 mcause=8000000000000007 mtval=0
+  mtime=6 mtimecmp=5 pass=true
+icase 42 word=00100193 rc=3 x3=0 pc=8000011c mstatus=1880 mepc=80000000 mcause=8000000000000007 mtval=0
+  mtime=6 mtimecmp=5 pass=true
+icase 43 word=00100193 rc=3 x3=0 pc=8000010c mstatus=1880 mepc=80000000 mcause=8000000000000003 mtval=0
+  mtime=1 mtimecmp=ffffffffffffffff pass=true
+icase 44 word=00100193 rc=3 x3=0 pc=8000012c mstatus=1880 mepc=80000000 mcause=800000000000000b mtval=0
+  mtime=1 mtimecmp=ffffffffffffffff pass=true
+icase 45 word=00000073 rc=3 x3=0 pc=80000100 mstatus=1800 mepc=80000000 mcause=b mtval=0
+  mtime=1 mtimecmp=ffffffffffffffff pass=true
+icase 46 word=00100193 rc=3 x3=0 pc=80000100 mstatus=1880 mepc=80000010 mcause=8000000000000007 mtval=0
+  mtime=6 mtimecmp=5 pass=true
+icase 47 word=10500073 rc=0 x3=0 pc=80000004 mstatus=1808 mepc=80000040 mcause=55 mtval=66
+  mtime=1 mtimecmp=ffffffffffffffff pass=true
+icase 48 word=10500073 rc=3 x3=0 pc=80000100 mstatus=1880 mepc=80000000 mcause=8000000000000007 mtval=0
+  mtime=6 mtimecmp=5 pass=true
+icase 49 word=10500073 rc=0 x3=0 pc=80000004 mstatus=1800 mepc=80000040 mcause=55 mtval=66
+  mtime=6 mtimecmp=5 pass=true
+icase 50 word=00100193 rc=0 x3=1 pc=80000004 mstatus=1808 mepc=80000040 mcause=55 mtval=66
+  mtime=5 mtimecmp=5 pass=true
+icase 51 steps=1 rc=0 x3=0 pc=80000040 mstatus=1888 mepc=80000040 mcause=55 mtval=66
+  mtime=6 mtimecmp=5 pass=true
+icase 52 steps=2 rc=3 x3=0 pc=80000100 mstatus=1880 mepc=80000040 mcause=8000000000000007 mtval=0
+  mtime=7 mtimecmp=5 pass=true
+icase 53 steps=2 rc=0 x3=2 pc=80000104 mstatus=1880 mepc=80000000 mcause=8000000000000007 mtval=0
+  mtime=7 mtimecmp=5 pass=true
+icase 54 steps=3 rc=0 x3=1 pc=8000000c mstatus=1808 mepc=80000040 mcause=55 mtval=66
+  mtime=8 mtimecmp=3e8 pass=true
+icase 55 steps=3 rc=3 x3=0 pc=80000100 mstatus=1880 mepc=80000008 mcause=8000000000000007 mtval=0
+  mtime=8 mtimecmp=5 pass=true
+icase 56 short register array rc=-4 pc=80000000 mtime=5 pass=true
+icases: 56 run, first failure 0
+program timer: run of 10000 steps: interrupts=99 steps=9901 traps=99 pc=8000002c out_len=99
+  x10=4648 x12=99 mtime=10000 mtimecmp=10000 mepc=80000030 mstatus=1888 hash=f1b4f1df12342aae
+program timer: run of 10000 steps: interrupts=99 steps=9901 traps=99 pc=8000002c out_len=99
+  x10=4648 x12=99 mtime=10000 mtimecmp=10000 mepc=80000030 mstatus=1888 hash=f1b4f1df12342aae
+program timer: run of 9999 steps: interrupts=99 steps=9900 traps=99 pc=80000030 out_len=99
+  x10=4648 x12=99 mtime=9999 mtimecmp=10000 mepc=80000030 mstatus=1888 hash=02a86ecc64904958
+program timer: expected interrupts=99 hash_self_check=true hashes_equal=true shorter_run_differs=true
