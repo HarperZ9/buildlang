@@ -1,0 +1,148 @@
+// asm-rv64: the names. One table of mnemonics and one of CSR names serve
+// both directions, text to number in the assembler and number to text in
+// the renderer. The operation numbers are those of emu-rv64 (OP_ in its
+// abi.bld), so the assembler hands the encoder the record it expects.
+
+// The mnemonic of operations 1 to 30.
+fn as_mn_low(op: u64) -> str {
+    if op == 1_u64 { return "lui"; }
+    if op == 2_u64 { return "auipc"; }
+    if op == 3_u64 { return "jal"; }
+    if op == 4_u64 { return "jalr"; }
+    if op == 5_u64 { return "beq"; }
+    if op == 6_u64 { return "bne"; }
+    if op == 7_u64 { return "blt"; }
+    if op == 8_u64 { return "bge"; }
+    if op == 9_u64 { return "bltu"; }
+    if op == 10_u64 { return "bgeu"; }
+    if op == 11_u64 { return "lb"; }
+    if op == 12_u64 { return "lh"; }
+    if op == 13_u64 { return "lw"; }
+    if op == 14_u64 { return "ld"; }
+    if op == 15_u64 { return "lbu"; }
+    if op == 16_u64 { return "lhu"; }
+    if op == 17_u64 { return "lwu"; }
+    if op == 18_u64 { return "sb"; }
+    if op == 19_u64 { return "sh"; }
+    if op == 20_u64 { return "sw"; }
+    if op == 21_u64 { return "sd"; }
+    if op == 22_u64 { return "addi"; }
+    if op == 23_u64 { return "slti"; }
+    if op == 24_u64 { return "sltiu"; }
+    if op == 25_u64 { return "xori"; }
+    if op == 26_u64 { return "ori"; }
+    if op == 27_u64 { return "andi"; }
+    if op == 28_u64 { return "slli"; }
+    if op == 29_u64 { return "srli"; }
+    "srai"
+}
+
+// The mnemonic of operations 31 to 60.
+fn as_mn_high(op: u64) -> str {
+    if op == 31_u64 { return "add"; }
+    if op == 32_u64 { return "sub"; }
+    if op == 33_u64 { return "sll"; }
+    if op == 34_u64 { return "slt"; }
+    if op == 35_u64 { return "sltu"; }
+    if op == 36_u64 { return "xor"; }
+    if op == 37_u64 { return "srl"; }
+    if op == 38_u64 { return "sra"; }
+    if op == 39_u64 { return "or"; }
+    if op == 40_u64 { return "and"; }
+    if op == 41_u64 { return "addiw"; }
+    if op == 42_u64 { return "slliw"; }
+    if op == 43_u64 { return "srliw"; }
+    if op == 44_u64 { return "sraiw"; }
+    if op == 45_u64 { return "addw"; }
+    if op == 46_u64 { return "subw"; }
+    if op == 47_u64 { return "sllw"; }
+    if op == 48_u64 { return "srlw"; }
+    if op == 49_u64 { return "sraw"; }
+    if op == 50_u64 { return "fence"; }
+    if op == 51_u64 { return "ecall"; }
+    if op == 52_u64 { return "ebreak"; }
+    if op == 53_u64 { return "csrrw"; }
+    if op == 54_u64 { return "csrrs"; }
+    if op == 55_u64 { return "csrrc"; }
+    if op == 56_u64 { return "csrrwi"; }
+    if op == 57_u64 { return "csrrsi"; }
+    if op == 58_u64 { return "csrrci"; }
+    if op == 59_u64 { return "mret"; }
+    "wfi"
+}
+
+// The mnemonic of an operation number, 1 to 60.
+fn as_mn(op: u64) -> str {
+    if op <= 30_u64 { return as_mn_low(op); }
+    as_mn_high(op)
+}
+
+// The operation number of the mnemonic at lo to hi, or 0. Mnemonics are
+// lower case only.
+fn as_op_find(src: &[u8], lo: usize, hi: usize) -> u64 {
+    let mut found: u64 = 0_u64;
+    let mut op: u64 = 1_u64;
+    while op <= OP_WFI {
+        if found == 0_u64 && as_is(src, lo, hi, as_mn(op)) { found = op; }
+        op = op + 1_u64;
+    }
+    found
+}
+
+// The name of a CSR the core implements, or the empty text.
+fn as_csr_name(n: u64) -> str {
+    if n == CSR_MSTATUS { return "mstatus"; }
+    if n == CSR_MISA { return "misa"; }
+    if n == CSR_MIE { return "mie"; }
+    if n == CSR_MTVEC { return "mtvec"; }
+    if n == CSR_MSCRATCH { return "mscratch"; }
+    if n == CSR_MEPC { return "mepc"; }
+    if n == CSR_MCAUSE { return "mcause"; }
+    if n == CSR_MTVAL { return "mtval"; }
+    if n == CSR_MIP { return "mip"; }
+    if n == CSR_MVENDORID { return "mvendorid"; }
+    if n == CSR_MVENDORID + 1_u64 { return "marchid"; }
+    if n == CSR_MVENDORID + 2_u64 { return "mimpid"; }
+    if n == CSR_MVENDORID + 3_u64 { return "mhartid"; }
+    if n == CSR_MCONFIGPTR { return "mconfigptr"; }
+    ""
+}
+
+// The number of the CSR named at lo to hi, or 4096 when there is none.
+fn as_csr_find(src: &[u8], lo: usize, hi: usize) -> u64 {
+    let mut found: u64 = 4096_u64;
+    let mut n: u64 = CSR_MSTATUS;
+    while n <= CSR_MCONFIGPTR {
+        if hi > lo && found == 4096_u64 && as_is(src, lo, hi, as_csr_name(n)) { found = n; }
+        n = n + 1_u64;
+        if n == CSR_MIP + 1_u64 { n = CSR_MVENDORID; }
+    }
+    found
+}
+
+// The operand form of an operation, one of the AK_ numbers.
+fn as_kind(op: u64) -> u64 {
+    let c = emu_class(op);
+    if c == CL_R { return AK_R; }
+    if c == CL_U { return AK_U; }
+    if c == CL_J { return AK_J; }
+    if c == CL_B { return AK_B; }
+    if c == CL_S { return AK_STORE; }
+    if c == CL_CSR {
+        if op <= OP_CSRRC { return AK_CSR; }
+        return AK_CSRI;
+    }
+    if c != CL_I { return AK_NONE; }
+    if op == OP_JALR || (op >= OP_LB && op <= OP_LWU) { return AK_LOAD; }
+    if op >= OP_SLLI && op <= OP_SRAI { return AK_SH6; }
+    if op >= OP_SLLIW && op <= OP_SRAIW { return AK_SH5; }
+    if op == OP_FENCE { return AK_FENCE; }
+    AK_I
+}
+
+// The number of operands of an operand form.
+fn as_kind_fields(k: u64) -> usize {
+    if k == AK_NONE { return 0; }
+    if k == AK_LOAD || k == AK_STORE || k == AK_J || k == AK_U { return 2; }
+    3
+}

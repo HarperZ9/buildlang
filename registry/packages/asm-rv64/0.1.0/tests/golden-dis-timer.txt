@@ -1,0 +1,22 @@
+lui x5, 0x2004
+addi x6, x0, 100
+sd x6, 0(x5)
+lui x13, 0x10000
+addi x14, x0, 46
+auipc x7, 0x0
+addi x7, x7, 44
+csrrw x0, mtvec, x7
+addi x8, x0, 128
+csrrw x0, mie, x8
+csrrsi x0, mstatus, 8
+addi x10, x10, 1
+jal x0, -4
+.word 0x00000000
+.word 0x00000000
+.word 0x00000000
+ld x11, 0(x5)
+addi x11, x11, 100
+sd x11, 0(x5)
+sb x14, 0(x13)
+addi x12, x12, 1
+mret

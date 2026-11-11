@@ -1,0 +1,140 @@
+// Property run of asm-rv64, third part: the rules on random programs and
+// the run itself.
+//
+//   66  a random program with labels, .word and .org gives the words that
+//       the generator computed from its own offsets
+//   67  the same program with the definition of a used label left out is
+//       refused: no word, every error is "undefined label", and the first
+//       is on the first line that uses the label
+//   68  the same program with one label defined a second time on a last
+//       line is refused: no word, one error, "duplicate label", on that
+//       line
+//   69  the same program with a comment after every statement, comments
+//       after labels, blank lines and comment lines gives the same words.
+//       Every comment holds the text of an instruction.
+
+// The index of the first word that differs from p.want, or AS_NONE when
+// the assembly has no error and gives exactly those words.
+fn ap_diff(p: &ApProg, o: &AsOut, bad: u64) -> u64 {
+    let mut i: usize = 0;
+    while i < p.want.len() && (i as u64) < o.count {
+        if o.words[i] != p.want[i] { return i as u64; }
+        i = i + 1;
+    }
+    if bad != 0_u64 || o.count != p.want.len() as u64 { return i as u64; }
+    AS_NONE
+}
+
+// A label that some statement uses, or AS_NONE.
+fn ap_used(p: &ApProg, r: &mut Rng) -> u64 {
+    let count = ap_stmts(p);
+    let start = (rng_next(r) % (count as u64)) as usize;
+    let mut found: u64 = AS_NONE;
+    let mut k: usize = 0;
+    while k < count {
+        let i = (start + k) % count;
+        if found == AS_NONE && p.st[8 * i] == 1_u64 { found = p.st[8 * i + 6]; }
+        k = k + 1;
+    }
+    found
+}
+
+// Rule 67 for label `lab` of the program.
+fn ap_rule_undef(v: u64, p: &ApProg, buf: &mut [u8], lab: u64, i: u64, o: &mut AsOut) -> Refusal {
+    let look = ApLook { omit: lab, dup: AS_NONE, noise: 0_u64 };
+    let info = ap_write(p, buf, &look);
+    as_out_reset(o);
+    let bad = as_assemble(v, buf, info.n, o);
+    let mut first: u64 = 0_u64;
+    if o.errs.len() > 0 { first = o.errs[0]; }
+    let mut all = bad > 0_u64 && o.count == 0_u64 && first == info.use_line;
+    let mut e: usize = 1;
+    while e < o.errs.len() {
+        if o.errs[e] != AE_UNDEF { all = false; }
+        e = e + 2;
+    }
+    if !all { return fz_refuse(AP_UNDEF, i, first, info.use_line); }
+    fz_refuse(0, i, 0_u64, 0_u64)
+}
+
+// Rule 68 for label `lab` of the program.
+fn ap_rule_dup(v: u64, p: &ApProg, buf: &mut [u8], lab: u64, i: u64, o: &mut AsOut) -> Refusal {
+    let look = ApLook { omit: AS_NONE, dup: lab, noise: 0_u64 };
+    let info = ap_write(p, buf, &look);
+    as_out_reset(o);
+    let bad = as_assemble(v, buf, info.n, o);
+    let mut line: u64 = 0_u64;
+    let mut code: u64 = 0_u64;
+    if o.errs.len() > 1 {
+        line = o.errs[0];
+        code = o.errs[1];
+    }
+    if bad != 1_u64 || o.count != 0_u64 || line != info.last_line || code != AE_DUP {
+        return fz_refuse(AP_DUP, i, line, info.last_line);
+    }
+    fz_refuse(0, i, 0_u64, 0_u64)
+}
+
+// Rules 66 to 69 for one random program.
+fn ap_step_prog(v: u64, r: &mut Rng, i: u64, o: &mut AsOut, p: &mut ApProg, ct: &mut ApCt) -> Refusal {
+    let mut buf: [u8; 8192] = [0_u8; 8192];
+    ap_gen(r, p);
+    ct.progs = ct.progs + 1_u64;
+    ct.stmts = ct.stmts + ap_stmts(p) as u64;
+    let mut look = ApLook { omit: AS_NONE, dup: AS_NONE, noise: 0_u64 };
+    let info = ap_write(p, &mut buf, &look);
+    as_out_reset(o);
+    let bad = as_assemble(v, &buf, info.n, o);
+    let at = ap_diff(p, o, bad);
+    if at != AS_NONE { return fz_refuse(AP_LABELS, i, at, p.want.len() as u64); }
+    look.noise = rng_next(r) | 1_u64;
+    let noisy = ap_write(p, &mut buf, &look);
+    as_out_reset(o);
+    let bad2 = as_assemble(v, &buf, noisy.n, o);
+    let at2 = ap_diff(p, o, bad2);
+    if at2 != AS_NONE { return fz_refuse(AP_COMMENT, i, at2, p.want.len() as u64); }
+    let lab = ap_used(p, r);
+    if lab != AS_NONE {
+        ct.uses = ct.uses + 1_u64;
+        let f = ap_rule_undef(v, p, &mut buf, lab, i, o);
+        if f.kind != 0 { return f; }
+    }
+    ap_rule_dup(v, p, &mut buf, rng_next(r) % (p.lpos.len() as u64), i, o)
+}
+
+// The property run for defect v. `steps` rounds: each judges rules 61 to
+// 65 once, and every eighth judges rules 66 to 69 on one program.
+// Returns the first refusal, or kind 0.
+fn ap_run(v: u64, seed: u64, steps: u64, ct: &mut ApCt) -> Refusal {
+    let mut r = Rng { s: seed };
+    let mut o = as_out_new();
+    let mut p = ap_prog_new();
+    let mut i: u64 = 0_u64;
+    while i < steps {
+        let a = ap_step_insn(v, &mut r, i, &mut o, ct);
+        if a.kind != 0 { return a; }
+        let b = ap_step_edge(v, &mut r, i, &mut o, ct);
+        if b.kind != 0 { return b; }
+        if i % 8_u64 == 0_u64 {
+            let c = ap_step_prog(v, &mut r, i, &mut o, &mut p, ct);
+            if c.kind != 0 { return c; }
+        }
+        i = i + 1_u64;
+    }
+    fz_refuse(0, steps, 0_u64, 0_u64)
+}
+
+// Runs the property check for defect v and prints the outcome. Returns 1
+// when the check refuses, else 0.
+fn ap_show(v: u64, seed: u64, steps: u64) -> i64 ~ Console {
+    let mut ct = ap_ct_new();
+    let f = ap_run(v, seed, steps, &mut ct);
+    if f.kind != 0 {
+        show_refusal(&f);
+        return 1;
+    }
+    println!("  accepted, {} instructions, {} raw words of which {} decoded, {} edge values, {} refusals",
+             ct.insns, ct.raw, ct.decoded, ct.edges, ct.refused);
+    println!("  {} programs, {} statements, {} with a used label left out", ct.progs, ct.stmts, ct.uses);
+    0
+}

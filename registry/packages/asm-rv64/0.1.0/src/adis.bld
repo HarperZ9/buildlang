@@ -1,0 +1,189 @@
+// asm-rv64: the renderer, the reverse of the assembler. It writes the
+// text of a decoded record into a byte buffer, in the operand forms the
+// assembler reads. The command dis prints that text, and the property run
+// uses it to make the text it feeds the assembler.
+//
+// Every function takes the buffer and the index to write at, and returns
+// the index after what it wrote. Text that does not fit is dropped.
+
+// The number operand of a statement as it is written: a sign and a
+// magnitude. lab is AS_NONE, or the number of a label to write in place of
+// a branch or jump offset.
+struct AdArg { neg: bool, mag: u64, lab: u64 }
+
+fn ad_ch(buf: &mut [u8], at: usize, c: u8) -> usize {
+    if at < buf.len() { buf[at] = c; }
+    at + 1
+}
+
+fn ad_put(buf: &mut [u8], at: usize, s: str) -> usize {
+    let b = s.as_bytes();
+    let mut p = at;
+    let mut i: usize = 0;
+    while i < s.len() {
+        p = ad_ch(buf, p, b[i]);
+        i = i + 1;
+    }
+    p
+}
+
+// v in decimal.
+fn ad_dec(buf: &mut [u8], at: usize, v: u64) -> usize {
+    let mut div: u64 = 1_u64;
+    while v / div >= 10_u64 { div = div * 10_u64; }
+    let mut p = at;
+    while div > 0_u64 {
+        p = ad_ch(buf, p, (48_u64 + (v / div) % 10_u64) as u8);
+        div = div / 10_u64;
+    }
+    p
+}
+
+// v as 0x and lower-case hex digits, at least `min` of them.
+fn ad_hex(buf: &mut [u8], at: usize, v: u64, min: u64) -> usize {
+    let mut digits: u64 = 1_u64;
+    while digits < 16_u64 && (v >> (4_u64 * digits)) != 0_u64 { digits = digits + 1_u64; }
+    if digits < min { digits = min; }
+    let mut p = ad_put(buf, at, "0x");
+    while digits > 0_u64 {
+        digits = digits - 1_u64;
+        let d = (v >> (4_u64 * digits)) & 15_u64;
+        if d < 10_u64 { p = ad_ch(buf, p, (48_u64 + d) as u8); } else { p = ad_ch(buf, p, (87_u64 + d) as u8); }
+    }
+    p
+}
+
+// A signed number in decimal or in hex.
+fn ad_num(buf: &mut [u8], at: usize, g: &AdArg, hex: bool) -> usize {
+    let mut p = at;
+    if g.neg { p = ad_ch(buf, p, 45_u8); }
+    if hex { return ad_hex(buf, p, g.mag, 1_u64); }
+    ad_dec(buf, p, g.mag)
+}
+
+fn ad_reg(buf: &mut [u8], at: usize, r: u64) -> usize {
+    ad_dec(buf, ad_ch(buf, at, 120_u8), r)
+}
+
+// The space after the mnemonic.
+fn ad_gap(buf: &mut [u8], at: usize, style: u64) -> usize {
+    if (style & AD_SPACE) != 0_u64 { return ad_ch(buf, ad_ch(buf, at, 9_u8), 32_u8); }
+    ad_ch(buf, at, 32_u8)
+}
+
+// The comma between two operands.
+fn ad_sep(buf: &mut [u8], at: usize, style: u64) -> usize {
+    if (style & AD_SPACE) != 0_u64 { return ad_put(buf, ad_ch(buf, at, 32_u8), ",  "); }
+    ad_put(buf, at, ", ")
+}
+
+// The name the checks give label number id.
+fn ad_lab(buf: &mut [u8], at: usize, id: u64) -> usize {
+    if id % 3_u64 == 1_u64 { return ad_dec(buf, ad_put(buf, at, "_t"), id); }
+    if id % 3_u64 == 2_u64 { return ad_dec(buf, ad_put(buf, at, "loop_"), id); }
+    ad_dec(buf, ad_put(buf, at, "L"), id)
+}
+
+// A branch or jump target: a label, or an offset in decimal or hex.
+fn ad_target(buf: &mut [u8], at: usize, g: &AdArg, style: u64) -> usize {
+    if g.lab != AS_NONE { return ad_lab(buf, at, g.lab); }
+    let mut p = at;
+    if (style & AD_PLUS) != 0_u64 && !g.neg { p = ad_ch(buf, p, 43_u8); }
+    ad_num(buf, p, g, (style & AD_RADIX) != 0_u64)
+}
+
+// A CSR: its name when the core implements it, else its number. A
+// negative number, which only a check writes, is always a number.
+fn ad_csr(buf: &mut [u8], at: usize, n: u64, neg: bool, style: u64) -> usize {
+    let name = as_csr_name(n);
+    if (style & AD_CSRNUM) == 0_u64 && name.len() > 0 && !neg { return ad_put(buf, at, name); }
+    let mut p = at;
+    if neg { p = ad_ch(buf, p, 45_u8); }
+    if (style & AD_RADIX) != 0_u64 { return ad_dec(buf, p, n); }
+    ad_hex(buf, p, n, 3_u64)
+}
+
+// The number operand of a decoded record, as the assembler wants it
+// written. For csrrw, csrrs and csrrc it is the CSR number.
+fn ad_arg(d: &Insn) -> AdArg {
+    let k = as_kind(d.op);
+    let mut g = AdArg { neg: false, mag: d.imm, lab: AS_NONE };
+    if k == AK_U { g.mag = (d.imm >> 12_u64) & 0xFFFFF_u64; }
+    if k == AK_FENCE { g.mag = d.imm & 0xFFF_u64; }
+    if k == AK_CSRI { g.mag = d.rs1; }
+    let signed = k == AK_I || k == AK_LOAD || k == AK_STORE || k == AK_B || k == AK_J;
+    if signed && (d.imm >> 63_u64) == 1_u64 {
+        g.neg = true;
+        g.mag = 0_u64.wrapping_sub(d.imm);
+    }
+    g
+}
+
+// The operands that follow rd.
+fn ad_tail(buf: &mut [u8], at: usize, d: &Insn, style: u64, g: &AdArg, k: u64) -> usize {
+    let flip = (style & AD_RADIX) != 0_u64;
+    if k == AK_J { return ad_target(buf, at, g, style); }
+    if k == AK_U { return ad_num(buf, at, g, !flip); }
+    if k == AK_LOAD {
+        let p = ad_ch(buf, ad_num(buf, at, g, flip), 40_u8);
+        return ad_ch(buf, ad_reg(buf, p, d.rs1), 41_u8);
+    }
+    if k == AK_CSR {
+        let p = ad_sep(buf, ad_csr(buf, at, g.mag, g.neg, style), style);
+        return ad_reg(buf, p, d.rs1);
+    }
+    if k == AK_CSRI {
+        let p = ad_sep(buf, ad_csr(buf, at, d.imm, false, style), style);
+        return ad_num(buf, p, g, flip);
+    }
+    let p = ad_sep(buf, ad_reg(buf, at, d.rs1), style);
+    if k == AK_R { return ad_reg(buf, p, d.rs2); }
+    if k == AK_FENCE { return ad_num(buf, p, g, !flip); }
+    ad_num(buf, p, g, flip)
+}
+
+// The text of record d with the number operand g. d.op is 1 to 60.
+fn ad_insn_arg(buf: &mut [u8], at: usize, d: &Insn, style: u64, g: &AdArg) -> usize {
+    let k = as_kind(d.op);
+    let flip = (style & AD_RADIX) != 0_u64;
+    let mut p = ad_put(buf, at, as_mn(d.op));
+    if k == AK_NONE { return p; }
+    p = ad_gap(buf, p, style);
+    if k == AK_STORE {
+        p = ad_sep(buf, ad_reg(buf, p, d.rs2), style);
+        p = ad_ch(buf, ad_num(buf, p, g, flip), 40_u8);
+        return ad_ch(buf, ad_reg(buf, p, d.rs1), 41_u8);
+    }
+    if k == AK_B {
+        p = ad_sep(buf, ad_reg(buf, p, d.rs1), style);
+        p = ad_sep(buf, ad_reg(buf, p, d.rs2), style);
+        return ad_target(buf, p, g, style);
+    }
+    p = ad_sep(buf, ad_reg(buf, p, d.rd), style);
+    ad_tail(buf, p, d, style, g, k)
+}
+
+// The text of a decoded record. Style 0 is the canonical text.
+fn ad_insn(buf: &mut [u8], at: usize, d: &Insn, style: u64) -> usize {
+    let g = ad_arg(d);
+    ad_insn_arg(buf, at, d, style, &g)
+}
+
+// The text of a word: the instruction the decoder of emu-rv64 reads in
+// it, or a .word directive when the decoder refuses it.
+fn ad_word(buf: &mut [u8], at: usize, w: u64, style: u64) -> usize {
+    let d = emu_decode(w);
+    if d.op != 0_u64 { return ad_insn(buf, at, &d, style); }
+    ad_hex(buf, ad_put(buf, at, ".word "), w, 8_u64)
+}
+
+// The bytes lo to hi of a buffer as text, for printing.
+fn ad_text(buf: &[u8], lo: usize, hi: usize) -> str {
+    let mut s = "";
+    let mut i = lo;
+    while i < hi {
+        s = s + format!("{}", buf[i] as char);
+        i = i + 1;
+    }
+    s
+}

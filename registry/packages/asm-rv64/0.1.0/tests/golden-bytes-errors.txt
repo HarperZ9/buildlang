@@ -1,0 +1,21 @@
+tests/errors.s:5: error: unknown mnemonic
+tests/errors.s:6: error: bad register, expected x0 to x31
+tests/errors.s:7: error: immediate out of range for its field
+tests/errors.s:8: error: branch or jump offset is odd
+tests/errors.s:9: error: branch or jump target out of range
+tests/errors.s:10: error: undefined label
+tests/errors.s:11: error: duplicate label
+tests/errors.s:12: error: wrong operand count
+tests/errors.s:13: error: trailing text after an operand
+tests/errors.s:14: error: bad number
+tests/errors.s:15: error: expected imm(rs1)
+tests/errors.s:16: error: unknown CSR name
+tests/errors.s:17: error: .org offset is not a multiple of 4 or lies before the location
+tests/errors.s:18: error: unknown directive
+tests/errors.s:19: error: image larger than 65536 bytes
+tests/errors.s:20: error: bad label name
+tests/errors.s:21: error: empty operand
+tests/errors.s:23: error: immediate out of range for its field
+tests/errors.s:24: error: immediate out of range for its field
+tests/errors.s:25: error: immediate out of range for its field
+errors: 20, no output

@@ -1,0 +1,11 @@
+# kind | command | rule
+# Kinds 41 to 59 belong to emu-rv64. `step` in a refusal is the round, counted from 0.
+61 | aprops | for a random instruction, written as text in a random style, the assembler gives the word the encoder of emu-rv64 gives
+62 | aprops | for a random 32-bit word the decoder of emu-rv64 accepts, and for an instruction word with one bit flipped that it accepts, the text of the decoded record assembles to the same word
+63 | aprops | the canonical text of a random instruction assembles to the encoder's word, and the text of that word is the same text, byte for byte
+64 | aprops | the lowest and the highest value of a number operand are accepted and give the encoder's word
+65 | aprops | a value one past either end of a range, a value far outside it, and an odd branch or jump offset are refused: one error on line 1 with the right code, and no word
+66 | aprops | a random program with labels, .word and .org gives the words computed from offsets the generator counted itself; judged every eighth round
+67 | aprops | that program with the definition of a used label left out gives no word, only "undefined label" errors, and the first on the first line that uses the label
+68 | aprops | that program with one label defined once more on a last line gives no word and one error, "duplicate label", on that line
+69 | aprops | that program with comments that hold instruction text, blank lines and comment lines added gives the same words
