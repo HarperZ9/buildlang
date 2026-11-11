@@ -45,6 +45,7 @@ mod check;
 mod const_generics;
 mod context;
 mod dispatch;
+mod duplicates;
 mod effects;
 mod error;
 mod hkt;

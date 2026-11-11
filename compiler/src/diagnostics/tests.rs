@@ -166,7 +166,10 @@ fn type_samples() -> Vec<TypeError> {
             ty: t(),
             bound: s("Ord"),
         },
-        E::DuplicateDefinition { name: s("f") },
+        E::DuplicateDefinition {
+            name: s("f"),
+            first_line: Some(1),
+        },
         E::TypeAnnotationNeeded,
         E::UnsafeOutsideUnsafe,
         E::Internal(s("boom")),

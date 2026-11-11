@@ -1,0 +1,1731 @@
+// Written by gen_matrix.py; do not edit. Expected output: stores.expected
+struct W0 { w: [u8; 1], a: u16, z: i32 }
+impl W0 {
+    fn put(&mut self, i: usize, v: u8) { self.w[i] = v; }
+    fn add(&mut self, i: usize, d: u8) { self.w[i] += d; }
+    fn sub(&mut self, i: usize, d: u8) { self.w[i] -= d; }
+}
+fn set0(s: &mut W0, i: usize, v: u8) { s.w[i] = v; }
+fn show0(s: &W0) ~ Console { println!("W0 {} {} {}", s.a, s.w[0], s.z); }
+fn st0() ~ Console {
+    let mut s = W0 { w: [255_u8], a: 25981_u16, z: 1693834296_i32 };
+    let t = s;
+    s.w[0] = 22_u8;
+    let i: usize = 0; s.w[i] = 56_u8;
+    set0(&mut s, 0, 127_u8);
+    s.put(0, 89_u8);
+    let j: usize = 0; s.w[j] += 1_u8;
+    s.add(0, 1_u8);
+    show0(&s);
+    show0(&t);
+    s.w = [255_u8];
+    s.a = 23605_u16;
+    println!("W0b {} {} {}", s.a, s.w[0], s.z);
+}
+struct W1 { a: i32, w: [u8; 1], z: u8 }
+impl W1 {
+    fn put(&mut self, i: usize, v: u8) { self.w[i] = v; }
+    fn add(&mut self, i: usize, d: u8) { self.w[i] += d; }
+    fn sub(&mut self, i: usize, d: u8) { self.w[i] -= d; }
+}
+fn set1(s: &mut W1, i: usize, v: u8) { s.w[i] = v; }
+fn show1(s: &W1) ~ Console { println!("W1 {} {} {}", s.a, s.w[0], s.z); }
+fn st1() ~ Console {
+    let mut s = W1 { a: (-1880379081_i32), w: [255_u8], z: 215_u8 };
+    let t = s;
+    s.w[0] = 116_u8;
+    let i: usize = 0; s.w[i] = 233_u8;
+    set1(&mut s, 0, 196_u8);
+    s.put(0, 19_u8);
+    let j: usize = 0; s.w[j] += 1_u8;
+    s.add(0, 1_u8);
+    show1(&s);
+    show1(&t);
+    s.w = [255_u8];
+    s.a = (-1990266786_i32);
+    println!("W1b {} {} {}", s.a, s.w[0], s.z);
+}
+struct W2 { a: u8, z: i64, w: [u8; 1] }
+impl W2 {
+    fn put(&mut self, i: usize, v: u8) { self.w[i] = v; }
+    fn add(&mut self, i: usize, d: u8) { self.w[i] += d; }
+    fn sub(&mut self, i: usize, d: u8) { self.w[i] -= d; }
+}
+fn set2(s: &mut W2, i: usize, v: u8) { s.w[i] = v; }
+fn show2(s: &W2) ~ Console { println!("W2 {} {} {}", s.a, s.w[0], s.z); }
+fn st2() ~ Console {
+    let mut s = W2 { a: 238_u8, z: (-9215236216919343357_i64), w: [255_u8] };
+    let t = s;
+    s.w[0] = 154_u8;
+    let i: usize = 0; s.w[i] = 82_u8;
+    set2(&mut s, 0, 244_u8);
+    s.put(0, 191_u8);
+    let j: usize = 0; s.w[j] += 1_u8;
+    s.add(0, 1_u8);
+    show2(&s);
+    show2(&t);
+    s.w = [255_u8];
+    s.a = 218_u8;
+    println!("W2b {} {} {}", s.a, s.w[0], s.z);
+}
+struct W3 { w: [u8; 3], a: i64, z: u16 }
+impl W3 {
+    fn put(&mut self, i: usize, v: u8) { self.w[i] = v; }
+    fn add(&mut self, i: usize, d: u8) { self.w[i] += d; }
+    fn sub(&mut self, i: usize, d: u8) { self.w[i] -= d; }
+}
+fn set3(s: &mut W3, i: usize, v: u8) { s.w[i] = v; }
+fn show3(s: &W3) ~ Console { println!("W3 {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.z); }
+fn st3() ~ Console {
+    let mut s = W3 { w: [255_u8, 0_u8, 131_u8], a: (-9215234919621054284_i64), z: 37885_u16 };
+    let t = s;
+    s.w[0] = 59_u8;
+    let i: usize = 1; s.w[i] = 87_u8;
+    set3(&mut s, 2, 200_u8);
+    s.put(2, 32_u8);
+    let j: usize = 0; s.w[j] += 1_u8;
+    s.add(1, 1_u8);
+    show3(&s);
+    show3(&t);
+    s.w = [214_u8, 0_u8, 255_u8];
+    s.a = (-9216503775410116392_i64);
+    println!("W3b {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.z);
+}
+struct W4 { a: u16, w: [u8; 3], z: i32 }
+impl W4 {
+    fn put(&mut self, i: usize, v: u8) { self.w[i] = v; }
+    fn add(&mut self, i: usize, d: u8) { self.w[i] += d; }
+    fn sub(&mut self, i: usize, d: u8) { self.w[i] -= d; }
+}
+fn set4(s: &mut W4, i: usize, v: u8) { s.w[i] = v; }
+fn show4(s: &W4) ~ Console { println!("W4 {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.z); }
+fn st4() ~ Console {
+    let mut s = W4 { a: 9989_u16, w: [255_u8, 0_u8, 52_u8], z: 2057524532_i32 };
+    let t = s;
+    s.w[2] = 217_u8;
+    let i: usize = 2; s.w[i] = 37_u8;
+    set4(&mut s, 1, 33_u8);
+    s.put(1, 159_u8);
+    let j: usize = 2; s.w[j] += 1_u8;
+    s.sub(0, 1_u8);
+    show4(&s);
+    show4(&t);
+    s.w = [33_u8, 0_u8, 255_u8];
+    s.a = 58303_u16;
+    println!("W4b {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.z);
+}
+struct W5 { a: i32, z: u8, w: [u8; 3] }
+impl W5 {
+    fn put(&mut self, i: usize, v: u8) { self.w[i] = v; }
+    fn add(&mut self, i: usize, d: u8) { self.w[i] += d; }
+    fn sub(&mut self, i: usize, d: u8) { self.w[i] -= d; }
+}
+fn set5(s: &mut W5, i: usize, v: u8) { s.w[i] = v; }
+fn show5(s: &W5) ~ Console { println!("W5 {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.z); }
+fn st5() ~ Console {
+    let mut s = W5 { a: (-1965724095_i32), z: 125_u8, w: [255_u8, 0_u8, 231_u8] };
+    let t = s;
+    s.w[0] = 113_u8;
+    let i: usize = 0; s.w[i] = 127_u8;
+    set5(&mut s, 0, 40_u8);
+    s.put(2, 101_u8);
+    let j: usize = 1; s.w[j] += 1_u8;
+    s.add(1, 1_u8);
+    show5(&s);
+    show5(&t);
+    s.w = [232_u8, 0_u8, 255_u8];
+    s.a = 810852859_i32;
+    println!("W5b {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.z);
+}
+struct W6 { w: [u8; 8], a: u8, z: i64 }
+impl W6 {
+    fn put(&mut self, i: usize, v: u8) { self.w[i] = v; }
+    fn add(&mut self, i: usize, d: u8) { self.w[i] += d; }
+    fn sub(&mut self, i: usize, d: u8) { self.w[i] -= d; }
+}
+fn set6(s: &mut W6, i: usize, v: u8) { s.w[i] = v; }
+fn show6(s: &W6) ~ Console { println!("W6 {} {} {} {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.w[5], s.w[6], s.w[7], s.z); }
+fn st6() ~ Console {
+    let mut s = W6 { w: [255_u8, 0_u8, 115_u8, 212_u8, 122_u8, 81_u8, 57_u8, 17_u8], a: 209_u8, z: (-9216246071293674736_i64) };
+    let t = s;
+    s.w[1] = 161_u8;
+    let i: usize = 2; s.w[i] = 73_u8;
+    set6(&mut s, 0, 198_u8);
+    s.put(5, 218_u8);
+    let j: usize = 4; s.w[j] += 1_u8;
+    s.add(7, 1_u8);
+    show6(&s);
+    show6(&t);
+    s.w = [249_u8, 58_u8, 10_u8, 64_u8, 80_u8, 253_u8, 0_u8, 255_u8];
+    s.a = 150_u8;
+    println!("W6b {} {} {} {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.w[5], s.w[6], s.w[7], s.z);
+}
+struct W7 { a: i64, w: [u8; 8], z: u16 }
+impl W7 {
+    fn put(&mut self, i: usize, v: u8) { self.w[i] = v; }
+    fn add(&mut self, i: usize, d: u8) { self.w[i] += d; }
+    fn sub(&mut self, i: usize, d: u8) { self.w[i] -= d; }
+}
+fn set7(s: &mut W7, i: usize, v: u8) { s.w[i] = v; }
+fn show7(s: &W7) ~ Console { println!("W7 {} {} {} {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.w[5], s.w[6], s.w[7], s.z); }
+fn st7() ~ Console {
+    let mut s = W7 { a: (-9216131270749670978_i64), w: [255_u8, 0_u8, 180_u8, 56_u8, 230_u8, 66_u8, 216_u8, 175_u8], z: 64008_u16 };
+    let t = s;
+    s.w[3] = 140_u8;
+    let i: usize = 0; s.w[i] = 165_u8;
+    set7(&mut s, 4, 153_u8);
+    s.put(3, 54_u8);
+    let j: usize = 6; s.w[j] += 1_u8;
+    s.add(3, 1_u8);
+    show7(&s);
+    show7(&t);
+    s.w = [99_u8, 115_u8, 47_u8, 238_u8, 138_u8, 7_u8, 0_u8, 255_u8];
+    s.a = (-9218451019854778044_i64);
+    println!("W7b {} {} {} {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.w[5], s.w[6], s.w[7], s.z);
+}
+struct W8 { a: u16, z: i32, w: [u8; 8] }
+impl W8 {
+    fn put(&mut self, i: usize, v: u8) { self.w[i] = v; }
+    fn add(&mut self, i: usize, d: u8) { self.w[i] += d; }
+    fn sub(&mut self, i: usize, d: u8) { self.w[i] -= d; }
+}
+fn set8(s: &mut W8, i: usize, v: u8) { s.w[i] = v; }
+fn show8(s: &W8) ~ Console { println!("W8 {} {} {} {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.w[5], s.w[6], s.w[7], s.z); }
+fn st8() ~ Console {
+    let mut s = W8 { a: 38956_u16, z: (-714437587_i32), w: [255_u8, 0_u8, 62_u8, 54_u8, 134_u8, 175_u8, 58_u8, 205_u8] };
+    let t = s;
+    s.w[5] = 175_u8;
+    let i: usize = 7; s.w[i] = 4_u8;
+    set8(&mut s, 1, 224_u8);
+    s.put(6, 220_u8);
+    let j: usize = 0; s.w[j] -= 1_u8;
+    s.add(0, 1_u8);
+    show8(&s);
+    show8(&t);
+    s.w = [229_u8, 248_u8, 88_u8, 228_u8, 22_u8, 73_u8, 0_u8, 255_u8];
+    s.a = 64721_u16;
+    println!("W8b {} {} {} {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.w[5], s.w[6], s.w[7], s.z);
+}
+struct W9 { w: [i8; 1], a: i32, z: u8 }
+impl W9 {
+    fn put(&mut self, i: usize, v: i8) { self.w[i] = v; }
+    fn add(&mut self, i: usize, d: i8) { self.w[i] += d; }
+    fn sub(&mut self, i: usize, d: i8) { self.w[i] -= d; }
+}
+fn set9(s: &mut W9, i: usize, v: i8) { s.w[i] = v; }
+fn show9(s: &W9) ~ Console { println!("W9 {} {} {}", s.a, s.w[0], s.z); }
+fn st9() ~ Console {
+    let mut s = W9 { w: [127_i8], a: 2082931761_i32, z: 218_u8 };
+    let t = s;
+    s.w[0] = 85_i8;
+    let i: usize = 0; s.w[i] = 71_i8;
+    set9(&mut s, 0, (-33_i8));
+    s.put(0, (-124_i8));
+    let j: usize = 0; s.w[j] += 1_i8;
+    s.add(0, 1_i8);
+    show9(&s);
+    show9(&t);
+    s.w = [127_i8];
+    s.a = (-1158655003_i32);
+    println!("W9b {} {} {}", s.a, s.w[0], s.z);
+}
+struct W10 { a: u8, w: [i8; 1], z: i64 }
+impl W10 {
+    fn put(&mut self, i: usize, v: i8) { self.w[i] = v; }
+    fn add(&mut self, i: usize, d: i8) { self.w[i] += d; }
+    fn sub(&mut self, i: usize, d: i8) { self.w[i] -= d; }
+}
+fn set10(s: &mut W10, i: usize, v: i8) { s.w[i] = v; }
+fn show10(s: &W10) ~ Console { println!("W10 {} {} {}", s.a, s.w[0], s.z); }
+fn st10() ~ Console {
+    let mut s = W10 { a: 52_u8, w: [127_i8], z: (-9218985633718058516_i64) };
+    let t = s;
+    s.w[0] = (-44_i8);
+    let i: usize = 0; s.w[i] = 44_i8;
+    set10(&mut s, 0, (-69_i8));
+    s.put(0, (-111_i8));
+    let j: usize = 0; s.w[j] += 1_i8;
+    s.add(0, 1_i8);
+    show10(&s);
+    show10(&t);
+    s.w = [127_i8];
+    s.a = 192_u8;
+    println!("W10b {} {} {}", s.a, s.w[0], s.z);
+}
+struct W11 { a: i64, z: u16, w: [i8; 1] }
+impl W11 {
+    fn put(&mut self, i: usize, v: i8) { self.w[i] = v; }
+    fn add(&mut self, i: usize, d: i8) { self.w[i] += d; }
+    fn sub(&mut self, i: usize, d: i8) { self.w[i] -= d; }
+}
+fn set11(s: &mut W11, i: usize, v: i8) { s.w[i] = v; }
+fn show11(s: &W11) ~ Console { println!("W11 {} {} {}", s.a, s.w[0], s.z); }
+fn st11() ~ Console {
+    let mut s = W11 { a: (-9219596475280950833_i64), z: 43145_u16, w: [127_i8] };
+    let t = s;
+    s.w[0] = (-96_i8);
+    let i: usize = 0; s.w[i] = (-20_i8);
+    set11(&mut s, 0, (-118_i8));
+    s.put(0, 83_i8);
+    let j: usize = 0; s.w[j] += 1_i8;
+    s.add(0, 1_i8);
+    show11(&s);
+    show11(&t);
+    s.w = [127_i8];
+    s.a = (-9216744202388446930_i64);
+    println!("W11b {} {} {}", s.a, s.w[0], s.z);
+}
+struct W12 { w: [i8; 3], a: u16, z: i32 }
+impl W12 {
+    fn put(&mut self, i: usize, v: i8) { self.w[i] = v; }
+    fn add(&mut self, i: usize, d: i8) { self.w[i] += d; }
+    fn sub(&mut self, i: usize, d: i8) { self.w[i] -= d; }
+}
+fn set12(s: &mut W12, i: usize, v: i8) { s.w[i] = v; }
+fn show12(s: &W12) ~ Console { println!("W12 {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.z); }
+fn st12() ~ Console {
+    let mut s = W12 { w: [127_i8, (-128_i8), (-16_i8)], a: 32936_u16, z: (-2065970139_i32) };
+    let t = s;
+    s.w[2] = (-44_i8);
+    let i: usize = 0; s.w[i] = 15_i8;
+    set12(&mut s, 2, 48_i8);
+    s.put(0, 83_i8);
+    let j: usize = 0; s.w[j] += 1_i8;
+    s.add(1, 1_i8);
+    show12(&s);
+    show12(&t);
+    s.w = [(-9_i8), (-128_i8), 127_i8];
+    s.a = 34442_u16;
+    println!("W12b {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.z);
+}
+struct W13 { a: i32, w: [i8; 3], z: u8 }
+impl W13 {
+    fn put(&mut self, i: usize, v: i8) { self.w[i] = v; }
+    fn add(&mut self, i: usize, d: i8) { self.w[i] += d; }
+    fn sub(&mut self, i: usize, d: i8) { self.w[i] -= d; }
+}
+fn set13(s: &mut W13, i: usize, v: i8) { s.w[i] = v; }
+fn show13(s: &W13) ~ Console { println!("W13 {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.z); }
+fn st13() ~ Console {
+    let mut s = W13 { a: (-671237024_i32), w: [127_i8, (-128_i8), (-110_i8)], z: 225_u8 };
+    let t = s;
+    s.w[2] = (-92_i8);
+    let i: usize = 1; s.w[i] = 57_i8;
+    set13(&mut s, 0, 69_i8);
+    s.put(0, 24_i8);
+    let j: usize = 0; s.w[j] += 1_i8;
+    s.add(2, 1_i8);
+    show13(&s);
+    show13(&t);
+    s.w = [(-9_i8), (-128_i8), 127_i8];
+    s.a = 15468689_i32;
+    println!("W13b {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.z);
+}
+struct W14 { a: u8, z: i64, w: [i8; 3] }
+impl W14 {
+    fn put(&mut self, i: usize, v: i8) { self.w[i] = v; }
+    fn add(&mut self, i: usize, d: i8) { self.w[i] += d; }
+    fn sub(&mut self, i: usize, d: i8) { self.w[i] -= d; }
+}
+fn set14(s: &mut W14, i: usize, v: i8) { s.w[i] = v; }
+fn show14(s: &W14) ~ Console { println!("W14 {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.z); }
+fn st14() ~ Console {
+    let mut s = W14 { a: 143_u8, z: (-9216162756605142143_i64), w: [127_i8, (-128_i8), (-53_i8)] };
+    let t = s;
+    s.w[1] = 115_i8;
+    let i: usize = 0; s.w[i] = 86_i8;
+    set14(&mut s, 1, 123_i8);
+    s.put(1, (-20_i8));
+    let j: usize = 2; s.w[j] += 1_i8;
+    s.add(2, 1_i8);
+    show14(&s);
+    show14(&t);
+    s.w = [37_i8, (-128_i8), 127_i8];
+    s.a = 163_u8;
+    println!("W14b {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.z);
+}
+struct W15 { w: [i8; 8], a: i64, z: u16 }
+impl W15 {
+    fn put(&mut self, i: usize, v: i8) { self.w[i] = v; }
+    fn add(&mut self, i: usize, d: i8) { self.w[i] += d; }
+    fn sub(&mut self, i: usize, d: i8) { self.w[i] -= d; }
+}
+fn set15(s: &mut W15, i: usize, v: i8) { s.w[i] = v; }
+fn show15(s: &W15) ~ Console { println!("W15 {} {} {} {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.w[5], s.w[6], s.w[7], s.z); }
+fn st15() ~ Console {
+    let mut s = W15 { w: [127_i8, (-128_i8), (-80_i8), (-61_i8), (-95_i8), 70_i8, 39_i8, (-100_i8)], a: (-9221977833995236728_i64), z: 47587_u16 };
+    let t = s;
+    s.w[1] = 18_i8;
+    let i: usize = 3; s.w[i] = (-71_i8);
+    set15(&mut s, 5, 26_i8);
+    s.put(3, 33_i8);
+    let j: usize = 7; s.w[j] += 1_i8;
+    s.sub(0, 1_i8);
+    show15(&s);
+    show15(&t);
+    s.w = [(-20_i8), 16_i8, (-115_i8), 18_i8, (-42_i8), (-49_i8), (-128_i8), 127_i8];
+    s.a = (-9223064008544946934_i64);
+    println!("W15b {} {} {} {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.w[5], s.w[6], s.w[7], s.z);
+}
+struct W16 { a: u16, w: [i8; 8], z: i32 }
+impl W16 {
+    fn put(&mut self, i: usize, v: i8) { self.w[i] = v; }
+    fn add(&mut self, i: usize, d: i8) { self.w[i] += d; }
+    fn sub(&mut self, i: usize, d: i8) { self.w[i] -= d; }
+}
+fn set16(s: &mut W16, i: usize, v: i8) { s.w[i] = v; }
+fn show16(s: &W16) ~ Console { println!("W16 {} {} {} {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.w[5], s.w[6], s.w[7], s.z); }
+fn st16() ~ Console {
+    let mut s = W16 { a: 35252_u16, w: [127_i8, (-128_i8), (-83_i8), 57_i8, (-109_i8), (-11_i8), (-58_i8), (-30_i8)], z: (-1385894285_i32) };
+    let t = s;
+    s.w[4] = 97_i8;
+    let i: usize = 2; s.w[i] = 127_i8;
+    set16(&mut s, 2, 31_i8);
+    s.put(7, (-99_i8));
+    let j: usize = 5; s.w[j] += 1_i8;
+    s.add(4, 1_i8);
+    show16(&s);
+    show16(&t);
+    s.w = [114_i8, (-105_i8), (-6_i8), 82_i8, 96_i8, (-113_i8), (-128_i8), 127_i8];
+    s.a = 61515_u16;
+    println!("W16b {} {} {} {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.w[5], s.w[6], s.w[7], s.z);
+}
+struct W17 { a: i32, z: u8, w: [i8; 8] }
+impl W17 {
+    fn put(&mut self, i: usize, v: i8) { self.w[i] = v; }
+    fn add(&mut self, i: usize, d: i8) { self.w[i] += d; }
+    fn sub(&mut self, i: usize, d: i8) { self.w[i] -= d; }
+}
+fn set17(s: &mut W17, i: usize, v: i8) { s.w[i] = v; }
+fn show17(s: &W17) ~ Console { println!("W17 {} {} {} {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.w[5], s.w[6], s.w[7], s.z); }
+fn st17() ~ Console {
+    let mut s = W17 { a: (-1846776778_i32), z: 144_u8, w: [127_i8, (-128_i8), (-63_i8), (-89_i8), 52_i8, 49_i8, 93_i8, 77_i8] };
+    let t = s;
+    s.w[6] = 86_i8;
+    let i: usize = 7; s.w[i] = 33_i8;
+    set17(&mut s, 7, (-100_i8));
+    s.put(7, (-87_i8));
+    let j: usize = 2; s.w[j] += 1_i8;
+    s.add(7, 1_i8);
+    show17(&s);
+    show17(&t);
+    s.w = [(-100_i8), 104_i8, 110_i8, (-103_i8), (-127_i8), 49_i8, (-128_i8), 127_i8];
+    s.a = (-1869696203_i32);
+    println!("W17b {} {} {} {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.w[5], s.w[6], s.w[7], s.z);
+}
+struct W18 { w: [u16; 1], a: u8, z: i64 }
+impl W18 {
+    fn put(&mut self, i: usize, v: u16) { self.w[i] = v; }
+    fn add(&mut self, i: usize, d: u16) { self.w[i] += d; }
+    fn sub(&mut self, i: usize, d: u16) { self.w[i] -= d; }
+}
+fn set18(s: &mut W18, i: usize, v: u16) { s.w[i] = v; }
+fn show18(s: &W18) ~ Console { println!("W18 {} {} {}", s.a, s.w[0], s.z); }
+fn st18() ~ Console {
+    let mut s = W18 { w: [65535_u16], a: 226_u8, z: (-9217679632850170144_i64) };
+    let t = s;
+    s.w[0] = 21490_u16;
+    let i: usize = 0; s.w[i] = 63761_u16;
+    set18(&mut s, 0, 3781_u16);
+    s.put(0, 13339_u16);
+    let j: usize = 0; s.w[j] += 1_u16;
+    s.add(0, 1_u16);
+    show18(&s);
+    show18(&t);
+    s.w = [65535_u16];
+    s.a = 166_u8;
+    println!("W18b {} {} {}", s.a, s.w[0], s.z);
+}
+struct W19 { a: i64, w: [u16; 1], z: u16 }
+impl W19 {
+    fn put(&mut self, i: usize, v: u16) { self.w[i] = v; }
+    fn add(&mut self, i: usize, d: u16) { self.w[i] += d; }
+    fn sub(&mut self, i: usize, d: u16) { self.w[i] -= d; }
+}
+fn set19(s: &mut W19, i: usize, v: u16) { s.w[i] = v; }
+fn show19(s: &W19) ~ Console { println!("W19 {} {} {}", s.a, s.w[0], s.z); }
+fn st19() ~ Console {
+    let mut s = W19 { a: (-9217290542423377221_i64), w: [65535_u16], z: 28539_u16 };
+    let t = s;
+    s.w[0] = 6108_u16;
+    let i: usize = 0; s.w[i] = 18056_u16;
+    set19(&mut s, 0, 29399_u16);
+    s.put(0, 32691_u16);
+    let j: usize = 0; s.w[j] += 1_u16;
+    s.add(0, 1_u16);
+    show19(&s);
+    show19(&t);
+    s.w = [65535_u16];
+    s.a = (-9218578151747411579_i64);
+    println!("W19b {} {} {}", s.a, s.w[0], s.z);
+}
+struct W20 { a: u16, z: i32, w: [u16; 1] }
+impl W20 {
+    fn put(&mut self, i: usize, v: u16) { self.w[i] = v; }
+    fn add(&mut self, i: usize, d: u16) { self.w[i] += d; }
+    fn sub(&mut self, i: usize, d: u16) { self.w[i] -= d; }
+}
+fn set20(s: &mut W20, i: usize, v: u16) { s.w[i] = v; }
+fn show20(s: &W20) ~ Console { println!("W20 {} {} {}", s.a, s.w[0], s.z); }
+fn st20() ~ Console {
+    let mut s = W20 { a: 11414_u16, z: 275030361_i32, w: [65535_u16] };
+    let t = s;
+    s.w[0] = 27804_u16;
+    let i: usize = 0; s.w[i] = 63399_u16;
+    set20(&mut s, 0, 35066_u16);
+    s.put(0, 55775_u16);
+    let j: usize = 0; s.w[j] += 1_u16;
+    s.add(0, 1_u16);
+    show20(&s);
+    show20(&t);
+    s.w = [65535_u16];
+    s.a = 13548_u16;
+    println!("W20b {} {} {}", s.a, s.w[0], s.z);
+}
+struct W21 { w: [u16; 3], a: i32, z: u8 }
+impl W21 {
+    fn put(&mut self, i: usize, v: u16) { self.w[i] = v; }
+    fn add(&mut self, i: usize, d: u16) { self.w[i] += d; }
+    fn sub(&mut self, i: usize, d: u16) { self.w[i] -= d; }
+}
+fn set21(s: &mut W21, i: usize, v: u16) { s.w[i] = v; }
+fn show21(s: &W21) ~ Console { println!("W21 {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.z); }
+fn st21() ~ Console {
+    let mut s = W21 { w: [65535_u16, 0_u16, 7216_u16], a: 1956842644_i32, z: 240_u8 };
+    let t = s;
+    s.w[0] = 44849_u16;
+    let i: usize = 2; s.w[i] = 47464_u16;
+    set21(&mut s, 2, 55754_u16);
+    s.put(1, 33599_u16);
+    let j: usize = 2; s.w[j] += 1_u16;
+    s.add(1, 1_u16);
+    show21(&s);
+    show21(&t);
+    s.w = [40191_u16, 0_u16, 65535_u16];
+    s.a = (-2041911200_i32);
+    println!("W21b {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.z);
+}
+struct W22 { a: u8, w: [u16; 3], z: i64 }
+impl W22 {
+    fn put(&mut self, i: usize, v: u16) { self.w[i] = v; }
+    fn add(&mut self, i: usize, d: u16) { self.w[i] += d; }
+    fn sub(&mut self, i: usize, d: u16) { self.w[i] -= d; }
+}
+fn set22(s: &mut W22, i: usize, v: u16) { s.w[i] = v; }
+fn show22(s: &W22) ~ Console { println!("W22 {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.z); }
+fn st22() ~ Console {
+    let mut s = W22 { a: 159_u8, w: [65535_u16, 0_u16, 12967_u16], z: (-9217365832776756232_i64) };
+    let t = s;
+    s.w[1] = 46110_u16;
+    let i: usize = 1; s.w[i] = 63576_u16;
+    set22(&mut s, 2, 35101_u16);
+    s.put(2, 39779_u16);
+    let j: usize = 0; s.w[j] -= 1_u16;
+    s.add(1, 1_u16);
+    show22(&s);
+    show22(&t);
+    s.w = [2824_u16, 0_u16, 65535_u16];
+    s.a = 49_u8;
+    println!("W22b {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.z);
+}
+struct W23 { a: i64, z: u16, w: [u16; 3] }
+impl W23 {
+    fn put(&mut self, i: usize, v: u16) { self.w[i] = v; }
+    fn add(&mut self, i: usize, d: u16) { self.w[i] += d; }
+    fn sub(&mut self, i: usize, d: u16) { self.w[i] -= d; }
+}
+fn set23(s: &mut W23, i: usize, v: u16) { s.w[i] = v; }
+fn show23(s: &W23) ~ Console { println!("W23 {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.z); }
+fn st23() ~ Console {
+    let mut s = W23 { a: (-9216297291164136479_i64), z: 48032_u16, w: [65535_u16, 0_u16, 20361_u16] };
+    let t = s;
+    s.w[1] = 37053_u16;
+    let i: usize = 0; s.w[i] = 37192_u16;
+    set23(&mut s, 1, 14357_u16);
+    s.put(2, 30479_u16);
+    let j: usize = 2; s.w[j] += 1_u16;
+    s.add(0, 1_u16);
+    show23(&s);
+    show23(&t);
+    s.w = [40110_u16, 0_u16, 65535_u16];
+    s.a = (-9219534741198485422_i64);
+    println!("W23b {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.z);
+}
+struct W24 { w: [u16; 8], a: u16, z: i32 }
+impl W24 {
+    fn put(&mut self, i: usize, v: u16) { self.w[i] = v; }
+    fn add(&mut self, i: usize, d: u16) { self.w[i] += d; }
+    fn sub(&mut self, i: usize, d: u16) { self.w[i] -= d; }
+}
+fn set24(s: &mut W24, i: usize, v: u16) { s.w[i] = v; }
+fn show24(s: &W24) ~ Console { println!("W24 {} {} {} {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.w[5], s.w[6], s.w[7], s.z); }
+fn st24() ~ Console {
+    let mut s = W24 { w: [65535_u16, 0_u16, 9861_u16, 17375_u16, 64282_u16, 31661_u16, 861_u16, 441_u16], a: 29463_u16, z: 757598219_i32 };
+    let t = s;
+    s.w[5] = 49260_u16;
+    let i: usize = 6; s.w[i] = 43469_u16;
+    set24(&mut s, 6, 34633_u16);
+    s.put(1, 63871_u16);
+    let j: usize = 4; s.w[j] += 1_u16;
+    s.add(1, 1_u16);
+    show24(&s);
+    show24(&t);
+    s.w = [9490_u16, 10703_u16, 5598_u16, 46153_u16, 57501_u16, 13007_u16, 0_u16, 65535_u16];
+    s.a = 8448_u16;
+    println!("W24b {} {} {} {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.w[5], s.w[6], s.w[7], s.z);
+}
+struct W25 { a: i32, w: [u16; 8], z: u8 }
+impl W25 {
+    fn put(&mut self, i: usize, v: u16) { self.w[i] = v; }
+    fn add(&mut self, i: usize, d: u16) { self.w[i] += d; }
+    fn sub(&mut self, i: usize, d: u16) { self.w[i] -= d; }
+}
+fn set25(s: &mut W25, i: usize, v: u16) { s.w[i] = v; }
+fn show25(s: &W25) ~ Console { println!("W25 {} {} {} {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.w[5], s.w[6], s.w[7], s.z); }
+fn st25() ~ Console {
+    let mut s = W25 { a: (-1890099859_i32), w: [65535_u16, 0_u16, 12964_u16, 2076_u16, 45814_u16, 27883_u16, 60348_u16, 13702_u16], z: 16_u8 };
+    let t = s;
+    s.w[7] = 20338_u16;
+    let i: usize = 0; s.w[i] = 22242_u16;
+    set25(&mut s, 4, 62571_u16);
+    s.put(2, 3014_u16);
+    let j: usize = 0; s.w[j] += 1_u16;
+    s.add(5, 1_u16);
+    show25(&s);
+    show25(&t);
+    s.w = [48150_u16, 44143_u16, 40672_u16, 26806_u16, 12812_u16, 36009_u16, 0_u16, 65535_u16];
+    s.a = (-1224561473_i32);
+    println!("W25b {} {} {} {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.w[5], s.w[6], s.w[7], s.z);
+}
+struct W26 { a: u8, z: i64, w: [u16; 8] }
+impl W26 {
+    fn put(&mut self, i: usize, v: u16) { self.w[i] = v; }
+    fn add(&mut self, i: usize, d: u16) { self.w[i] += d; }
+    fn sub(&mut self, i: usize, d: u16) { self.w[i] -= d; }
+}
+fn set26(s: &mut W26, i: usize, v: u16) { s.w[i] = v; }
+fn show26(s: &W26) ~ Console { println!("W26 {} {} {} {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.w[5], s.w[6], s.w[7], s.z); }
+fn st26() ~ Console {
+    let mut s = W26 { a: 46_u8, z: (-9221865165634374829_i64), w: [65535_u16, 0_u16, 23708_u16, 55832_u16, 54123_u16, 38599_u16, 46347_u16, 43011_u16] };
+    let t = s;
+    s.w[4] = 36600_u16;
+    let i: usize = 1; s.w[i] = 19556_u16;
+    set26(&mut s, 6, 65333_u16);
+    s.put(7, 17534_u16);
+    let j: usize = 1; s.w[j] += 1_u16;
+    s.add(2, 1_u16);
+    show26(&s);
+    show26(&t);
+    s.w = [41822_u16, 52553_u16, 32294_u16, 5514_u16, 30167_u16, 42058_u16, 0_u16, 65535_u16];
+    s.a = 252_u8;
+    println!("W26b {} {} {} {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.w[5], s.w[6], s.w[7], s.z);
+}
+struct W27 { w: [i16; 1], a: i64, z: u16 }
+impl W27 {
+    fn put(&mut self, i: usize, v: i16) { self.w[i] = v; }
+    fn add(&mut self, i: usize, d: i16) { self.w[i] += d; }
+    fn sub(&mut self, i: usize, d: i16) { self.w[i] -= d; }
+}
+fn set27(s: &mut W27, i: usize, v: i16) { s.w[i] = v; }
+fn show27(s: &W27) ~ Console { println!("W27 {} {} {}", s.a, s.w[0], s.z); }
+fn st27() ~ Console {
+    let mut s = W27 { w: [32767_i16], a: (-9221136745592359523_i64), z: 10994_u16 };
+    let t = s;
+    s.w[0] = (-6428_i16);
+    let i: usize = 0; s.w[i] = 4146_i16;
+    set27(&mut s, 0, (-8027_i16));
+    s.put(0, (-6835_i16));
+    let j: usize = 0; s.w[j] += 1_i16;
+    s.add(0, 1_i16);
+    show27(&s);
+    show27(&t);
+    s.w = [32767_i16];
+    s.a = (-9218127964997627418_i64);
+    println!("W27b {} {} {}", s.a, s.w[0], s.z);
+}
+struct W28 { a: u16, w: [i16; 1], z: i32 }
+impl W28 {
+    fn put(&mut self, i: usize, v: i16) { self.w[i] = v; }
+    fn add(&mut self, i: usize, d: i16) { self.w[i] += d; }
+    fn sub(&mut self, i: usize, d: i16) { self.w[i] -= d; }
+}
+fn set28(s: &mut W28, i: usize, v: i16) { s.w[i] = v; }
+fn show28(s: &W28) ~ Console { println!("W28 {} {} {}", s.a, s.w[0], s.z); }
+fn st28() ~ Console {
+    let mut s = W28 { a: 33801_u16, w: [32767_i16], z: (-1737122312_i32) };
+    let t = s;
+    s.w[0] = (-15722_i16);
+    let i: usize = 0; s.w[i] = (-30024_i16);
+    set28(&mut s, 0, (-6330_i16));
+    s.put(0, (-12800_i16));
+    let j: usize = 0; s.w[j] += 1_i16;
+    s.add(0, 1_i16);
+    show28(&s);
+    show28(&t);
+    s.w = [32767_i16];
+    s.a = 26400_u16;
+    println!("W28b {} {} {}", s.a, s.w[0], s.z);
+}
+struct W29 { a: i32, z: u8, w: [i16; 1] }
+impl W29 {
+    fn put(&mut self, i: usize, v: i16) { self.w[i] = v; }
+    fn add(&mut self, i: usize, d: i16) { self.w[i] += d; }
+    fn sub(&mut self, i: usize, d: i16) { self.w[i] -= d; }
+}
+fn set29(s: &mut W29, i: usize, v: i16) { s.w[i] = v; }
+fn show29(s: &W29) ~ Console { println!("W29 {} {} {}", s.a, s.w[0], s.z); }
+fn st29() ~ Console {
+    let mut s = W29 { a: (-257860775_i32), z: 252_u8, w: [32767_i16] };
+    let t = s;
+    s.w[0] = (-4306_i16);
+    let i: usize = 0; s.w[i] = 20612_i16;
+    set29(&mut s, 0, 2727_i16);
+    s.put(0, 5251_i16);
+    let j: usize = 0; s.w[j] += 1_i16;
+    s.add(0, 1_i16);
+    show29(&s);
+    show29(&t);
+    s.w = [32767_i16];
+    s.a = 1469929729_i32;
+    println!("W29b {} {} {}", s.a, s.w[0], s.z);
+}
+struct W30 { w: [i16; 3], a: u8, z: i64 }
+impl W30 {
+    fn put(&mut self, i: usize, v: i16) { self.w[i] = v; }
+    fn add(&mut self, i: usize, d: i16) { self.w[i] += d; }
+    fn sub(&mut self, i: usize, d: i16) { self.w[i] -= d; }
+}
+fn set30(s: &mut W30, i: usize, v: i16) { s.w[i] = v; }
+fn show30(s: &W30) ~ Console { println!("W30 {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.z); }
+fn st30() ~ Console {
+    let mut s = W30 { w: [32767_i16, (-32768_i16), 24438_i16], a: 7_u8, z: (-9220081879529771907_i64) };
+    let t = s;
+    s.w[0] = 23462_i16;
+    let i: usize = 1; s.w[i] = 6224_i16;
+    set30(&mut s, 2, 12552_i16);
+    s.put(1, (-22223_i16));
+    let j: usize = 1; s.w[j] += 1_i16;
+    s.add(0, 1_i16);
+    show30(&s);
+    show30(&t);
+    s.w = [(-16635_i16), (-32768_i16), 32767_i16];
+    s.a = 23_u8;
+    println!("W30b {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.z);
+}
+struct W31 { a: i64, w: [i16; 3], z: u16 }
+impl W31 {
+    fn put(&mut self, i: usize, v: i16) { self.w[i] = v; }
+    fn add(&mut self, i: usize, d: i16) { self.w[i] += d; }
+    fn sub(&mut self, i: usize, d: i16) { self.w[i] -= d; }
+}
+fn set31(s: &mut W31, i: usize, v: i16) { s.w[i] = v; }
+fn show31(s: &W31) ~ Console { println!("W31 {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.z); }
+fn st31() ~ Console {
+    let mut s = W31 { a: (-9221211171985665115_i64), w: [32767_i16, (-32768_i16), 21776_i16], z: 5821_u16 };
+    let t = s;
+    s.w[1] = (-27577_i16);
+    let i: usize = 0; s.w[i] = 12966_i16;
+    set31(&mut s, 0, 6811_i16);
+    s.put(1, 23126_i16);
+    let j: usize = 1; s.w[j] += 1_i16;
+    s.add(1, 1_i16);
+    show31(&s);
+    show31(&t);
+    s.w = [7038_i16, (-32768_i16), 32767_i16];
+    s.a = (-9219138476826823394_i64);
+    println!("W31b {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.z);
+}
+struct W32 { a: u16, z: i32, w: [i16; 3] }
+impl W32 {
+    fn put(&mut self, i: usize, v: i16) { self.w[i] = v; }
+    fn add(&mut self, i: usize, d: i16) { self.w[i] += d; }
+    fn sub(&mut self, i: usize, d: i16) { self.w[i] -= d; }
+}
+fn set32(s: &mut W32, i: usize, v: i16) { s.w[i] = v; }
+fn show32(s: &W32) ~ Console { println!("W32 {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.z); }
+fn st32() ~ Console {
+    let mut s = W32 { a: 49096_u16, z: 866736940_i32, w: [32767_i16, (-32768_i16), 21075_i16] };
+    let t = s;
+    s.w[2] = (-23220_i16);
+    let i: usize = 1; s.w[i] = (-18869_i16);
+    set32(&mut s, 1, (-19324_i16));
+    s.put(0, (-19167_i16));
+    let j: usize = 0; s.w[j] += 1_i16;
+    s.add(1, 1_i16);
+    show32(&s);
+    show32(&t);
+    s.w = [1604_i16, (-32768_i16), 32767_i16];
+    s.a = 14318_u16;
+    println!("W32b {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.z);
+}
+struct W33 { w: [i16; 8], a: i32, z: u8 }
+impl W33 {
+    fn put(&mut self, i: usize, v: i16) { self.w[i] = v; }
+    fn add(&mut self, i: usize, d: i16) { self.w[i] += d; }
+    fn sub(&mut self, i: usize, d: i16) { self.w[i] -= d; }
+}
+fn set33(s: &mut W33, i: usize, v: i16) { s.w[i] = v; }
+fn show33(s: &W33) ~ Console { println!("W33 {} {} {} {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.w[5], s.w[6], s.w[7], s.z); }
+fn st33() ~ Console {
+    let mut s = W33 { w: [32767_i16, (-32768_i16), (-632_i16), (-9237_i16), (-27253_i16), 27280_i16, 17214_i16, 953_i16], a: 1660980439_i32, z: 90_u8 };
+    let t = s;
+    s.w[2] = 13761_i16;
+    let i: usize = 3; s.w[i] = (-7571_i16);
+    set33(&mut s, 3, 30396_i16);
+    s.put(7, 12478_i16);
+    let j: usize = 0; s.w[j] -= 1_i16;
+    s.add(4, 1_i16);
+    show33(&s);
+    show33(&t);
+    s.w = [1177_i16, 13032_i16, 16076_i16, (-11147_i16), (-15615_i16), 2674_i16, (-32768_i16), 32767_i16];
+    s.a = (-933832613_i32);
+    println!("W33b {} {} {} {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.w[5], s.w[6], s.w[7], s.z);
+}
+struct W34 { a: u8, w: [i16; 8], z: i64 }
+impl W34 {
+    fn put(&mut self, i: usize, v: i16) { self.w[i] = v; }
+    fn add(&mut self, i: usize, d: i16) { self.w[i] += d; }
+    fn sub(&mut self, i: usize, d: i16) { self.w[i] -= d; }
+}
+fn set34(s: &mut W34, i: usize, v: i16) { s.w[i] = v; }
+fn show34(s: &W34) ~ Console { println!("W34 {} {} {} {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.w[5], s.w[6], s.w[7], s.z); }
+fn st34() ~ Console {
+    let mut s = W34 { a: 164_u8, w: [32767_i16, (-32768_i16), 15100_i16, (-22901_i16), 11895_i16, (-28219_i16), (-7316_i16), (-7102_i16)], z: (-9215729401005222872_i64) };
+    let t = s;
+    s.w[1] = (-8161_i16);
+    let i: usize = 7; s.w[i] = (-28842_i16);
+    set34(&mut s, 2, 32687_i16);
+    s.put(3, (-2474_i16));
+    let j: usize = 7; s.w[j] += 1_i16;
+    s.add(3, 1_i16);
+    show34(&s);
+    show34(&t);
+    s.w = [1879_i16, 27552_i16, (-5094_i16), (-27244_i16), 31427_i16, 27927_i16, (-32768_i16), 32767_i16];
+    s.a = 2_u8;
+    println!("W34b {} {} {} {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.w[5], s.w[6], s.w[7], s.z);
+}
+struct W35 { a: i64, z: u16, w: [i16; 8] }
+impl W35 {
+    fn put(&mut self, i: usize, v: i16) { self.w[i] = v; }
+    fn add(&mut self, i: usize, d: i16) { self.w[i] += d; }
+    fn sub(&mut self, i: usize, d: i16) { self.w[i] -= d; }
+}
+fn set35(s: &mut W35, i: usize, v: i16) { s.w[i] = v; }
+fn show35(s: &W35) ~ Console { println!("W35 {} {} {} {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.w[5], s.w[6], s.w[7], s.z); }
+fn st35() ~ Console {
+    let mut s = W35 { a: (-9223286813931536649_i64), z: 17384_u16, w: [32767_i16, (-32768_i16), 21587_i16, (-23063_i16), 24783_i16, (-23724_i16), 17474_i16, (-2322_i16)] };
+    let t = s;
+    s.w[3] = 12575_i16;
+    let i: usize = 6; s.w[i] = (-14380_i16);
+    set35(&mut s, 3, (-26668_i16));
+    s.put(3, 21922_i16);
+    let j: usize = 6; s.w[j] += 1_i16;
+    s.sub(0, 1_i16);
+    show35(&s);
+    show35(&t);
+    s.w = [18132_i16, 20251_i16, 3227_i16, 14190_i16, 23947_i16, 8886_i16, (-32768_i16), 32767_i16];
+    s.a = (-9221112717875975252_i64);
+    println!("W35b {} {} {} {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.w[5], s.w[6], s.w[7], s.z);
+}
+struct W36 { w: [u32; 1], a: u16, z: i32 }
+impl W36 {
+    fn put(&mut self, i: usize, v: u32) { self.w[i] = v; }
+    fn add(&mut self, i: usize, d: u32) { self.w[i] += d; }
+    fn sub(&mut self, i: usize, d: u32) { self.w[i] -= d; }
+}
+fn set36(s: &mut W36, i: usize, v: u32) { s.w[i] = v; }
+fn show36(s: &W36) ~ Console { println!("W36 {} {} {}", s.a, s.w[0], s.z); }
+fn st36() ~ Console {
+    let mut s = W36 { w: [4294967295_u32], a: 51312_u16, z: (-981894042_i32) };
+    let t = s;
+    s.w[0] = 680820475_u32;
+    let i: usize = 0; s.w[i] = 783832767_u32;
+    set36(&mut s, 0, 144505526_u32);
+    s.put(0, 3714044204_u32);
+    let j: usize = 0; s.w[j] += 1_u32;
+    s.add(0, 1_u32);
+    show36(&s);
+    show36(&t);
+    s.w = [4294967295_u32];
+    s.a = 23364_u16;
+    println!("W36b {} {} {}", s.a, s.w[0], s.z);
+}
+struct W37 { a: i32, w: [u32; 1], z: u8 }
+impl W37 {
+    fn put(&mut self, i: usize, v: u32) { self.w[i] = v; }
+    fn add(&mut self, i: usize, d: u32) { self.w[i] += d; }
+    fn sub(&mut self, i: usize, d: u32) { self.w[i] -= d; }
+}
+fn set37(s: &mut W37, i: usize, v: u32) { s.w[i] = v; }
+fn show37(s: &W37) ~ Console { println!("W37 {} {} {}", s.a, s.w[0], s.z); }
+fn st37() ~ Console {
+    let mut s = W37 { a: 2041899185_i32, w: [4294967295_u32], z: 80_u8 };
+    let t = s;
+    s.w[0] = 1970486322_u32;
+    let i: usize = 0; s.w[i] = 2120077832_u32;
+    set37(&mut s, 0, 2235753977_u32);
+    s.put(0, 4283987141_u32);
+    let j: usize = 0; s.w[j] += 1_u32;
+    s.add(0, 1_u32);
+    show37(&s);
+    show37(&t);
+    s.w = [4294967295_u32];
+    s.a = 1469785680_i32;
+    println!("W37b {} {} {}", s.a, s.w[0], s.z);
+}
+struct W38 { a: u8, z: i64, w: [u32; 1] }
+impl W38 {
+    fn put(&mut self, i: usize, v: u32) { self.w[i] = v; }
+    fn add(&mut self, i: usize, d: u32) { self.w[i] += d; }
+    fn sub(&mut self, i: usize, d: u32) { self.w[i] -= d; }
+}
+fn set38(s: &mut W38, i: usize, v: u32) { s.w[i] = v; }
+fn show38(s: &W38) ~ Console { println!("W38 {} {} {}", s.a, s.w[0], s.z); }
+fn st38() ~ Console {
+    let mut s = W38 { a: 77_u8, z: (-9222198954459065742_i64), w: [4294967295_u32] };
+    let t = s;
+    s.w[0] = 3614197812_u32;
+    let i: usize = 0; s.w[i] = 2117703649_u32;
+    set38(&mut s, 0, 1532620725_u32);
+    s.put(0, 3886756585_u32);
+    let j: usize = 0; s.w[j] += 1_u32;
+    s.add(0, 1_u32);
+    show38(&s);
+    show38(&t);
+    s.w = [4294967295_u32];
+    s.a = 107_u8;
+    println!("W38b {} {} {}", s.a, s.w[0], s.z);
+}
+struct W39 { w: [u32; 3], a: i64, z: u16 }
+impl W39 {
+    fn put(&mut self, i: usize, v: u32) { self.w[i] = v; }
+    fn add(&mut self, i: usize, d: u32) { self.w[i] += d; }
+    fn sub(&mut self, i: usize, d: u32) { self.w[i] -= d; }
+}
+fn set39(s: &mut W39, i: usize, v: u32) { s.w[i] = v; }
+fn show39(s: &W39) ~ Console { println!("W39 {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.z); }
+fn st39() ~ Console {
+    let mut s = W39 { w: [4294967295_u32, 0_u32, 182910736_u32], a: (-9220703580972976846_i64), z: 11124_u16 };
+    let t = s;
+    s.w[0] = 958134435_u32;
+    let i: usize = 2; s.w[i] = 1602985763_u32;
+    set39(&mut s, 0, 1020730929_u32);
+    s.put(1, 1538813122_u32);
+    let j: usize = 0; s.w[j] += 1_u32;
+    s.add(1, 1_u32);
+    show39(&s);
+    show39(&t);
+    s.w = [450249362_u32, 0_u32, 4294967295_u32];
+    s.a = (-9220408829445403477_i64);
+    println!("W39b {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.z);
+}
+struct W40 { a: u16, w: [u32; 3], z: i32 }
+impl W40 {
+    fn put(&mut self, i: usize, v: u32) { self.w[i] = v; }
+    fn add(&mut self, i: usize, d: u32) { self.w[i] += d; }
+    fn sub(&mut self, i: usize, d: u32) { self.w[i] -= d; }
+}
+fn set40(s: &mut W40, i: usize, v: u32) { s.w[i] = v; }
+fn show40(s: &W40) ~ Console { println!("W40 {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.z); }
+fn st40() ~ Console {
+    let mut s = W40 { a: 16957_u16, w: [4294967295_u32, 0_u32, 1939641047_u32], z: 360371436_i32 };
+    let t = s;
+    s.w[0] = 1944283886_u32;
+    let i: usize = 2; s.w[i] = 2880749204_u32;
+    set40(&mut s, 1, 2291219057_u32);
+    s.put(0, 2733194910_u32);
+    let j: usize = 2; s.w[j] += 1_u32;
+    s.add(2, 1_u32);
+    show40(&s);
+    show40(&t);
+    s.w = [795402594_u32, 0_u32, 4294967295_u32];
+    s.a = 2123_u16;
+    println!("W40b {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.z);
+}
+struct W41 { a: i32, z: u8, w: [u32; 3] }
+impl W41 {
+    fn put(&mut self, i: usize, v: u32) { self.w[i] = v; }
+    fn add(&mut self, i: usize, d: u32) { self.w[i] += d; }
+    fn sub(&mut self, i: usize, d: u32) { self.w[i] -= d; }
+}
+fn set41(s: &mut W41, i: usize, v: u32) { s.w[i] = v; }
+fn show41(s: &W41) ~ Console { println!("W41 {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.z); }
+fn st41() ~ Console {
+    let mut s = W41 { a: 358222607_i32, z: 152_u8, w: [4294967295_u32, 0_u32, 2614238460_u32] };
+    let t = s;
+    s.w[1] = 831811809_u32;
+    let i: usize = 0; s.w[i] = 3360123733_u32;
+    set41(&mut s, 2, 2173522354_u32);
+    s.put(0, 4175754579_u32);
+    let j: usize = 0; s.w[j] += 1_u32;
+    s.add(0, 1_u32);
+    show41(&s);
+    show41(&t);
+    s.w = [360309927_u32, 0_u32, 4294967295_u32];
+    s.a = 666802953_i32;
+    println!("W41b {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.z);
+}
+struct W42 { w: [u32; 8], a: u8, z: i64 }
+impl W42 {
+    fn put(&mut self, i: usize, v: u32) { self.w[i] = v; }
+    fn add(&mut self, i: usize, d: u32) { self.w[i] += d; }
+    fn sub(&mut self, i: usize, d: u32) { self.w[i] -= d; }
+}
+fn set42(s: &mut W42, i: usize, v: u32) { s.w[i] = v; }
+fn show42(s: &W42) ~ Console { println!("W42 {} {} {} {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.w[5], s.w[6], s.w[7], s.z); }
+fn st42() ~ Console {
+    let mut s = W42 { w: [4294967295_u32, 0_u32, 2489089431_u32, 1692849968_u32, 2020013133_u32, 1765181510_u32, 4141467047_u32, 3205358546_u32], a: 68_u8, z: (-9222636761604891040_i64) };
+    let t = s;
+    s.w[0] = 3702776816_u32;
+    let i: usize = 6; s.w[i] = 2986971178_u32;
+    set42(&mut s, 1, 4108549858_u32);
+    s.put(2, 2600416480_u32);
+    let j: usize = 6; s.w[j] += 1_u32;
+    s.add(6, 1_u32);
+    show42(&s);
+    show42(&t);
+    s.w = [1326169970_u32, 3534001122_u32, 2229325279_u32, 3527773176_u32, 2250233776_u32, 133971758_u32, 0_u32, 4294967295_u32];
+    s.a = 145_u8;
+    println!("W42b {} {} {} {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.w[5], s.w[6], s.w[7], s.z);
+}
+struct W43 { a: i64, w: [u32; 8], z: u16 }
+impl W43 {
+    fn put(&mut self, i: usize, v: u32) { self.w[i] = v; }
+    fn add(&mut self, i: usize, d: u32) { self.w[i] += d; }
+    fn sub(&mut self, i: usize, d: u32) { self.w[i] -= d; }
+}
+fn set43(s: &mut W43, i: usize, v: u32) { s.w[i] = v; }
+fn show43(s: &W43) ~ Console { println!("W43 {} {} {} {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.w[5], s.w[6], s.w[7], s.z); }
+fn st43() ~ Console {
+    let mut s = W43 { a: (-9220619899514561901_i64), w: [4294967295_u32, 0_u32, 3321425771_u32, 2542718763_u32, 1468794241_u32, 3961459552_u32, 239075313_u32, 890905478_u32], z: 4216_u16 };
+    let t = s;
+    s.w[5] = 776020744_u32;
+    let i: usize = 0; s.w[i] = 1721643757_u32;
+    set43(&mut s, 3, 1598392321_u32);
+    s.put(4, 1725292181_u32);
+    let j: usize = 0; s.w[j] += 1_u32;
+    s.add(0, 1_u32);
+    show43(&s);
+    show43(&t);
+    s.w = [4272840266_u32, 46714018_u32, 569766388_u32, 576663426_u32, 4071916209_u32, 2534697092_u32, 0_u32, 4294967295_u32];
+    s.a = (-9215278675531261440_i64);
+    println!("W43b {} {} {} {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.w[5], s.w[6], s.w[7], s.z);
+}
+struct W44 { a: u16, z: i32, w: [u32; 8] }
+impl W44 {
+    fn put(&mut self, i: usize, v: u32) { self.w[i] = v; }
+    fn add(&mut self, i: usize, d: u32) { self.w[i] += d; }
+    fn sub(&mut self, i: usize, d: u32) { self.w[i] -= d; }
+}
+fn set44(s: &mut W44, i: usize, v: u32) { s.w[i] = v; }
+fn show44(s: &W44) ~ Console { println!("W44 {} {} {} {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.w[5], s.w[6], s.w[7], s.z); }
+fn st44() ~ Console {
+    let mut s = W44 { a: 34490_u16, z: (-1679754395_i32), w: [4294967295_u32, 0_u32, 3771592598_u32, 2836524034_u32, 543729709_u32, 3187632_u32, 1128636621_u32, 933833556_u32] };
+    let t = s;
+    s.w[1] = 4068216851_u32;
+    let i: usize = 2; s.w[i] = 3845609107_u32;
+    set44(&mut s, 3, 2990205905_u32);
+    s.put(2, 1152593312_u32);
+    let j: usize = 0; s.w[j] -= 1_u32;
+    s.add(2, 1_u32);
+    show44(&s);
+    show44(&t);
+    s.w = [3651682470_u32, 2239846474_u32, 3386968080_u32, 181996659_u32, 1757689750_u32, 2557504983_u32, 0_u32, 4294967295_u32];
+    s.a = 2822_u16;
+    println!("W44b {} {} {} {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.w[5], s.w[6], s.w[7], s.z);
+}
+struct W45 { w: [i32; 1], a: i32, z: u8 }
+impl W45 {
+    fn put(&mut self, i: usize, v: i32) { self.w[i] = v; }
+    fn add(&mut self, i: usize, d: i32) { self.w[i] += d; }
+    fn sub(&mut self, i: usize, d: i32) { self.w[i] -= d; }
+}
+fn set45(s: &mut W45, i: usize, v: i32) { s.w[i] = v; }
+fn show45(s: &W45) ~ Console { println!("W45 {} {} {}", s.a, s.w[0], s.z); }
+fn st45() ~ Console {
+    let mut s = W45 { w: [2147483647_i32], a: 1036063081_i32, z: 82_u8 };
+    let t = s;
+    s.w[0] = 831750184_i32;
+    let i: usize = 0; s.w[i] = (-245038887_i32);
+    set45(&mut s, 0, 1888523730_i32);
+    s.put(0, (-2067023752_i32));
+    let j: usize = 0; s.w[j] += 1_i32;
+    s.add(0, 1_i32);
+    show45(&s);
+    show45(&t);
+    s.w = [2147483647_i32];
+    s.a = (-1814167241_i32);
+    println!("W45b {} {} {}", s.a, s.w[0], s.z);
+}
+struct W46 { a: u8, w: [i32; 1], z: i64 }
+impl W46 {
+    fn put(&mut self, i: usize, v: i32) { self.w[i] = v; }
+    fn add(&mut self, i: usize, d: i32) { self.w[i] += d; }
+    fn sub(&mut self, i: usize, d: i32) { self.w[i] -= d; }
+}
+fn set46(s: &mut W46, i: usize, v: i32) { s.w[i] = v; }
+fn show46(s: &W46) ~ Console { println!("W46 {} {} {}", s.a, s.w[0], s.z); }
+fn st46() ~ Console {
+    let mut s = W46 { a: 91_u8, w: [2147483647_i32], z: (-9219067093036346687_i64) };
+    let t = s;
+    s.w[0] = 1041613966_i32;
+    let i: usize = 0; s.w[i] = 281723532_i32;
+    set46(&mut s, 0, 183656398_i32);
+    s.put(0, (-1092789076_i32));
+    let j: usize = 0; s.w[j] += 1_i32;
+    s.add(0, 1_i32);
+    show46(&s);
+    show46(&t);
+    s.w = [2147483647_i32];
+    s.a = 14_u8;
+    println!("W46b {} {} {}", s.a, s.w[0], s.z);
+}
+struct W47 { a: i64, z: u16, w: [i32; 1] }
+impl W47 {
+    fn put(&mut self, i: usize, v: i32) { self.w[i] = v; }
+    fn add(&mut self, i: usize, d: i32) { self.w[i] += d; }
+    fn sub(&mut self, i: usize, d: i32) { self.w[i] -= d; }
+}
+fn set47(s: &mut W47, i: usize, v: i32) { s.w[i] = v; }
+fn show47(s: &W47) ~ Console { println!("W47 {} {} {}", s.a, s.w[0], s.z); }
+fn st47() ~ Console {
+    let mut s = W47 { a: (-9220175355483604355_i64), z: 48940_u16, w: [2147483647_i32] };
+    let t = s;
+    s.w[0] = (-825630316_i32);
+    let i: usize = 0; s.w[i] = (-1601777698_i32);
+    set47(&mut s, 0, (-185531842_i32));
+    s.put(0, (-824396016_i32));
+    let j: usize = 0; s.w[j] += 1_i32;
+    s.add(0, 1_i32);
+    show47(&s);
+    show47(&t);
+    s.w = [2147483647_i32];
+    s.a = (-9218855333204395457_i64);
+    println!("W47b {} {} {}", s.a, s.w[0], s.z);
+}
+struct W48 { w: [i32; 3], a: u16, z: i32 }
+impl W48 {
+    fn put(&mut self, i: usize, v: i32) { self.w[i] = v; }
+    fn add(&mut self, i: usize, d: i32) { self.w[i] += d; }
+    fn sub(&mut self, i: usize, d: i32) { self.w[i] -= d; }
+}
+fn set48(s: &mut W48, i: usize, v: i32) { s.w[i] = v; }
+fn show48(s: &W48) ~ Console { println!("W48 {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.z); }
+fn st48() ~ Console {
+    let mut s = W48 { w: [2147483647_i32, (-2147483648_i32), (-258184938_i32)], a: 10060_u16, z: 852867031_i32 };
+    let t = s;
+    s.w[2] = (-2065008665_i32);
+    let i: usize = 1; s.w[i] = (-1981884962_i32);
+    set48(&mut s, 0, 269476030_i32);
+    s.put(1, 1223060697_i32);
+    let j: usize = 0; s.w[j] += 1_i32;
+    s.add(0, 1_i32);
+    show48(&s);
+    show48(&t);
+    s.w = [704088691_i32, (-2147483648_i32), 2147483647_i32];
+    s.a = 10172_u16;
+    println!("W48b {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.z);
+}
+struct W49 { a: i32, w: [i32; 3], z: u8 }
+impl W49 {
+    fn put(&mut self, i: usize, v: i32) { self.w[i] = v; }
+    fn add(&mut self, i: usize, d: i32) { self.w[i] += d; }
+    fn sub(&mut self, i: usize, d: i32) { self.w[i] -= d; }
+}
+fn set49(s: &mut W49, i: usize, v: i32) { s.w[i] = v; }
+fn show49(s: &W49) ~ Console { println!("W49 {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.z); }
+fn st49() ~ Console {
+    let mut s = W49 { a: (-1270520965_i32), w: [2147483647_i32, (-2147483648_i32), (-1205372328_i32)], z: 170_u8 };
+    let t = s;
+    s.w[2] = (-342897301_i32);
+    let i: usize = 2; s.w[i] = (-278454008_i32);
+    set49(&mut s, 0, 2001139181_i32);
+    s.put(2, 675952456_i32);
+    let j: usize = 2; s.w[j] += 1_i32;
+    s.add(1, 1_i32);
+    show49(&s);
+    show49(&t);
+    s.w = [(-1569942341_i32), (-2147483648_i32), 2147483647_i32];
+    s.a = 1451008549_i32;
+    println!("W49b {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.z);
+}
+struct W50 { a: u8, z: i64, w: [i32; 3] }
+impl W50 {
+    fn put(&mut self, i: usize, v: i32) { self.w[i] = v; }
+    fn add(&mut self, i: usize, d: i32) { self.w[i] += d; }
+    fn sub(&mut self, i: usize, d: i32) { self.w[i] -= d; }
+}
+fn set50(s: &mut W50, i: usize, v: i32) { s.w[i] = v; }
+fn show50(s: &W50) ~ Console { println!("W50 {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.z); }
+fn st50() ~ Console {
+    let mut s = W50 { a: 153_u8, z: (-9218264482299975008_i64), w: [2147483647_i32, (-2147483648_i32), (-893094207_i32)] };
+    let t = s;
+    s.w[2] = (-1681356385_i32);
+    let i: usize = 2; s.w[i] = (-1301384778_i32);
+    set50(&mut s, 1, (-1213372297_i32));
+    s.put(2, (-1780259059_i32));
+    let j: usize = 1; s.w[j] += 1_i32;
+    s.sub(0, 1_i32);
+    show50(&s);
+    show50(&t);
+    s.w = [701143214_i32, (-2147483648_i32), 2147483647_i32];
+    s.a = 171_u8;
+    println!("W50b {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.z);
+}
+struct W51 { w: [i32; 8], a: i64, z: u16 }
+impl W51 {
+    fn put(&mut self, i: usize, v: i32) { self.w[i] = v; }
+    fn add(&mut self, i: usize, d: i32) { self.w[i] += d; }
+    fn sub(&mut self, i: usize, d: i32) { self.w[i] -= d; }
+}
+fn set51(s: &mut W51, i: usize, v: i32) { s.w[i] = v; }
+fn show51(s: &W51) ~ Console { println!("W51 {} {} {} {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.w[5], s.w[6], s.w[7], s.z); }
+fn st51() ~ Console {
+    let mut s = W51 { w: [2147483647_i32, (-2147483648_i32), (-2130483307_i32), (-220347753_i32), 1487604116_i32, 245556647_i32, 184010194_i32, (-132781848_i32)], a: (-9221164732469041807_i64), z: 43427_u16 };
+    let t = s;
+    s.w[1] = (-807513933_i32);
+    let i: usize = 4; s.w[i] = 1480875297_i32;
+    set51(&mut s, 4, 74511808_i32);
+    s.put(7, 1870522418_i32);
+    let j: usize = 3; s.w[j] += 1_i32;
+    s.add(3, 1_i32);
+    show51(&s);
+    show51(&t);
+    s.w = [(-418624998_i32), (-290637780_i32), 1512476311_i32, 2011552328_i32, (-1515477871_i32), (-1184652748_i32), (-2147483648_i32), 2147483647_i32];
+    s.a = (-9218759920956697993_i64);
+    println!("W51b {} {} {} {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.w[5], s.w[6], s.w[7], s.z);
+}
+struct W52 { a: u16, w: [i32; 8], z: i32 }
+impl W52 {
+    fn put(&mut self, i: usize, v: i32) { self.w[i] = v; }
+    fn add(&mut self, i: usize, d: i32) { self.w[i] += d; }
+    fn sub(&mut self, i: usize, d: i32) { self.w[i] -= d; }
+}
+fn set52(s: &mut W52, i: usize, v: i32) { s.w[i] = v; }
+fn show52(s: &W52) ~ Console { println!("W52 {} {} {} {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.w[5], s.w[6], s.w[7], s.z); }
+fn st52() ~ Console {
+    let mut s = W52 { a: 43774_u16, w: [2147483647_i32, (-2147483648_i32), (-2051988431_i32), 56743354_i32, (-2074782807_i32), (-1587477949_i32), 1950264027_i32, 1832028129_i32], z: 1017212246_i32 };
+    let t = s;
+    s.w[5] = 1519069264_i32;
+    let i: usize = 1; s.w[i] = (-1718078904_i32);
+    set52(&mut s, 3, (-361598194_i32));
+    s.put(0, 1032354981_i32);
+    let j: usize = 7; s.w[j] += 1_i32;
+    s.add(6, 1_i32);
+    show52(&s);
+    show52(&t);
+    s.w = [(-2097048842_i32), (-2070411749_i32), (-1916844870_i32), 930156850_i32, 1507185215_i32, (-656270628_i32), (-2147483648_i32), 2147483647_i32];
+    s.a = 56808_u16;
+    println!("W52b {} {} {} {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.w[5], s.w[6], s.w[7], s.z);
+}
+struct W53 { a: i32, z: u8, w: [i32; 8] }
+impl W53 {
+    fn put(&mut self, i: usize, v: i32) { self.w[i] = v; }
+    fn add(&mut self, i: usize, d: i32) { self.w[i] += d; }
+    fn sub(&mut self, i: usize, d: i32) { self.w[i] -= d; }
+}
+fn set53(s: &mut W53, i: usize, v: i32) { s.w[i] = v; }
+fn show53(s: &W53) ~ Console { println!("W53 {} {} {} {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.w[5], s.w[6], s.w[7], s.z); }
+fn st53() ~ Console {
+    let mut s = W53 { a: (-920242347_i32), z: 65_u8, w: [2147483647_i32, (-2147483648_i32), (-1338672975_i32), 522518211_i32, 36454348_i32, 49525458_i32, 1830245780_i32, (-198285222_i32)] };
+    let t = s;
+    s.w[0] = (-742294623_i32);
+    let i: usize = 4; s.w[i] = (-1327638005_i32);
+    set53(&mut s, 6, 1547166921_i32);
+    s.put(4, (-205319686_i32));
+    let j: usize = 0; s.w[j] += 1_i32;
+    s.add(6, 1_i32);
+    show53(&s);
+    show53(&t);
+    s.w = [198634349_i32, 1453586721_i32, (-1065870910_i32), 1062156456_i32, 1065693211_i32, (-254281472_i32), (-2147483648_i32), 2147483647_i32];
+    s.a = (-722208730_i32);
+    println!("W53b {} {} {} {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.w[5], s.w[6], s.w[7], s.z);
+}
+struct W54 { w: [u64; 1], a: u8, z: i64 }
+impl W54 {
+    fn put(&mut self, i: usize, v: u64) { self.w[i] = v; }
+    fn add(&mut self, i: usize, d: u64) { self.w[i] += d; }
+    fn sub(&mut self, i: usize, d: u64) { self.w[i] -= d; }
+}
+fn set54(s: &mut W54, i: usize, v: u64) { s.w[i] = v; }
+fn show54(s: &W54) ~ Console { println!("W54 {} {} {}", s.a, s.w[0], s.z); }
+fn st54() ~ Console {
+    let mut s = W54 { w: [18446744073709551615_u64], a: 53_u8, z: (-9221637326296831942_i64) };
+    let t = s;
+    s.w[0] = 100134701417985_u64;
+    let i: usize = 0; s.w[i] = 4581607712306356_u64;
+    set54(&mut s, 0, 4648802671985222_u64);
+    s.put(0, 7317631639123088_u64);
+    let j: usize = 0; s.w[j] += 1_u64;
+    s.add(0, 1_u64);
+    show54(&s);
+    show54(&t);
+    s.w = [18446744073709551615_u64];
+    s.a = 22_u8;
+    println!("W54b {} {} {}", s.a, s.w[0], s.z);
+}
+struct W55 { a: i64, w: [u64; 1], z: u16 }
+impl W55 {
+    fn put(&mut self, i: usize, v: u64) { self.w[i] = v; }
+    fn add(&mut self, i: usize, d: u64) { self.w[i] += d; }
+    fn sub(&mut self, i: usize, d: u64) { self.w[i] -= d; }
+}
+fn set55(s: &mut W55, i: usize, v: u64) { s.w[i] = v; }
+fn show55(s: &W55) ~ Console { println!("W55 {} {} {}", s.a, s.w[0], s.z); }
+fn st55() ~ Console {
+    let mut s = W55 { a: (-9221026950036839874_i64), w: [18446744073709551615_u64], z: 3572_u16 };
+    let t = s;
+    s.w[0] = 3090299815304643_u64;
+    let i: usize = 0; s.w[i] = 498498029249982_u64;
+    set55(&mut s, 0, 7554166666421969_u64);
+    s.put(0, 1578926201516900_u64);
+    let j: usize = 0; s.w[j] += 1_u64;
+    s.add(0, 1_u64);
+    show55(&s);
+    show55(&t);
+    s.w = [18446744073709551615_u64];
+    s.a = (-9218608754900516260_i64);
+    println!("W55b {} {} {}", s.a, s.w[0], s.z);
+}
+struct W56 { a: u16, z: i32, w: [u64; 1] }
+impl W56 {
+    fn put(&mut self, i: usize, v: u64) { self.w[i] = v; }
+    fn add(&mut self, i: usize, d: u64) { self.w[i] += d; }
+    fn sub(&mut self, i: usize, d: u64) { self.w[i] -= d; }
+}
+fn set56(s: &mut W56, i: usize, v: u64) { s.w[i] = v; }
+fn show56(s: &W56) ~ Console { println!("W56 {} {} {}", s.a, s.w[0], s.z); }
+fn st56() ~ Console {
+    let mut s = W56 { a: 42383_u16, z: (-1248173353_i32), w: [18446744073709551615_u64] };
+    let t = s;
+    s.w[0] = 1392944755704318_u64;
+    let i: usize = 0; s.w[i] = 1320872181149536_u64;
+    set56(&mut s, 0, 7397314452801536_u64);
+    s.put(0, 3310298188121528_u64);
+    let j: usize = 0; s.w[j] += 1_u64;
+    s.add(0, 1_u64);
+    show56(&s);
+    show56(&t);
+    s.w = [18446744073709551615_u64];
+    s.a = 1_u16;
+    println!("W56b {} {} {}", s.a, s.w[0], s.z);
+}
+struct W57 { w: [u64; 3], a: i32, z: u8 }
+impl W57 {
+    fn put(&mut self, i: usize, v: u64) { self.w[i] = v; }
+    fn add(&mut self, i: usize, d: u64) { self.w[i] += d; }
+    fn sub(&mut self, i: usize, d: u64) { self.w[i] -= d; }
+}
+fn set57(s: &mut W57, i: usize, v: u64) { s.w[i] = v; }
+fn show57(s: &W57) ~ Console { println!("W57 {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.z); }
+fn st57() ~ Console {
+    let mut s = W57 { w: [18446744073709551615_u64, 0_u64, 50805762210065_u64], a: 1802380020_i32, z: 122_u8 };
+    let t = s;
+    s.w[2] = 319771723186436_u64;
+    let i: usize = 2; s.w[i] = 8063651348374758_u64;
+    set57(&mut s, 0, 1105074654646026_u64);
+    s.put(2, 6930862140017162_u64);
+    let j: usize = 2; s.w[j] += 1_u64;
+    s.add(0, 1_u64);
+    show57(&s);
+    show57(&t);
+    s.w = [8001483562977168_u64, 0_u64, 18446744073709551615_u64];
+    s.a = (-1070945269_i32);
+    println!("W57b {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.z);
+}
+struct W58 { a: u8, w: [u64; 3], z: i64 }
+impl W58 {
+    fn put(&mut self, i: usize, v: u64) { self.w[i] = v; }
+    fn add(&mut self, i: usize, d: u64) { self.w[i] += d; }
+    fn sub(&mut self, i: usize, d: u64) { self.w[i] -= d; }
+}
+fn set58(s: &mut W58, i: usize, v: u64) { s.w[i] = v; }
+fn show58(s: &W58) ~ Console { println!("W58 {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.z); }
+fn st58() ~ Console {
+    let mut s = W58 { a: 58_u8, w: [18446744073709551615_u64, 0_u64, 1655237159829453_u64], z: (-9219291621339755119_i64) };
+    let t = s;
+    s.w[1] = 6425922298716625_u64;
+    let i: usize = 2; s.w[i] = 8904540436513069_u64;
+    set58(&mut s, 2, 4559900519979529_u64);
+    s.put(2, 6047537211687719_u64);
+    let j: usize = 1; s.w[j] += 1_u64;
+    s.add(1, 1_u64);
+    show58(&s);
+    show58(&t);
+    s.w = [7276281117493989_u64, 0_u64, 18446744073709551615_u64];
+    s.a = 203_u8;
+    println!("W58b {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.z);
+}
+struct W59 { a: i64, z: u16, w: [u64; 3] }
+impl W59 {
+    fn put(&mut self, i: usize, v: u64) { self.w[i] = v; }
+    fn add(&mut self, i: usize, d: u64) { self.w[i] += d; }
+    fn sub(&mut self, i: usize, d: u64) { self.w[i] -= d; }
+}
+fn set59(s: &mut W59, i: usize, v: u64) { s.w[i] = v; }
+fn show59(s: &W59) ~ Console { println!("W59 {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.z); }
+fn st59() ~ Console {
+    let mut s = W59 { a: (-9216386432785888832_i64), z: 26819_u16, w: [18446744073709551615_u64, 0_u64, 5209408010407152_u64] };
+    let t = s;
+    s.w[2] = 8277960834198570_u64;
+    let i: usize = 2; s.w[i] = 2055225425996993_u64;
+    set59(&mut s, 0, 5967852147176324_u64);
+    s.put(2, 7814798865698487_u64);
+    let j: usize = 1; s.w[j] += 1_u64;
+    s.add(2, 1_u64);
+    show59(&s);
+    show59(&t);
+    s.w = [4820062090724163_u64, 0_u64, 18446744073709551615_u64];
+    s.a = (-9220005465647406577_i64);
+    println!("W59b {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.z);
+}
+struct W60 { w: [u64; 8], a: u16, z: i32 }
+impl W60 {
+    fn put(&mut self, i: usize, v: u64) { self.w[i] = v; }
+    fn add(&mut self, i: usize, d: u64) { self.w[i] += d; }
+    fn sub(&mut self, i: usize, d: u64) { self.w[i] -= d; }
+}
+fn set60(s: &mut W60, i: usize, v: u64) { s.w[i] = v; }
+fn show60(s: &W60) ~ Console { println!("W60 {} {} {} {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.w[5], s.w[6], s.w[7], s.z); }
+fn st60() ~ Console {
+    let mut s = W60 { w: [18446744073709551615_u64, 0_u64, 1624835166293079_u64, 5282768065954995_u64, 3353806505011647_u64, 8794735870116841_u64, 2612057408458002_u64, 2532605945838032_u64], a: 48700_u16, z: (-1603999944_i32) };
+    let t = s;
+    s.w[3] = 252164524308999_u64;
+    let i: usize = 1; s.w[i] = 5209418962022000_u64;
+    set60(&mut s, 6, 4053538059500629_u64);
+    s.put(1, 7362159536823660_u64);
+    let j: usize = 7; s.w[j] += 1_u64;
+    s.add(3, 1_u64);
+    show60(&s);
+    show60(&t);
+    s.w = [6004353242152440_u64, 8800638709083815_u64, 4561049923332934_u64, 8660104647894171_u64, 8786795918045306_u64, 8978233413281019_u64, 0_u64, 18446744073709551615_u64];
+    s.a = 58147_u16;
+    println!("W60b {} {} {} {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.w[5], s.w[6], s.w[7], s.z);
+}
+struct W61 { a: i32, w: [u64; 8], z: u8 }
+impl W61 {
+    fn put(&mut self, i: usize, v: u64) { self.w[i] = v; }
+    fn add(&mut self, i: usize, d: u64) { self.w[i] += d; }
+    fn sub(&mut self, i: usize, d: u64) { self.w[i] -= d; }
+}
+fn set61(s: &mut W61, i: usize, v: u64) { s.w[i] = v; }
+fn show61(s: &W61) ~ Console { println!("W61 {} {} {} {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.w[5], s.w[6], s.w[7], s.z); }
+fn st61() ~ Console {
+    let mut s = W61 { a: 409001234_i32, w: [18446744073709551615_u64, 0_u64, 92082637055364_u64, 2864803856317235_u64, 6867064339400056_u64, 6816709070447481_u64, 2083493614846312_u64, 8869175040874178_u64], z: 27_u8 };
+    let t = s;
+    s.w[1] = 3195027519370452_u64;
+    let i: usize = 1; s.w[i] = 2926310050607989_u64;
+    set61(&mut s, 5, 7344463077513241_u64);
+    s.put(4, 1199306127357283_u64);
+    let j: usize = 2; s.w[j] += 1_u64;
+    s.add(3, 1_u64);
+    show61(&s);
+    show61(&t);
+    s.w = [1113735371927544_u64, 89566693888582_u64, 8815344470043827_u64, 1454630011967689_u64, 1626835879992932_u64, 7254035502997361_u64, 0_u64, 18446744073709551615_u64];
+    s.a = 752924850_i32;
+    println!("W61b {} {} {} {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.w[5], s.w[6], s.w[7], s.z);
+}
+struct W62 { a: u8, z: i64, w: [u64; 8] }
+impl W62 {
+    fn put(&mut self, i: usize, v: u64) { self.w[i] = v; }
+    fn add(&mut self, i: usize, d: u64) { self.w[i] += d; }
+    fn sub(&mut self, i: usize, d: u64) { self.w[i] -= d; }
+}
+fn set62(s: &mut W62, i: usize, v: u64) { s.w[i] = v; }
+fn show62(s: &W62) ~ Console { println!("W62 {} {} {} {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.w[5], s.w[6], s.w[7], s.z); }
+fn st62() ~ Console {
+    let mut s = W62 { a: 166_u8, z: (-9218822129733651718_i64), w: [18446744073709551615_u64, 0_u64, 2469708508597357_u64, 3675476879954718_u64, 985261572370254_u64, 4906973505452906_u64, 4196903035978805_u64, 6902581123069819_u64] };
+    let t = s;
+    s.w[6] = 7152466519586151_u64;
+    let i: usize = 0; s.w[i] = 8474570465731629_u64;
+    set62(&mut s, 4, 3999628531923370_u64);
+    s.put(4, 2665643571800337_u64);
+    let j: usize = 5; s.w[j] += 1_u64;
+    s.add(7, 1_u64);
+    show62(&s);
+    show62(&t);
+    s.w = [854049008364089_u64, 6583295290558989_u64, 8488153451925684_u64, 254039140657993_u64, 2044715197916568_u64, 833345405160261_u64, 0_u64, 18446744073709551615_u64];
+    s.a = 142_u8;
+    println!("W62b {} {} {} {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.w[5], s.w[6], s.w[7], s.z);
+}
+struct W63 { w: [i64; 1], a: i64, z: u16 }
+impl W63 {
+    fn put(&mut self, i: usize, v: i64) { self.w[i] = v; }
+    fn add(&mut self, i: usize, d: i64) { self.w[i] += d; }
+    fn sub(&mut self, i: usize, d: i64) { self.w[i] -= d; }
+}
+fn set63(s: &mut W63, i: usize, v: i64) { s.w[i] = v; }
+fn show63(s: &W63) ~ Console { println!("W63 {} {} {}", s.a, s.w[0], s.z); }
+fn st63() ~ Console {
+    let mut s = W63 { w: [9223372036854775807_i64], a: (-9215725121857495076_i64), z: 766_u16 };
+    let t = s;
+    s.w[0] = (-9215723841773857216_i64);
+    let i: usize = 0; s.w[i] = (-9219899590793267649_i64);
+    set63(&mut s, 0, (-9216604015128478708_i64));
+    s.put(0, (-9221142944846291832_i64));
+    let j: usize = 0; s.w[j] += 1_i64;
+    s.add(0, 1_i64);
+    show63(&s);
+    show63(&t);
+    s.w = [9223372036854775807_i64];
+    s.a = (-9217856890098360449_i64);
+    println!("W63b {} {} {}", s.a, s.w[0], s.z);
+}
+struct W64 { a: u16, w: [i64; 1], z: i32 }
+impl W64 {
+    fn put(&mut self, i: usize, v: i64) { self.w[i] = v; }
+    fn add(&mut self, i: usize, d: i64) { self.w[i] += d; }
+    fn sub(&mut self, i: usize, d: i64) { self.w[i] -= d; }
+}
+fn set64(s: &mut W64, i: usize, v: i64) { s.w[i] = v; }
+fn show64(s: &W64) ~ Console { println!("W64 {} {} {}", s.a, s.w[0], s.z); }
+fn st64() ~ Console {
+    let mut s = W64 { a: 33567_u16, w: [9223372036854775807_i64], z: (-393824431_i32) };
+    let t = s;
+    s.w[0] = (-9223229126564409590_i64);
+    let i: usize = 0; s.w[i] = (-9214798166875645767_i64);
+    set64(&mut s, 0, (-9220062572400952518_i64));
+    s.put(0, (-9222144218330577839_i64));
+    let j: usize = 0; s.w[j] += 1_i64;
+    s.add(0, 1_i64);
+    show64(&s);
+    show64(&t);
+    s.w = [9223372036854775807_i64];
+    s.a = 30368_u16;
+    println!("W64b {} {} {}", s.a, s.w[0], s.z);
+}
+struct W65 { a: i32, z: u8, w: [i64; 1] }
+impl W65 {
+    fn put(&mut self, i: usize, v: i64) { self.w[i] = v; }
+    fn add(&mut self, i: usize, d: i64) { self.w[i] += d; }
+    fn sub(&mut self, i: usize, d: i64) { self.w[i] -= d; }
+}
+fn set65(s: &mut W65, i: usize, v: i64) { s.w[i] = v; }
+fn show65(s: &W65) ~ Console { println!("W65 {} {} {}", s.a, s.w[0], s.z); }
+fn st65() ~ Console {
+    let mut s = W65 { a: (-673964029_i32), z: 95_u8, w: [9223372036854775807_i64] };
+    let t = s;
+    s.w[0] = (-9217274270327467486_i64);
+    let i: usize = 0; s.w[i] = (-9220745872023035251_i64);
+    set65(&mut s, 0, (-9220850668147085739_i64));
+    s.put(0, (-9214717645626459451_i64));
+    let j: usize = 0; s.w[j] += 1_i64;
+    s.add(0, 1_i64);
+    show65(&s);
+    show65(&t);
+    s.w = [9223372036854775807_i64];
+    s.a = (-251986702_i32);
+    println!("W65b {} {} {}", s.a, s.w[0], s.z);
+}
+struct W66 { w: [i64; 3], a: u8, z: i64 }
+impl W66 {
+    fn put(&mut self, i: usize, v: i64) { self.w[i] = v; }
+    fn add(&mut self, i: usize, d: i64) { self.w[i] += d; }
+    fn sub(&mut self, i: usize, d: i64) { self.w[i] -= d; }
+}
+fn set66(s: &mut W66, i: usize, v: i64) { s.w[i] = v; }
+fn show66(s: &W66) ~ Console { println!("W66 {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.z); }
+fn st66() ~ Console {
+    let mut s = W66 { w: [9223372036854775807_i64, (-9223372036854775808_i64), (-9218776396871824403_i64)], a: 197_u8, z: (-9220883969632730337_i64) };
+    let t = s;
+    s.w[1] = (-9214482051949107859_i64);
+    let i: usize = 0; s.w[i] = (-9221794963870336333_i64);
+    set66(&mut s, 2, (-9221519153992706047_i64));
+    s.put(0, (-9215234282584894930_i64));
+    let j: usize = 2; s.w[j] += 1_i64;
+    s.add(0, 1_i64);
+    show66(&s);
+    show66(&t);
+    s.w = [(-9222412696173161649_i64), (-9223372036854775808_i64), 9223372036854775807_i64];
+    s.a = 105_u8;
+    println!("W66b {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.z);
+}
+struct W67 { a: i64, w: [i64; 3], z: u16 }
+impl W67 {
+    fn put(&mut self, i: usize, v: i64) { self.w[i] = v; }
+    fn add(&mut self, i: usize, d: i64) { self.w[i] += d; }
+    fn sub(&mut self, i: usize, d: i64) { self.w[i] -= d; }
+}
+fn set67(s: &mut W67, i: usize, v: i64) { s.w[i] = v; }
+fn show67(s: &W67) ~ Console { println!("W67 {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.z); }
+fn st67() ~ Console {
+    let mut s = W67 { a: (-9221031631681641158_i64), w: [9223372036854775807_i64, (-9223372036854775808_i64), (-9218951986688156693_i64)], z: 33406_u16 };
+    let t = s;
+    s.w[1] = (-9216566395557832442_i64);
+    let i: usize = 1; s.w[i] = (-9222323117156690449_i64);
+    set67(&mut s, 0, (-9219267752404810896_i64));
+    s.put(1, (-9219602495198523999_i64));
+    let j: usize = 2; s.w[j] += 1_i64;
+    s.add(2, 1_i64);
+    show67(&s);
+    show67(&t);
+    s.w = [(-9218382994979010444_i64), (-9223372036854775808_i64), 9223372036854775807_i64];
+    s.a = (-9218559119766534901_i64);
+    println!("W67b {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.z);
+}
+struct W68 { a: u16, z: i32, w: [i64; 3] }
+impl W68 {
+    fn put(&mut self, i: usize, v: i64) { self.w[i] = v; }
+    fn add(&mut self, i: usize, d: i64) { self.w[i] += d; }
+    fn sub(&mut self, i: usize, d: i64) { self.w[i] -= d; }
+}
+fn set68(s: &mut W68, i: usize, v: i64) { s.w[i] = v; }
+fn show68(s: &W68) ~ Console { println!("W68 {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.z); }
+fn st68() ~ Console {
+    let mut s = W68 { a: 3811_u16, z: 1846955155_i32, w: [9223372036854775807_i64, (-9223372036854775808_i64), (-9216652097521479741_i64)] };
+    let t = s;
+    s.w[1] = (-9218308372737689785_i64);
+    let i: usize = 0; s.w[i] = (-9221348368709548114_i64);
+    set68(&mut s, 1, (-9220036466630334284_i64));
+    s.put(1, (-9217042404574938388_i64));
+    let j: usize = 1; s.w[j] += 1_i64;
+    s.add(2, 1_i64);
+    show68(&s);
+    show68(&t);
+    s.w = [(-9221455171015067988_i64), (-9223372036854775808_i64), 9223372036854775807_i64];
+    s.a = 5049_u16;
+    println!("W68b {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.z);
+}
+struct W69 { w: [i64; 8], a: i32, z: u8 }
+impl W69 {
+    fn put(&mut self, i: usize, v: i64) { self.w[i] = v; }
+    fn add(&mut self, i: usize, d: i64) { self.w[i] += d; }
+    fn sub(&mut self, i: usize, d: i64) { self.w[i] -= d; }
+}
+fn set69(s: &mut W69, i: usize, v: i64) { s.w[i] = v; }
+fn show69(s: &W69) ~ Console { println!("W69 {} {} {} {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.w[5], s.w[6], s.w[7], s.z); }
+fn st69() ~ Console {
+    let mut s = W69 { w: [9223372036854775807_i64, (-9223372036854775808_i64), (-9217826185156010120_i64), (-9218788403821828963_i64), (-9217267212096161513_i64), (-9218023297579387477_i64), (-9221618869112452994_i64), (-9215352764106224188_i64)], a: 1658832801_i32, z: 222_u8 };
+    let t = s;
+    s.w[4] = (-9215062390349380776_i64);
+    let i: usize = 7; s.w[i] = (-9220905233040065975_i64);
+    set69(&mut s, 6, (-9218919246998053622_i64));
+    s.put(6, (-9220952638097207226_i64));
+    let j: usize = 6; s.w[j] += 1_i64;
+    s.add(2, 1_i64);
+    show69(&s);
+    show69(&t);
+    s.w = [(-9221473818422275796_i64), (-9220704971394337539_i64), (-9222754688121914690_i64), (-9223275718840000340_i64), (-9217016967439041353_i64), (-9217463351146066859_i64), (-9223372036854775808_i64), 9223372036854775807_i64];
+    s.a = 551745520_i32;
+    println!("W69b {} {} {} {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.w[5], s.w[6], s.w[7], s.z);
+}
+struct W70 { a: u8, w: [i64; 8], z: i64 }
+impl W70 {
+    fn put(&mut self, i: usize, v: i64) { self.w[i] = v; }
+    fn add(&mut self, i: usize, d: i64) { self.w[i] += d; }
+    fn sub(&mut self, i: usize, d: i64) { self.w[i] -= d; }
+}
+fn set70(s: &mut W70, i: usize, v: i64) { s.w[i] = v; }
+fn show70(s: &W70) ~ Console { println!("W70 {} {} {} {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.w[5], s.w[6], s.w[7], s.z); }
+fn st70() ~ Console {
+    let mut s = W70 { a: 97_u8, w: [9223372036854775807_i64, (-9223372036854775808_i64), (-9222929880247152875_i64), (-9215304691263416105_i64), (-9220569615645264525_i64), (-9219531491905384295_i64), (-9219250933633024815_i64), (-9221961933133519645_i64)], z: (-9215576066117937221_i64) };
+    let t = s;
+    s.w[3] = (-9216924720538898781_i64);
+    let i: usize = 4; s.w[i] = (-9214762797255901796_i64);
+    set70(&mut s, 2, (-9218900611769642565_i64));
+    s.put(1, (-9215015740153050817_i64));
+    let j: usize = 5; s.w[j] += 1_i64;
+    s.add(3, 1_i64);
+    show70(&s);
+    show70(&t);
+    s.w = [(-9216028815056613514_i64), (-9220003583349054622_i64), (-9216265368891910686_i64), (-9215343686623429154_i64), (-9216213118780661692_i64), (-9217185285735972101_i64), (-9223372036854775808_i64), 9223372036854775807_i64];
+    s.a = 229_u8;
+    println!("W70b {} {} {} {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.w[5], s.w[6], s.w[7], s.z);
+}
+struct W71 { a: i64, z: u16, w: [i64; 8] }
+impl W71 {
+    fn put(&mut self, i: usize, v: i64) { self.w[i] = v; }
+    fn add(&mut self, i: usize, d: i64) { self.w[i] += d; }
+    fn sub(&mut self, i: usize, d: i64) { self.w[i] -= d; }
+}
+fn set71(s: &mut W71, i: usize, v: i64) { s.w[i] = v; }
+fn show71(s: &W71) ~ Console { println!("W71 {} {} {} {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.w[5], s.w[6], s.w[7], s.z); }
+fn st71() ~ Console {
+    let mut s = W71 { a: (-9222253810745088450_i64), z: 60968_u16, w: [9223372036854775807_i64, (-9223372036854775808_i64), (-9223166714082117450_i64), (-9219750785167734661_i64), (-9218641753508382863_i64), (-9219057391032966693_i64), (-9219737519940870737_i64), (-9218218449697874558_i64)] };
+    let t = s;
+    s.w[1] = (-9214737378234226416_i64);
+    let i: usize = 1; s.w[i] = (-9222429399944780219_i64);
+    set71(&mut s, 1, (-9214814382680889415_i64));
+    s.put(3, (-9216500112691295350_i64));
+    let j: usize = 5; s.w[j] += 1_i64;
+    s.add(7, 1_i64);
+    show71(&s);
+    show71(&t);
+    s.w = [(-9214572731974872064_i64), (-9216317957070433169_i64), (-9219857412484208728_i64), (-9214444106279590072_i64), (-9214521231528146666_i64), (-9221842156625954469_i64), (-9223372036854775808_i64), 9223372036854775807_i64];
+    s.a = (-9216052667006035374_i64);
+    println!("W71b {} {} {} {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.w[5], s.w[6], s.w[7], s.z);
+}
+fn main() ~ Console {
+    st0();
+    st1();
+    st2();
+    st3();
+    st4();
+    st5();
+    st6();
+    st7();
+    st8();
+    st9();
+    st10();
+    st11();
+    st12();
+    st13();
+    st14();
+    st15();
+    st16();
+    st17();
+    st18();
+    st19();
+    st20();
+    st21();
+    st22();
+    st23();
+    st24();
+    st25();
+    st26();
+    st27();
+    st28();
+    st29();
+    st30();
+    st31();
+    st32();
+    st33();
+    st34();
+    st35();
+    st36();
+    st37();
+    st38();
+    st39();
+    st40();
+    st41();
+    st42();
+    st43();
+    st44();
+    st45();
+    st46();
+    st47();
+    st48();
+    st49();
+    st50();
+    st51();
+    st52();
+    st53();
+    st54();
+    st55();
+    st56();
+    st57();
+    st58();
+    st59();
+    st60();
+    st61();
+    st62();
+    st63();
+    st64();
+    st65();
+    st66();
+    st67();
+    st68();
+    st69();
+    st70();
+    st71();
+}

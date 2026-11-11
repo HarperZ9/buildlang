@@ -14,6 +14,7 @@
 //! - `types`: Type lowering, const evaluation, and generic monomorphization
 //! - `macros`: Closure, effect, builtin macro, and iterator chain lowering
 
+mod array_places;
 mod asserts;
 mod c_abi;
 mod env_macro;

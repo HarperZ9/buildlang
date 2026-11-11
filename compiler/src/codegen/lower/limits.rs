@@ -6,7 +6,31 @@
 //! its MIR type; without it a temporary such as `u64::MAX - 1` defaulted to
 //! `int32_t` and truncated (#215).
 
-use crate::codegen::ir::MirType;
+use crate::codegen::ir::{IntSize, MirType};
+
+/// The type of `-literal` when the unsuffixed literal is one above a signed
+/// maximum, so the negation is exactly a signed minimum (G32). The literal
+/// alone does not fit the hinted type and was widened: `-128` under an `i8`
+/// hint was an `i32` constant, and `-9223372036854775808` under an `i64`
+/// hint an `i128` constant. `hint` is the expected type; without a signed
+/// hint the 32-bit minimum is an `i32`, the default integer type.
+pub(super) fn negated_min_type(negated: i128, hint: Option<&MirType>) -> Option<MirType> {
+    let min_of = |size: &IntSize| match size {
+        IntSize::I8 => i128::from(i8::MIN),
+        IntSize::I16 => i128::from(i16::MIN),
+        IntSize::I32 => i128::from(i32::MIN),
+        IntSize::I64 | IntSize::ISize => i128::from(i64::MIN),
+        IntSize::I128 => i128::MIN,
+    };
+    match hint {
+        Some(MirType::Int(size, true)) if negated == min_of(size) => {
+            Some(MirType::Int(*size, true))
+        }
+        Some(MirType::Int(..)) => None,
+        _ if negated == i128::from(i32::MIN) => Some(MirType::i32()),
+        _ => None,
+    }
+}
 
 /// The integer type named by a BuildLang primitive (`"i8"`, `"usize"`, ...).
 pub(super) fn int_type_by_name(name: &str) -> MirType {
@@ -68,6 +92,25 @@ pub(super) fn c_limit_type(name: &str) -> Option<MirType> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_negated_minimum_takes_the_hinted_type() {
+        let i8t = MirType::i8();
+        let i64t = MirType::i64();
+        assert_eq!(negated_min_type(-128, Some(&i8t)), Some(MirType::i8()));
+        assert_eq!(negated_min_type(-127, Some(&i8t)), None);
+        assert_eq!(negated_min_type(-128, Some(&i64t)), None);
+        assert_eq!(
+            negated_min_type(i128::from(i64::MIN), Some(&i64t)),
+            Some(MirType::i64())
+        );
+        assert_eq!(negated_min_type(-128, Some(&MirType::u8())), None);
+        assert_eq!(
+            negated_min_type(i128::from(i32::MIN), None),
+            Some(MirType::i32())
+        );
+        assert_eq!(negated_min_type(i128::from(i64::MIN), None), None);
+    }
 
     #[test]
     fn every_macro_round_trips_to_its_type() {

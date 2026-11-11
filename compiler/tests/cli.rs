@@ -13533,8 +13533,14 @@ fn compile_time_integer_literal_and_fold_overflow_are_diagnostics() {
     }
 }
 
+/// `-9223372036854775808` given to an `i64` parameter is the minimum of `i64`
+/// (G32). Until that fix this test required the spelling to be rejected, so
+/// that the literal `9223372036854775808` never reached MIR as an `i128`
+/// passed to an `i64`. The second half of that requirement still holds: the
+/// constant in the MIR is an `i64`, and one below the minimum is rejected
+/// before any MIR is written.
 #[test]
-fn function_i64_argument_signed_min_spelling_is_out_of_range() {
+fn function_i64_argument_signed_min_spelling_is_the_i64_minimum() {
     let dir = std::env::temp_dir().join(format!(
         "buildlang_i64_arg_signed_min_literal_{}",
         std::process::id()
@@ -13550,28 +13556,64 @@ fn function_i64_argument_signed_min_spelling_is_out_of_range() {
 
     let (status, stdout, stderr) = check_within(&file, 30);
     assert!(
-        !status.success(),
-        "i64 parameter must reject signed-min spelling whose positive literal \
-         magnitude exceeds i64::MAX\nstdout:\n{stdout}\nstderr:\n{stderr}"
-    );
-    assert!(
-        stderr.contains("integer literal `9223372036854775808` is out of range for type `i64`"),
-        "i64 parameter should report the same out-of-range literal diagnostic as \
-         annotated i64 locals\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        status.success(),
+        "the i64 minimum written as a negated literal must pass the check\n\
+         stdout:\n{stdout}\nstderr:\n{stderr}"
     );
 
+    let mir_path = dir.join("i64_arg_signed_min.mir.json");
     let mir = buildc()
         .arg("mir")
         .arg("emit")
         .arg(&file)
         .arg("-o")
-        .arg(dir.join("i64_arg_signed_min.mir.json"))
+        .arg(&mir_path)
+        .output()
+        .expect("run buildc mir emit");
+    assert!(
+        mir.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&mir.stderr)
+    );
+    let text = fs::read_to_string(&mir_path).expect("read MIR");
+    let json: serde_json::Value = serde_json::from_str(&text).expect("MIR is JSON");
+    let compact = serde_json::to_string(&json).expect("MIR prints");
+    assert!(
+        compact.contains(r#"{"Const":{"Int":[-9223372036854775808,{"Int":["I64",true]}]}}"#),
+        "the argument must be an i64 constant in the MIR"
+    );
+    assert!(
+        !compact.contains("I128"),
+        "no i128 value may appear in the MIR of this program"
+    );
+
+    let below = dir.join("i64_arg_below_min.bld");
+    fs::write(
+        &below,
+        "fn takes_i64(x: i64) -> i64 { x }\n\
+         fn main() { let _ = takes_i64(-9223372036854775809); }\n",
+    )
+    .expect("write below-min literal fixture");
+    let (status, stdout, stderr) = check_within(&below, 30);
+    assert!(
+        !status.success(),
+        "one below the i64 minimum must be rejected\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("integer literal `9223372036854775809` is out of range for type `i64`"),
+        "stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    let mir = buildc()
+        .arg("mir")
+        .arg("emit")
+        .arg(&below)
+        .arg("-o")
+        .arg(dir.join("i64_arg_below_min.mir.json"))
         .output()
         .expect("run buildc mir emit");
     assert!(
         !mir.status.success(),
-        "out-of-range i64 argument literal must not reach MIR as an implicit \
-         i128-to-i64 conversion\nstdout:\n{}\nstderr:\n{}",
+        "an out-of-range i64 argument literal must not reach MIR\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&mir.stdout),
         String::from_utf8_lossy(&mir.stderr)
     );

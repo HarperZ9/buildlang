@@ -379,7 +379,7 @@ impl<'ctx> MirLowerer<'ctx> {
         &mut self,
         path: &ast::Path,
         fields: &[ast::FieldExpr],
-        _rest: Option<&ast::Expr>,
+        rest: Option<&ast::Expr>,
     ) -> CodegenResult<MirValue> {
         let mut raw_name = path
             .last_ident()
@@ -449,6 +449,10 @@ impl<'ctx> MirLowerer<'ctx> {
             raw_name
         };
 
+        // With `..base` the values are matched to fields by name further down;
+        // keep them in the order written for that.
+        let written_vals = rest.map(|_| field_vals.clone());
+
         // The aggregate is positional: put the values in declaration order.
         // Written out of order, `Q { c: "hi", a: 3, b: 2.5 }` assigned `a`
         // the string, and with two fields of one type it swapped them silently.
@@ -475,6 +479,13 @@ impl<'ctx> MirLowerer<'ctx> {
             }
             _ => field_vals,
         };
+        // `S { a: 1, ..base }`: the fields not written come from `base`.
+        let field_vals = match (rest, written_vals) {
+            (Some(rest), Some(written)) => {
+                self.struct_update_operands(&struct_name, fields, written, rest)?
+            }
+            _ => field_vals,
+        };
 
         let builder = self
             .current_fn
@@ -484,6 +495,57 @@ impl<'ctx> MirLowerer<'ctx> {
         builder.aggregate(result, AggregateKind::Struct(struct_name), field_vals);
 
         Ok(values::local(result))
+    }
+
+    /// The operands of `S { written.., ..rest }` in declaration order: a
+    /// written field keeps its value and every other field is read from
+    /// `rest`. Before this the `..rest` part was ignored, the aggregate held
+    /// only the written fields, and the others read as zero. `written` is in
+    /// the order the fields were written, which is the order they were
+    /// evaluated in; `rest` is evaluated after them.
+    fn struct_update_operands(
+        &mut self,
+        struct_name: &Arc<str>,
+        fields: &[ast::FieldExpr],
+        written: Vec<MirValue>,
+        rest: &ast::Expr,
+    ) -> CodegenResult<Vec<MirValue>> {
+        let unsupported = || CodegenError::Rejected {
+            message: format!("`..` in a `{struct_name}` literal needs a struct with named fields"),
+            location: (rest.span.end.0 > rest.span.start.0)
+                .then_some((rest.span.start.0, rest.span.end.0)),
+            help: Some("write every field of the literal".to_string()),
+        };
+        let decl = self
+            .struct_field_types(struct_name.as_ref())
+            .ok_or_else(unsupported)?;
+        let base = self.lower_expr(rest)?;
+        let mut operands = Vec::with_capacity(decl.len());
+        for (name, ty) in decl {
+            let name = name.ok_or_else(unsupported)?;
+            let given = fields
+                .iter()
+                .position(|f| f.name.name.as_ref() == name.as_ref());
+            if let Some(value) = given.and_then(|i| written.get(i)) {
+                operands.push(value.clone());
+                continue;
+            }
+            let builder = self
+                .current_fn
+                .as_mut()
+                .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
+            let field = builder.create_local(ty.clone());
+            builder.assign(
+                field,
+                MirRValue::FieldAccess {
+                    base: base.clone(),
+                    field_name: name,
+                    field_ty: ty,
+                },
+            );
+            operands.push(values::local(field));
+        }
+        Ok(operands)
     }
 
     /// The named fields of a struct type in declaration order, if it is one.
