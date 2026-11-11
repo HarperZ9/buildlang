@@ -95,3 +95,34 @@ fn the_same_name_in_another_module_is_not_a_duplicate() {
     assert_eq!(reports, 2, "one report per extra definition: {text}");
     assert!(!text.contains("defined on line 2"), "{text}");
 }
+
+/// Two `struct`, or a `struct` and an `enum`, of one name failed in the C
+/// compiler after the check passed. Types are their own namespace: a type and
+/// a constant may share a name. Functions are left alone, because two
+/// functions of one name with different parameter types are overloads.
+#[test]
+fn duplicate_types_are_reported_and_overloads_are_not() {
+    let src = "struct S { a: u8 }
+               struct S { b: u8 }
+               enum S { X }
+               fn main() ~ Console { println!(\"{}\", 1_u8); }
+";
+    let (ok, text) = check("types", src);
+    assert!(!ok, "{text}");
+    assert!(
+        text.contains("duplicate definition: `S` is already defined on line 1"),
+        "{text}"
+    );
+    assert_eq!(text.matches("[BL0380]").count(), 2, "{text}");
+
+    let apart = "const K: u64 = 1_u64;
+                 fn g(x: u64) -> u64 { x }
+                 fn g(x: u8) -> u64 { 2_u64 }
+                 struct T { a: u8 }
+                 impl T { fn g(&self) -> u64 { 3_u64 } }
+                 fn main() ~ Console { let t = T { a: 1_u8 }; println!(\"{} {} {} {}\", K, g(5_u64), g(5_u8), t.g()); }
+";
+    let (ok, text) = check("apart", apart);
+    assert!(ok, "{text}");
+    assert!(!text.contains("BL0380"), "{text}");
+}

@@ -20,7 +20,10 @@ impl CBackend {
         } else {
             format!("{} {}", self.type_to_c(&global.ty), global.name)
         };
-        if global.is_mut {
+        // A foreign static is declared without `const`: the other side owns
+        // the object, and a C declaration that calls it constant would let
+        // the C compiler fold a value the foreign code may change.
+        if global.is_mut || global.is_extern_decl {
             decl
         } else {
             format!("const {decl}")
