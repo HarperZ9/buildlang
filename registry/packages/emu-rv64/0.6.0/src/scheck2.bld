@@ -1,0 +1,219 @@
+// Differential check for the system profile of emu-rv64 (command sfuzz):
+// the state of a round, the comparison and the run.
+//
+// Counters live in a caller array `ct` of 48 slots: 0 to 15 count the
+// synchronous traps of each cause, 16 to 27 the interrupts of causes 0 to
+// 11, 28 the traps taken in S-mode, 29 to 31 the instructions retired in
+// U-mode, S-mode and M-mode (slot 29 + mode, slot 31 for M), 32 the
+// retired loads, stores and atomics that went through the page tables, 33
+// the retired instructions whose fetch went through them, 34 retired
+// MRETs, 35 retired SRETs, 36 retired Zicsr words, 37 the rounds, 38 to 40
+// the steps that began in U-mode, S-mode and M-mode.
+
+// Draws the state of a round and puts it into the core machine and into
+// the model array: the mode, every field of mstatus, satp, the delegation
+// and interrupt registers, the two trap vectors, the two saved pcs and the
+// pc. Of 8 rounds, 3 start in U-mode, 3 in S-mode and 2 in M-mode. Of 16,
+// 12 run with satp MODE 8 on the root table of the stream, 2 with MODE 0,
+// 1 with the level-1 table as root and 1 with a root outside memory. Half
+// of the rounds delegate every exception, a quarter a drawn set and a
+// quarter none.
+fn sfz_state(r: &mut Rng, ma: &mut Machine, c: &mut [u64]) {
+    let p = rng_next(r);
+    let q = rng_next(r);
+    let modes: [u64; 8] = [0_u64, 0_u64, 0_u64, 1_u64, 1_u64, 1_u64, 3_u64, 3_u64];
+    ma.prv = modes[(p & 7_u64) as usize];
+    c[RS_PRV] = ma.prv;
+    let mpp = modes[((p >> 60_u64) & 7_u64) as usize];
+    ma.mstatus = MS_XL | (mpp << 11_u64) | ((p >> 4_u64) & (MS_SYS_W & !MS_MPP));
+    sref_status_set(c, ma.mstatus, false);
+    let mut satp = (8_u64 << 60_u64) | 0x80002_u64;
+    let sel = (p >> 32_u64) & 15_u64;
+    if sel >= 12_u64 { satp = 0_u64; }
+    if sel == 14_u64 { satp = (8_u64 << 60_u64) | 0x80003_u64; }
+    if sel == 15_u64 { satp = (8_u64 << 60_u64) | 0x90000_u64; }
+    ma.satp = satp;
+    c[RS_SATP] = satp;
+    ma.medeleg = (p >> 36_u64) & MEDELEG_W;
+    if ((p >> 52_u64) & 3_u64) <= 1_u64 { ma.medeleg = MEDELEG_W; }
+    if ((p >> 52_u64) & 3_u64) == 2_u64 { ma.medeleg = 0_u64; }
+    c[RS_MEDELEG] = ma.medeleg;
+    ma.mideleg = q & SI_BITS;
+    c[RS_MIDELEG] = ma.mideleg;
+    ma.mie = (q >> 12_u64) & MI_ALL;
+    c[RC_IE] = ma.mie;
+    ma.mip = (q >> 24_u64) & (MI_MSIP | MI_MEIP | SI_BITS) & (q >> 36_u64);
+    c[RC_IP] = ma.mip;
+    ma.mtvec = EMU_RAM_BASE + 4_u64 * ((q >> 48_u64) & 0x1FF_u64) + ((q >> 57_u64) & 1_u64);
+    c[RC_MTVEC] = ma.mtvec;
+    ma.stvec = EMU_RAM_BASE + 4_u64 * ((q >> 58_u64) & 0x3F_u64) + ((p >> 56_u64) & 1_u64);
+    c[RS_STVEC] = ma.stvec;
+}
+
+// The second half of a round: the saved pcs, the pc and the timer. mepc
+// and sepc are code addresses for the modes MPP and SPP name. Of 16 pcs,
+// 12 are code addresses for the present mode, 2 are drawn like a data
+// address and 2 stay. One round in eight sets mtimecmp up to 31 steps ahead of mtime, so
+// that the machine timer interrupt becomes pending, and one in eight sets
+// it back to all ones.
+fn sfz_pcs(r: &mut Rng, ma: &mut Machine, mb: &mut Machine, c: &mut [u64]) {
+    let p = rng_next(r);
+    ma.mepc = sfz_code_pc((ma.mstatus >> 11_u64) & 3_u64, rng_next(r));
+    c[RC_MEPC] = ma.mepc;
+    ma.sepc = sfz_code_pc((ma.mstatus >> 8_u64) & 1_u64, rng_next(r));
+    c[RS_SEPC] = ma.sepc;
+    let sel = (p >> 24_u64) & 15_u64;
+    if sel < 12_u64 { ma.pc = sfz_code_pc(ma.prv, rng_next(r)); }
+    if sel == 12_u64 || sel == 13_u64 { ma.pc = sfz_va(r) & !3_u64; }
+    if ((p >> 40_u64) & 63_u64) == 0_u64 { ma.pc = ma.pc | 2_u64; }
+    mb.pc = ma.pc;
+    let t = (p >> 46_u64) & 7_u64;
+    if t == 0_u64 { ma.mtimecmp = ma.mtime.wrapping_add((p >> 49_u64) & 31_u64); }
+    if t == 1_u64 { ma.mtimecmp = !0_u64; }
+    c[RC_CMP] = ma.mtimecmp;
+    if ma.out_len == FZ_OUT { ma.out_len = 0_u64; mb.out_len = 0_u64; }
+}
+
+// A hop: four steps into every block of eight, one time in two, the host
+// puts the machine into a drawn mode (of 8: 4 U, 3 S, 1 M) at a pc in the
+// code pages, in the view that mode can execute. Without it a random stream sits in M-mode most of the time,
+// because every trap that is not delegated ends there.
+fn sfz_hop(r: &mut Rng, ma: &mut Machine, mb: &mut Machine, c: &mut [u64]) {
+    let p = rng_next(r);
+    if (p & 1_u64) == 1_u64 { return; }
+    let modes: [u64; 8] = [0_u64, 0_u64, 0_u64, 0_u64, 1_u64, 1_u64, 1_u64, 3_u64];
+    ma.prv = modes[((p >> 1_u64) & 7_u64) as usize];
+    c[RS_PRV] = ma.prv;
+    ma.pc = sfz_code_pc(ma.prv, p >> 8_u64);
+    mb.pc = ma.pc;
+}
+
+// Compares the mode and every CSR of the core with the model. Kinds 30 to
+// 39: 30 mode, 31 mstatus, 32 an M-mode trap register, 33 an S-mode trap
+// register, 34 mie, 35 mip, 36 a delegation register, 37 satp, 38 a vector
+// or scratch register, 39 an environment configuration register.
+fn sfz_cmp_csr(step: u64, m: &Machine, c: &[u64]) -> Refusal {
+    let st = sref_status(c, false);
+    if m.prv != c[RS_PRV] { return fz_refuse(30, step, m.prv, c[RS_PRV]); }
+    if m.mstatus != st { return fz_refuse(31, step, m.mstatus, st); }
+    if m.mepc != c[RC_MEPC] { return fz_refuse(32, step, m.mepc, c[RC_MEPC]); }
+    if m.mcause != c[RC_MCAUSE] { return fz_refuse(32, step, m.mcause, c[RC_MCAUSE]); }
+    if m.mtval != c[RC_MTVAL] { return fz_refuse(32, step, m.mtval, c[RC_MTVAL]); }
+    if m.sepc != c[RS_SEPC] { return fz_refuse(33, step, m.sepc, c[RS_SEPC]); }
+    if m.scause != c[RS_SCAUSE] { return fz_refuse(33, step, m.scause, c[RS_SCAUSE]); }
+    if m.stval != c[RS_STVAL] { return fz_refuse(33, step, m.stval, c[RS_STVAL]); }
+    if m.mie != c[RC_IE] { return fz_refuse(34, step, m.mie, c[RC_IE]); }
+    if m.mip != c[RC_IP] { return fz_refuse(35, step, m.mip, c[RC_IP]); }
+    if m.medeleg != c[RS_MEDELEG] { return fz_refuse(36, step, m.medeleg, c[RS_MEDELEG]); }
+    if m.mideleg != c[RS_MIDELEG] { return fz_refuse(36, step, m.mideleg, c[RS_MIDELEG]); }
+    if m.satp != c[RS_SATP] { return fz_refuse(37, step, m.satp, c[RS_SATP]); }
+    if m.mtvec != c[RC_MTVEC] { return fz_refuse(38, step, m.mtvec, c[RC_MTVEC]); }
+    if m.stvec != c[RS_STVEC] { return fz_refuse(38, step, m.stvec, c[RS_STVEC]); }
+    if m.mscratch != c[RC_SCRATCH] { return fz_refuse(38, step, m.mscratch, c[RC_SCRATCH]); }
+    if m.sscratch != c[RS_SSCRATCH] { return fz_refuse(38, step, m.sscratch, c[RS_SSCRATCH]); }
+    if m.menvcfg != c[RS_MENV] || m.senvcfg != c[RS_SENV] { return fz_refuse(39, step, m.menvcfg, c[RS_MENV]); }
+    fz_refuse(0, step, 0_u64, 0_u64)
+}
+
+// Counts what step did. `was` is the core machine before the step, w the
+// word that was placed, or 0 when none was.
+fn sfz_count(ct: &mut [u64], rc: i64, was: &Machine, now: &Machine, w: u64) {
+    let mut begun = was.prv;
+    if begun == PRIV_M { begun = 2_u64; }
+    ct[(38_u64 + begun) as usize] = ct[(38_u64 + begun) as usize] + 1_u64;
+    if rc == EMU_TRAP {
+        let mut cause = now.mcause;
+        if now.prv == PRIV_S { cause = now.scause; ct[28] = ct[28] + 1_u64; }
+        let code = cause & 15_u64;
+        if (cause & EMU_SIGN) != 0_u64 { ct[(16_u64 + code) as usize] = ct[(16_u64 + code) as usize] + 1_u64; }
+        if (cause & EMU_SIGN) == 0_u64 { ct[code as usize] = ct[code as usize] + 1_u64; }
+        return;
+    }
+    if rc != EMU_OK { return; }
+    let paged = (was.satp >> 60_u64) == 8_u64;
+    let mut mode = was.prv;
+    if mode == PRIV_M { mode = 2_u64; }
+    ct[(29_u64 + mode) as usize] = ct[(29_u64 + mode) as usize] + 1_u64;
+    if paged && was.prv != PRIV_M { ct[33] = ct[33] + 1_u64; }
+    let d = emu_decode(w);
+    let data = (d.op >= OP_LB && d.op <= OP_SD) || emu_class(d.op) == CL_A;
+    if data && paged && sys_eff_prv(0_u64, was, 1_u64) != PRIV_M { ct[32] = ct[32] + 1_u64; }
+    if d.op == OP_MRET { ct[34] = ct[34] + 1_u64; }
+    if d.op == OP_SRET { ct[35] = ct[35] + 1_u64; }
+    if emu_class(d.op) == CL_CSR { ct[36] = ct[36] + 1_u64; }
+}
+
+// Places the word of the step at the pc of both machines, when the core
+// translates the pc to memory. Returns the word, or 0 when none was placed.
+fn sfz_place(ma: &Machine, ra: &mut [u8], rb: &mut [u8], w: u64) -> u64 {
+    if (ma.pc & 3_u64) != 0_u64 { return 0_u64; }
+    let f = sys_translate(0_u64, ma, ra, ma.pc, 0_u64);
+    if f.cause != 0_u64 || !emu_in_ram(SZ_RAM, f.pa, 4_u64) { return 0_u64; }
+    emu_poke(ra, f.pa, 4_u64, w);
+    emu_poke(rb, f.pa, 4_u64, w);
+    w
+}
+
+// Compares the machines after step i: the result code, the pc, the
+// counters, the timer, the reservation, the mode and the CSRs, then the
+// registers and the serial output. Kinds as fz_cmp, ifz_cmp and
+// sfz_cmp_csr give them.
+fn sfz_cmp(i: u64, ca: i64, cb: i64, ma: &Machine, mb: &Machine, c: &[u64], xa: &[u64], xb: &[u64], oa: &[u8], ob: &[u8]) -> Refusal {
+    let f = ifz_cmp(i, ca, cb, ma, mb, c);
+    if f.kind != 0 { return f; }
+    let g = sfz_cmp_csr(i, ma, c);
+    if g.kind != 0 { return g; }
+    if xa[0] != 0_u64 { return fz_refuse(6, i, xa[0], 0_u64); }
+    let mut k: usize = 0;
+    while k < 32 {
+        if xa[k] != xb[k] { return fz_refuse(3, i, xa[k], xb[k]); }
+        k = k + 1;
+    }
+    k = 0;
+    while k < oa.len() {
+        if oa[k] != ob[k] { return fz_refuse(5, i, oa[k] as u64, ob[k] as u64); }
+        k = k + 1;
+    }
+    fz_refuse(0, i, 0_u64, 0_u64)
+}
+
+// Runs `steps` steps of the system stream through variant v and the model.
+// A round is 32 steps: it starts with a fresh state, and every eighth
+// round starts with fresh page tables. Inside a round the host may move
+// the machine to another mode (sfz_hop).
+fn sfuzz_run(v: u64, seed: u64, steps: u64, ct: &mut [u64]) -> Refusal {
+    let mut r = Rng { s: seed };
+    let mut xa: [u64; 32] = [0_u64; 32];
+    let mut xb: [u64; 32] = [0_u64; 32];
+    let mut ra: [u8; 32768] = [0_u8; 32768];
+    let mut rb: [u8; 32768] = [0_u8; 32768];
+    let mut oa: [u8; 64] = [0_u8; 64];
+    let mut ob: [u8; 64] = [0_u8; 64];
+    let mut c: [u64; 34] = [0_u64; 34];
+    let mut last: [u64; 1] = [EMU_RAM_BASE + 0x5000_u64];
+    sref_reset(&mut c);
+    let mut ma = emu_new_system();
+    let mut mb = emu_new();
+    let mut i: u64 = 0_u64;
+    while i < steps {
+        if i % 256_u64 == 0_u64 { sfz_tables(&mut r, &mut ra, &mut rb); }
+        if i % 32_u64 == 0_u64 { sfz_state(&mut r, &mut ma, &mut c); ct[37] = ct[37] + 1_u64; }
+        if i % 32_u64 == 0_u64 || ma.out_len == FZ_OUT { sfz_pcs(&mut r, &mut ma, &mut mb, &mut c); }
+        if i % 8_u64 == 4_u64 { sfz_hop(&mut r, &mut ma, &mut mb, &mut c); }
+        if i % 4_u64 == 0_u64 { fz_seed(&mut r, &mut xa, &mut xb); }
+        let w = sfz_place(&ma, &mut ra, &mut rb, sfz_word(&mut r, &mut xa, &mut xb, &mut last));
+        let was = ipr_copy(&ma);
+        let ca = sys_step_v(v, &mut ma, &mut xa, &mut ra, &mut oa);
+        let cb = sref_step(&mut mb, &mut xb, &mut rb, &mut ob, &mut c);
+        let f = sfz_cmp(i, ca, cb, &ma, &mb, &c, &xa, &xb, &oa, &ob);
+        if f.kind != 0 { return f; }
+        // All of memory, 32768 bytes, after every eighth step and at the end.
+        if i % 8_u64 == 7_u64 || i + 1_u64 == steps {
+            let g = fz_cmp(i, &xa, &xb, &ra, &rb, &oa, &ob);
+            if g.kind != 0 { return g; }
+        }
+        sfz_count(ct, ca, &was, &ma, w);
+        i = i + 1_u64;
+    }
+    fz_refuse(0, steps, 0_u64, 0_u64)
+}

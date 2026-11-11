@@ -9,5 +9,34 @@ fn sys_main() -> i64 ~ Console + Process + Environment {
         if st.bad != 0_u64 { return 1; }
         return 0;
     }
+    if cmd == "sfuzz" {
+        let seed = args_get(2).parse_int() as u64;
+        let steps = args_get(3).parse_int() as u64;
+        println!("{} seed={} steps={}", cmd, seed, steps);
+        return scheck_one(0_u64, 0_u64, seed, steps);
+    }
     -1
+}
+
+fn sshow_counts(steps: u64, ct: &[u64]) ~ Console {
+    println!("  accepted, {} steps in {} rounds: begun in U={} S={} M={}, retired in U={} S={} M={}",
+             steps, ct[37], ct[38], ct[39], ct[40], ct[29], ct[30], ct[31]);
+    println!("  through page tables: fetches={} data={}  mret={} sret={} csr={}", ct[33], ct[32], ct[34], ct[35], ct[36]);
+    println!("  traps by cause: 0={} 1={} 2={} 3={} 4={} 5={} 6={} 7={} 8={} 9={} 11={} 12={} 13={} 15={}",
+             ct[0], ct[1], ct[2], ct[3], ct[4], ct[5], ct[6], ct[7], ct[8], ct[9], ct[11], ct[12], ct[13], ct[15]);
+    println!("  interrupts by cause: 1={} 3={} 5={} 7={} 9={} 11={}  traps taken in S-mode={}",
+             ct[17], ct[19], ct[21], ct[23], ct[25], ct[27], ct[28]);
+}
+
+// Runs one check (0 differential, 1 properties) for variant v. Returns 1
+// when the check refuses the variant, else 0.
+fn scheck_one(check: u64, v: u64, seed: u64, steps: u64) -> i64 ~ Console {
+    let mut ct: [u64; 48] = [0_u64; 48];
+    let f = sfuzz_run(v, seed, steps, &mut ct);
+    if f.kind != 0 {
+        show_refusal(&f);
+        return 1;
+    }
+    sshow_counts(steps, &ct);
+    0
 }

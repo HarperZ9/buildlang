@@ -1,0 +1,177 @@
+// Differential check for the system profile of emu-rv64 (command sfuzz):
+// the generators. A core variant and the reference model of smodel.bld to
+// smodel4.bld receive the same stream in eight pages of memory, and the
+// state is compared after every step.
+//
+// Memory layout of the stream: pages 0 and 1 hold code, page 2 the root
+// page table, page 3 the level-1 table, page 4 the level-0 table, pages 5
+// to 7 data. A program may store anywhere, the tables included.
+
+// A page table entry for a table of `level` (2 root, 1, 0). Of 32: 1 not
+// valid, 1 with a reserved bit, 1 that names a frame outside memory, 1 that
+// names a device frame, and the rest valid entries of memory. At levels 2
+// and 1, 16 of the 32 point to the next table (1 of them with the A bit,
+// which is reserved there), 8 are superpages of the first frame of memory
+// and 4 are superpages of another frame, which are misaligned. Permission
+// bits and U are drawn; A is clear in 1 of 8 and D in 1 of 8.
+fn sfz_pte(r: &mut Rng, level: u64) -> u64 {
+    let pick = rng_next(r);
+    let sel = pick % 32_u64;
+    let mut flags = 1_u64 | (((pick >> 16_u64) & 7_u64) << 1_u64) | (((pick >> 20_u64) & 1_u64) << 4_u64) | 0xC0_u64;
+    if ((pick >> 24_u64) & 7_u64) == 0_u64 { flags = flags & !PTE_A; }
+    if ((pick >> 28_u64) & 7_u64) == 0_u64 { flags = flags & !PTE_D; }
+    let mut frame = EMU_RAM_BASE + 4096_u64 * ((pick >> 8_u64) & 7_u64);
+    if sel == 0_u64 { return flags & !PTE_V; }
+    if sel == 2_u64 { frame = 0x90000000_u64; }
+    if sel == 3_u64 {
+        frame = 0x02004000_u64;
+        if ((pick >> 32_u64) & 3_u64) == 1_u64 { frame = 0x0200B000_u64; }
+        if ((pick >> 32_u64) & 3_u64) == 2_u64 { frame = EMU_UART_BASE; }
+    }
+    if level > 0_u64 && sel >= 4_u64 && sel < 20_u64 {
+        let mut next = EMU_RAM_BASE + 0x3000_u64;
+        if level == 1_u64 { next = EMU_RAM_BASE + 0x4000_u64; }
+        if sel == 19_u64 { return ((next >> 12_u64) << 10_u64) | PTE_V | PTE_A; }
+        return ((next >> 12_u64) << 10_u64) | PTE_V;
+    }
+    if level > 0_u64 && sel >= 20_u64 && sel < 28_u64 { frame = EMU_RAM_BASE; }
+    let pte = ((frame >> 12_u64) << 10_u64) | flags;
+    if sel == 1_u64 { return pte | (1_u64 << (54_u64 + (pick >> 40_u64) % 10_u64)); }
+    pte
+}
+
+// Writes fresh entries into the three tables of both machines: entries 0,
+// 1, 2 and 511 of the root, 0 and 1 of the level-1 table and 0 to 7 of the
+// level-0 table. Seven times in eight, entry 2 of the root is a gigapage
+// that maps memory where it lies for the supervisor, and seven times in
+// eight entry 1 is a gigapage that maps the same memory for the user, at
+// virtual addresses from 0x40000000. Both carry every permission. The
+// other entries, and these two the eighth time, come from sfz_pte, so
+// entries 0 and 511 of the root lead into drawn tables.
+fn sfz_tables(r: &mut Rng, ra: &mut [u8], rb: &mut [u8]) {
+    let slots: [u64; 14] = [0x2000_u64, 0x2008_u64, 0x2010_u64, 0x2FF8_u64, 0x3000_u64, 0x3008_u64,
+        0x4000_u64, 0x4008_u64, 0x4010_u64, 0x4018_u64, 0x4020_u64, 0x4028_u64, 0x4030_u64, 0x4038_u64];
+    let mut i: usize = 0;
+    while i < 14 {
+        let mut level: u64 = 2_u64;
+        if i >= 4 { level = 1_u64; }
+        if i >= 6 { level = 0_u64; }
+        let mut pte = sfz_pte(r, level);
+        let sane = (rng_next(r) & 7_u64) != 0_u64;
+        if i == 2 && sane { pte = (0x80000_u64 << 10_u64) | 0xCF_u64; }
+        if i == 1 && sane { pte = (0x80000_u64 << 10_u64) | 0xDF_u64; }
+        emu_poke(ra, EMU_RAM_BASE + slots[i], 8_u64, pte);
+        emu_poke(rb, EMU_RAM_BASE + slots[i], 8_u64, pte);
+        i = i + 1;
+    }
+}
+
+// A virtual address inside the part of the address space the tables
+// cover. Of 16: 5 in the gigabyte of memory (root entry 2), 5 in the user
+// view of it (root entry 1), 2 under root entry 0 and 2 at the top of the
+// address space (root entry 511), where the drawn tables are, 1 that is
+// not canonical and 1 drawn like any register value. One address in four
+// lies in the last eight bytes of its page, so that wide accesses cross.
+// One in eight has bit 21 set and so lies outside memory in the two
+// gigapages, or goes through entry 1 of the level-1 table.
+fn sfz_va(r: &mut Rng) -> u64 {
+    let pick = rng_next(r);
+    let sel = pick % 16_u64;
+    let mut off = (pick >> 24_u64) & 0xFF8_u64;
+    if ((pick >> 20_u64) & 3_u64) == 0_u64 { off = 0xFF8_u64 + ((pick >> 40_u64) & 7_u64); }
+    if ((pick >> 44_u64) & 7_u64) == 0_u64 { off = off ^ ((pick >> 48_u64) & 7_u64); }
+    let mut low = (((pick >> 12_u64) & 7_u64) << 12_u64) | off;
+    if ((pick >> 8_u64) & 7_u64) == 0_u64 { low = low | (1_u64 << 21_u64); }
+    if sel < 5_u64 { return (2_u64 << 30_u64) | low; }
+    if sel < 10_u64 { return (1_u64 << 30_u64) | low; }
+    if sel < 12_u64 { return low; }
+    if sel < 14_u64 { return 0xFFFFFFFFC0000000_u64 | low; }
+    if sel == 14_u64 { return (1_u64 << (39_u64 + (pick >> 52_u64) % 25_u64)) | (2_u64 << 30_u64) | low; }
+    gen_value(r)
+}
+
+// A pc for mode prv in the code pages: seven times in eight in the view
+// of memory that mode can execute, the user view for U-mode.
+fn sfz_code_pc(prv: u64, pick: u64) -> u64 {
+    let at = 4_u64 * (pick & 0x7FF_u64);
+    let user = prv == PRIV_U;
+    let swap = ((pick >> 12_u64) & 7_u64) == 0_u64;
+    if user != swap { return 0x40000000_u64 + at; }
+    EMU_RAM_BASE + at
+}
+
+// A CSR number: three in four name a register of the system profile.
+fn sfz_csr(r: &mut Rng) -> u64 {
+    let t: [u64; 24] = [0x100_u64, 0x104_u64, 0x105_u64, 0x106_u64, 0x10A_u64, 0x140_u64, 0x141_u64,
+        0x142_u64, 0x143_u64, 0x144_u64, 0x180_u64, 0x300_u64, 0x301_u64, 0x302_u64, 0x303_u64,
+        0x304_u64, 0x305_u64, 0x306_u64, 0x30A_u64, 0x340_u64, 0x341_u64, 0x342_u64, 0x343_u64, 0x344_u64];
+    let pick = rng_next(r);
+    if (pick & 3_u64) == 0_u64 { return (pick >> 16_u64) & 0xFFF_u64; }
+    if ((pick >> 2_u64) & 31_u64) == 0_u64 { return CSR_MVENDORID + (pick >> 40_u64) % 5_u64; }
+    t[((pick >> 8_u64) % 24_u64) as usize]
+}
+
+// A Zicsr word on a drawn CSR. One source in four is register 0.
+fn sfz_csr_word(r: &mut Rng) -> u64 {
+    let pick = rng_next(r);
+    let mut rs1 = (pick >> 16_u64) & 31_u64;
+    if ((pick >> 24_u64) & 3_u64) == 0_u64 { rs1 = 0_u64; }
+    let d = Insn { op: OP_CSRRW + pick % 6_u64, rd: (pick >> 8_u64) & 31_u64, rs1: rs1, rs2: 0_u64, imm: sfz_csr(r) };
+    emu_encode(&emu_canon(&d))
+}
+
+// A load or a store through register 8, which gets a drawn address in
+// both machines, with an offset of -8 to 7.
+fn sfz_mem_word(r: &mut Rng, xa: &mut [u64], xb: &mut [u64]) -> u64 {
+    let pick = rng_next(r);
+    xa[8] = sfz_va(r);
+    xb[8] = xa[8];
+    let imm = emu_sext((pick >> 8_u64) & 15_u64, 4_u64);
+    let mut op = OP_LB + (pick >> 16_u64) % 7_u64;
+    if (pick & 1_u64) == 1_u64 { op = OP_SB + (pick >> 16_u64) % 4_u64; }
+    let d = Insn { op: op, rd: (pick >> 24_u64) & 31_u64, rs1: 8_u64, rs2: (pick >> 32_u64) & 31_u64, imm: imm };
+    emu_encode(&emu_canon(&d))
+}
+
+// An atomic word through register 8. Of 8: 2 LR, 2 SC and 4 AMOs. `last`
+// holds the address of the latest LR of the stream; half of the SC words
+// use it, so that SC stores often. One address in eight is misaligned.
+fn sfz_atomic_word(r: &mut Rng, xa: &mut [u64], xb: &mut [u64], last: &mut [u64]) -> u64 {
+    let pick = rng_next(r);
+    let sel = pick % 8_u64;
+    let mut k: u64 = 2_u64 + (pick >> 8_u64) % 9_u64;
+    if sel < 2_u64 { k = 0_u64; }
+    if sel == 2_u64 || sel == 3_u64 { k = 1_u64; }
+    let wide = (pick >> 16_u64) & 1_u64;
+    let mut va = sfz_va(r) & !7_u64;
+    if ((pick >> 20_u64) & 7_u64) == 0_u64 { va = va | ((pick >> 24_u64) & 7_u64); }
+    if sel == 2_u64 { va = last[0]; }
+    if k == 0_u64 { last[0] = va; }
+    xa[8] = va;
+    xb[8] = va;
+    let d = Insn { op: OP_LR_W + k + 11_u64 * wide, rd: (pick >> 32_u64) & 31_u64, rs1: 8_u64,
+                   rs2: (pick >> 40_u64) & 31_u64, imm: (pick >> 48_u64) & 3_u64 };
+    emu_encode(&emu_canon(&d))
+}
+
+// The word of a step. Of 16: 3 Zicsr words, 2 words of the PRIV group, 4
+// loads or stores, 2 atomic words, 1 M word, 1 word of noise and 3 RV64I
+// instructions. The PRIV words: of 8, 2 MRET, 2 SRET, 1 WFI, 1 SFENCE.VMA,
+// 1 ECALL and 1 EBREAK.
+fn sfz_word(r: &mut Rng, xa: &mut [u64], xb: &mut [u64], last: &mut [u64]) -> u64 {
+    let pick = rng_next(r);
+    let sel = pick % 16_u64;
+    let p: [u64; 8] = [0x30200073_u64, 0x30200073_u64, 0x10200073_u64, 0x10200073_u64, 0x10500073_u64,
+        0x12000073_u64, 0x73_u64, 0x00100073_u64];
+    if sel < 3_u64 { return sfz_csr_word(r); }
+    if sel < 5_u64 {
+        let w = p[((pick >> 8_u64) & 7_u64) as usize];
+        if w == 0x12000073_u64 { return w | (((pick >> 16_u64) & 0x3FF_u64) << 15_u64); }
+        return w;
+    }
+    if sel < 9_u64 { return sfz_mem_word(r, xa, xb); }
+    if sel < 11_u64 { return sfz_atomic_word(r, xa, xb, last); }
+    if sel == 11_u64 { return maz_m(r, xa, xb); }
+    if sel == 12_u64 { return rng_next(r) & 0xFFFFFFFF_u64; }
+    emu_encode(&gen_insn(r))
+}
