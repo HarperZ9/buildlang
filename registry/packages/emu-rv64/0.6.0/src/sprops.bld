@@ -1,0 +1,138 @@
+// Property rules for the system profile of emu-rv64 (command sprops),
+// first part: what the rules look at. No reference model is used. The
+// rules watch the core run the stream of scheck.bld and judge each step
+// from the state before it and the state after it.
+//
+// The one piece of machinery the rules own is sp_leaf, which follows the
+// pointers of the page tables for an address and returns the PTE the walk
+// must end at. It decides nothing about permission: the rules do that,
+// each for one bit.
+
+// The leaf PTE of va on the path the manual describes: three levels from
+// the root table satp names. ok is false when the path has no leaf: a PTE
+// outside memory, not valid, with a reserved bit, with W and not R, or a
+// pointer with D, A or U.
+struct SpLeaf { ok: bool, pte: u64, level: u64 }
+
+fn sp_leaf(m: &Machine, ram: &[u8], va: u64) -> SpLeaf {
+    let bad = SpLeaf { ok: false, pte: 0_u64, level: 0_u64 };
+    let mut table = (m.satp & 0xFFFFFFFFFFF_u64) * 4096_u64;
+    let mut level: u64 = 3_u64;
+    while level > 0_u64 {
+        level = level - 1_u64;
+        let at = table + ((va >> (12_u64 + 9_u64 * level)) & 511_u64) * 8_u64;
+        if !emu_in_ram(ram.len() as u64, at, 8_u64) { return bad; }
+        let pte = emu_peek(ram, at, 8_u64);
+        if (pte & 1_u64) == 0_u64 || (pte >> 54_u64) != 0_u64 { return bad; }
+        if (pte & 0xA_u64) != 0_u64 {
+            if (pte & 6_u64) == 4_u64 { return bad; }
+            return SpLeaf { ok: true, pte: pte, level: level };
+        }
+        if (pte & 0xD4_u64) != 0_u64 { return bad; }
+        table = ((pte >> 10_u64) & 0xFFFFFFFFFFF_u64) * 4096_u64;
+    }
+    bad
+}
+
+// True when bits 63 to 39 of va all equal bit 38.
+fn sp_canonical(va: u64) -> bool {
+    let top = va >> 38_u64;
+    top == 0_u64 || top == 0x3FFFFFF_u64
+}
+
+// True when a leaf at its level names an aligned frame: the low 9 bits of
+// the page number are 0 at level 1, the low 18 at level 2.
+fn sp_aligned(l: &SpLeaf) -> bool {
+    let ppn = (l.pte >> 10_u64) & 0xFFFFFFFFFFF_u64;
+    (ppn & ((1_u64 << (9_u64 * l.level)) - 1_u64)) == 0_u64
+}
+
+// FNV-1a over all of memory.
+fn sp_mem_hash(ram: &[u8]) -> u64 {
+    let mut h: u64 = FNV_BASIS;
+    let mut i: usize = 0;
+    while i < ram.len() {
+        h = fnv_byte(h, ram[i] as u64);
+        i = i + 1;
+    }
+    h
+}
+
+// What the rules keep from before a step. kind: 0 no data access, 1 a
+// load or LR, 2 a store, SC or AMO. va: the data address. word: the word
+// placed at the pc, 0 when none was. fetch and data say whether the fetch
+// and the data access go through the page tables, eff is the mode the data
+// access is checked in, and the two leaves are those of the pc and of va.
+struct SpPre {
+    kind: u64, va: u64, word: u64, fetch: bool, data: bool, eff: u64,
+    leaf_pc: SpLeaf, leaf_va: SpLeaf, hash: u64
+}
+
+fn sp_pre(m: &Machine, x: &[u64], ram: &[u8], w: u64) -> SpPre {
+    let d = emu_decode(w);
+    let none = SpLeaf { ok: false, pte: 0_u64, level: 0_u64 };
+    let on = (m.satp >> 60_u64) == 8_u64;
+    let mut p = SpPre { kind: 0_u64, va: 0_u64, word: w, fetch: on && m.prv != PRIV_M, data: false,
+                        eff: m.prv, leaf_pc: none, leaf_va: none, hash: sp_mem_hash(ram) };
+    if (m.mstatus & 0x20000_u64) != 0_u64 { p.eff = (m.mstatus >> 11_u64) & 3_u64; }
+    if d.op >= OP_LB && d.op <= OP_LWU { p.kind = 1_u64; p.va = x[d.rs1 as usize].wrapping_add(d.imm); }
+    if d.op >= OP_SB && d.op <= OP_SD { p.kind = 2_u64; p.va = x[d.rs1 as usize].wrapping_add(d.imm); }
+    if emu_class(d.op) == CL_A {
+        p.kind = 2_u64;
+        if d.op == OP_LR_W || d.op == OP_LR_D { p.kind = 1_u64; }
+        p.va = x[d.rs1 as usize];
+    }
+    p.data = on && p.eff != PRIV_M && p.kind != 0_u64;
+    if p.fetch { p.leaf_pc = sp_leaf(m, ram, m.pc); }
+    if p.data { p.leaf_va = sp_leaf(m, ram, p.va); }
+    p
+}
+
+// Kind 90: with satp MODE 0, and in M-mode without MPRV whatever satp
+// holds, translation is the identity for every address and access kind.
+fn sp_identity(v: u64, i: u64, m: &Machine, ram: &[u8], va: u64) -> Refusal {
+    let mut bare = ipr_copy(m);
+    bare.satp = 0_u64;
+    let mut mach = ipr_copy(m);
+    mach.prv = PRIV_M;
+    mach.mstatus = mach.mstatus & !0x20000_u64;
+    let mut acc: u64 = 0_u64;
+    while acc < 3_u64 {
+        let a = sys_translate(v, &bare, ram, va, acc);
+        if a.cause != 0_u64 || a.pa != va { return fz_refuse(90, i, a.pa, va); }
+        let b = sys_translate(v, &mach, ram, va, acc);
+        if b.cause != 0_u64 || b.pa != va { return fz_refuse(90, i, b.pa, va); }
+        acc = acc + 1_u64;
+    }
+    fz_refuse(0, i, 0_u64, 0_u64)
+}
+
+// Kind 92: the walk reads nothing but the PTEs on the path. `other` is a
+// second memory filled with a pattern; the PTEs of the path of va are
+// copied into it, and the translation there must give the same result as
+// in the real memory. The path is followed here pointer by pointer.
+fn sp_path_only(v: u64, i: u64, m: &Machine, ram: &[u8], other: &mut [u8], va: u64, acc: u64) -> Refusal {
+    let len = ram.len() as u64;
+    let mut k: usize = 0;
+    while k < other.len() {
+        other[k] = (0xA5_u64 ^ (k as u64 & 0xFF_u64)) as u8;
+        k = k + 1;
+    }
+    let mut table = (m.satp & 0xFFFFFFFFFFF_u64) * 4096_u64;
+    let mut level: u64 = 3_u64;
+    while level > 0_u64 {
+        level = level - 1_u64;
+        let at = table + ((va >> (12_u64 + 9_u64 * level)) & 511_u64) * 8_u64;
+        if !emu_in_ram(len, at, 8_u64) { level = 0_u64; } else {
+            let pte = emu_peek(ram, at, 8_u64);
+            emu_poke(other, at, 8_u64, pte);
+            if (pte & 1_u64) == 0_u64 || (pte & 0xE_u64) != 0_u64 { level = 0_u64; }
+            table = ((pte >> 10_u64) & 0xFFFFFFFFFFF_u64) * 4096_u64;
+        }
+    }
+    let a = sys_translate(v, m, ram, va, acc);
+    let b = sys_translate(v, m, other, va, acc);
+    if a.cause != b.cause { return fz_refuse(92, i, a.cause, b.cause); }
+    if a.pa != b.pa { return fz_refuse(92, i, a.pa, b.pa); }
+    fz_refuse(0, i, 0_u64, 0_u64)
+}

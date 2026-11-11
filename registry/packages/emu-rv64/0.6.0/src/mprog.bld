@@ -1,0 +1,82 @@
+// A hand-assembled program for the trap profile of emu-rv64. It installs a
+// trap handler, makes an environment call, and after the handler returns it
+// prints one byte on the serial device.
+//
+// Main code, loaded at 0x80000000:
+//   00  0x00000297  auipc x5, 0         x5 = 0x80000000
+//                   rd 5 << 7 = 0x280, opcode 0x17
+//   04  0x04028293  addi x5, x5, 0x40   x5 = 0x80000040, the handler
+//                   0x040 << 20 + 5 << 15 (0x28000) + 0x280 + 0x13
+//   08  0x30529073  csrrw x0, mtvec, x5
+//                   0x305 << 20 + 0x28000 + 1 << 12 + 0x73
+//   0C  0x00000073  ecall               trap, cause 11, mepc = 0x8000000C
+//   10  0x10000337  lui x6, 0x10000     x6 = 0x10000000, the serial device
+//                   0x10000 << 12 + 6 << 7 (0x300) + 0x37
+//   14  0x02100393  addi x7, x0, 0x21   x7 = 0x21, the byte "!"
+//                   0x021 << 20 + 7 << 7 (0x380) + 0x13
+//   18  0x00730023  sb x7, 0(x6)
+//                   7 << 20 (0x700000) + 6 << 15 (0x30000) + 0x23
+//   1C  0x0000006F  jal x0, 0           stays here
+// Handler, at 0x80000040:
+//   40  0x34102E73  csrrs x28, mepc, x0     x28 = 0x8000000C
+//                   0x341 << 20 + 2 << 12 + 28 << 7 (0xE00) + 0x73
+//   44  0x004E0E13  addi x28, x28, 4        x28 = 0x80000010
+//                   4 << 20 + 28 << 15 (0xE0000) + 0xE00 + 0x13
+//   48  0x341E1073  csrrw x0, mepc, x28
+//                   0x341 << 20 + 0xE0000 + 1 << 12 + 0x73
+//   4C  0x34202EF3  csrrs x29, mcause, x0   x29 = 11
+//                   0x342 << 20 + 2 << 12 + 29 << 7 (0xE80) + 0x73
+//   50  0x30200073  mret                    pc = 0x80000010
+//
+// Twelve steps: three instructions retire, ECALL traps, the five handler
+// instructions retire, then LUI, ADDI and SB. So 11 instructions retire and
+// 1 trap is taken, pc ends at 0x8000001C and the output holds the byte 0x21.
+// mstatus starts at 0x1800; the trap leaves it there (MIE was 0) and MRET
+// sets MPIE, so it ends at 0x1880.
+
+fn mprog_load(ram: &mut [u8]) {
+    emu_poke(ram, 0x80000000_u64, 4_u64, 0x00000297_u64);
+    emu_poke(ram, 0x80000004_u64, 4_u64, 0x04028293_u64);
+    emu_poke(ram, 0x80000008_u64, 4_u64, 0x30529073_u64);
+    emu_poke(ram, 0x8000000C_u64, 4_u64, 0x00000073_u64);
+    emu_poke(ram, 0x80000010_u64, 4_u64, 0x10000337_u64);
+    emu_poke(ram, 0x80000014_u64, 4_u64, 0x02100393_u64);
+    emu_poke(ram, 0x80000018_u64, 4_u64, 0x00730023_u64);
+    emu_poke(ram, 0x8000001C_u64, 4_u64, 0x0000006F_u64);
+    emu_poke(ram, 0x80000040_u64, 4_u64, 0x34102E73_u64);
+    emu_poke(ram, 0x80000044_u64, 4_u64, 0x004E0E13_u64);
+    emu_poke(ram, 0x80000048_u64, 4_u64, 0x341E1073_u64);
+    emu_poke(ram, 0x8000004C_u64, 4_u64, 0x34202EF3_u64);
+    emu_poke(ram, 0x80000050_u64, 4_u64, 0x30200073_u64);
+}
+
+// Runs the program for 12 steps and prints the end state. Returns 0 when
+// the state is the one worked out above, else 1.
+fn program_trap() -> u64 ~ Console {
+    let mut m = emu_new_machine();
+    let mut x: [u64; 32] = [0_u64; 32];
+    let mut ram: [u8; 256] = [0_u8; 256];
+    let mut out: [u8; 8] = [0_u8; 8];
+    mprog_load(&mut ram);
+    let mut ok_codes: u64 = 0_u64;
+    let mut trap_codes: u64 = 0_u64;
+    let mut i: u64 = 0_u64;
+    while i < 12_u64 {
+        let rc = emu_step(&mut m, &mut x, &mut ram, &mut out);
+        if rc == EMU_OK { ok_codes = ok_codes + 1_u64; }
+        if rc == EMU_TRAP { trap_codes = trap_codes + 1_u64; }
+        i = i + 1_u64;
+    }
+    println!("program trap: ok={} trap={} steps={} traps={} pc={:08x} out_len={} out={:02x}",
+             ok_codes, trap_codes, m.steps, m.traps, m.pc, m.out_len, out[0] as u64);
+    println!("program trap: x29={} mepc={:08x} mcause={} mstatus={:x} mtvec={:08x}",
+             x[29], m.mepc, m.mcause, m.mstatus, m.mtvec);
+    let counts = ok_codes == 11_u64 && trap_codes == 1_u64 && m.steps == 11_u64 && m.traps == 1_u64;
+    let regs = m.pc == 0x8000001C_u64 && x[29] == 11_u64 && x[28] == 0x80000010_u64 && x[7] == 0x21_u64;
+    let csrs = m.mepc == 0x80000010_u64 && m.mcause == 11_u64 && m.mstatus == 0x1880_u64 &&
+               m.mtvec == 0x80000040_u64 && m.mtval == 0_u64;
+    let sent = m.out_len == 1_u64 && out[0] as u64 == 0x21_u64;
+    if counts && regs && csrs && sent { return 0_u64; }
+    println!("program trap: FAILED");
+    1_u64
+}

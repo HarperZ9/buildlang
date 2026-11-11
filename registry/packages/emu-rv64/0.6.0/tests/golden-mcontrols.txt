@@ -1,0 +1,38 @@
+variant 0: the core
+ differential:
+  accepted, 20000 steps: retired=11845 csr=2392 mret=1958 fetch_faults=487
+  traps by cause: 0=342 1=330 2=4419 3=745 5=883 7=546 11=783
+  interrupts by cause: 3=94 7=0 11=12 timer_accesses=0
+ properties:
+  accepted, 59 cases, 20000 round trips, 20000 raw words
+control 7: a trap saves pc + 4 in mepc
+ differential:
+  REFUSED kind=13 step=0 got=80000004 want=80000000
+ properties:
+  REFUSED kind=43 step=13 got=0 want=0
+control 8: ECALL reports cause 8 instead of 11
+ differential:
+  REFUSED kind=14 step=5 got=8 want=b
+ properties:
+  REFUSED kind=43 step=36 got=0 want=0
+control 9: MRET does not restore MIE from MPIE
+ differential:
+  REFUSED kind=11 step=102 got=1880 want=1888
+ properties:
+  REFUSED kind=43 step=53 got=0 want=0
+control 10: CSRRS with rs1 = 0 counts as a write
+ differential:
+  REFUSED kind=1 step=15 got=3 want=0
+ properties:
+  REFUSED kind=43 step=16 got=0 want=0
+control 11: CSRRC sets the bits instead of clearing them
+ differential:
+  REFUSED kind=14 step=74 got=13 want=3
+ properties:
+  REFUSED kind=43 step=23 got=0 want=0
+control 12: CSR number sign-extended
+ differential:
+  REFUSED kind=1 step=15 got=3 want=0
+ properties:
+  REFUSED kind=42 step=0 got=0 want=fb325573
+result: core accepted, 6 of 6 controls refused by both checks

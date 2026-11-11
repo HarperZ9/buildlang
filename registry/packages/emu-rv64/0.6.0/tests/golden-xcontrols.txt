@@ -1,0 +1,76 @@
+variant 0: the core
+ differential:
+  accepted, 20000 steps: retired=15567 m=6273 lr=1386 sc_stored=471 sc_failed=944 amo=2775
+  m edges: divide_by_zero=495 overflow=2 atomics_on_timer=367 fetch_faults=292
+  traps by cause: 0=222 1=136 2=1382 3=215 4=420 5=398 6=1040 7=368 11=243
+  interrupts by cause: 3=7 7=0 11=2
+ properties:
+  accepted, 20000 rounds of kinds 70 to 83
+ hand cases: 0 of 398 fail, first 0
+control 27: a division by zero gives the quotient 0
+ differential:
+  REFUSED kind=3 step=107 got=0 want=ffffffffffffffff
+ properties:
+  REFUSED kind=75 step=0 got=c9 want=41
+ hand cases: 22 of 398 fail, first 73
+control 28: the most negative number divided by -1 gives the largest positive number
+ differential:
+  REFUSED kind=3 step=1948 got=7fffffffffffffff want=8000000000000000
+ properties:
+  REFUSED kind=75 step=0 got=7fffffffffffffff want=8000000000000000
+ hand cases: 3 of 398 fail, first 78
+control 29: a remainder takes the sign of the divisor
+ differential:
+  REFUSED kind=3 step=132 got=a13d3a136d3a79e9 want=100000000
+ properties:
+  REFUSED kind=74 step=0 got=0 want=ffffffff800000c9
+ hand cases: 9 of 398 fail, first 112
+control 30: MULHSU reads rs2 as signed
+ differential:
+  REFUSED kind=3 step=158 got=f8832c261ddce9c want=d079946fb9697ed5
+ properties:
+  REFUSED kind=73 step=0 got=ffffffffffffffff want=c8
+ hand cases: 6 of 398 fail, first 37
+control 31: a 32-bit result is not sign-extended
+ differential:
+  REFUSED kind=3 step=24 got=80000000 want=ffffffff80000000
+ properties:
+  REFUSED kind=76 step=0 got=80000000 want=ffffffff80000000
+ hand cases: 60 of 398 fail, first 154
+control 32: SC succeeds with no reservation
+ differential:
+  REFUSED kind=3 step=1 got=0 want=1
+ properties:
+  REFUSED kind=77 step=0 got=0 want=1
+ hand cases: 6 of 398 fail, first 242
+control 33: a successful SC writes 1 to rd
+ differential:
+  REFUSED kind=3 step=26 got=1 want=0
+ properties:
+  REFUSED kind=77 step=0 got=1 want=0
+ hand cases: 18 of 398 fail, first 241
+control 34: the reservation survives an SC
+ differential:
+  REFUSED kind=21 step=26 got=8 want=0
+ properties:
+  REFUSED kind=77 step=0 got=0 want=1
+ hand cases: 31 of 398 fail, first 241
+control 35: AMOMIN compares unsigned
+ differential:
+  REFUSED kind=4 step=11 got=0 want=80
+ properties:
+  REFUSED kind=78 step=15 got=ffffffff want=ffffffffffffffff
+ hand cases: 6 of 398 fail, first 313
+control 36: an AMO returns the new value
+ differential:
+  REFUSED kind=3 step=11 got=ffffffff80000000 want=0
+ properties:
+  REFUSED kind=79 step=1 got=0 want=4a
+ hand cases: 72 of 398 fail, first 256
+control 37: a misaligned atomic access is carried out
+ differential:
+  REFUSED kind=1 step=20 got=0 want=3
+ properties:
+  REFUSED kind=80 step=0 got=0 want=6
+ hand cases: 14 of 398 fail, first 235
+result: core accepted, 11 of 11 controls refused by all three checks

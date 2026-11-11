@@ -1,0 +1,114 @@
+// emu-rv64 command line, sixth part: the checks of the M and A extensions.
+//
+//   emu-rv64 xcases              hand cases of every M and A instruction
+//   emu-rv64 xfuzz SEED STEPS    differential run of a stream weighted toward
+//                                M and A words against the reference model
+//   emu-rv64 xprops SEED STEPS   property run, no model
+//   emu-rv64 xcontrols           shows that every planted defect is refused
+
+fn xshow_counts(steps: u64, ct: &[u64]) ~ Console {
+    println!("  accepted, {} steps: retired={} m={} lr={} sc_stored={} sc_failed={} amo={}",
+             steps, ct[12], ct[20], ct[23], ct[24], ct[25], ct[26]);
+    println!("  m edges: divide_by_zero={} overflow={} atomics_on_timer={} fetch_faults={}",
+             ct[21], ct[22], ct[27], ct[15]);
+    println!("  traps by cause: 0={} 1={} 2={} 3={} 4={} 5={} 6={} 7={} 11={}",
+             ct[0], ct[1], ct[2], ct[3], ct[4], ct[5], ct[6], ct[7], ct[11]);
+    println!("  interrupts by cause: 3={} 7={} 11={}", ct[16], ct[17], ct[18]);
+}
+
+// Runs one check (0 differential, 1 properties) for variant v. Returns 1
+// when the check refuses the variant, else 0.
+fn xcheck_one(check: u64, v: u64, seed: u64, steps: u64) -> i64 ~ Console {
+    let mut ct: [u64; 32] = [0_u64; 32];
+    let mut f = fz_refuse(0, 0_u64, 0_u64, 0_u64);
+    if check == 0_u64 {
+        f = mafz_run(v, seed, steps, &mut ct);
+    } else {
+        f = xprop_run(v, seed, steps);
+    }
+    if f.kind != 0 {
+        show_refusal(&f);
+        return 1;
+    }
+    if check == 0_u64 {
+        xshow_counts(steps, &ct);
+    } else {
+        println!("  accepted, {} rounds of kinds 70 to 83", steps);
+    }
+    0
+}
+
+fn xcontrol_name(v: u64) ~ Console {
+    if v == 0_u64 { println!("variant 0: the core"); }
+    if v == 27_u64 { println!("control 27: a division by zero gives the quotient 0"); }
+    if v == 28_u64 { println!("control 28: the most negative number divided by -1 gives the largest positive number"); }
+    if v == 29_u64 { println!("control 29: a remainder takes the sign of the divisor"); }
+    if v == 30_u64 { println!("control 30: MULHSU reads rs2 as signed"); }
+    if v == 31_u64 { println!("control 31: a 32-bit result is not sign-extended"); }
+    if v == 32_u64 { println!("control 32: SC succeeds with no reservation"); }
+    if v == 33_u64 { println!("control 33: a successful SC writes 1 to rd"); }
+    if v == 34_u64 { println!("control 34: the reservation survives an SC"); }
+    if v == 35_u64 { println!("control 35: AMOMIN compares unsigned"); }
+    if v == 36_u64 { println!("control 36: an AMO returns the new value"); }
+    if v == 37_u64 { println!("control 37: a misaligned atomic access is carried out"); }
+}
+
+// The hand cases against variant v. Returns 1 when at least one fails.
+fn xcontrol_cases(v: u64) -> i64 ~ Console {
+    let st = xvec_run(v, false);
+    println!(" hand cases: {} of {} fail, first {}", st.bad, st.count, st.fail);
+    if st.bad != 0_u64 { return 1; }
+    0
+}
+
+// Every control must be refused by all three checks, and the core must
+// pass all three.
+fn xcontrols() -> i64 ~ Console {
+    let mut bad: i64 = 0;
+    let mut v: u64 = 0_u64;
+    while v <= XCTL_LAST {
+        xcontrol_name(v);
+        println!(" differential:");
+        let d = xcheck_one(0_u64, v, 1_u64, 20000_u64);
+        println!(" properties:");
+        let q = xcheck_one(1_u64, v, 1_u64, 20000_u64);
+        let c = xcontrol_cases(v);
+        if v == 0_u64 && (d + q + c) != 0 { bad = bad + 1; }
+        if v != 0_u64 && (d == 0 || q == 0 || c == 0) {
+            println!("  ACCEPTED A PLANTED DEFECT");
+            bad = bad + 1;
+        }
+        v = v + 1_u64;
+        if v == 1_u64 { v = XCTL_FIRST; }
+    }
+    if bad == 0 {
+        println!("result: core accepted, 11 of 11 controls refused by all three checks");
+    } else {
+        println!("result: FAILED, {} variants judged wrongly", bad);
+    }
+    bad
+}
+
+// Runs an M and A command. Returns -1 when the first argument is not one,
+// else the exit status.
+fn ma_main() -> i64 ~ Console + Process + Environment {
+    let cmd = args_get(1);
+    if cmd == "xcases" {
+        let st = xvec_run(0_u64, true);
+        if st.bad != 0_u64 { return 1; }
+        return 0;
+    }
+    if cmd == "xcontrols" {
+        if xcontrols() != 0 { return 1; }
+        return 0;
+    }
+    if cmd == "xfuzz" || cmd == "xprops" {
+        let seed = args_get(2).parse_int() as u64;
+        let steps = args_get(3).parse_int() as u64;
+        let mut check: u64 = 0_u64;
+        if cmd == "xprops" { check = 1_u64; }
+        println!("{} seed={} steps={}", cmd, seed, steps);
+        return xcheck_one(check, 0_u64, seed, steps);
+    }
+    -1
+}

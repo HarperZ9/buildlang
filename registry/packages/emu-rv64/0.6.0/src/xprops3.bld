@@ -1,0 +1,73 @@
+// Property check for the M and A extensions of emu-rv64, third part: the
+// round trips, one round of the A rules, and the run.
+
+// A random M or A instruction in canonical form.
+fn gen_xinsn(r: &mut Rng) -> Insn {
+    let pick = rng_next(r);
+    let d = Insn { op: OP_MUL + pick % 35_u64, rd: (pick >> 8_u64) & 31_u64, rs1: (pick >> 16_u64) & 31_u64,
+                   rs2: (pick >> 24_u64) & 31_u64, imm: (pick >> 32_u64) & 3_u64 };
+    emu_canon(&d)
+}
+
+// Kinds 70 and 71. The raw word carries the opcode OP, OP-32 or AMO, and
+// half of the OP and OP-32 words carry the funct7 of the M extension.
+fn xp_trips(r: &mut Rng, i: u64) -> Refusal {
+    let d = gen_xinsn(r);
+    let w = emu_encode(&d);
+    let back = emu_decode(w);
+    if !same_insn(&d, &back) { return fz_refuse(70, i, w, d.op); }
+    let pick = rng_next(r);
+    let mut raw = (rng_next(r) & 0xFFFFFF80_u64) | 0x2F_u64;
+    if pick % 3_u64 == 1_u64 { raw = (raw & 0xFFFFFF80_u64) | 0x33_u64; }
+    if pick % 3_u64 == 2_u64 { raw = (raw & 0xFFFFFF80_u64) | 0x3B_u64; }
+    if pick % 3_u64 != 0_u64 && ((pick >> 8_u64) & 1_u64) == 1_u64 { raw = (raw & 0x01FFFFFF_u64) | 0x02000000_u64; }
+    let e = emu_decode(raw);
+    if e.op != 0_u64 {
+        let again = emu_encode(&e);
+        if again != raw { return fz_refuse(71, i, again, raw); }
+    }
+    fz_refuse(0, i, 0_u64, 0_u64)
+}
+
+// Kinds 77 to 83 for round i.
+fn xp_a_round(v: u64, r: &mut Rng, i: u64) -> Refusal {
+    let pick = rng_next(r);
+    let n: u64 = 4_u64 + 4_u64 * (pick & 1_u64);
+    let mut at = EMU_RAM_BASE + 64_u64 + 8_u64 * ((pick >> 8_u64) % 22_u64);
+    if n == 4_u64 && ((pick >> 4_u64) & 1_u64) == 1_u64 { at = at + 4_u64; }
+    let old = maz_edge(r);
+    let src = maz_edge(r);
+    let f = xp_lrsc(v, i, at, n, old, src);
+    if f.kind != 0 { return f; }
+    let g = xp_lrsc_miss(v, i, at, n, old, src);
+    if g.kind != 0 { return g; }
+    let h = xp_amo(v, i, 2_u64 + (pick >> 16_u64) % 9_u64, at, n, old, src, (pick >> 24_u64) & 3_u64);
+    if h.kind != 0 { return h; }
+    let k = (pick >> 28_u64) % 11_u64;
+    let crooked = (at & !7_u64) + 1_u64 + (pick >> 32_u64) % (n - 1_u64);
+    let p = xp_fault(v, i, 80, k, crooked, n, EXC_LOAD_ALIGN);
+    if p.kind != 0 { return p; }
+    let mut far = EMU_RAM_BASE + 256_u64 + 8_u64 * ((pick >> 40_u64) % 4_u64);
+    if ((pick >> 44_u64) & 7_u64) == 0_u64 { far = 0x7FFFFFF8_u64; }
+    let q = xp_fault(v, i, 81, k, far, n, EXC_LOAD_ACCESS);
+    if q.kind != 0 { return q; }
+    let z = xp_hash(i, at);
+    if z.kind != 0 { return z; }
+    xp_misa(v, i)
+}
+
+// Every rule, `steps` rounds, for variant v.
+fn xprop_run(v: u64, seed: u64, steps: u64) -> Refusal {
+    let mut r = Rng { s: seed };
+    let mut i: u64 = 0_u64;
+    while i < steps {
+        let f = xp_trips(&mut r, i);
+        if f.kind != 0 { return f; }
+        let g = xp_m_round(v, &mut r, i);
+        if g.kind != 0 { return g; }
+        let h = xp_a_round(v, &mut r, i);
+        if h.kind != 0 { return h; }
+        i = i + 1_u64;
+    }
+    fz_refuse(0, steps, 0_u64, 0_u64)
+}

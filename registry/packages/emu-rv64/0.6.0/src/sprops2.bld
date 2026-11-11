@@ -1,0 +1,146 @@
+// Property rules for the system profile of emu-rv64, second part: the
+// rules judged on a step of the stream. `was` is the machine before the
+// step, `now` the machine after it, p what sp_pre kept.
+
+// Kinds 93 and 94: an instruction that retired had the right to its
+// fetch and to its data access. For the first page of each: the address
+// is canonical, the path ends in a leaf, the leaf is aligned and has A
+// set; a fetch needs X, and U exactly when the mode is U; a data access in
+// U-mode needs U, in S-mode a clear U or SUM; a load needs R, or X under
+// MXR; a store needs W and D.
+fn sp_rights(i: u64, was: &Machine, p: &SpPre) -> Refusal {
+    let l = SpLeaf { ok: p.leaf_pc.ok, pte: p.leaf_pc.pte, level: p.leaf_pc.level };
+    if p.fetch {
+        let user = (l.pte & 0x10_u64) != 0_u64;
+        let ok = l.ok && sp_canonical(was.pc) && sp_aligned(&l) && (l.pte & 0x48_u64) == 0x48_u64 &&
+                 user == (was.prv == PRIV_U);
+        if !ok { return fz_refuse(93, i, l.pte, was.pc); }
+    }
+    if !p.data { return fz_refuse(0, i, 0_u64, 0_u64); }
+    let e = SpLeaf { ok: p.leaf_va.ok, pte: p.leaf_va.pte, level: p.leaf_va.level };
+    let user = (e.pte & 0x10_u64) != 0_u64;
+    let sum = (was.mstatus & 0x40000_u64) != 0_u64;
+    let mxr = (was.mstatus & 0x80000_u64) != 0_u64;
+    let mut ok = e.ok && sp_canonical(p.va) && sp_aligned(&e) && (e.pte & 0x40_u64) != 0_u64;
+    if p.eff == PRIV_U && !user { ok = false; }
+    if p.eff == PRIV_S && user && !sum { ok = false; }
+    if p.kind == 1_u64 && (e.pte & 2_u64) == 0_u64 && !(mxr && (e.pte & 8_u64) != 0_u64) { ok = false; }
+    if p.kind == 2_u64 && (e.pte & 0x84_u64) != 0x84_u64 { ok = false; }
+    if !ok { return fz_refuse(94, i, e.pte, p.va); }
+    fz_refuse(0, i, 0_u64, 0_u64)
+}
+
+// Kind 98: an instruction that retired was allowed in its mode. MRET
+// retires in M only. SRET does not retire in U, nor in S under TSR. WFI
+// does not retire below M under TW. SFENCE.VMA does not retire in U, nor
+// in S under TVM. A Zicsr word retires only on a CSR whose number allows
+// the mode, and not on satp in S under TVM. Then the two returns: the mode
+// and the enable come from the stack, the stack is reset, MPRV is cleared
+// when the new mode is below M, and the pc is the saved pc.
+fn sp_allowed(i: u64, was: &Machine, now: &Machine, w: u64) -> Refusal {
+    let d = emu_decode(w);
+    let s = was.mstatus;
+    let in_s = was.prv == PRIV_S;
+    let mut bad = d.op == OP_MRET && was.prv != PRIV_M;
+    if d.op == OP_SRET && (was.prv == PRIV_U || (in_s && (s & 0x400000_u64) != 0_u64)) { bad = true; }
+    if d.op == OP_WFI && was.prv != PRIV_M && (s & 0x200000_u64) != 0_u64 { bad = true; }
+    if d.op == OP_SFENCE && (was.prv == PRIV_U || (in_s && (s & 0x100000_u64) != 0_u64)) { bad = true; }
+    if emu_class(d.op) == CL_CSR {
+        if ((d.imm >> 8_u64) & 3_u64) > was.prv { bad = true; }
+        if d.imm == 0x180_u64 && in_s && (s & 0x100000_u64) != 0_u64 { bad = true; }
+    }
+    if bad { return fz_refuse(98, i, w, was.prv); }
+    let t = now.mstatus;
+    if d.op == OP_SRET {
+        let ok = now.prv == ((s >> 8_u64) & 1_u64) && ((t >> 1_u64) & 1_u64) == ((s >> 5_u64) & 1_u64) &&
+                 (t & 0x20120_u64) == 0x20_u64 && now.pc == was.sepc;
+        if !ok { return fz_refuse(98, i, t, s); }
+    }
+    if d.op == OP_MRET {
+        let y = (s >> 11_u64) & 3_u64;
+        let mut mprv = (t & 0x20000_u64) == 0_u64;
+        if y == PRIV_M { mprv = (t & 0x20000_u64) == (s & 0x20000_u64); }
+        let ok = now.prv == y && ((t >> 3_u64) & 1_u64) == ((s >> 7_u64) & 1_u64) && (t & 0x1880_u64) == 0x80_u64 &&
+                 now.pc == was.mepc && mprv;
+        if !ok { return fz_refuse(98, i, t, s); }
+    }
+    fz_refuse(0, i, 0_u64, 0_u64)
+}
+
+// Kind 91: a step that trapped changed no register, no byte of memory, no
+// byte of output, not the reservation, not the timer compare register and
+// no CSR outside the trap registers of the mode that took it.
+fn sp_untouched(i: u64, was: &Machine, now: &Machine, xa: &[u64], x0: &[u64], ram: &[u8], p: &SpPre) -> Refusal {
+    let mut k: usize = 0;
+    while k < 32 {
+        if xa[k] != x0[k] { return fz_refuse(91, i, xa[k], x0[k]); }
+        k = k + 1;
+    }
+    let h = sp_mem_hash(ram);
+    if h != p.hash { return fz_refuse(91, i, h, p.hash); }
+    let same = now.res == was.res && now.res_addr == was.res_addr && now.out_len == was.out_len &&
+               now.mtimecmp == was.mtimecmp && now.satp == was.satp && now.medeleg == was.medeleg &&
+               now.mideleg == was.mideleg && now.mie == was.mie && now.mip == was.mip &&
+               now.mtvec == was.mtvec && now.stvec == was.stvec && now.mscratch == was.mscratch &&
+               now.sscratch == was.sscratch && now.steps == was.steps && now.traps == was.traps + 1_u64;
+    if !same { return fz_refuse(91, i, now.steps, was.steps); }
+    let m_side = now.mepc == was.mepc && now.mcause == was.mcause && now.mtval == was.mtval &&
+                 (now.mstatus & 0x1888_u64) == (was.mstatus & 0x1888_u64);
+    let s_side = now.sepc == was.sepc && now.scause == was.scause && now.stval == was.stval &&
+                 (now.mstatus & 0x122_u64) == (was.mstatus & 0x122_u64);
+    if now.prv == PRIV_S && !m_side { return fz_refuse(91, i, now.mstatus, was.mstatus); }
+    if now.prv == PRIV_M && !s_side { return fz_refuse(91, i, now.mstatus, was.mstatus); }
+    fz_refuse(0, i, 0_u64, 0_u64)
+}
+
+// Kinds 95, 100 and 103, for a synchronous trap with exception code
+// `cause`. 95: it goes to S-mode exactly when its medeleg bit is set and
+// the machine was not in M-mode, and a trap never lowers the mode.
+// 100: causes 4, 5 and 13 belong to a load or LR, causes 6, 7 and 15 to a
+// store, SC or AMO, and a store never takes a load cause. 103: in M-mode
+// no fetch takes a page fault, whatever MPRV says.
+fn sp_sync(i: u64, was: &Machine, now: &Machine, cause: u64, p: &SpPre) -> Refusal {
+    let bit = ((was.medeleg >> cause) & 1_u64) == 1_u64;
+    let want_s = bit && was.prv != PRIV_M;
+    if (now.prv == PRIV_S) != want_s || now.prv < was.prv { return fz_refuse(95, i, now.prv, was.prv); }
+    let loadish = cause == 4_u64 || cause == 5_u64 || cause == 13_u64;
+    let storish = cause == 6_u64 || cause == 7_u64 || cause == 15_u64;
+    if loadish && p.kind != 1_u64 { return fz_refuse(100, i, cause, p.kind); }
+    if storish && p.kind != 2_u64 { return fz_refuse(100, i, cause, p.kind); }
+    if was.prv == PRIV_M && cause == 12_u64 { return fz_refuse(103, i, cause, was.pc); }
+    fz_refuse(0, i, 0_u64, 0_u64)
+}
+
+// The interrupts the state `was` permits: bit i is set when interrupt i
+// is pending, enabled and may be taken now. To M-mode: not delegated, and
+// MIE set or the mode below M. To S-mode: delegated, and the mode U, or S
+// with SIE set.
+fn sp_permitted(was: &Machine) -> u64 {
+    let mut pend = was.mip & 0xA2A_u64;
+    if was.mtime >= was.mtimecmp { pend = pend | 0x80_u64; }
+    let live = pend & was.mie;
+    let mut out: u64 = 0_u64;
+    if was.prv != PRIV_M || (was.mstatus & 8_u64) != 0_u64 { out = live & !was.mideleg; }
+    if was.prv == PRIV_U || (was.prv == PRIV_S && (was.mstatus & 2_u64) != 0_u64) { out = out | (live & was.mideleg); }
+    out
+}
+
+// Kind 97: an interrupt is taken exactly when one is permitted; the one
+// taken is permitted; it goes to S-mode exactly when it is delegated; and
+// none permitted for M-mode is passed over for one for S-mode.
+fn sp_irq(i: u64, was: &Machine, now: &Machine, rc: i64) -> Refusal {
+    let may = sp_permitted(was);
+    let mut cause = now.mcause;
+    if now.prv == PRIV_S { cause = now.scause; }
+    let taken = rc == EMU_TRAP && (cause & EMU_SIGN) != 0_u64 && now.traps == was.traps + 1_u64;
+    if !taken {
+        if may != 0_u64 { return fz_refuse(97, i, 0_u64, may); }
+        return fz_refuse(0, i, 0_u64, 0_u64);
+    }
+    let k = cause & 63_u64;
+    if ((may >> k) & 1_u64) == 0_u64 { return fz_refuse(97, i, k, may); }
+    let delegated = ((was.mideleg >> k) & 1_u64) == 1_u64;
+    if (now.prv == PRIV_S) != delegated { return fz_refuse(97, i, k, was.mideleg); }
+    if delegated && (may & !was.mideleg) != 0_u64 { return fz_refuse(97, i, k, may); }
+    fz_refuse(0, i, 0_u64, 0_u64)
+}

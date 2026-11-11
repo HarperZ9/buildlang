@@ -1,0 +1,104 @@
+// Planted controls for the image loader and the replay check of emu-rv64,
+// variants 20 to 26, and the run that every check and command uses. Each
+// variant is the core with one defect put in on purpose. The checks must
+// refuse every one; `emu-rv64 rcontrols` shows the refusals. Variant 0 is
+// the core itself: each function below calls the core function directly.
+//
+//   20  the loader drops the last byte of the image
+//   21  the loader places the image one byte late, at 0x80000001
+//   22  the loader does not clear memory, so bytes of an earlier run stay
+//   23  the state hash leaves mtime out
+//   24  the state hash leaves the serial output out: the buffer and the
+//       record of the bytes emptied from it
+//   25  the second run of a replay starts with mtime = 1
+//   26  the checkpoint compare looks only at the last hash
+
+fn rctl_load(v: u64, img: &[u8], n: usize, ram: &mut [u8]) -> u64 {
+    if v != 20_u64 && v != 21_u64 && v != 22_u64 { return img_load(img, n, ram); }
+    let rc = img_check(n, ram.len());
+    if rc != IMG_OK { return rc; }
+    if v != 22_u64 { img_clear(ram); }
+    let mut k = n;
+    let mut at: usize = 0;
+    if v == 20_u64 { k = n - 1; }
+    if v == 21_u64 { at = 1; }
+    img_place(img, k, ram, at);
+    IMG_OK
+}
+
+// The start state of run number nth (0 or 1) as variant v makes it.
+fn rctl_boot(v: u64, nth: u64, img: &[u8], n: usize, m: &mut Machine, x: &mut [u64], ram: &mut [u8], out: &mut [u8], t: &mut Tape) -> u64 {
+    if v == 0_u64 { return rr_boot(img, n, m, x, ram, out, t); }
+    let rc = rctl_load(v, img, n, ram);
+    if rc != IMG_OK { return rc; }
+    rr_reset(m, x, out, t);
+    if v == 25_u64 && nth == 1_u64 { m.mtime = 1_u64; }
+    IMG_OK
+}
+
+fn rctl_hash(v: u64, m: &Machine, x: &[u64], ram: &[u8], out: &[u8], t: &Tape) -> u64 {
+    if v == 23_u64 {
+        let mut c = ipr_copy(m);
+        c.mtime = 0_u64;
+        return rr_hash(&c, x, ram, out, t);
+    }
+    if v == 24_u64 {
+        let z: [u8; 1] = [0_u8; 1];
+        return state_hash(m, x, ram, &z);
+    }
+    rr_hash(m, x, ram, out, t)
+}
+
+// The first index at which the lists differ, as variant v finds it.
+fn rctl_diff(v: u64, a: &Vec<u64>, b: &Vec<u64>) -> u64 {
+    if v != 26_u64 || a.len() == 0 || a.len() != b.len() { return ck_first_diff(a, b); }
+    let last = a.len() - 1;
+    if a[last] != b[last] { return last as u64; }
+    a.len() as u64
+}
+
+fn rctl_same(v: u64, a: &Vec<u64>, b: &Vec<u64>) -> bool {
+    a.len() == b.len() && rctl_diff(v, a, b) == a.len() as u64
+}
+
+// One run. v: the variant. nth: 0 for the first run of a replay, 1 for the
+// second. every: a hash is recorded after each `every` steps; 0 records
+// none before the end. poke: when not 0, bit 0 of x11 is flipped after that
+// step, a fault the checks put in on purpose.
+struct Plan { v: u64, nth: u64, steps: u64, every: u64, poke: u64 }
+
+fn plan_new(v: u64, nth: u64, steps: u64, every: u64) -> Plan {
+    Plan { v: v, nth: nth, steps: steps, every: every, poke: 0_u64 }
+}
+
+// Runs plan p on the image from its start state and appends the recorded
+// hashes to ck. The last entry is always the hash of the end state. Returns
+// the loader code; when it is not IMG_OK nothing ran and ck is unchanged.
+// The end state stays in m, x, ram, out and t.
+fn rr_run(p: &Plan, img: &[u8], n: usize, m: &mut Machine, x: &mut [u64], ram: &mut [u8], out: &mut [u8], t: &mut Tape, ck: &mut Vec<u64>) -> u64 {
+    let rc = rctl_boot(p.v, p.nth, img, n, m, x, ram, out, t);
+    if rc != IMG_OK { return rc; }
+    let mut i: u64 = 0_u64;
+    let mut live = true;
+    let mut at_mark = false;
+    while live && i < p.steps {
+        let sc = rr_step(m, x, ram, out, t);
+        if sc != EMU_OK && sc != EMU_TRAP {
+            live = false;
+        } else {
+            i = i + 1_u64;
+            if p.poke != 0_u64 && i == p.poke { x[11] = x[11] ^ 1_u64; }
+            at_mark = p.every != 0_u64 && i % p.every == 0_u64;
+            if at_mark { ck.push(rctl_hash(p.v, m, x, ram, out, t)); }
+        }
+    }
+    if !at_mark { ck.push(rctl_hash(p.v, m, x, ram, out, t)); }
+    IMG_OK
+}
+
+// The step a checkpoint index stands for.
+fn ck_step(k: u64, every: u64, steps: u64) -> u64 {
+    let s = (k + 1_u64) * every;
+    if every == 0_u64 || s > steps { return steps; }
+    s
+}

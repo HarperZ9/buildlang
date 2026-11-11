@@ -1,0 +1,160 @@
+// Hand-computed cases for the timer and the interrupts of emu-rv64, second
+// part: the pending bits and interrupt delivery. Harness and rules of a
+// case: ivec.bld.
+//
+// Words used here, assembled by hand:
+//   CSRRS x3, mip, x0  = 0x344 << 20 | 2 << 12 | 3 << 7 | 0x73 = 0x344021F3
+//   CSRRW x3, mip, x1  = 0x344 << 20 | 1 << 15 | 1 << 12 | 3 << 7 | 0x73
+//                      = 0x34400000 + 0x8000 + 0x1000 + 0x180 + 0x73 = 0x344091F3
+//   ADDI  x3, x0, 1    = 1 << 20 | 3 << 7 | 0x13 = 0x00100193
+//   WFI                = 0x10500073
+//   ECALL              = 0x00000073
+
+// Cases 21 to 28: MTIP, bit 7 of mip, as software reads it. MIE is 0, so
+// nothing is taken. The read sees the time before the tick of its own step.
+fn iv_mtip(st: &mut ISt) ~ Console {
+    let rd = 0x344021F3_u64;
+    let top = 0x8000000000000000_u64;
+    // 21: mtime one below mtimecmp: not pending. 22: equal: pending.
+    // 23: above: pending.
+    iv_one(st, &ii_new(rd, 0_u64, 0_u64, 99_u64, 100_u64), &ie_ok(0_u64, 100_u64, 100_u64));
+    iv_one(st, &ii_new(rd, 0_u64, 0_u64, 100_u64, 100_u64), &ie_ok(0x80_u64, 101_u64, 100_u64));
+    iv_one(st, &ii_new(rd, 0_u64, 0_u64, 101_u64, 100_u64), &ie_ok(0x80_u64, 102_u64, 100_u64));
+    // 24, 25: the comparison is unsigned. 2^63 is above 1, though as a
+    // signed number it would be below.
+    iv_one(st, &ii_new(rd, 0_u64, 0_u64, top, 1_u64), &ie_ok(0x80_u64, top + 1_u64, 1_u64));
+    iv_one(st, &ii_new(rd, 0_u64, 0_u64, 1_u64, top), &ie_ok(0_u64, 2_u64, top));
+    // 26: the host set every bit of Machine.mip. Software sees bits 3 and
+    // 11 only, and bit 7 comes from the timer, which is not due.
+    let mut h = ii_new(rd, 0_u64, 0_u64, 0_u64, V_ONES);
+    h.mip = V_ONES;
+    iv_one(st, &h, &ie_ok(0x808_u64, 1_u64, V_ONES));
+    // 27: CSRRW with x1 = all ones cannot set a pending bit: x3 reads 0 and
+    // Machine.mip is still 0 after the step.
+    iv_one(st, &ii_new(0x344091F3_u64, V_ONES, 0_u64, 0_u64, V_ONES), &ie_ok(0_u64, 1_u64, V_ONES));
+    // 28: CSRRW with x1 = 0 cannot clear MTIP: the timer still stands at
+    // 5 >= 5 after the step (6 >= 5), and x3 read 0x80.
+    iv_one(st, &ii_new(0x344091F3_u64, 0_u64, 0_u64, 5_u64, 5_u64), &ie_ok(0x80_u64, 6_u64, 5_u64));
+}
+
+// A start with ADDI x3, x0, 1 at pc. due: the timer interrupt is pending
+// (mtime = mtimecmp = 5) or not (mtime = 0, mtimecmp = all ones).
+fn ii_irq(mstatus: u64, mie: u64, mip: u64, due: bool) -> IIn {
+    let mut i = ii_new(0x00100193_u64, 0_u64, 0_u64, 0_u64, V_ONES);
+    if due { i.mtime = 5_u64; i.mtimecmp = 5_u64; }
+    i.mstatus = mstatus;
+    i.mie = mie;
+    i.mip = mip;
+    i
+}
+
+// Expected: interrupt `cause` was taken in place of the instruction at
+// 0x80000000. MIE was 1, so MPIE = 1 and MIE = 0: mstatus = 0x1880. x3
+// stays 0 because the ADDI did not run.
+fn ie_irq(cause: u64, pc: u64, due: bool) -> IExp {
+    let mut e = IExp { rc: 3, x3: 0_u64, pc: pc, mstatus: 0x1880_u64, mepc: V_B,
+                       mcause: EMU_SIGN | cause, mtval: 0_u64, mtime: 1_u64, mtimecmp: V_ONES };
+    if due { e.mtime = 6_u64; e.mtimecmp = 5_u64; }
+    e
+}
+
+// Expected: no interrupt, the ADDI retired, mstatus as it was.
+fn ie_run(mstatus: u64, due: bool) -> IExp {
+    let mut e = ie_ok(1_u64, 1_u64, V_ONES);
+    if due { e.mtime = 6_u64; e.mtimecmp = 5_u64; }
+    e.mstatus = mstatus;
+    e
+}
+
+// Cases 29 to 35: the three conditions of delivery, and each cause.
+// mstatus 0x1808 has MIE = 1, 0x1800 has MIE = 0.
+fn iv_gate(st: &mut ISt) ~ Console {
+    // 29: timer pending and enabled in mie, but MIE = 0: not taken.
+    iv_one(st, &ii_irq(0x1800_u64, 0x80_u64, 0_u64, true), &ie_run(0x1800_u64, true));
+    // 30: MIE = 1 but the timer bit of mie is clear: not taken.
+    iv_one(st, &ii_irq(0x1808_u64, 0_u64, 0_u64, true), &ie_run(0x1808_u64, true));
+    // 31: all three hold, with mtime equal to mtimecmp: taken. mcause =
+    // 2^63 + 7, mepc = 0x80000000, mtval = 0, pc = BASE = 0x80000100.
+    iv_one(st, &ii_irq(0x1808_u64, 0x80_u64, 0_u64, true), &ie_irq(7_u64, MV_TVEC, true));
+    // 32: the software interrupt, bit 3. 33: the external interrupt, bit 11.
+    iv_one(st, &ii_irq(0x1808_u64, 0x8_u64, 0x8_u64, false), &ie_irq(3_u64, MV_TVEC, false));
+    iv_one(st, &ii_irq(0x1808_u64, 0x800_u64, 0x800_u64, false), &ie_irq(11_u64, MV_TVEC, false));
+    // 34, 35: a pending bit with a different enable bit is not taken.
+    iv_one(st, &ii_irq(0x1808_u64, 0x8_u64, 0x800_u64, false), &ie_run(0x1808_u64, false));
+    iv_one(st, &ii_irq(0x1808_u64, 0x880_u64, 0x8_u64, false), &ie_run(0x1808_u64, false));
+}
+
+// Cases 36 to 41: priority. External (11) first, then software (3), then
+// timer (7).
+fn iv_prio(st: &mut ISt) ~ Console {
+    // 36: external and software. 37: software and timer. 38: external and
+    // timer. 39: all three.
+    iv_one(st, &ii_irq(0x1808_u64, 0x888_u64, 0x808_u64, false), &ie_irq(11_u64, MV_TVEC, false));
+    iv_one(st, &ii_irq(0x1808_u64, 0x888_u64, 0x8_u64, true), &ie_irq(3_u64, MV_TVEC, true));
+    iv_one(st, &ii_irq(0x1808_u64, 0x888_u64, 0x800_u64, true), &ie_irq(11_u64, MV_TVEC, true));
+    iv_one(st, &ii_irq(0x1808_u64, 0x888_u64, 0x808_u64, true), &ie_irq(11_u64, MV_TVEC, true));
+    // 40: all three pending, external disabled in mie: software wins.
+    // 41: all three pending, only the timer enabled: timer.
+    iv_one(st, &ii_irq(0x1808_u64, 0x88_u64, 0x808_u64, true), &ie_irq(3_u64, MV_TVEC, true));
+    iv_one(st, &ii_irq(0x1808_u64, 0x80_u64, 0x808_u64, true), &ie_irq(7_u64, MV_TVEC, true));
+}
+
+// Cases 42 to 46: where the handler is, and what mepc holds. With mtvec =
+// 0x80000101 the mode is vectored and BASE is 0x80000100.
+fn iv_vector(st: &mut ISt) ~ Console {
+    // 42: timer: BASE + 4 * 7 = 0x8000011C.
+    let mut a = ii_irq(0x1808_u64, 0x80_u64, 0_u64, true);
+    a.mtvec = 0x80000101_u64;
+    iv_one(st, &a, &ie_irq(7_u64, 0x8000011C_u64, true));
+    // 43: software: BASE + 4 * 3 = 0x8000010C.
+    let mut b = ii_irq(0x1808_u64, 0x8_u64, 0x8_u64, false);
+    b.mtvec = 0x80000101_u64;
+    iv_one(st, &b, &ie_irq(3_u64, 0x8000010C_u64, false));
+    // 44: external: BASE + 4 * 11 = 0x8000012C.
+    let mut c = ii_irq(0x1808_u64, 0x800_u64, 0x800_u64, false);
+    c.mtvec = 0x80000101_u64;
+    iv_one(st, &c, &ie_irq(11_u64, 0x8000012C_u64, false));
+    // 45: a synchronous trap goes to BASE in vectored mode too. ECALL with
+    // MIE = 0: cause 11 with bit 63 clear, mtval 0, mstatus stays 0x1800.
+    let mut d = ii_new(0x00000073_u64, 0_u64, 0_u64, 0_u64, V_ONES);
+    d.mtvec = 0x80000101_u64;
+    iv_one(st, &d, &ie_trap(11_u64, 0_u64, 1_u64, V_ONES));
+    // 46: the instruction not executed is at 0x80000010: mepc = 0x80000010.
+    let mut f = ii_irq(0x1808_u64, 0x80_u64, 0_u64, true);
+    f.pc = 0x80000010_u64;
+    let mut g = ie_irq(7_u64, MV_TVEC, true);
+    g.mepc = 0x80000010_u64;
+    iv_one(st, &f, &g);
+}
+
+// Cases 47 to 50: WFI, and the order of the tick and the interrupt check.
+fn iv_wfi(st: &mut ISt) ~ Console {
+    // 47: WFI with nothing pending retires as a no-op: pc + 4, one tick.
+    let mut a = ii_irq(0x1808_u64, 0x888_u64, 0_u64, false);
+    a.word = 0x10500073_u64;
+    let mut ea = ie_run(0x1808_u64, false);
+    ea.x3 = 0_u64;
+    iv_one(st, &a, &ea);
+    // 48: an enabled interrupt is pending when the step starts, so it is
+    // taken in place of the WFI, and mepc holds the pc of the WFI.
+    let mut b = ii_irq(0x1808_u64, 0x80_u64, 0_u64, true);
+    b.word = 0x10500073_u64;
+    iv_one(st, &b, &ie_irq(7_u64, MV_TVEC, true));
+    // 49: pending and enabled in mie but MIE = 0: WFI retires. The machine
+    // does not wait and does not take the interrupt.
+    let mut c = ii_irq(0x1800_u64, 0x80_u64, 0_u64, true);
+    c.word = 0x10500073_u64;
+    let mut ec = ie_run(0x1800_u64, true);
+    ec.x3 = 0_u64;
+    iv_one(st, &c, &ec);
+    // 50: mtime = 4 and mtimecmp = 5 when the step starts. The check reads
+    // 4, so the ADDI runs, and the tick after it makes mtime 5. A machine
+    // that ticked before the check would take the interrupt here.
+    let mut d = ii_irq(0x1808_u64, 0x80_u64, 0_u64, false);
+    d.mtime = 4_u64;
+    d.mtimecmp = 5_u64;
+    let mut ed = ie_run(0x1808_u64, false);
+    ed.mtime = 5_u64;
+    ed.mtimecmp = 5_u64;
+    iv_one(st, &d, &ed);
+}

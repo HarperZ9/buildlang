@@ -1,0 +1,53 @@
+// Planted controls for emu-rv64. Each variant is the core with one defect put
+// in on purpose. The checks must refuse every one; `emu-rv64 controls` shows
+// the refusals. A check that accepts a planted defect is a broken check.
+// Nothing outside the checks calls these.
+//
+// Variant 0 is the core itself. Variants 1 to 4 are wrong decodes. Variants
+// 5 and 6 are wrong executions.
+
+
+// The decoder as variant v would have written it.
+fn ctl_decode(v: u64, w: u64) -> Insn {
+    let mut d = emu_decode(w);
+    // 1: branch offset bit 11 read from word bit 20 instead of word bit 7.
+    if v == 1_u64 && emu_class(d.op) == CL_B {
+        let fixed = (d.imm & !0x800_u64) | (((w >> 20_u64) & 1_u64) << 11_u64);
+        d.imm = fixed;
+    }
+    // 2: the shift decoder ignores word bit 30, so SRAI reads as SRLI.
+    if v == 2_u64 && d.op == OP_SRAI { d.op = OP_SRLI; }
+    // 3: 12-bit immediates are zero-extended instead of sign-extended.
+    if v == 3_u64 && emu_class(d.op) == CL_I { d.imm = d.imm & 0xFFF_u64; }
+    // 4: the jump decoder drops offset bits 19 to 12.
+    if v == 4_u64 && d.op == OP_JAL { d.imm = d.imm & !0xFF000_u64; }
+    d
+}
+
+fn ctl_writes(op: u64) -> bool {
+    let c = emu_class(op);
+    (c == CL_U || c == CL_J || c == CL_I || c == CL_R) && op != OP_FENCE
+}
+
+// One step of variant v.
+fn step_v(v: u64, m: &mut Machine, x: &mut [u64], ram: &mut [u8], out: &mut [u8]) -> i64 {
+    if v == 0_u64 { return emu_step(m, x, ram, out); }
+    let rc0 = emu_fetch_check(m, ram);
+    if rc0 != EMU_OK { return rc0; }
+    let mut d = ctl_decode(v, emu_peek(ram, m.pc, 4_u64));
+    // 5: register 0 is an ordinary register, so a write to it lands.
+    if v == 5_u64 && d.rd == 0_u64 && ctl_writes(d.op) {
+        let keep = x[1];
+        d.rd = 1_u64;
+        let rc5 = emu_exec(m, x, ram, out, &d);
+        if rc5 == EMU_OK { x[0] = x[1]; }
+        x[1] = keep;
+        return rc5;
+    }
+    let rc = emu_exec(m, x, ram, out, &d);
+    // 6: ADDIW leaves the upper 32 bits clear instead of copying bit 31.
+    if v == 6_u64 && rc == EMU_OK && d.op == OP_ADDIW && d.rd != 0_u64 {
+        x[d.rd as usize] = x[d.rd as usize] & 0xFFFFFFFF_u64;
+    }
+    rc
+}

@@ -1,0 +1,3 @@
+replay image=tests/mulatomic.img bytes=200 ram=256 steps=100 interval=1000
+  step 100 hash=9de954947c4d6323
+  runs agree at 1 of 1 checkpoints

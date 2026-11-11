@@ -1,0 +1,147 @@
+// Reference model for the system profile of emu-rv64, third part: memory
+// access, the instructions and the step. Built a different way from
+// sys4.bld and sys5.bld on purpose:
+//   - every byte of an access is translated by itself, so the model has no
+//     notion of the two parts of an access that crosses a page;
+//   - a byte is read or written at its own physical address, one per turn;
+//   - the privileged instructions are matched as rows of mask and value.
+// Nothing outside the checks calls this file.
+
+// The outcome of the checks of an access: cause 0, or the exception code
+// and the trap value.
+struct SrefAcc { cause: u64, tval: u64 }
+
+// Translates the n bytes at va into pa[0] to pa[n - 1] and checks where
+// they lie: one byte of the serial device, n neighbouring bytes of one
+// timer register, or n bytes of memory.
+fn sref_reach(c: &[u64], ram: &[u8], va: u64, n: u64, acc: u64, pa: &mut [u64]) -> SrefAcc {
+    let mut k: u64 = 0_u64;
+    while k < n {
+        let t = sref_xlate(c, ram, ref_add(va, k), acc);
+        if t.cause != 0_u64 { return SrefAcc { cause: t.cause, tval: ref_add(va, k) }; }
+        pa[k as usize] = t.pa;
+        k = k + 1_u64;
+    }
+    if n == 1_u64 && ref_uart_ok(pa[0], 1_u64) { return SrefAcc { cause: 0_u64, tval: 0_u64 }; }
+    let first = ref_timer_slot(pa[0]);
+    let mut timer = first != 0_u64;
+    k = 0_u64;
+    while k < n {
+        let s = ref_timer_slot(pa[k as usize]);
+        if s != first + k || (s > 8_u64) != (first > 8_u64) { timer = false; }
+        k = k + 1_u64;
+    }
+    if timer { return SrefAcc { cause: 0_u64, tval: 0_u64 }; }
+    k = 0_u64;
+    while k < n {
+        if !ref_ram_ok(ram.len() as u64, pa[k as usize], 1_u64) {
+            return SrefAcc { cause: sref_fault(acc, false), tval: ref_add(va, k) };
+        }
+        k = k + 1_u64;
+    }
+    SrefAcc { cause: 0_u64, tval: 0_u64 }
+}
+
+// Reads the n bytes at pa[0] to pa[n - 1], the first into bits 7 to 0.
+fn sref_rd(c: &[u64], ram: &[u8], pa: &[u64], n: u64) -> u64 {
+    let mut val: u64 = 0_u64;
+    let mut k: u64 = 0_u64;
+    while k < n {
+        let at = pa[k as usize];
+        let slot = ref_timer_slot(at);
+        let mut b: u64 = 0_u64;
+        if ref_uart_ok(at, 1_u64) {
+            if at == 0x10000005_u64 { b = 0x60_u64; }
+        } else {
+            if slot > 8_u64 { b = ref_put(0_u64, 0_u64, c[RC_TIME], 8_u64 * (slot - 9_u64), 8_u64); }
+            if slot >= 1_u64 && slot <= 8_u64 { b = ref_put(0_u64, 0_u64, c[RC_CMP], 8_u64 * (slot - 1_u64), 8_u64); }
+            if slot == 0_u64 { b = ram[(at - 0x80000000_u64) as usize] as u64; }
+        }
+        val = val | (b << (8_u64 * k));
+        k = k + 1_u64;
+    }
+    val
+}
+
+// Writes the low n bytes of v. Returns -4 and changes nothing when the
+// byte goes to the serial device and `out` is full.
+fn sref_wr(m: &mut Machine, c: &mut [u64], ram: &mut [u8], out: &mut [u8], pa: &[u64], n: u64, v: u64) -> i64 {
+    let mut k: u64 = 0_u64;
+    while k < n {
+        let at = pa[k as usize];
+        let slot = ref_timer_slot(at);
+        if ref_uart_ok(at, 1_u64) {
+            if at == 0x10000000_u64 {
+                if m.out_len >= out.len() as u64 { return -4; }
+                out[m.out_len as usize] = ref_low(v, 8_u64) as u8;
+                m.out_len = m.out_len + 1_u64;
+            }
+        } else {
+            if slot > 8_u64 { c[RC_TIME] = ref_byte_set(c[RC_TIME], slot - 9_u64, v, k); }
+            if slot >= 1_u64 && slot <= 8_u64 { c[RC_CMP] = ref_byte_set(c[RC_CMP], slot - 1_u64, v, k); }
+            if slot == 0_u64 { ram[(at - 0x80000000_u64) as usize] = ref_low(ref_shift(v, 8_u64 * k, 1_u64), 8_u64) as u8; }
+        }
+        k = k + 1_u64;
+    }
+    0
+}
+
+// A load or store word; op is 11 to 21.
+fn sref_mem(m: &mut Machine, x: &mut [u64], ram: &mut [u8], out: &mut [u8], c: &mut [u64], w: u64, op: u64) -> i64 {
+    let n = ref_width(op);
+    let va = ref_reach(x, w, op);
+    let rd = ref_put(0_u64, 0_u64, w, 7_u64, 5_u64);
+    let mut pa: [u64; 8] = [0_u64; 8];
+    let mut acc: u64 = 1_u64;
+    if op >= 18_u64 { acc = 2_u64; }
+    let r = sref_reach(c, ram, va, n, acc, &mut pa);
+    if r.cause != 0_u64 { return sref_trap(m, c, r.cause, r.tval, 0_u64); }
+    if op >= 18_u64 {
+        let b = x[ref_put(0_u64, 0_u64, w, 20_u64, 5_u64) as usize];
+        if sref_wr(m, c, ram, out, &pa, n, b) != 0 { return -4; }
+    } else {
+        let mut val = sref_rd(c, ram, &pa, n);
+        if op <= 13_u64 { val = ref_fill(val, 8_u64 * n, ref_bit(val, 8_u64 * n - 1_u64)); }
+        if rd != 0_u64 { x[rd as usize] = val; }
+    }
+    m.pc = ref_add(m.pc, 4_u64);
+    m.steps = ref_add(m.steps, 1_u64);
+    0
+}
+
+// An atomic word; op is 74 to 95. Alignment first, then the access as a
+// load for LR and as a store for the others, then the effect. The
+// reservation holds the physical address of the first byte.
+fn sref_atomic(m: &mut Machine, x: &mut [u64], ram: &mut [u8], out: &mut [u8], c: &mut [u64], w: u64, op: u64) -> i64 {
+    let wide = op >= 85_u64;
+    let mut n: u64 = 4_u64;
+    let mut k = op - 73_u64;
+    if wide { n = 8_u64; k = op - 84_u64; }
+    let rd = ref_put(0_u64, 0_u64, w, 7_u64, 5_u64);
+    let va = x[ref_put(0_u64, 0_u64, w, 15_u64, 5_u64) as usize];
+    let mut b = x[ref_put(0_u64, 0_u64, w, 20_u64, 5_u64) as usize];
+    let mut off = ref_bit(va, 0_u64) | ref_bit(va, 1_u64);
+    if wide { off = off | ref_bit(va, 2_u64); }
+    let mut acc: u64 = 2_u64;
+    if k == 1_u64 { acc = 1_u64; }
+    if off == 1_u64 { return sref_trap(m, c, 2_u64 + 2_u64 * acc, va, 0_u64); }
+    let mut pa: [u64; 8] = [0_u64; 8];
+    let r = sref_reach(c, ram, va, n, acc, &mut pa);
+    if r.cause != 0_u64 { return sref_trap(m, c, r.cause, r.tval, 0_u64); }
+    let mut old = sref_rd(c, ram, &pa, n);
+    if !wide { old = ref_w(old); b = ref_w(b); }
+    let mut val = old;
+    if k == 1_u64 { c[RC_RES] = n; c[RC_RADDR] = pa[0]; }
+    if k == 2_u64 {
+        let held = c[RC_RES] == n && c[RC_RADDR] == pa[0];
+        c[RC_RES] = 0_u64;
+        c[RC_RADDR] = 0_u64;
+        val = 1_u64;
+        if held { sref_wr(m, c, ram, out, &pa, n, b); val = 0_u64; }
+    }
+    if k >= 3_u64 { sref_wr(m, c, ram, out, &pa, n, ref_amo(k, wide, old, b)); }
+    if rd != 0_u64 { x[rd as usize] = val; }
+    m.pc = ref_add(m.pc, 4_u64);
+    m.steps = ref_add(m.steps, 1_u64);
+    0
+}

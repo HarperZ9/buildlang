@@ -1,0 +1,12 @@
+replay image=tests/timer.img bytes=88 ram=256 steps=10000 interval=1000
+  step 1000 hash=3da57ed236ce90af
+  step 2000 hash=ccd553a2669cfd76
+  step 3000 hash=3bf14c85aa7b48e9
+  step 4000 hash=71e7c54af21f91e4
+  step 5000 hash=6de0c384d48cd6ab
+  step 6000 hash=43af9c4848739f0d
+  step 7000 hash=86ad2b20cec40eb6
+  step 8000 hash=aeab517475912730
+  step 9000 hash=af87ab7378e9420f
+  step 10000 hash=f1b4f1df12342aae
+  runs agree at 10 of 10 checkpoints

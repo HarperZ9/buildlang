@@ -1,0 +1,3 @@
+run image=tests/mulatomic.img bytes=200 ram=256 steps=100
+  interrupts=0 retired=100 traps=0 pc=80000078 mtime=100 serial_len=1
+  hash=9de954947c4d6323

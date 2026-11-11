@@ -1,0 +1,57 @@
+// emu-rv64: constants of the system profile checks. abi.bld holds the
+// constants of the core.
+
+// Planted-defect variants of the system profile: 38 to 57. sctl.bld lists
+// them.
+const SCTL_FIRST: u64 = 38_u64;
+const SCTL_LAST: u64 = 57_u64;
+const SC_CANON: u64 = 38_u64;
+const SC_SUPER: u64 = 39_u64;
+const SC_UBIT: u64 = 40_u64;
+const SC_SUM: u64 = 41_u64;
+const SC_MXR: u64 = 42_u64;
+const SC_WONLY: u64 = 43_u64;
+const SC_TWO: u64 = 44_u64;
+const SC_FOUR: u64 = 45_u64;
+const SC_ABIT: u64 = 46_u64;
+const SC_DBIT: u64 = 47_u64;
+const SC_MPRV: u64 = 48_u64;
+const SC_DELEG: u64 = 49_u64;
+const SC_SRET: u64 = 50_u64;
+const SC_TSR: u64 = 51_u64;
+const SC_TVM: u64 = 52_u64;
+const SC_TW: u64 = 53_u64;
+const SC_SIE: u64 = 54_u64;
+const SC_SSTATUS: u64 = 55_u64;
+const SC_SATP: u64 = 56_u64;
+const SC_CAUSE: u64 = 57_u64;
+
+// Reference model of the system profile: slots of its array, after the 13
+// slots of the older model files (RC_MIE to RC_RADDR in abi.bld). Each
+// field of mstatus has a slot of its own. The array has 34 slots.
+const RS_SIE: usize = 13;
+const RS_SPIE: usize = 14;
+const RS_SPP: usize = 15;
+const RS_MPP: usize = 16;
+const RS_MPRV: usize = 17;
+const RS_SUM: usize = 18;
+const RS_MXR: usize = 19;
+const RS_TVM: usize = 20;
+const RS_TW: usize = 21;
+const RS_TSR: usize = 22;
+const RS_PRV: usize = 23;
+const RS_MEDELEG: usize = 24;
+const RS_MIDELEG: usize = 25;
+const RS_STVEC: usize = 26;
+const RS_SSCRATCH: usize = 27;
+const RS_SEPC: usize = 28;
+const RS_SCAUSE: usize = 29;
+const RS_STVAL: usize = 30;
+const RS_SATP: usize = 31;
+const RS_MENV: usize = 32;
+const RS_SENV: usize = 33;
+const RS_COUNT: usize = 34;
+
+// Differential fuzz of the system profile: bytes of memory per machine,
+// eight pages.
+const SZ_RAM: u64 = 32768_u64;

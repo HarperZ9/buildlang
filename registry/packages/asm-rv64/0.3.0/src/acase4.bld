@@ -1,0 +1,125 @@
+// Hand cases of asm-rv64, fourth part: statements the assembler must
+// refuse. Each gives exactly one error, on line 1, and no word.
+
+// Unknown mnemonics, bad registers and immediates one past each range.
+fn ac_refuse_a(st: &mut AcSt) ~ Console {
+    ac_e(st, "foo x1, x2, x3", AE_MNEMONIC);
+    ac_e(st, "ADD x1, x2, x3", AE_MNEMONIC);
+    ac_e(st, "addq x1, x2, x3", AE_MNEMONIC);
+    ac_e(st, "nop", AE_MNEMONIC);
+    ac_e(st, ", x1", AE_MNEMONIC);
+    ac_e(st, "add x1, x2, x32", AE_REG);
+    ac_e(st, "add x1, y2, x3", AE_REG);
+    ac_e(st, "add x1, x02, x3", AE_REG);
+    ac_e(st, "add x1, 5, x3", AE_REG);
+    ac_e(st, "add x1, x2, x", AE_REG);
+    ac_e(st, "add X1, x2, x3", AE_REG);
+    ac_e(st, "add a0, x2, x3", AE_REG);
+    ac_e(st, "lb x1, 0(y2)", AE_REG);
+    ac_e(st, "sb x1, 0(x32)", AE_REG);
+    ac_e(st, "addi x1, x2, 2048", AE_RANGE);
+    ac_e(st, "addi x1, x2, -2049", AE_RANGE);
+    ac_e(st, "addi x1, x2, 0xFFF", AE_RANGE);
+    ac_e(st, "addi x1, x2, 0xFFFFFFFFFFFFFFFF", AE_RANGE);
+    ac_e(st, "andi x1, x2, 4095", AE_RANGE);
+    ac_e(st, "addiw x1, x2, 2048", AE_RANGE);
+    ac_e(st, "slli x1, x2, 64", AE_RANGE);
+    ac_e(st, "srai x1, x2, -1", AE_RANGE);
+    ac_e(st, "slliw x1, x2, 32", AE_RANGE);
+    ac_e(st, "sraiw x1, x2, 32", AE_RANGE);
+    ac_e(st, "lui x1, 0x100000", AE_RANGE);
+    ac_e(st, "lui x1, -1", AE_RANGE);
+    ac_e(st, "auipc x1, 1048576", AE_RANGE);
+    ac_e(st, "lb x1, 2048(x2)", AE_RANGE);
+    ac_e(st, "ld x1, -2049(x2)", AE_RANGE);
+    ac_e(st, "sb x1, 2048(x2)", AE_RANGE);
+    ac_e(st, "sd x1, -2049(x2)", AE_RANGE);
+    ac_e(st, "jalr x1, 2048(x2)", AE_RANGE);
+    ac_e(st, "csrrwi x1, mscratch, 32", AE_RANGE);
+    ac_e(st, "csrrci x1, mscratch, -1", AE_RANGE);
+    ac_e(st, "csrrw x1, 4096, x2", AE_RANGE);
+    ac_e(st, "csrrw x1, -1, x2", AE_RANGE);
+    ac_e(st, "fence x0, x0, 4096", AE_RANGE);
+    ac_e(st, ".word 0x100000000", AE_RANGE);
+    ac_e(st, ".word -1", AE_RANGE);
+}
+
+// Branch and jump targets, labels, operand counts and trailing text.
+fn ac_refuse_b(st: &mut AcSt) ~ Console {
+    ac_e(st, "beq x1, x2, 3", AE_ALIGN);
+    ac_e(st, "beq x1, x2, -1", AE_ALIGN);
+    ac_e(st, "beq x1, x2, 4097", AE_ALIGN);
+    ac_e(st, "jal x1, 1", AE_ALIGN);
+    ac_e(st, "jal x1, -1048577", AE_ALIGN);
+    ac_e(st, "beq x1, x2, 4096", AE_FAR);
+    ac_e(st, "bgeu x1, x2, -4098", AE_FAR);
+    ac_e(st, "jal x1, 1048576", AE_FAR);
+    ac_e(st, "jal x1, -1048578", AE_FAR);
+    ac_e(st, "beq x1, x2, nowhere", AE_UNDEF);
+    ac_e(st, "jal x0, nowhere", AE_UNDEF);
+    ac_e(st, "here: jal x0, Here", AE_UNDEF);
+    ac_e(st, "beq x1, x2, a.b", AE_LABEL);
+    ac_e(st, "jal x0, (x1)", AE_LABEL);
+    ac_e(st, "1abc: ecall", AE_LABEL);
+    ac_e(st, "a.b: ecall", AE_LABEL);
+    ac_e(st, ": ecall", AE_LABEL);
+    ac_e(st, "a2345678901234567890123456789012: ecall", AE_LABEL);
+    ac_e(st, "add x1, x2", AE_COUNT);
+    ac_e(st, "add x1, x2, x3, x4", AE_COUNT);
+    ac_e(st, "add", AE_COUNT);
+    ac_e(st, "ecall x1", AE_COUNT);
+    ac_e(st, "mret 0", AE_COUNT);
+    ac_e(st, "lb x1", AE_COUNT);
+    ac_e(st, "lb x1, 0, x2", AE_COUNT);
+    ac_e(st, "jal x1", AE_COUNT);
+    ac_e(st, "jal x1, x2, 8", AE_COUNT);
+    ac_e(st, "lui x1, x2, 5", AE_COUNT);
+    ac_e(st, "csrrw x1, mscratch", AE_COUNT);
+    ac_e(st, ".word", AE_COUNT);
+    ac_e(st, ".word 1, 2", AE_COUNT);
+    ac_e(st, ".org", AE_COUNT);
+    ac_e(st, "add x1, x2, x3 x4", AE_TRAIL);
+    ac_e(st, "add x1 x2, x3, x4", AE_TRAIL);
+    ac_e(st, "addi x1, x2, 5 6", AE_TRAIL);
+    ac_e(st, "lb x1, 0(x2) x3", AE_TRAIL);
+    ac_e(st, "beq x1, x2, 8 8", AE_TRAIL);
+    ac_e(st, "jal x0, lab el", AE_TRAIL);
+    ac_e(st, "csrrw x1, mscratch x, x2", AE_TRAIL);
+    ac_e(st, ".word 1 2", AE_TRAIL);
+    ac_e(st, "ecall ecall", AE_COUNT);
+}
+
+// Numbers, imm(rs1), CSR names, directives and empty operands.
+fn ac_refuse_c(st: &mut AcSt) ~ Console {
+    ac_e(st, "addi x1, x2, 0x", AE_NUMBER);
+    ac_e(st, "addi x1, x2, 12a", AE_NUMBER);
+    ac_e(st, "addi x1, x2, 0xg", AE_NUMBER);
+    ac_e(st, "addi x1, x2, --1", AE_NUMBER);
+    ac_e(st, "addi x1, x2, -", AE_NUMBER);
+    ac_e(st, "addi x1, x2, x3", AE_NUMBER);
+    ac_e(st, "addi x1, x2, 1.5", AE_NUMBER);
+    ac_e(st, "addi x1, x2, 0X10", AE_NUMBER);
+    ac_e(st, "addi x1, x2, 18446744073709551616", AE_NUMBER);
+    ac_e(st, "addi x1, x2, 0x10000000000000000", AE_NUMBER);
+    ac_e(st, "beq x1, x2, 8x", AE_NUMBER);
+    ac_e(st, "lb x1, 12a(x2)", AE_NUMBER);
+    ac_e(st, "lb x1, x2", AE_MEM);
+    ac_e(st, "lb x1, 8", AE_MEM);
+    ac_e(st, "lb x1, (x2)", AE_MEM);
+    ac_e(st, "lb x1, 0(x2", AE_MEM);
+    ac_e(st, "sb x1, 0 x2)", AE_MEM);
+    ac_e(st, "jalr x1, x2", AE_MEM);
+    ac_e(st, "csrrw x1, mfoo, x2", AE_CSR);
+    ac_e(st, "csrrw x1, MSTATUS, x2", AE_CSR);
+    ac_e(st, "csrrs x1, hstatus, x0", AE_CSR);
+    ac_e(st, ".byte 1", AE_DIRECTIVE);
+    ac_e(st, ".zero 4", AE_DIRECTIVE);
+    ac_e(st, ".", AE_DIRECTIVE);
+    ac_e(st, "add x1, , x3", AE_EMPTY);
+    ac_e(st, "add x1, x2,", AE_EMPTY);
+    ac_e(st, "lui , 5", AE_EMPTY);
+    ac_e(st, ".org 2", AE_ORG);
+    ac_e(st, ".org -4", AE_ORG);
+    ac_e(st, ".org 0x10004", AE_BIG);
+    ac_e(st, ".org x1", AE_NUMBER);
+}

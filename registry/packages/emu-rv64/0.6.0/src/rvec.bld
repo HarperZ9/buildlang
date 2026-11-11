@@ -1,0 +1,192 @@
+// Hand-computed cases for the image loader, the start state, the state hash
+// and the checkpoint compare of emu-rv64. Cases 1 to 11 are here, 12 to 19
+// in rvec2.bld, and the cases that run an image in rvec3.bld.
+//
+// Every expected value was worked out before the run. Bytes are written
+// least significant first, so the image bytes 73 00 20 30 are the word
+// 0x30200073 (MRET), and the two bytes EF BE followed by zeros are the word
+// 0x0000BEEF.
+
+// v: the variant under test. fail: number of the first failing case, or 0.
+// bad: bit k is set when case k failed.
+struct RSt { v: u64, show: bool, fail: u64, count: u64, bad: u64 }
+
+fn rv_note(st: &mut RSt, k: u64, ok: bool, what: str) ~ Console {
+    st.count = st.count + 1_u64;
+    if !ok {
+        if st.fail == 0_u64 { st.fail = k; }
+        st.bad = st.bad | (1_u64 << k);
+    }
+    if st.show { println!("rcase {} {}: pass={}", k, what, ok); }
+}
+
+fn rv_fill(ram: &mut [u8], b: u8) {
+    let mut i: usize = 0;
+    while i < ram.len() {
+        ram[i] = b;
+        i = i + 1;
+    }
+}
+
+// True when ram[from] to ram[to - 1] all hold b.
+fn rv_all(ram: &[u8], from: usize, to: usize, b: u8) -> bool {
+    let mut i = from;
+    while i < to {
+        if ram[i] != b { return false; }
+        i = i + 1;
+    }
+    true
+}
+
+// True when the first n bytes of the two slices are equal.
+fn rv_eq(a: &[u8], b: &[u8], n: usize) -> bool {
+    let mut i: usize = 0;
+    while i < n {
+        if a[i] != b[i] { return false; }
+        i = i + 1;
+    }
+    true
+}
+
+// The six bytes 73 00 20 30 EF BE.
+fn rv_six(img: &mut [u8]) {
+    img[0] = 0x73_u8;
+    img[1] = 0x00_u8;
+    img[2] = 0x20_u8;
+    img[3] = 0x30_u8;
+    img[4] = 0xEF_u8;
+    img[5] = 0xBE_u8;
+}
+
+// Cases 1 to 3: byte order, zero fill, and a final word cut short.
+fn rv_order(st: &mut RSt) ~ Console {
+    let mut img: [u8; 8] = [0_u8; 8];
+    let mut ram: [u8; 16] = [0_u8; 16];
+    rv_six(&mut img);
+    rv_fill(&mut ram, 0xAA_u8);
+    let rc = rctl_load(st.v, &img, 4, &mut ram);
+    let w = emu_peek(&ram, V_B, 4_u64);
+    rv_note(st, 1_u64, rc == IMG_OK && ram[0] == 0x73_u8 && ram[3] == 0x30_u8 && w == 0x30200073_u64,
+            format!("bytes 73 00 20 30 read as the word {:08x}", w));
+    rv_note(st, 2_u64, rv_all(&ram, 4, 16, 0_u8), "4 bytes into 16 that held AA: bytes 4 to 15 are zero");
+    rv_fill(&mut ram, 0xAA_u8);
+    let rc6 = rctl_load(st.v, &img, 6, &mut ram);
+    let w6 = emu_peek(&ram, V_B + 4_u64, 4_u64);
+    let d6 = emu_peek(&ram, V_B, 8_u64);
+    rv_note(st, 3_u64, rc6 == IMG_OK && w6 == 0xBEEF_u64 && d6 == 0x0000BEEF30200073_u64,
+            format!("6 bytes: the short second word reads {:08x}", w6));
+}
+
+// Cases 4 to 6: the last legal size, one byte over, and empty.
+fn rv_sizes(st: &mut RSt) ~ Console {
+    let mut img: [u8; 17] = [0_u8; 17];
+    let mut ram: [u8; 16] = [0_u8; 16];
+    let mut i: usize = 0;
+    while i < 17 {
+        img[i] = (i + 1) as u8;
+        i = i + 1;
+    }
+    rv_fill(&mut ram, 0xAA_u8);
+    let rc3 = rctl_load(st.v, &img, 16, &mut ram);
+    rv_note(st, 4_u64, rc3 == IMG_OK && rv_eq(&img, &ram, 16) && ram[15] == 16_u8,
+            format!("16 bytes into 16: code {} and the last byte is {}", rc3, ram[15] as u64));
+    rv_fill(&mut ram, 0xAA_u8);
+    let rc4 = rctl_load(st.v, &img, 17, &mut ram);
+    rv_note(st, 5_u64, rc4 == IMG_BIG && rv_all(&ram, 0, 16, 0xAA_u8),
+            format!("17 bytes into 16: code {} and memory unchanged", rc4));
+    let rc5 = rctl_load(st.v, &img, 0, &mut ram);
+    rv_note(st, 6_u64, rc5 == IMG_EMPTY && rv_all(&ram, 0, 16, 0xAA_u8),
+            format!("0 bytes: code {} and memory unchanged", rc5));
+}
+
+// Cases 7 and 8: a second load over a first, and a full read back.
+fn rv_again(st: &mut RSt) ~ Console {
+    let mut img: [u8; 256] = [0xFF_u8; 256];
+    let mut ram: [u8; 16] = [0_u8; 16];
+    let mut big: [u8; 256] = [0_u8; 256];
+    rctl_load(st.v, &img, 8, &mut ram);
+    img[0] = 0x11_u8;
+    img[1] = 0x22_u8;
+    let rc = rctl_load(st.v, &img, 2, &mut ram);
+    rv_note(st, 7_u64, rc == IMG_OK && ram[0] == 0x11_u8 && ram[1] == 0x22_u8 && rv_all(&ram, 2, 16, 0_u8),
+            "8 bytes FF, then 2 bytes: bytes 2 to 15 are zero");
+    let mut i: usize = 0;
+    while i < 256 {
+        img[i] = ((i as u64) ^ 0x5A_u64) as u8;
+        i = i + 1;
+    }
+    rv_fill(&mut big, 0xAA_u8);
+    let rc8 = rctl_load(st.v, &img, 256, &mut big);
+    rv_note(st, 8_u64, rc8 == IMG_OK && rv_eq(&img, &big, 256), "256 bytes into 256 read back equal");
+}
+
+fn rv_machine_reset(m: &Machine) -> bool {
+    let a = m.pc == V_B && m.steps == 0_u64 && m.out_len == 0_u64 && m.traps == 0_u64;
+    let b = m.profile == EMU_PROFILE_TRAP && m.mstatus == 0x1800_u64 && m.mtvec == 0_u64 && m.mepc == 0_u64;
+    let c = m.mcause == 0_u64 && m.mtval == 0_u64 && m.mie == 0_u64 && m.mip == 0_u64 && m.mscratch == 0_u64;
+    a && b && c && m.mtime == 0_u64 && m.mtimecmp == V_ONES
+}
+
+// The start state of run nth after a state in which every part held
+// something else.
+fn rv_boot_ok(v: u64, nth: u64) -> bool {
+    let mut img: [u8; 8] = [0_u8; 8];
+    let mut ram: [u8; 16] = [0xAA_u8; 16];
+    let mut x: [u64; 32] = [7_u64; 32];
+    let mut out: [u8; 8] = [0x55_u8; 8];
+    rv_six(&mut img);
+    let mut m = emu_new();
+    m.pc = 1_u64;
+    m.steps = 2_u64;
+    m.out_len = 3_u64;
+    m.traps = 9_u64;
+    m.mstatus = 0x1888_u64;
+    m.mtvec = 4_u64;
+    m.mepc = 8_u64;
+    m.mcause = 11_u64;
+    m.mtval = 12_u64;
+    m.mie = 0x80_u64;
+    m.mip = 8_u64;
+    m.mscratch = 13_u64;
+    m.mtime = 77_u64;
+    m.mtimecmp = 5_u64;
+    let mut t = Tape { sent: 4_u64, dig: 1_u64, irqs: 5_u64 };
+    let rc = rctl_boot(v, nth, &img, 6, &mut m, &mut x, &mut ram, &mut out, &mut t);
+    let mut xz = true;
+    let mut i: usize = 0;
+    while i < 32 {
+        if x[i] != 0_u64 { xz = false; }
+        i = i + 1;
+    }
+    let tz = t.sent == 0_u64 && t.irqs == 0_u64 && t.dig == FNV_BASIS;
+    rc == IMG_OK && rv_machine_reset(&m) && xz && tz && rv_all(&out, 0, 8, 0_u8) && ram[5] == 0xBE_u8
+}
+
+// FNV-1a of the first n bytes.
+fn rv_fnv(b: &[u8], n: usize) -> u64 {
+    let mut h = FNV_BASIS;
+    let mut i: usize = 0;
+    while i < n {
+        h = fnv_byte(h, b[i] as u64);
+        i = i + 1;
+    }
+    h
+}
+
+// Cases 9 to 11: the start state of both runs, and three FNV-1a values.
+fn rv_reset(st: &mut RSt) ~ Console {
+    rv_note(st, 9_u64, rv_boot_ok(st.v, 0_u64), "first run: machine, registers, output and tape are reset");
+    rv_note(st, 10_u64, rv_boot_ok(st.v, 1_u64), "second run: the same start state");
+    let mut s: [u8; 6] = [0_u8; 6];
+    s[0] = 0x66_u8;
+    s[1] = 0x6F_u8;
+    s[2] = 0x6F_u8;
+    s[3] = 0x62_u8;
+    s[4] = 0x61_u8;
+    s[5] = 0x72_u8;
+    let e = rv_fnv(&s, 0);
+    let f = rv_fnv(&s, 6);
+    let a = fnv_byte(FNV_BASIS, 0x61_u64);
+    let ok = e == 0xCBF29CE484222325_u64 && a == 0xAF63DC4C8601EC8C_u64 && f == 0x85944171F73967E8_u64;
+    rv_note(st, 11_u64, ok, format!("FNV-1a: empty {:016x}, a {:016x}, foobar {:016x}", e, a, f));
+}

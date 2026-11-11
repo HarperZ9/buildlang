@@ -1,0 +1,5 @@
+run image=tests/sv39.img bytes=4132 ram=65536 steps=200
+  interrupts=0 retired=198 traps=2 pc=80000100 mtime=200 serial_len=0
+  mode=1 satp=8000000000080002 scause=d stval=80006018 sepc=8000101c
+  x10=2a x11=7 x12=7 x13=80006018 x14=2a x15=80006018 x16=d x17=8000101c
+  hash=e15fb2f971dfeb00
