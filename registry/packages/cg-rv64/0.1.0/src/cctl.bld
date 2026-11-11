@@ -1,0 +1,39 @@
+// cg-rv64: the list of planted defects. Each is one wrong decision
+// inside the generator, taken only when its number is passed in; number
+// 0 is the generator itself and there is no second copy of its code.
+// tests/controls.txt says which check refuses each one.
+
+fn cx_control_name(v: u64) -> str {
+    if v == CGC_SEXT { return "a signed value narrower than 64 bits is extended with zeros"; }
+    if v == CGC_UCMP { return "unsigned values are compared as signed"; }
+    if v == CGC_BOUNDS { return "an array or slice index is not checked against the length"; }
+    if v == CGC_FIELD { return "a field read through a pointer takes the offset of the field before it"; }
+    if v == CGC_ARGREG { return "arguments 1 and 2 travel in each other's register"; }
+    if v == CGC_ADDOVF { return "an add that leaves its type does not trap"; }
+    if v == CGC_DIVZERO { return "a zero divisor does not trap"; }
+    if v == CGC_SHMASK { return "every shift count is masked with 63"; }
+    if v == CGC_CAST { return "a cast of a signed value to a wider type fills with zeros"; }
+    if v == CGC_STACKARG { return "a stack argument is read one slot too high"; }
+    if v == CGC_SUBOVF { return "a subtract that leaves its type does not trap"; }
+    if v == CGC_MULOVF { return "a multiply that leaves its type does not trap"; }
+    if v == CGC_STORE8 { return "an indexed store writes eight bytes whatever the element width"; }
+    if v == CGC_UREM { return "a signed remainder is taken as unsigned"; }
+    if v == CGC_RETAGG { return "an aggregate result is copied back for its first 8 bytes only"; }
+    if v == CGC_HEXPAD { return "a hex number is padded with spaces where the format asks for zeros"; }
+    if v == CGC_MINUS { return "a negative decimal number is printed with no minus sign"; }
+    if v == CGC_LE { return "less-or-equal is compiled as less-than"; }
+    if v == CGC_VECOOB { return "a vector index is not checked against the length"; }
+    if v == CGC_WRAP { return "a wrapping subtract takes its operands the wrong way round"; }
+    if v == CGC_DIVOVF { return "the smallest signed value divided by -1 does not trap"; }
+    if v == CGC_SRA { return "a right shift of a signed value fills with zeros"; }
+    "the generator"
+}
+
+fn cx_controls() -> i64 ~ Console {
+    let mut v: u64 = 0_u64;
+    while v <= CGC_COUNT {
+        println!("{} {}", v, cx_control_name(v));
+        v = v + 1_u64;
+    }
+    0
+}

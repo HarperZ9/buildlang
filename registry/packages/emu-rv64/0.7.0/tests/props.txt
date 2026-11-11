@@ -1,0 +1,96 @@
+# kind | what is compared or required
+1 | differential: result code of the step
+2 | differential: pc after the step
+3 | differential: one of the 32 registers
+4 | differential: one byte of memory
+5 | differential: one byte of serial output
+6 | differential: register 0 is 0
+7 | differential: step count and serial output length
+41 | property: decode(encode(i)) equals i for every generated instruction i
+42 | property: for any 32-bit word w, decode(w) is "not RV64I" or encode(decode(w)) equals w
+43 | property: every hand-computed case passes (step is the number of the first failing case)
+# trap profile (commands mfuzz, mprops, mcontrols): kinds 1 to 7 as above, and
+8 | differential: trap count
+11 | differential: mstatus
+12 | differential: mtvec
+13 | differential: mepc
+14 | differential: mcause
+15 | differential: mtval
+16 | differential: mie
+17 | differential: mip
+18 | differential: mscratch
+41 | property: decode(encode(i)) equals i for every generated Zicsr instruction and MRET
+42 | property: for any 32-bit word w with opcode 0x73, decode(w) is "no instruction" or encode(decode(w)) equals w
+43 | property: every hand-computed trap-profile case passes (step is the number of the first failing case)
+# timer and interrupts (commands ifuzz, iprops, icontrols): kinds 1 to 18 as above, and
+19 | differential: mtime
+20 | differential: mtimecmp
+41 | property: as above; the generator now includes WFI
+44 | property: every hand-computed timer and interrupt case passes (step is the number of the first failing case)
+45 | property: a store of 1, 2, 4 or 8 bytes at any offset inside a timer register, then an unsigned load of the same width and offset, reads the stored bytes (for mtime, after the one tick of the store step)
+46 | property: no interrupt is taken that the state before the step did not permit, and the cause is the highest-priority one
+47 | property: an interrupt that the state before the step required is taken
+48 | property: after an interrupt, mepc is the old pc, mtval is 0, MIE is 0 and MPIE is 1
+49 | property: after an interrupt, pc is BASE, or BASE + 4 * cause when the old mtvec had bit 0 set
+50 | property: mtime rises by exactly one in a step that stored nothing
+51 | property: the timer program takes 99 interrupts in 10000 steps and two runs give one state hash
+# image loader and replay (commands rprops, rcontrols): step is the round, one random image per round
+52 | property: after a load into memory that held other bytes, byte i of memory is byte i of the image below the image length and zero from there on (got is the first wrong index, want the image length)
+53 | property: an image of 0 bytes and an image of 257 bytes are refused with the codes 1 and 2, and memory is unchanged
+54 | property: two runs of one image from scratch in the same arrays give equal checkpoint lists (got is the first index that differs)
+55 | property: a run that records no hash before the end reaches the end hash of the run that recorded one at every interval
+56 | property: one flipped bit in one image byte changes the hash of the loaded state
+57 | property: the same flipped bit changes the hash of the end state, unless memory at that byte no longer holds what was loaded in one of the two end states
+58 | property: a change to one part of an end state (0 a register, 1 mtime, 2 another machine field, 3 a memory byte, 4 an output byte, 5 the count of emptied output bytes) changes the hash (got is the part)
+59 | property: a checkpoint list compared with a copy shows no difference, and compared with a copy with one changed entry shows the first difference at that entry (got is the index found, want the index changed)
+# M and A extensions (commands xfuzz, xprops, xcontrols). Kinds 1 to 20 as above, and
+21 | differential: the width of the reservation, 0 for none (also judged by mfuzz and ifuzz since 0.5.0)
+22 | differential: the address of the reservation
+# Kinds 61 to 69 belong to asm-rv64. For kinds 70 to 83 step is the round; each round judges every rule once.
+70 | property: decode(encode(i)) equals i for a generated M or A instruction
+71 | property: a word with the opcode OP, OP-32 or AMO decodes to "no instruction" or encodes back to itself
+72 | property: MUL, MULH and MULHU give the same result with the operands swapped
+73 | property: MUL and MULHU are the two halves of a product worked out by long multiplication on 16-bit digits; MULH and MULHSU are the upper half of the product of the magnitudes, negated at 128 bits when the signs ask for it
+74 | property: with a divisor that is not 0 and no overflow, quotient * divisor + remainder is the dividend, the remainder is smaller in magnitude than the divisor, and a nonzero signed remainder has the sign of the dividend
+75 | property: a divisor of 0 gives a quotient of all ones and the dividend as remainder; the most negative number divided by -1 gives itself and the remainder 0
+76 | property: each 32-bit form equals the sign extension of bits 31 to 0 of the 64-bit form on operands extended from 32 bits
+77 | property: an SC with no LR before it does not store and writes a nonzero value; LR returns memory; the SC after it stores and writes 0; a second SC does not store; an SC to another address than the LR, or of the other width, does not store
+78 | property: an AMO writes the old value of memory to rd and stores the result of its operator, worked out with signed host integers; the two ordering bits change nothing
+79 | property: AMOSWAP twice, the second time with the value the first returned, leaves memory as it was
+80 | property: an atomic instruction at an address that is not a multiple of its width traps with cause 4 (LR) or 6, mtval = the address and mepc = its pc, and changes no register and no memory
+81 | property: an atomic instruction past the end of memory traps with cause 5 (LR) or 7 and mtval = the address, also an SC with no reservation
+82 | property: misa reads 2 in bits 63 and 62 and exactly the bits A, I and M
+83 | property: the state hash changes with the width and with the address of a held reservation, and a state with none hashes as before
+30 | differential, system profile: the privilege mode
+31 | differential, system profile: mstatus, composed by the model from one slot per field
+32 | differential, system profile: mepc, mcause or mtval
+33 | differential, system profile: sepc, scause or stval
+34 | differential, system profile: mie
+35 | differential, system profile: the stored bits of mip
+36 | differential, system profile: medeleg or mideleg
+37 | differential, system profile: satp
+38 | differential, system profile: mtvec, stvec, mscratch or sscratch
+39 | differential, system profile: menvcfg or senvcfg
+90 | property: with satp MODE 0, and in M-mode without MPRV, the translation of a drawn address is the address itself for a fetch, a load and a store
+91 | property: a step that trapped changed no register, no byte of memory, no byte of output, not the reservation, not mtimecmp and no CSR outside the trap registers of the mode that took the trap
+92 | property: the walk reads nothing but the PTEs on its path: with only those copied into a second memory filled with a pattern, the translation gives the same result
+93 | property: an instruction that retired below M-mode with translation on was fetched through a canonical address whose path ends in an aligned leaf with X and A set, and U set exactly when the mode is U
+94 | property: a retired load, store or atomic instruction through translation used a canonical address whose path ends in an aligned leaf with A set, with U as the mode and SUM demand, R (or X under MXR) for a load, W and D for a store
+95 | property: a synchronous trap goes to S-mode exactly when its medeleg bit is set and the machine was not in M-mode, and no trap lowers the mode
+96 | property: in S-mode sstatus reads mstatus and 0x2000C0122, sie reads mie and mideleg, sip reads mip and mideleg
+97 | property: an interrupt is taken exactly when the state before the step permits one, the one taken is permitted, it goes to S-mode exactly when delegated, and none for M-mode is passed over for one for S-mode
+98 | property: a retired MRET, SRET, WFI, SFENCE.VMA or Zicsr word was allowed in its mode under TSR, TW and TVM, and after SRET and MRET the mode, the enable, the stack, MPRV and the pc follow the rule of the return
+99 | property: after every step satp is 0 or MODE 8 with no ASID bit, mstatus holds only writable bits and UXL = SXL = 2 with MPP not 2, the delegation and enable registers hold only bits that exist, the saved pcs are multiples of 4
+100 | property: causes 4, 5 and 13 are taken only by a load or LR, causes 6, 7 and 15 only by a store, SC or AMO
+103 | property: in M-mode no fetch takes a page fault, whatever MPRV holds
+104 | property: a load in S-mode from a drawn execute-only page faults with cause 13 while MXR is clear and reads the data while it is set, and from a drawn user page faults while SUM is clear and reads while it is set
+# serial run (commands zprops, zcontrols). step is the round, one generated program per round. The program has no branch, so its bytes, exit code and step count are known from its layout before it runs.
+110 | property: the run of a generated program is loaded (got is the loader code) and halts
+111 | property: the run takes exactly the steps of the layout: 1, then 2 for each byte, 1, 1 for each arithmetic instruction, and 1 or 2 to load the exit code
+112 | property: the exit code is the code the generator drew
+113 | property: the sink holds as many bytes as the program sends
+114 | property: the sink holds the bytes the generator drew, in order (got is the first wrong index)
+115 | property: a second run in the same memory gives the same state hash, steps, exit code and bytes (got and want are the two hashes)
+116 | property: a run with a limit one below the steps of the program does not halt, takes that many steps, reports exit code 0 and its sink is the bytes of the stores it reached, a prefix of the expected bytes
+117 | property: the same for a limit drawn from 0 to the steps of the program less one; after s steps the program has sent (s - 1) / 2 bytes, at most all of them
+118 | property: a run with a limit equal to the steps of the program halts (got 0 when it did not) with the state hash of the unlimited run (got and want are the two hashes)

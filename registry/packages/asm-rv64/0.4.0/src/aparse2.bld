@@ -1,0 +1,96 @@
+// asm-rv64: the atomic forms, since 0.2.0. The manual writes them
+//     lr.w t0, (a0)
+//     sc.w t0, a2, (a0)
+//     amoswap.w.aq t1, t0, (a0)
+// in its chapter of atomics examples: the destination first, then the
+// source, then the address register in brackets with no offset. The two
+// ordering bits are a suffix of the mnemonic: .aq, .rl or .aqrl.
+
+// A mnemonic split from its ordering suffix. end is the index after the
+// mnemonic proper. bits: bit 1 is aq and bit 0 is rl, as the decoded
+// record of emu-rv64 holds them.
+struct AsOrd { end: usize, bits: u64 }
+
+// True when the word lo to hi ends with the text s and is longer than it.
+fn as_ends(src: &[u8], lo: usize, hi: usize, s: str) -> bool {
+    hi > lo + s.len() && as_is(src, hi - s.len(), hi, s)
+}
+
+fn as_order(src: &[u8], lo: usize, hi: usize) -> AsOrd {
+    if as_ends(src, lo, hi, ".aqrl") { return AsOrd { end: hi - 5, bits: 3_u64 }; }
+    if as_ends(src, lo, hi, ".aq") { return AsOrd { end: hi - 3, bits: 2_u64 }; }
+    if as_ends(src, lo, hi, ".rl") { return AsOrd { end: hi - 3, bits: 1_u64 }; }
+    AsOrd { end: hi, bits: 0_u64 }
+}
+
+// The suffix for ordering bits 0 to 3.
+fn as_order_text(bits: u64) -> str {
+    if bits == 3_u64 { return ".aqrl"; }
+    if bits == 2_u64 { return ".aq"; }
+    if bits == 1_u64 { return ".rl"; }
+    ""
+}
+
+// The operation a mnemonic with ordering bits names: only an atomic
+// mnemonic may carry a suffix. Defect 12 assembles a .w mnemonic as the
+// .d one.
+fn as_op_atomic(v: u64, op: u64, bits: u64) -> u64 {
+    if bits != 0_u64 && emu_class(op) != CL_A { return 0_u64; }
+    if v == ACTL_WIDTH && op >= OP_LR_W && op < OP_LR_D { return op + 11_u64; }
+    op
+}
+
+// The operand (rs1): a register in brackets and nothing else. Defect 13
+// takes the register for an offset and leaves the address register x0.
+fn as_f_addr(st: &mut AsSt, src: &[u8], lo: usize, hi: usize) -> u64 {
+    let a = as_skip(src, lo, hi);
+    if a >= hi || src[a] != 40_u8 {
+        as_fail(st, AE_ADDR);
+        return 0_u64;
+    }
+    let q = as_skip(src, a + 1, hi);
+    let e = as_word_end(src, q, hi);
+    let reg = as_reg_val(src, q, e);
+    if reg > 31_u64 {
+        as_fail(st, AE_REG);
+        return 0_u64;
+    }
+    let c = as_skip(src, e, hi);
+    if c >= hi || src[c] != 41_u8 {
+        as_fail(st, AE_ADDR);
+        return 0_u64;
+    }
+    if as_skip(src, c + 1, hi) != hi { as_fail(st, AE_TRAIL); }
+    if st.v == ACTL_PAREN { return 0_u64; }
+    reg
+}
+
+// lr: rd, (rs1). sc and the AMOs: rd, rs2, (rs1). Defect 11 swaps the two
+// source registers.
+fn as_atomic(st: &mut AsSt, src: &[u8], op: u64, f: &AsFields) -> Insn {
+    let mut d = Insn { op: op, rd: 0_u64, rs1: 0_u64, rs2: 0_u64, imm: 0_u64 };
+    d.rd = as_f_reg(st, src, f.a0, f.b0);
+    if as_kind(op) == AK_LR {
+        d.rs1 = as_f_addr(st, src, f.a1, f.b1);
+        return d;
+    }
+    d.rs2 = as_f_reg(st, src, f.a1, f.b1);
+    d.rs1 = as_f_addr(st, src, f.a2, f.b2);
+    if st.v == ACTL_AMOSWAP {
+        let keep = d.rs1;
+        d.rs1 = d.rs2;
+        d.rs2 = keep;
+    }
+    d
+}
+
+// The operands after rd of an atomic record, as text.
+fn ad_atomic(buf: &mut [u8], at: usize, d: &Insn, style: u64, k: u64) -> usize {
+    let mut p = at;
+    if k == AK_AMO { p = ad_sep(buf, ad_reg(buf, p, d.rs2), style); }
+    p = ad_ch(buf, p, 40_u8);
+    if (style & AD_SPACE) != 0_u64 { p = ad_ch(buf, p, 32_u8); }
+    p = ad_reg(buf, p, d.rs1);
+    if (style & AD_SPACE) != 0_u64 { p = ad_ch(buf, p, 32_u8); }
+    ad_ch(buf, p, 41_u8)
+}

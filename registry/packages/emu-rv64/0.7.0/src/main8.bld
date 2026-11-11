@@ -1,0 +1,97 @@
+// emu-rv64 command line, eighth part: the serial run, since 0.7.0.
+//
+//   emu-rv64 serial IMAGE MAX        run a flat image for at most MAX steps
+//                                    and print the bytes it sent to the
+//                                    serial device, and nothing else
+//   emu-rv64 serial-check IMAGE MAX  run it twice from scratch, print a
+//                                    summary and compare the two runs
+//   emu-rv64 zcases | zprops SEED STEPS | zcontrols   the checks, in zctl.bld
+
+// Reads a file into a vector, at most one byte more than the largest
+// image. Returns the length of the file.
+fn ser_file(path: str, img: &mut Vec<u8>) -> usize ~ FileSystem {
+    let s = read_bytes(path);
+    let b = s.as_bytes();
+    let mut i: usize = 0;
+    while i < s.len() && i <= SER_IMG_MAX {
+        img.push(b[i]);
+        i = i + 1;
+    }
+    s.len()
+}
+
+// Loads the image file. Returns 0, or the exit status after printing why
+// the file was refused, with the messages and codes of `run`.
+fn ser_load(path: str, img: &mut Vec<u8>) -> i64 ~ Console + FileSystem {
+    if !file_exists(path) {
+        println!("error: cannot read image {}", path);
+        return 3;
+    }
+    let len = ser_file(path, img);
+    if len == 0 { return img_refuse(path, len, SER_IMG_MAX, IMG_EMPTY); }
+    if len > SER_IMG_MAX { return img_refuse(path, len, SER_IMG_MAX, IMG_BIG); }
+    0
+}
+
+fn ser_cmd_serial(path: str, max: u64) -> i64 ~ Console + FileSystem {
+    let mut img: Vec<u8> = Vec::new();
+    let rc = ser_load(path, &mut img);
+    if rc != 0 { return rc; }
+    let mut ram = ser_ram(SER_RAM);
+    let mut sink: Vec<u8> = Vec::new();
+    let r = ser_run(&img, img.len(), &mut ram, max, &mut sink);
+    let bad = ser_print(&sink);
+    eprintln!("serial: halted={} code={} steps={} serial_len={} serial_fnv={:016x} hash={:016x}",
+              r.halted, r.code, r.steps, sink.len(), ser_fnv(&sink), r.hash);
+    if bad != 0_u64 { eprintln!("serial: {} bytes outside 1 to 127 were printed as ?", bad); }
+    ser_status(&r, bad)
+}
+
+// Prints the summary of a run and whether a second run agreed with it.
+fn ser_show(r: &SerRun, q: &SerRun, a: &Vec<u8>, b: &Vec<u8>) -> bool ~ Console {
+    println!("  halted={} code={} steps={} serial_len={} serial_fnv={:016x}",
+             r.halted, r.code, r.steps, a.len(), ser_fnv(a));
+    println!("  hash={:016x}", r.hash);
+    let same = r.hash == q.hash && r.steps == q.steps && r.code == q.code
+        && r.halted == q.halted && a.len() == b.len() && ser_fnv(a) == ser_fnv(b);
+    if same {
+        println!("  second run: equal");
+    } else {
+        println!("  SECOND RUN DIFFERS: hash={:016x} steps={} serial_len={}", q.hash, q.steps, b.len());
+    }
+    same
+}
+
+fn ser_cmd_check(path: str, max: u64) -> i64 ~ Console + FileSystem {
+    let mut img: Vec<u8> = Vec::new();
+    let rc = ser_load(path, &mut img);
+    if rc != 0 { return rc; }
+    let mut ram = ser_ram(SER_RAM);
+    let mut a: Vec<u8> = Vec::new();
+    let mut b: Vec<u8> = Vec::new();
+    let r = ser_run(&img, img.len(), &mut ram, max, &mut a);
+    let q = ser_run(&img, img.len(), &mut ram, max, &mut b);
+    println!("serial-check image={} bytes={} ram={} max={}", path, img.len(), SER_RAM, max);
+    let same = ser_show(&r, &q, &a, &b);
+    if same && r.halted { return 0; }
+    1
+}
+
+// Runs a serial command. Returns -1 when the first argument is not one,
+// else the exit status.
+fn serial_main() -> i64 ~ Console + FileSystem + Process + Environment {
+    let cmd = args_get(1);
+    let argc = args_count();
+    if (cmd == "serial" || cmd == "serial-check") && argc >= 4 {
+        let max = args_get(3).parse_int() as u64;
+        if cmd == "serial" { return ser_cmd_serial(args_get(2), max); }
+        return ser_cmd_check(args_get(2), max);
+    }
+    zcheck_main()
+}
+
+// The lines of the usage text for the commands of this file.
+fn serial_usage() ~ Console {
+    println!("       emu-rv64 serial IMAGE MAX | serial-check IMAGE MAX");
+    println!("       emu-rv64 zcases | zcontrols | zprops SEED STEPS");
+}

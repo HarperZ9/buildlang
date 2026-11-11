@@ -1,0 +1,8 @@
+v8 len 21 sum 1470
+v8 sum 1697 first 0
+v64 len 22 xor 8806fa3d7a242ddd last 18054082321272548793
+bytes 5442
+dec -1 255 -32767 3735928559 -9223372036854775807 2
+hex ff deadbeef deadbeef 0000000000000002 0
+pad 05 0abc fedcba9876543210
+bool false true 100% {}

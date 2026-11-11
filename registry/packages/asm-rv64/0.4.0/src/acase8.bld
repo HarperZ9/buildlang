@@ -1,0 +1,87 @@
+// Hand cases of asm-rv64, eighth part: the program tests/mulatomic.s,
+// assembled and then run on the core of emu-rv64. The case holds the
+// statements of that file without its comments. The expected register
+// values were worked out by hand; the working is in the comment at the
+// top of tests/mulatomic.s. No expected word is given here: the case
+// passes when the machine that runs the assembled image ends in the
+// state the working predicts.
+
+// The first half of the program: arithmetic, then the loop.
+fn ac_p_ma_head(b: &mut [u8]) -> usize {
+    let mut n = ac_ln(b, 0, "auipc x5, 0");
+    n = ac_ln(b, n, "addi x5, x5, 0xC0");
+    n = ac_ln(b, n, "lui x6, 0x10000");
+    n = ac_ln(b, n, "addi x10, x0, 12");
+    n = ac_ln(b, n, "addi x11, x0, -7");
+    n = ac_ln(b, n, "mul x12, x10, x11");
+    n = ac_ln(b, n, "addi x13, x0, 5");
+    n = ac_ln(b, n, "div x14, x12, x13");
+    n = ac_ln(b, n, "rem x15, x12, x13");
+    n = ac_ln(b, n, "mulh x7, x12, x12");
+    n = ac_ln(b, n, "divu x8, x13, x0");
+    n = ac_ln(b, n, "sub x14, x0, x14");
+    n = ac_ln(b, n, "sub x15, x0, x15");
+    n = ac_ln(b, n, "jal x0, try");
+    n = ac_ln(b, n, "retry: lr.d x16, (x5)");
+    n = ac_ln(b, n, "try: add x17, x16, x14");
+    n = ac_ln(b, n, "sc.d x18, x17, (x5)");
+    n = ac_ln(b, n, "add x26, x26, x18");
+    n = ac_ln(b, n, "bne x18, x0, retry");
+    n = ac_ln(b, n, "addi x19, x19, 1");
+    n = ac_ln(b, n, "addi x20, x0, 3");
+    ac_ln(b, n, "bne x19, x20, retry")
+}
+
+// The second half: the AMO, the two checks and the data.
+fn ac_p_ma_tail(b: &mut [u8], at: usize) -> usize {
+    let mut n = ac_ln(b, at, "amoadd.d x21, x15, (x5)");
+    n = ac_ln(b, n, "ld x22, 0(x5)");
+    n = ac_ln(b, n, "addi x27, x0, 1052");
+    n = ac_ln(b, n, "bne x22, x27, fail");
+    n = ac_ln(b, n, "addi x28, x0, 1");
+    n = ac_ln(b, n, "bne x26, x28, fail");
+    n = ac_ln(b, n, "addi x29, x0, 80");
+    n = ac_ln(b, n, "sb x29, 0(x6)");
+    n = ac_ln(b, n, "pass: jal x0, pass");
+    n = ac_ln(b, n, "fail: jal x0, fail");
+    n = ac_ln(b, n, ".org 0xC0");
+    n = ac_ln(b, n, "cell: .word 1000");
+    ac_ln(b, n, ".word 0")
+}
+
+// The registers after 100 steps, as the working gives them.
+fn ac_p_ma_regs(x: &[u64]) -> bool {
+    x[5] == 0x800000C0_u64 && x[12] == 0xFFFFFFFFFFFFFFAC_u64 && x[14] == 16_u64 && x[15] == 4_u64 &&
+    x[7] == 0_u64 && x[8] == 0xFFFFFFFFFFFFFFFF_u64 && x[16] == 1032_u64 && x[17] == 1048_u64 &&
+    x[18] == 0_u64 && x[19] == 3_u64 && x[21] == 1048_u64 && x[22] == 1052_u64 && x[26] == 1_u64
+}
+
+// Assembles the program, loads the image at the start of 256 bytes of
+// memory and runs 100 steps in the trap profile.
+fn ac_p_mulatomic(st: &mut AcSt) ~ Console {
+    st.count = st.count + 1_u64;
+    let mut b: [u8; 2048] = [0_u8; 2048];
+    let head = ac_p_ma_head(&mut b);
+    let n = ac_p_ma_tail(&mut b, head);
+    let mut o = as_out_new();
+    let bad = as_assemble(st.v, &b, n, &mut o);
+    let mut m = emu_new_machine();
+    let mut x: [u64; 32] = [0_u64; 32];
+    let mut ram: [u8; 256] = [0_u8; 256];
+    let mut out: [u8; 8] = [0_u8; 8];
+    let mut i: usize = 0;
+    while bad == 0_u64 && i < o.words.len() && i < 64 {
+        emu_poke(&mut ram, EMU_RAM_BASE + 4_u64 * (i as u64), 4_u64, o.words[i]);
+        i = i + 1;
+    }
+    let rc = emu_run(&mut m, &mut x, &mut ram, &mut out, 100_u64);
+    let cell = emu_peek(&ram, 0x800000C0_u64, 8_u64);
+    let mach = rc == EMU_OK && m.steps == 100_u64 && m.traps == 0_u64 && m.pc == 0x80000078_u64 &&
+               m.out_len == 1_u64 && out[0] == 80_u8 && m.res == 0_u64;
+    let ok = bad == 0_u64 && o.count == 50_u64 && mach && cell == 1052_u64 && ac_p_ma_regs(&x);
+    if st.show {
+        println!("acase {} program mulatomic: words={} errors={} retired={} traps={} pc={:08x} cell={} failed_sc={} pass={}",
+                 st.count, o.count, bad, m.steps, m.traps, m.pc, cell, x[26], ok);
+    }
+    if !ok { ac_fail(st); }
+}

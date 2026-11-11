@@ -19,12 +19,12 @@
       }
     },
     "asm-rv64": {
-      "version": "0.3.0",
-      "description": "RV64IMA text assembler grown from the encoder of emu-rv64: one instruction per line, labels, .word and .org, the RV64I user set, Zicsr, MRET, WFI, the M and A extensions and, since 0.3.0, SRET, SFENCE.VMA and the names of the supervisor CSRs, with a renderer for the reverse direction; it holds no bit layout of its own and is checked by hand cases, the hand-assembled words and images of emu-rv64, property rules against that encoder and decoder, and planted controls",
+      "version": "0.4.0",
+      "description": "RV64IMA text assembler grown from the encoder of emu-rv64: one instruction per line, labels, .word and .org, the RV64I user set, Zicsr, MRET, WFI, the M and A extensions and, since 0.3.0, SRET, SFENCE.VMA and the names of the supervisor CSRs, with a renderer for the reverse direction; it holds no bit layout of its own and is checked by hand cases, the hand-assembled words and images of emu-rv64, property rules against that encoder and decoder, and planted controls, and since 0.4.0 large assemblies of up to 1048576 bytes with a command that runs the image on the serial run of emu-rv64",
       "author": "Zain Dana Harper",
       "license": "AGPL-3.0-only",
-      "checksum": "sha256:ae01283cb1d6922f3d9f304de4642a4d028ee7901ee2f04c8cf31025b4373a6b",
-      "path": "packages/asm-rv64/0.3.0",
+      "checksum": "sha256:46783d7b81697b44a81cb3cb1092fc77716b3ca048aab5d426cfedf4c89ed32f",
+      "path": "packages/asm-rv64/0.4.0",
       "versions": {
         "0.1.0": {
           "path": "packages/asm-rv64/0.1.0",
@@ -46,6 +46,13 @@
           "dependencies": {
             "emu-rv64": "=0.6.0"
           }
+        },
+        "0.4.0": {
+          "path": "packages/asm-rv64/0.4.0",
+          "checksum": "sha256:46783d7b81697b44a81cb3cb1092fc77716b3ca048aab5d426cfedf4c89ed32f",
+          "dependencies": {
+            "emu-rv64": "=0.7.0"
+          }
         }
       }
     },
@@ -66,6 +73,23 @@
         }
       }
     },
+    "cg-rv64": {
+      "version": "0.1.0",
+      "description": "RV64IM code generator for BuildLang programs: reads the MIR JSON that buildc mir emit writes and prints assembly text for asm-rv64, with a small runtime in emitted assembly that prints through the serial device of emu-rv64; integer arithmetic with the traps of the hosted C backend, structs, arrays, slices, byte and word vectors, calls and printf with a format fixed at compile time; every construct outside the covered set is refused by name; checked by a differential corpus and a seeded differential fuzz against the hosted build, planted wrong-code controls and committed fixtures",
+      "author": "Zain Dana Harper",
+      "license": "AGPL-3.0-only",
+      "checksum": "sha256:c2c35593782c02e297fa4ace65da600eb5544f5f32cfc0b95e1b6d183ae7f024",
+      "path": "packages/cg-rv64/0.1.0",
+      "versions": {
+        "0.1.0": {
+          "path": "packages/cg-rv64/0.1.0",
+          "checksum": "sha256:c2c35593782c02e297fa4ace65da600eb5544f5f32cfc0b95e1b6d183ae7f024",
+          "dependencies": {
+            "asm-rv64": "=0.4.0"
+          }
+        }
+      }
+    },
     "color": {
       "version": "1.0.0",
       "description": "Colour difference metrics (CIE76, CIE94, CIEDE2000, CMC, HyAB) and sRGB, XYZ, xyY, Lab, LCh, Oklab and Oklch conversions in pure BuildLang",
@@ -82,12 +106,12 @@
       }
     },
     "emu-rv64": {
-      "version": "0.6.0",
-      "description": "RV64IMA machine emulator core with Zicsr, traps, a step-counted timer, interrupts, the M and A extensions on one hart, a flat image loader and a replay check, and since 0.6.0 a system profile with the privilege modes M, S and U, the supervisor CSRs, trap delegation, SRET, SFENCE.VMA and Sv39 virtual memory with no translation cache: decoder, encoder and deterministic step function with flat memory and one serial device, checked by hand cases from oracle scripts outside the package, reference models, differential fuzz, property rules and planted controls",
+      "version": "0.7.0",
+      "description": "RV64IMA machine emulator core with Zicsr, traps, a step-counted timer, interrupts, the M and A extensions on one hart, a flat image loader and a replay check, and since 0.6.0 a system profile with the privilege modes M, S and U, the supervisor CSRs, trap delegation, SRET, SFENCE.VMA and Sv39 virtual memory with no translation cache: decoder, encoder and deterministic step function with flat memory and one serial device, checked by hand cases from oracle scripts outside the package, reference models, differential fuzz, property rules and planted controls, and since 0.7.0 a serial run that keeps the bytes a program sends and stops at a halt word",
       "author": "Zain Dana Harper",
       "license": "AGPL-3.0-only",
-      "checksum": "sha256:617a37a6d9dc491ea4321dccd7507ad547ea49d12cd181bef85ff5bc2356c109",
-      "path": "packages/emu-rv64/0.6.0",
+      "checksum": "sha256:26cb91693ca0ffbfc87620461efbc2be62c0204bdda320c52c731ffc9425195e",
+      "path": "packages/emu-rv64/0.7.0",
       "versions": {
         "0.1.0": {
           "path": "packages/emu-rv64/0.1.0",
@@ -117,6 +141,11 @@
         "0.6.0": {
           "path": "packages/emu-rv64/0.6.0",
           "checksum": "sha256:617a37a6d9dc491ea4321dccd7507ad547ea49d12cd181bef85ff5bc2356c109",
+          "dependencies": {}
+        },
+        "0.7.0": {
+          "path": "packages/emu-rv64/0.7.0",
+          "checksum": "sha256:26cb91693ca0ffbfc87620461efbc2be62c0204bdda320c52c731ffc9425195e",
           "dependencies": {}
         }
       }

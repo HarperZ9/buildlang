@@ -1,0 +1,3 @@
+zprops seed=7 steps=20000
+  accepted, 52 programs, 20383 steps, 10021 bytes sent, 146 arithmetic instructions
+  programs: 35 of more than 128 bytes, 2 of no byte, 39 with a code above 255

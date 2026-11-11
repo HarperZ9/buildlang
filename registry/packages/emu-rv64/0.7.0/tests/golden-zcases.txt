@@ -1,0 +1,25 @@
+case 1 the halt word alone: ok
+case 2 set the code to 42 and halt: ok
+case 3 print OK and a line feed, code 7: ok
+case 4 the run appends to a sink that held 2 bytes: ok
+case 5 the code is x10 and not x11: ok
+case 6 a code above 255 is reported in full: ok
+case 7 the exit status of that run is 120: ok
+case 8 a halt word that is data and never reached: ok
+case 9 a halt word reached by a jump back: ok
+case 10 a store to the status register sends nothing: ok
+case 11 a loop with no halt word stops at the limit of 10 steps: ok
+case 12 exit statuses 124, 42 and 125: ok
+case 13 300 bytes through a buffer of 128: ok
+case 14 the same with a limit of exactly 1204 steps: ok
+case 15 a limit of 1203 steps: all bytes, no halt: ok
+case 16 a limit of 515 steps: the buffer is full, 128 bytes: ok
+case 17 a limit of 516 steps: the buffer was emptied once, 129 bytes: ok
+case 18 an empty image is refused with code 1: ok
+case 19 an image of 8193 bytes for 8192 bytes of memory is refused with code 2: ok
+case 20 a limit of 0 steps runs nothing: ok
+case 21 a limit of 0 steps at the halt word is a halt: ok
+case 22 a trap is a step and does not end the run: ok
+case 23 a run in memory that another run used: ok
+case 24 equal runs give one state hash, a shorter run another: ok
+zcases: 24 run, first failure 0

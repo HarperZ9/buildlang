@@ -1,0 +1,151 @@
+variant 0: the core
+ differential:
+  accepted, 20000 steps in 625 rounds: begun in U=1289 S=6874 M=11837, retired in U=170 S=2146 M=6305
+  through page tables: fetches=1951 data=666  mret=335 sret=451 csr=1853
+  traps by cause: 0=66 1=1056 2=2617 3=316 4=49 5=1575 6=167 7=2006 8=10 9=104 11=210 12=1290 13=455 15=600
+  interrupts by cause: 1=91 3=123 5=93 7=359 9=67 11=125  traps taken in S-mode=4486
+ properties:
+  accepted, 20000 steps of kinds 90 to 104
+ hand cases: 0 of 4331 fail, first failure 0
+ refused by: cases=0 fuzz=0 props=0
+control 38: no canonical test
+ differential:
+  REFUSED kind=1 step=774 got=0 want=3
+ properties:
+  REFUSED kind=94 step=589 got=200000cf want=80000080006f07
+ hand cases: 9 of 4331 fail, first failure 653
+ refused by: cases=1 fuzz=1 props=1
+control 39: misaligned superpage accepted
+ differential:
+  REFUSED kind=1 step=578 got=0 want=3
+ properties:
+  REFUSED kind=94 step=561 got=200004c7 want=ffffffffc02049f2
+ hand cases: 9 of 4331 fail, first failure 659
+ refused by: cases=1 fuzz=1 props=1
+control 40: U bit ignored
+ differential:
+  REFUSED kind=2 step=96 got=8000055c want=8000005c
+ properties:
+  REFUSED kind=104 step=3 got=0 want=d
+ hand cases: 192 of 4331 fail, first failure 729
+ refused by: cases=1 fuzz=1 props=1
+control 41: SUM ignored
+ differential:
+  REFUSED kind=1 step=740 got=0 want=3
+ properties:
+  REFUSED kind=104 step=3 got=0 want=d
+ hand cases: 49 of 4331 fail, first failure 729
+ refused by: cases=1 fuzz=1 props=1
+control 42: MXR ignored
+ differential:
+  REFUSED kind=1 step=3595 got=3 want=0
+ properties:
+  REFUSED kind=104 step=3 got=0 want=b86c9a9deb72ed0f
+ hand cases: 21 of 4331 fail, first failure 734
+ refused by: cases=1 fuzz=1 props=1
+control 43: W without R accepted
+ differential:
+  REFUSED kind=1 step=1096 got=0 want=3
+ properties:
+  REFUSED kind=94 step=265 got=0 want=b28
+ hand cases: 81 of 4331 fail, first failure 742
+ refused by: cases=1 fuzz=1 props=1
+control 44: walk of two levels
+ differential:
+  REFUSED kind=33 step=12 got=c want=2
+ properties:
+  REFUSED kind=104 step=3 got=c want=d
+ hand cases: 1799 of 4331 fail, first failure 380
+ refused by: cases=1 fuzz=1 props=1
+control 45: walk of four levels
+ differential:
+  REFUSED kind=33 step=12 got=c want=2
+ properties:
+  REFUSED kind=104 step=3 got=c want=d
+ hand cases: 1106 of 4331 fail, first failure 386
+ refused by: cases=1 fuzz=1 props=1
+control 46: A bit ignored
+ differential:
+  REFUSED kind=1 step=3943 got=0 want=3
+ properties:
+  REFUSED kind=94 step=3786 got=2000009f want=ffffffffc00031e5
+ hand cases: 122 of 4331 fail, first failure 725
+ refused by: cases=1 fuzz=1 props=1
+control 47: D bit ignored
+ differential:
+  REFUSED kind=1 step=11813 got=0 want=3
+ properties:
+  REFUSED kind=94 step=5480 got=2000004f want=40003ff8
+ hand cases: 44 of 4331 fail, first failure 762
+ refused by: cases=1 fuzz=1 props=1
+control 48: MPRV applied to the fetch
+ differential:
+  REFUSED kind=32 step=33 got=c want=f
+ properties:
+  REFUSED kind=103 step=192 got=c want=800003b8
+ hand cases: 803 of 4331 fail, first failure 667
+ refused by: cases=1 fuzz=1 props=1
+control 49: delegation taken in M-mode
+ differential:
+  REFUSED kind=2 step=34 got=8000003c want=80000750
+ properties:
+  REFUSED kind=95 step=67 got=1 want=3
+ hand cases: 11 of 4331 fail, first failure 307
+ refused by: cases=1 fuzz=1 props=1
+control 50: SRET ignores SPP
+ differential:
+  REFUSED kind=30 step=227 got=1 want=0
+ properties:
+  REFUSED kind=98 step=111 got=a00541822 want=a00541820
+ hand cases: 12 of 4331 fail, first failure 230
+ refused by: cases=1 fuzz=1 props=1
+control 51: TSR ignored
+ differential:
+  REFUSED kind=1 step=1810 got=0 want=3
+ properties:
+  REFUSED kind=98 step=275 got=10200073 want=1
+ hand cases: 1 of 4331 fail, first failure 231
+ refused by: cases=1 fuzz=1 props=1
+control 52: TVM ignored
+ differential:
+  REFUSED kind=1 step=912 got=0 want=3
+ properties:
+  REFUSED kind=98 step=368 got=12938073 want=1
+ hand cases: 3 of 4331 fail, first failure 150
+ refused by: cases=1 fuzz=1 props=1
+control 53: TW ignored
+ differential:
+  REFUSED kind=1 step=528 got=0 want=3
+ properties:
+  REFUSED kind=98 step=645 got=10500073 want=1
+ hand cases: 2 of 4331 fail, first failure 224
+ refused by: cases=1 fuzz=1 props=1
+control 54: S interrupt blocked in U by SIE
+ differential:
+  REFUSED kind=2 step=940 got=8000028c want=800000ac
+ properties:
+  REFUSED kind=97 step=1216 got=0 want=22
+ hand cases: 6 of 4331 fail, first failure 408
+ refused by: cases=1 fuzz=1 props=1
+control 55: sstatus shows machine fields
+ differential:
+  REFUSED kind=3 step=422 got=a00561900 want=200040100
+ properties:
+  REFUSED kind=96 step=3 got=a00441802 want=a00441802
+ hand cases: 17 of 4331 fail, first failure 27
+ refused by: cases=1 fuzz=1 props=1
+control 56: satp accepts an unsupported MODE
+ differential:
+  REFUSED kind=37 step=14376 got=e317377c5e69834f want=8000000000080003
+ properties:
+  REFUSED kind=99 step=4907 got=fdc83220de63ce54 want=0
+ hand cases: 9 of 4331 fail, first failure 47
+ refused by: cases=1 fuzz=1 props=1
+control 57: store page fault with cause 13
+ differential:
+  REFUSED kind=2 step=21 got=800000fc want=800005b0
+ properties:
+  REFUSED kind=100 step=259 got=d want=2
+ hand cases: 789 of 4331 fail, first failure 395
+ refused by: cases=1 fuzz=1 props=1
+result: core accepted, 20 of 20 controls refused by all three checks, 0 by one or two

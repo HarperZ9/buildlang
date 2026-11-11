@@ -1,0 +1,79 @@
+// Differential corpus: structs with fields of mixed widths, nested
+// structs, arrays of structs, arrays of arrays, struct arguments and
+// struct results, and writes through references.
+
+struct In { x: u16, y: i8 }
+struct Mix { a: u8, b: i64, c: u16, d: i32, e: u8, f: u64 }
+struct Out { tag: u8, v: In, w: u32, z: i64 }
+
+fn mix(k: u64) -> Mix {
+    Mix { a: 200_u8, b: -5 - (k as i64), c: 65535_u16, d: -2147483647_i32, e: 1_u8, f: 0xFFFFFFFFFFFFFFFF_u64 }
+}
+
+fn show_mix(m: &Mix) ~ Console {
+    println!("mix {} {} {} {} {} {}", m.a, m.b, m.c, m.d, m.e, m.f);
+}
+
+fn swap_ends(m: Mix) -> Mix {
+    Mix { a: m.e, b: m.b, c: m.c, d: m.d, e: m.a, f: m.f }
+}
+
+fn touch(m: &mut Mix) {
+    m.a = m.a - 100_u8;
+    m.c = m.c - 1_u16;
+    m.d = m.d + 7_i32;
+    m.f = m.f - 1_u64;
+}
+
+fn mk(k: u64) -> Out {
+    Out { tag: 7_u8, v: In { x: 65000_u16, y: -3_i8 }, w: 2_u32, z: -9 - (k as i64) }
+}
+
+fn sum_in(a: In, b: In) -> i64 {
+    (a.x as i64) + (a.y as i64) + (b.x as i64) + (b.y as i64)
+}
+
+fn grid(k: u64) ~ Console {
+    let mut g: [[u16; 3]; 2] = [[1_u16, 2_u16, 3_u16], [4_u16, 5_u16, 6_u16]];
+    let row = g[1];
+    println!("grid {} {} {}", g[0][2], row[0], row[2]);
+    let mut i: usize = 0;
+    let mut t: u64 = k;
+    while i < 2 {
+        let r = g[i];
+        let mut j: usize = 0;
+        while j < 3 {
+            t = t + r[j] as u64;
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    println!("grid sum {}", t);
+}
+
+fn run(k: u64) ~ Console {
+    let mut m = mix(k);
+    show_mix(&m);
+    touch(&mut m);
+    show_mix(&m);
+    let s = swap_ends(m);
+    show_mix(&s);
+    show_mix(&m);
+    let mut o = mk(k);
+    o.v.x = o.v.x - 1_u16;
+    o.v.y = o.v.y - 100_i8;
+    o.w = o.w + 40_u32;
+    let inner = o.v;
+    println!("out {} {} {} {} {} {}", o.tag, o.v.x, o.v.y, o.w, o.z, inner.y);
+    let mut arr: [In; 3] = [In { x: 1_u16, y: 2_i8 }, In { x: 3_u16, y: 4_i8 }, In { x: 5_u16, y: -6_i8 }];
+    arr[1].y = -7_i8;
+    arr[2].x = arr[0].x + 9_u16;
+    let pick = arr[(k % 3_u64) as usize];
+    println!("arr {} {} {} {} {}", arr[1].y, arr[0].x, arr[2].x, pick.x, pick.y);
+    println!("sum {}", sum_in(arr[0], arr[2]));
+    grid(k);
+}
+
+fn main() ~ Console + Process + Environment {
+    run(args_get(1).parse_int() as u64);
+}

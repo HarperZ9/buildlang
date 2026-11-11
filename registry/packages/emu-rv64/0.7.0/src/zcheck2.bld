@@ -1,0 +1,179 @@
+// Hand cases for the serial run of emu-rv64, second part: cases 13 to 24.
+// zcheck.bld explains how the expected numbers were found.
+
+// The image of cases 13 to 17 and 23. It prints 300 bytes.
+//    0  lui x5, 0x10000      the serial device
+//    4  addi x6, x0, 300     rounds left
+//    8  addi x7, x0, 1       the next byte
+//   12  sb x7, 0(x5)
+//   16  addi x7, x7, 1
+//   20  addi x6, x6, -1
+//   24  bne x6, x0, -12
+//   28  addi x10, x0, 9
+//   32  the halt word
+// Round i, counted from 0, stores the low byte of i + 1. The loop has 4
+// instructions and runs 300 times. Steps to the halt: 3 + 300 * 4 + 1 =
+// 1204. The output buffer holds 128 bytes, so it is emptied before store
+// 129 and before store 257, and 300 - 256 = 44 bytes wait in it at the end.
+fn zc_loop_image(img: &mut Vec<u8>) {
+    zc_dev(img);
+    zc_addi(img, 6_u64, 0_u64, 300_u64);
+    zc_addi(img, 7_u64, 0_u64, 1_u64);
+    zc_sb(img, 7_u64, 5_u64, 0_u64);
+    zc_addi(img, 7_u64, 7_u64, 1_u64);
+    zc_addi(img, 6_u64, 6_u64, zc_neg(1_u64));
+    zc_bne(img, 6_u64, 0_u64, zc_neg(12_u64));
+    zc_addi(img, 10_u64, 0_u64, 9_u64);
+    zc_halt(img);
+}
+
+// True when sink holds exactly n bytes and byte i is the low byte of i + 1.
+fn zc_count_up(sink: &Vec<u8>, n: usize) -> bool {
+    if sink.len() != n { return false; }
+    let mut i: usize = 0;
+    while i < n {
+        if sink[i] != (((i + 1) & 255) as u8) { return false; }
+        i = i + 1;
+    }
+    true
+}
+
+// Cases 13 to 15: the whole run and the two limits beside its length.
+//   case 13: 1204 steps, code 9, 300 bytes, each one checked.
+//   case 14: a limit of exactly 1204 steps. The halt word is looked for
+//            before the limit, so the run halts with the same numbers.
+//   case 15: a limit of 1203 steps. Step 1204 would be addi x10, x0, 9.
+//            All 300 stores are done, the run did not halt, the code is 0.
+fn zc_long(st: &mut ZSt, ram: &mut [u8]) ~ Console {
+    let mut img: Vec<u8> = Vec::new();
+    let mut sink: Vec<u8> = Vec::new();
+    zc_loop_image(&mut img);
+    let r = ser_run_v(st.v, &img, img.len(), ram, 100000_u64, &mut sink);
+    zc_judge(st, 13_u64, "300 bytes through a buffer of 128", &r, sink.len(), &zc_want(true, 9_u64, 1204_u64, 300),
+             zc_count_up(&sink, 300));
+    sink.clear();
+    let q = ser_run_v(st.v, &img, img.len(), ram, 1204_u64, &mut sink);
+    zc_judge(st, 14_u64, "the same with a limit of exactly 1204 steps", &q, sink.len(),
+             &zc_want(true, 9_u64, 1204_u64, 300), zc_count_up(&sink, 300));
+    sink.clear();
+    let p = ser_run_v(st.v, &img, img.len(), ram, 1203_u64, &mut sink);
+    zc_judge(st, 15_u64, "a limit of 1203 steps: all bytes, no halt", &p, sink.len(),
+             &zc_want(false, 0_u64, 1203_u64, 300), zc_count_up(&sink, 300));
+}
+
+// Cases 16 and 17: limits at the edge of the output buffer.
+//   case 16: 515 steps = 3 + 128 * 4, so 128 rounds are complete and the
+//            buffer is full but was never emptied. 128 bytes.
+//   case 17: 516 steps. Step 516 is store 129, which finds the buffer
+//            full: the buffer is emptied and the store runs. 129 bytes.
+fn zc_edges(st: &mut ZSt, ram: &mut [u8]) ~ Console {
+    let mut img: Vec<u8> = Vec::new();
+    let mut sink: Vec<u8> = Vec::new();
+    zc_loop_image(&mut img);
+    let r = ser_run_v(st.v, &img, img.len(), ram, 515_u64, &mut sink);
+    zc_judge(st, 16_u64, "a limit of 515 steps: the buffer is full, 128 bytes", &r, sink.len(),
+             &zc_want(false, 0_u64, 515_u64, 128), zc_count_up(&sink, 128));
+    sink.clear();
+    let q = ser_run_v(st.v, &img, img.len(), ram, 516_u64, &mut sink);
+    zc_judge(st, 17_u64, "a limit of 516 steps: the buffer was emptied once, 129 bytes", &q, sink.len(),
+             &zc_want(false, 0_u64, 516_u64, 129), zc_count_up(&sink, 129));
+}
+
+// Cases 18 and 19: images the loader refuses. Nothing runs, and sink
+// keeps the one byte it held.
+//   case 18: 0 bytes. The loader code is IMG_EMPTY = 1.
+//   case 19: one byte more than the memory of 8192 bytes. IMG_BIG = 2.
+fn zc_refused(st: &mut ZSt, ram: &mut [u8]) ~ Console {
+    let mut img: Vec<u8> = Vec::new();
+    let mut sink: Vec<u8> = Vec::new();
+    sink.push(9_u8);
+    let r = ser_run_v(st.v, &img, 0, ram, 100000_u64, &mut sink);
+    let mut w = zc_want(false, 0_u64, 0_u64, 1);
+    w.rc = IMG_EMPTY;
+    zc_judge(st, 18_u64, "an empty image is refused with code 1", &r, sink.len(), &w, zc_all(&sink, 1, 9_u8));
+    let mut i: usize = 0;
+    while i < ZC_RAM + 1 {
+        img.push(0x13_u8);
+        i = i + 1;
+    }
+    let q = ser_run_v(st.v, &img, img.len(), ram, 100000_u64, &mut sink);
+    w.rc = IMG_BIG;
+    zc_judge(st, 19_u64, "an image of 8193 bytes for 8192 bytes of memory is refused with code 2", &q, sink.len(),
+             &w, zc_all(&sink, 1, 9_u8));
+}
+
+// Cases 20 to 22: a limit of 0 steps, and traps.
+//   case 20: addi x10, x0, 42; halt with a limit of 0. Nothing runs: 0
+//            steps, no halt, code 0.
+//   case 21: the halt word alone with a limit of 0. The halt word is
+//            looked for first, so the run halts after 0 steps.
+//   case 22: four zero bytes. The word 0 is no instruction, so step 1
+//            traps to mtvec = 0. Address 0 is outside memory, so every
+//            later step is a fetch trap to the same place. A trap is a
+//            step: with a limit of 5 the run takes 5 steps and no halt.
+fn zc_zero(st: &mut ZSt, ram: &mut [u8]) ~ Console {
+    let mut img: Vec<u8> = Vec::new();
+    let mut sink: Vec<u8> = Vec::new();
+    zc_addi(&mut img, 10_u64, 0_u64, 42_u64);
+    zc_halt(&mut img);
+    let r = ser_run_v(st.v, &img, img.len(), ram, 0_u64, &mut sink);
+    zc_judge(st, 20_u64, "a limit of 0 steps runs nothing", &r, sink.len(), &zc_want(false, 0_u64, 0_u64, 0), true);
+    img.clear();
+    zc_halt(&mut img);
+    let q = ser_run_v(st.v, &img, img.len(), ram, 0_u64, &mut sink);
+    zc_judge(st, 21_u64, "a limit of 0 steps at the halt word is a halt", &q, sink.len(),
+             &zc_want(true, 0_u64, 0_u64, 0), true);
+    img.clear();
+    zc_put(&mut img, 0_u64);
+    let p = ser_run_v(st.v, &img, img.len(), ram, 5_u64, &mut sink);
+    zc_judge(st, 22_u64, "a trap is a step and does not end the run", &p, sink.len(),
+             &zc_want(false, 0_u64, 5_u64, 0), true);
+}
+
+// Cases 23 and 24: the state hash.
+//   case 23: the image of case 2 runs in fresh memory, then the image of
+//            300 bytes runs in the same memory, then the image of case 2
+//            again. The loader clears memory, so the third run gives the
+//            numbers and the hash of the first.
+//   case 24: two runs of the image of 300 bytes give one hash, and the
+//            run cut at 1203 steps gives another, because x10 and the pc
+//            differ.
+fn zc_hashes(st: &mut ZSt, ram: &mut [u8]) ~ Console {
+    let mut small: Vec<u8> = Vec::new();
+    let mut big: Vec<u8> = Vec::new();
+    let mut sink: Vec<u8> = Vec::new();
+    let mut fresh = ser_ram(ZC_RAM);
+    zc_addi(&mut small, 10_u64, 0_u64, 42_u64);
+    zc_halt(&mut small);
+    zc_loop_image(&mut big);
+    let a = ser_run_v(st.v, &small, small.len(), &mut fresh, 100000_u64, &mut sink);
+    let b = ser_run_v(st.v, &big, big.len(), ram, 100000_u64, &mut sink);
+    sink.clear();
+    let c = ser_run_v(st.v, &small, small.len(), ram, 100000_u64, &mut sink);
+    zc_judge(st, 23_u64, "a run in memory that another run used", &c, sink.len(), &zc_want(true, 42_u64, 1_u64, 0),
+             c.hash == a.hash);
+    let d = ser_run_v(st.v, &big, big.len(), ram, 100000_u64, &mut sink);
+    sink.clear();
+    let e = ser_run_v(st.v, &big, big.len(), ram, 1203_u64, &mut sink);
+    let ok = b.hash == d.hash && e.hash != d.hash && a.hash != b.hash;
+    zc_note(st, 24_u64, "equal runs give one state hash, a shorter run another", ok,
+            format!("got {:016x} {:016x} {:016x}", b.hash, d.hash, e.hash));
+}
+
+// Runs the cases against planted defect v. The cases share one memory.
+fn zcases_run(v: u64, show: bool) -> ZSt ~ Console {
+    let mut st = ZSt { v: v, show: show, fail: 0_u64, count: 0_u64, bad: 0_u64 };
+    let mut ram = ser_ram(ZC_RAM);
+    zc_short(&mut st, &mut ram);
+    zc_three(&mut st, &mut ram);
+    zc_codes(&mut st, &mut ram);
+    zc_places(&mut st, &mut ram);
+    zc_forever(&mut st, &mut ram);
+    zc_long(&mut st, &mut ram);
+    zc_edges(&mut st, &mut ram);
+    zc_refused(&mut st, &mut ram);
+    zc_zero(&mut st, &mut ram);
+    zc_hashes(&mut st, &mut ram);
+    if show { println!("zcases: {} run, first failure {}", st.count, st.fail); }
+    st
+}

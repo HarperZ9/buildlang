@@ -1,0 +1,4 @@
+serial-check image=tests/hello.img bytes=56 ram=4194304 max=75
+  halted=false code=0 steps=75 serial_len=14 serial_fnv=549c7564fcdf760b
+  hash=6293072ceaa8407f
+  second run: equal

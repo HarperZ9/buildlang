@@ -1,0 +1,156 @@
+// The flat image loader of emu-rv64 and the start state of a run.
+//
+// A flat image is raw bytes with no header. Byte i of the image goes to
+// address 0x80000000 + i, which is ram[i]. Every byte of memory after the
+// image is zero. The loader reads no file: it works on a byte slice, and
+// the command line in main4.bld reads the file.
+//
+// The image is passed as a slice and a count, `n`, of the bytes that belong
+// to it, because the caller keeps the file in a buffer of fixed size.
+
+// IMG_OK when an image of n bytes fits a memory of cap bytes.
+fn img_check(n: usize, cap: usize) -> u64 {
+    if n == 0 { return IMG_EMPTY; }
+    if n > cap { return IMG_BIG; }
+    IMG_OK
+}
+
+fn img_clear(ram: &mut [u8]) {
+    let mut i: usize = 0;
+    while i < ram.len() {
+        ram[i] = 0_u8;
+        i = i + 1;
+    }
+}
+
+// Copies n bytes of img to ram, the first to ram[at]. A byte that would
+// land outside ram is dropped.
+fn img_place(img: &[u8], n: usize, ram: &mut [u8], at: usize) {
+    let mut i: usize = 0;
+    while i < n && at + i < ram.len() {
+        ram[at + i] = img[i];
+        i = i + 1;
+    }
+}
+
+// Loads the image. Returns IMG_OK, or IMG_EMPTY or IMG_BIG, and then
+// memory is unchanged.
+fn img_load(img: &[u8], n: usize, ram: &mut [u8]) -> u64 {
+    let rc = img_check(n, ram.len());
+    if rc != IMG_OK { return rc; }
+    img_clear(ram);
+    img_place(img, n, ram, 0);
+    IMG_OK
+}
+
+// What a run keeps beside the machine. The output buffer has a fixed size,
+// so the host empties it when it is full. `sent` counts the bytes emptied
+// so far and `dig` is the FNV-1a hash of those bytes in order. `irqs`
+// counts the interrupts taken.
+struct Tape { sent: u64, dig: u64, irqs: u64 }
+
+fn tape_new() -> Tape {
+    Tape { sent: 0_u64, dig: FNV_BASIS, irqs: 0_u64 }
+}
+
+// The start state of everything but memory: the machine in the reset state
+// of the trap profile, every register 0, the output buffer zero and the
+// tape empty. Since 0.6.0 a machine in the system profile is reset to the
+// reset state of that profile.
+fn rr_reset(m: &mut Machine, x: &mut [u64], out: &mut [u8], t: &mut Tape) {
+    let system = m.profile == EMU_PROFILE_SYSTEM;
+    *m = emu_new_machine();
+    if system { *m = emu_new_system(); }
+    *t = tape_new();
+    let mut i: usize = 0;
+    while i < x.len() {
+        x[i] = 0_u64;
+        i = i + 1;
+    }
+    i = 0;
+    while i < out.len() {
+        out[i] = 0_u8;
+        i = i + 1;
+    }
+}
+
+// The start state of a run of an image: the image in memory and the rest
+// reset. Returns the loader code; when it is not IMG_OK nothing has changed.
+fn rr_boot(img: &[u8], n: usize, m: &mut Machine, x: &mut [u64], ram: &mut [u8], out: &mut [u8], t: &mut Tape) -> u64 {
+    let rc = img_load(img, n, ram);
+    if rc != IMG_OK { return rc; }
+    rr_reset(m, x, out, t);
+    IMG_OK
+}
+
+// Empties the output buffer into the tape and zeroes it.
+fn rr_drain(m: &mut Machine, out: &mut [u8], t: &mut Tape) {
+    let mut i: usize = 0;
+    while (i as u64) < m.out_len && i < out.len() {
+        t.dig = fnv_byte(t.dig, out[i] as u64);
+        out[i] = 0_u8;
+        i = i + 1;
+    }
+    t.sent = t.sent + m.out_len;
+    m.out_len = 0_u64;
+}
+
+// One step of a run. When the output buffer is full the core returns
+// EMU_SMALL and changes nothing; the buffer is emptied and the step runs
+// again, so the caller sees one step.
+fn rr_step(m: &mut Machine, x: &mut [u64], ram: &mut [u8], out: &mut [u8], t: &mut Tape) -> i64 {
+    let mut rc = emu_step(m, x, ram, out);
+    if rc == EMU_SMALL && m.out_len != 0_u64 {
+        rr_drain(m, out, t);
+        rc = emu_step(m, x, ram, out);
+    }
+    let mut cause = m.mcause;
+    if m.profile == EMU_PROFILE_SYSTEM && m.prv == PRIV_S { cause = m.scause; }
+    if rc == EMU_TRAP && (cause & EMU_SIGN) != 0_u64 { t.irqs = t.irqs + 1_u64; }
+    rc
+}
+
+// The hash of a run's state. While no output has been emptied it is the
+// state hash of iprog.bld: registers, machine, memory, output buffer. After
+// the first emptying it goes on over the count of emptied bytes and their
+// hash, so every byte the program ever sent is part of it.
+fn rr_hash(m: &Machine, x: &[u64], ram: &[u8], out: &[u8], t: &Tape) -> u64 {
+    let h = state_hash(m, x, ram, out);
+    if t.sent == 0_u64 { return h; }
+    fnv_word(fnv_word(h, t.sent), t.dig)
+}
+
+// The first index at which two checkpoint lists differ. Lists of different
+// length differ at the length of the shorter one at the latest. Returns the
+// common length when the lists are equal.
+fn ck_first_diff(a: &Vec<u64>, b: &Vec<u64>) -> u64 {
+    let mut n = a.len();
+    if b.len() < n { n = b.len(); }
+    let mut i: usize = 0;
+    while i < n {
+        if a[i] != b[i] { return i as u64; }
+        i = i + 1;
+    }
+    n as u64
+}
+
+// True when two lists have the same length and the same entries.
+fn ck_same(a: &Vec<u64>, b: &Vec<u64>) -> bool {
+    a.len() == b.len() && ck_first_diff(a, b) == a.len() as u64
+}
+
+// The two built-in images: the programs of iprog.bld and mprog.bld, laid
+// out by their own loaders. Fills buf and returns the length, or 0 for an
+// unknown name. buf holds at least 96 bytes.
+fn img_builtin(which: u64, buf: &mut [u8]) -> usize {
+    img_clear(buf);
+    if which == 1_u64 {
+        iprog_load(buf);
+        return IMG_TIMER_LEN;
+    }
+    if which == 2_u64 {
+        mprog_load(buf);
+        return IMG_TRAP_LEN;
+    }
+    0
+}

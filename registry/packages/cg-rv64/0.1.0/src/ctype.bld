@@ -1,0 +1,192 @@
+// cg-rv64: the types of the MIR and how the generator lays them out.
+//
+// A type is a node of the JSON tree, as the MIR writes it: "Void", "Bool",
+// {"Int": [size, signed]}, {"Ptr": T}, {"Array": [T, n]}, {"Slice": T},
+// {"Struct": name}, {"Vec": T}. Every other type is CT_BAD.
+//
+// Sizes in bytes: Bool 1, Int its width, Ptr 8, Vec 8 (a handle), Slice 16
+// (address, then length), Array n elements, Struct its fields in order,
+// each at the next multiple of its alignment, the whole rounded up to the
+// largest alignment. This layout is the generator's own; no other program
+// reads the memory of a generated program.
+
+fn ct_int_bits(d: &CjDoc, t: u64) -> u64 {
+    let s = cj_first(d, cj_body(d, t));
+    if cj_str_is(d, s, "I8") { return 8_u64; }
+    if cj_str_is(d, s, "I16") { return 16_u64; }
+    if cj_str_is(d, s, "I32") { return 32_u64; }
+    if cj_str_is(d, s, "I64") || cj_str_is(d, s, "ISize") { return 64_u64; }
+    0_u64
+}
+
+fn ct_kind(d: &CjDoc, t: u64) -> u64 {
+    if cj_str_is(d, t, "Void") { return CT_VOID; }
+    if cj_str_is(d, t, "Bool") { return CT_BOOL; }
+    if cj_tag_is(d, t, "Int") {
+        if ct_int_bits(d, t) == 0_u64 { return CT_BAD; }
+        return CT_INT;
+    }
+    if cj_tag_is(d, t, "Ptr") { return CT_PTR; }
+    if cj_tag_is(d, t, "Array") { return CT_ARRAY; }
+    if cj_tag_is(d, t, "Slice") { return CT_SLICE; }
+    if cj_tag_is(d, t, "Struct") { return CT_STRUCT; }
+    if cj_tag_is(d, t, "Vec") { return CT_VEC; }
+    CT_BAD
+}
+
+// The width in bits of a Bool or an Int, else 64.
+fn ct_bits(d: &CjDoc, t: u64) -> u64 {
+    let k = ct_kind(d, t);
+    if k == CT_BOOL { return 8_u64; }
+    if k == CT_INT { return ct_int_bits(d, t); }
+    64_u64
+}
+
+fn ct_signed(d: &CjDoc, t: u64) -> bool {
+    ct_kind(d, t) == CT_INT && cj_kind(d, cj_next(d, cj_first(d, cj_body(d, t)))) == CJ_TRUE
+}
+
+// The element type of a Ptr, Slice, Vec or Array.
+fn ct_elem(d: &CjDoc, t: u64) -> u64 {
+    let k = ct_kind(d, t);
+    if k == CT_PTR || k == CT_SLICE || k == CT_VEC { return cj_body(d, t); }
+    if k == CT_ARRAY { return cj_first(d, cj_body(d, t)); }
+    CG_NONE
+}
+
+// The length of an Array.
+fn ct_alen(d: &CjDoc, t: u64) -> u64 {
+    if ct_kind(d, t) != CT_ARRAY { return 0_u64; }
+    cj_mag(d, cj_next(d, cj_first(d, cj_body(d, t))))
+}
+
+// A value held in one register: Bool, Int, Ptr, Vec.
+fn ct_scalar(d: &CjDoc, t: u64) -> bool {
+    let k = ct_kind(d, t);
+    k == CT_BOOL || k == CT_INT || k == CT_PTR || k == CT_VEC
+}
+
+// A value held in memory only: Array, Slice, Struct.
+fn ct_agg(d: &CjDoc, t: u64) -> bool {
+    let k = ct_kind(d, t);
+    k == CT_ARRAY || k == CT_SLICE || k == CT_STRUCT
+}
+
+// True when two type nodes describe the same type.
+fn ct_same(d: &CjDoc, a: u64, b: u64) -> bool {
+    let k = ct_kind(d, a);
+    if k != ct_kind(d, b) || k == CT_BAD { return false; }
+    if k == CT_INT { return ct_int_bits(d, a) == ct_int_bits(d, b) && ct_signed(d, a) == ct_signed(d, b); }
+    if k == CT_STRUCT { return cj_same_str(d, cj_body(d, a), cj_body(d, b)); }
+    if k == CT_ARRAY && ct_alen(d, a) != ct_alen(d, b) { return false; }
+    if k == CT_PTR || k == CT_SLICE || k == CT_VEC || k == CT_ARRAY {
+        return ct_same(d, ct_elem(d, a), ct_elem(d, b));
+    }
+    true
+}
+
+// The field list of the struct type t: the array of [name, type] pairs
+// from the type table of the module. CG_NONE when the module does not
+// define it or it is packed.
+fn ct_fields(g: &Cg, d: &CjDoc, t: u64) -> u64 {
+    if ct_kind(d, t) != CT_STRUCT { return CG_NONE; }
+    let name = cj_body(d, t);
+    let mut def = cj_first(d, g.types);
+    while def != CG_NONE {
+        if cj_same_str(d, cj_get(d, def, "name"), name) {
+            let st = cj_get(d, cj_get(d, def, "kind"), "Struct");
+            if cj_kind(d, cj_get(d, st, "packed")) != CJ_FALSE { return CG_NONE; }
+            return cj_get(d, st, "fields");
+        }
+        def = cj_next(d, def);
+    }
+    CG_NONE
+}
+
+fn ct_round(v: u64, a: u64) -> u64 {
+    if a <= 1_u64 { return v; }
+    ((v + a - 1_u64) / a) * a
+}
+
+fn ct_align(g: &Cg, d: &CjDoc, t: u64) -> u64 {
+    let k = ct_kind(d, t);
+    if k == CT_BOOL || k == CT_INT { return ct_bits(d, t) / 8_u64; }
+    if k == CT_PTR || k == CT_VEC || k == CT_SLICE { return 8_u64; }
+    if k == CT_ARRAY { return ct_align(g, d, ct_elem(d, t)); }
+    if k != CT_STRUCT { return 1_u64; }
+    let mut a: u64 = 1_u64;
+    let mut f = cj_first(d, ct_fields(g, d, t));
+    while f != CG_NONE {
+        let fa = ct_align(g, d, cj_next(d, cj_first(d, f)));
+        if fa > a { a = fa; }
+        f = cj_next(d, f);
+    }
+    a
+}
+
+// The size in bytes. 0 for Void and for a type the generator refuses.
+fn ct_size(g: &Cg, d: &CjDoc, t: u64) -> u64 {
+    let k = ct_kind(d, t);
+    if k == CT_BOOL || k == CT_INT { return ct_bits(d, t) / 8_u64; }
+    if k == CT_PTR || k == CT_VEC { return 8_u64; }
+    if k == CT_SLICE { return 16_u64; }
+    if k == CT_ARRAY { return ct_alen(d, t) * ct_size(g, d, ct_elem(d, t)); }
+    if k != CT_STRUCT { return 0_u64; }
+    let mut off: u64 = 0_u64;
+    let mut f = cj_first(d, ct_fields(g, d, t));
+    while f != CG_NONE {
+        let ft = cj_next(d, cj_first(d, f));
+        off = ct_round(off, ct_align(g, d, ft)) + ct_size(g, d, ft);
+        f = cj_next(d, f);
+    }
+    ct_round(off, ct_align(g, d, t))
+}
+
+// One field of a struct. ok is false when the struct has no field of
+// that name. prev is the offset of the field before it (its own offset
+// for the first field), which only planted defect 4 reads.
+struct CtField { ok: bool, off: u64, ty: u64, prev: u64 }
+
+// The field of struct type t whose name is the string node `name`.
+fn ct_field(g: &Cg, d: &CjDoc, t: u64, name: u64) -> CtField {
+    let mut r = CtField { ok: false, off: 0_u64, ty: CG_NONE, prev: 0_u64 };
+    let mut off: u64 = 0_u64;
+    let mut prev: u64 = 0_u64;
+    let mut f = cj_first(d, ct_fields(g, d, t));
+    while f != CG_NONE && !r.ok {
+        let ft = cj_next(d, cj_first(d, f));
+        off = ct_round(off, ct_align(g, d, ft));
+        if cj_same_str(d, cj_first(d, f), name) {
+            r.ok = true;
+            r.off = off;
+            r.ty = ft;
+            r.prev = prev;
+        }
+        prev = off;
+        off = off + ct_size(g, d, ft);
+        f = cj_next(d, f);
+    }
+    r
+}
+
+// True when the generator can hold a value of type t: every type inside
+// it is covered and every struct inside it is defined.
+fn ct_known(g: &Cg, d: &CjDoc, t: u64) -> bool {
+    let k = ct_kind(d, t);
+    if k == CT_BAD { return false; }
+    if k == CT_VOID || k == CT_BOOL || k == CT_INT { return true; }
+    if k == CT_PTR { return true; }
+    if k == CT_STRUCT {
+        let fl = ct_fields(g, d, t);
+        if fl == CG_NONE || cj_first(d, fl) == CG_NONE { return false; }
+        let mut f = cj_first(d, fl);
+        while f != CG_NONE {
+            if !ct_known(g, d, cj_next(d, cj_first(d, f))) { return false; }
+            if ct_kind(d, cj_next(d, cj_first(d, f))) == CT_VOID { return false; }
+            f = cj_next(d, f);
+        }
+        return true;
+    }
+    let e = ct_elem(d, t);
+    ct_known(g, d, e) && ct_kind(d, e) != CT_VOID
+}

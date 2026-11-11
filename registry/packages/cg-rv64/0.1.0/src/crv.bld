@@ -1,0 +1,297 @@
+// cg-rv64: right-hand sides that give a scalar. The result is left in x5
+// in the form of type dty, the type of the place it will be stored to.
+// x6, x7, x28, x29 and x31 are scratch.
+
+// Not on a Bool; BitNot on an integer; Neg on an integer. A signed Neg
+// of the smallest value traps, as bl_ineg_ does; an unsigned Neg wraps.
+fn cr_unary(g: &mut Cg, d: &CjDoc, body: u64, dty: u64) {
+    let opn = cj_get(d, body, "op");
+    let v = cj_get(d, body, "operand");
+    let mut t = cv_ty(g, d, v);
+    if t == CG_NONE && cv_is_int(d, v) { t = cv_int_ty(d, v); }
+    if t == CG_NONE && cv_is_bool(d, v) { t = dty; }
+    let k = ct_kind(d, t);
+    let isnot = cj_str_is(d, opn, "Not");
+    if !ct_same(d, t, dty) || (isnot && k != CT_BOOL) || (!isnot && k != CT_INT) {
+        cg_refuse_tag(g, d, "unary operation on a type the generator does not cover:", opn);
+        return;
+    }
+    cv_load(g, d, 5_u64, v, t);
+    if isnot {
+        ci_i(g, "xori", 5_u64, 5_u64, 1_u64);
+    } else if cj_str_is(d, opn, "BitNot") {
+        ci_i(g, "xori", 5_u64, 5_u64, 0xFFFFFFFFFFFFFFFF_u64);
+        ci_norm(g, d, 5_u64, t);
+    } else if cj_str_is(d, opn, "Neg") {
+        if ct_signed(d, t) {
+            ci_li(g, 7_u64, cb_min(d, t));
+            ci_skip(g, "bne", 5_u64, 7_u64, 1_u64);
+            ci_trap(g, "rt_ovf_neg");
+        }
+        ci_r(g, "sub", 5_u64, 0_u64, 5_u64);
+        ci_norm(g, d, 5_u64, t);
+    } else {
+        cg_refuse_tag(g, d, "unary operation", opn);
+    }
+}
+
+// An integer cast: the C conversion, which cuts the value to the width
+// of the target and extends it by the sign of the target. The source is
+// an integer or a Bool. Defect 9 widens a signed value with zeros.
+fn cr_cast(g: &mut Cg, d: &CjDoc, body: u64, dty: u64) {
+    let kind = cj_get(d, body, "kind");
+    let to = cj_get(d, body, "ty");
+    let v = cj_get(d, body, "value");
+    if !cj_str_is(d, kind, "IntToInt") || ct_kind(d, to) != CT_INT || !ct_same(d, to, dty) {
+        cg_refuse_tag(g, d, "cast", kind);
+        return;
+    }
+    let mut from = cv_ty(g, d, v);
+    if from == CG_NONE && cv_is_int(d, v) { from = cv_int_ty(d, v); }
+    let fk = ct_kind(d, from);
+    if fk != CT_INT && fk != CT_BOOL {
+        cg_refuse(g, d, "cast from a value that is neither an integer nor a Bool");
+        return;
+    }
+    cv_load(g, d, 5_u64, v, from);
+    if g.v == CGC_CAST && ct_signed(d, from) && ct_bits(d, from) < ct_bits(d, to) {
+        ci_i(g, "slli", 5_u64, 5_u64, 64_u64 - ct_bits(d, from));
+        ci_i(g, "srli", 5_u64, 5_u64, 64_u64 - ct_bits(d, from));
+    }
+    ci_norm(g, d, 5_u64, to);
+}
+
+// x7 = base + off for a field offset.
+fn cr_bump(g: &mut Cg, off: u64) {
+    ci_add(g, 7_u64, 7_u64, off);
+}
+
+// The address of a field into x7. Returns the type of the field, or
+// CG_NONE after a refusal. The base is a struct local, a pointer to a
+// struct, or a slice (local or pointer) whose field `len` is read.
+// Defect 4 reads through a pointer at the offset of the field before.
+fn cr_field(g: &mut Cg, d: &CjDoc, body: u64) -> u64 {
+    let base = cj_get(d, body, "base");
+    let name = cj_get(d, body, "field_name");
+    let bt = cv_lty(g, cv_local(d, base));
+    let off = cv_loff(g, cv_local(d, base));
+    let inner = ct_elem(d, bt);
+    let ptr = ct_kind(d, bt) == CT_PTR;
+    if !cv_is_local(d, base) { return cr_no_field(g, d); }
+    if ct_kind(d, bt) == CT_SLICE || (ptr && ct_kind(d, inner) == CT_SLICE) {
+        let lt = cj_get(d, body, "field_ty");
+        let word = ct_kind(d, lt) == CT_INT && ct_bits(d, lt) == 64_u64;
+        if !cj_str_is(d, name, "len") || !word { return cr_no_field(g, d); }
+        if ptr { ci_load(g, d, 7_u64, 2_u64, off, bt); } else { ci_add(g, 7_u64, 2_u64, off); }
+        cr_bump(g, 8_u64);
+        return lt;
+    }
+    let mut st = bt;
+    if ptr { st = inner; }
+    let f = ct_field(g, d, st, name);
+    if !f.ok || !ct_known(g, d, f.ty) || !ct_same(d, f.ty, cj_get(d, body, "field_ty")) { return cr_no_field(g, d); }
+    if ptr {
+        ci_load(g, d, 7_u64, 2_u64, off, bt);
+        if g.v == CGC_FIELD { cr_bump(g, f.prev); } else { cr_bump(g, f.off); }
+    } else {
+        ci_add(g, 7_u64, 2_u64, off + f.off);
+    }
+    f.ty
+}
+
+fn cr_no_field(g: &mut Cg, d: &CjDoc) -> u64 {
+    cg_refuse(g, d, "field access on a base the generator does not cover");
+    CG_NONE
+}
+
+// The bounds check of an index in x28 against a length in x7: the index
+// is below the length, as unsigned numbers, or the program traps. That
+// is bl_idx_chk: a negative index is a large unsigned one. Defect 3
+// leaves the check of an array or slice out, defect 19 that of a vector.
+fn cr_bounds(g: &mut Cg, vec: bool, store: bool) {
+    if (g.v == CGC_BOUNDS && !vec) || (g.v == CGC_VECOOB && vec) { return; }
+    ci_skip(g, "bltu", 28_u64, 7_u64, 3_u64);
+    if vec && store {
+        ci_i(g, "addi", 10_u64, 28_u64, 0_u64);
+        ci_i(g, "addi", 11_u64, 7_u64, 0_u64);
+        ci_trap(g, "rt_vec_oob");
+    } else {
+        ci_i(g, "addi", 10_u64, 7_u64, 0_u64);
+        ci_i(g, "addi", 11_u64, 28_u64, 0_u64);
+        ci_trap(g, "rt_oob");
+    }
+}
+
+// x6 = the address of element 0 and x7 = the number of elements of the
+// indexed base: an array local, a slice local, a pointer to a slice, or
+// a vector. Returns the element type, or CG_NONE after a refusal.
+fn cr_base(g: &mut Cg, d: &CjDoc, base: u64) -> u64 {
+    let bt = cv_lty(g, cv_local(d, base));
+    let off = cv_loff(g, cv_local(d, base));
+    let k = ct_kind(d, bt);
+    let inner = ct_elem(d, bt);
+    if cv_is_local(d, base) && k == CT_ARRAY {
+        ci_li(g, 7_u64, ct_alen(d, bt));
+        ci_add(g, 6_u64, 2_u64, off);
+        return inner;
+    }
+    if cv_is_local(d, base) && k == CT_SLICE {
+        ci_mem(g, "ld", 7_u64, 2_u64, off + 8_u64);
+        ci_mem(g, "ld", 6_u64, 2_u64, off);
+        return inner;
+    }
+    if cv_is_local(d, base) && (k == CT_VEC || (k == CT_PTR && ct_kind(d, inner) == CT_SLICE)) {
+        ci_mem(g, "ld", 6_u64, 2_u64, off);
+        ci_m(g, "ld", 7_u64, 8_u64, 6_u64);
+        ci_m(g, "ld", 6_u64, 0_u64, 6_u64);
+        if k == CT_VEC { return inner; }
+        return ct_elem(d, inner);
+    }
+    cg_refuse(g, d, "index into a base that is not an array, a slice or a vector");
+    CG_NONE
+}
+
+// The address of base[index] into x7, after the bounds check. x5 is not
+// touched. Returns the element type, or CG_NONE after a refusal.
+fn cr_index(g: &mut Cg, d: &CjDoc, base: u64, index: u64, ety: u64, store: bool) -> u64 {
+    let it = cv_load_own(g, d, 28_u64, index);
+    let e = cr_base(g, d, base);
+    if e == CG_NONE { return CG_NONE; }
+    if ct_kind(d, it) != CT_INT || !ct_same(d, e, ety) || !ct_known(g, d, e) {
+        cg_refuse(g, d, "index whose element type or index type the generator does not cover");
+        return CG_NONE;
+    }
+    cr_bounds(g, ct_kind(d, cv_lty(g, cv_local(d, base))) == CT_VEC, store);
+    cr_elem(g, d, e);
+    e
+}
+
+// x7 = x6 + x28 * the size of element type e.
+fn cr_elem(g: &mut Cg, d: &CjDoc, e: u64) {
+    let es = ct_size(g, d, e);
+    if es == 1_u64 {
+        ci_r(g, "add", 7_u64, 6_u64, 28_u64);
+        return;
+    }
+    if es == 2_u64 || es == 4_u64 || es == 8_u64 {
+        let mut sh: u64 = 1_u64;
+        if es == 4_u64 { sh = 2_u64; }
+        if es == 8_u64 { sh = 3_u64; }
+        ci_i(g, "slli", 29_u64, 28_u64, sh);
+    } else {
+        ci_li(g, 29_u64, es);
+        ci_r(g, "mul", 29_u64, 28_u64, 29_u64);
+    }
+    ci_r(g, "add", 7_u64, 6_u64, 29_u64);
+}
+
+// The pointer of a Deref into x7. Returns the type it points to.
+fn cr_deref(g: &mut Cg, d: &CjDoc, body: u64) -> u64 {
+    let p = cj_get(d, body, "ptr");
+    let pt = cv_lty(g, cv_local(d, p));
+    let to = ct_elem(d, pt);
+    let typed = ct_kind(d, pt) == CT_PTR && ct_same(d, to, cj_get(d, body, "pointee_ty"));
+    if !cv_is_local(d, p) || !typed || !ct_known(g, d, to) {
+        cg_refuse(g, d, "dereference of a value that is not a pointer local of the stated type");
+        return CG_NONE;
+    }
+    ci_load(g, d, 7_u64, 2_u64, cv_loff(g, cv_local(d, p)), pt);
+    to
+}
+
+// The address of the place of a FieldAccess, IndexAccess or Deref into
+// x7. Returns the type at that address, CG_NONE after a refusal, and
+// CG_NONE with no refusal when rv is none of the three.
+fn cr_place(g: &mut Cg, d: &CjDoc, rv: u64) -> u64 {
+    let body = cj_body(d, rv);
+    if cj_tag_is(d, rv, "FieldAccess") { return cr_field(g, d, body); }
+    if cj_tag_is(d, rv, "Deref") { return cr_deref(g, d, body); }
+    if cj_tag_is(d, rv, "IndexAccess") {
+        return cr_index(g, d, cj_get(d, body, "base"), cj_get(d, body, "index"), cj_get(d, body, "elem_ty"), false);
+    }
+    CG_NONE
+}
+
+// One step of a place: x7 holds the address of a value of type t and
+// is moved to the part the projection p names. Returns the type of that
+// part, or CG_NONE after a refusal.
+//   "Deref"                    t is a pointer; the value it points to
+//   {"Field": [i, name, type]} a field of a struct, or of the struct a
+//                              pointer points to
+//   {"Index": local}           an element of an array, with the bounds
+//                              check. The hosted program does not check
+//                              this index; see SPEC.md, "Differences".
+fn cr_project(g: &mut Cg, d: &CjDoc, p: u64, t: u64) -> u64 {
+    let body = cj_body(d, p);
+    let mut cur = t;
+    if cj_tag_is(d, p, "Deref") || (cj_tag_is(d, p, "Field") && ct_kind(d, t) == CT_PTR) {
+        ci_m(g, "ld", 7_u64, 0_u64, 7_u64);
+        cur = ct_elem(d, t);
+        if ct_kind(d, t) != CT_PTR || !ct_known(g, d, cur) { cur = CG_NONE; }
+        if cj_tag_is(d, p, "Deref") && cur != CG_NONE { return cur; }
+    }
+    if cj_tag_is(d, p, "Field") {
+        let name = cj_next(d, cj_first(d, body));
+        let f = ct_field(g, d, cur, name);
+        if f.ok && ct_same(d, f.ty, cj_next(d, name)) {
+            ci_add(g, 7_u64, 7_u64, f.off);
+            return f.ty;
+        }
+    }
+    let it = cv_lty(g, cj_mag(d, body));
+    if cj_tag_is(d, p, "Index") && cj_kind(d, body) == CJ_NUM && ct_kind(d, t) == CT_ARRAY && ct_kind(d, it) == CT_INT {
+        ci_load(g, d, 28_u64, 2_u64, cv_loff(g, cj_mag(d, body)), it);
+        ci_i(g, "addi", 6_u64, 7_u64, 0_u64);
+        ci_li(g, 7_u64, ct_alen(d, t));
+        cr_bounds(g, false, false);
+        cr_elem(g, d, ct_elem(d, t));
+        return ct_elem(d, t);
+    }
+    cg_refuse_tag(g, d, "place projection the generator does not cover:", p);
+    CG_NONE
+}
+
+// A reference: the address of a local, or of a part of it that a list of
+// projections names. dty is a pointer to the type of that part.
+fn cr_ref(g: &mut Cg, d: &CjDoc, body: u64, dty: u64) {
+    let place = cj_get(d, body, "place");
+    let id = cj_mag(d, cj_get(d, place, "local"));
+    let mut t = cv_lty(g, id);
+    ci_add(g, 7_u64, 2_u64, cv_loff(g, id));
+    let mut p = cj_first(d, cj_get(d, place, "projections"));
+    while p != CG_NONE && t != CG_NONE {
+        t = cr_project(g, d, p, t);
+        p = cj_next(d, p);
+    }
+    if t == CG_NONE { return; }
+    if ct_kind(d, dty) != CT_PTR || !ct_same(d, ct_elem(d, dty), t) {
+        cg_refuse(g, d, "reference whose place does not have the pointed-to type");
+        return;
+    }
+    ci_i(g, "addi", 5_u64, 7_u64, 0_u64);
+}
+
+// x5 = the scalar value of the right-hand side rv, as type dty.
+fn cr_scalar(g: &mut Cg, d: &CjDoc, rv: u64, dty: u64) {
+    let body = cj_body(d, rv);
+    if cj_tag_is(d, rv, "Use") {
+        cv_load(g, d, 5_u64, body, dty);
+    } else if cj_tag_is(d, rv, "BinaryOp") {
+        cb_binary(g, d, body, dty);
+    } else if cj_tag_is(d, rv, "UnaryOp") {
+        cr_unary(g, d, body, dty);
+    } else if cj_tag_is(d, rv, "Cast") {
+        cr_cast(g, d, body, dty);
+    } else if cj_tag_is(d, rv, "Ref") || cj_tag_is(d, rv, "AddressOf") {
+        cr_ref(g, d, body, dty);
+    } else if cj_tag_is(d, rv, "FieldAccess") || cj_tag_is(d, rv, "IndexAccess") || cj_tag_is(d, rv, "Deref") {
+        let t = cr_place(g, d, rv);
+        if t == CG_NONE || !ct_same(d, t, dty) {
+            cg_refuse(g, d, "read of a place whose type is not the type it is stored to");
+            return;
+        }
+        ci_load(g, d, 5_u64, 7_u64, 0_u64, dty);
+    } else {
+        cg_refuse_tag(g, d, "right-hand side", rv);
+    }
+}

@@ -1,0 +1,5 @@
+xfuzz seed=1 steps=20000
+  accepted, 20000 steps: retired=15567 m=6273 lr=1386 sc_stored=471 sc_failed=944 amo=2775
+  m edges: divide_by_zero=495 overflow=2 atomics_on_timer=367 fetch_faults=292
+  traps by cause: 0=222 1=136 2=1382 3=215 4=420 5=398 6=1040 7=368 11=243
+  interrupts by cause: 3=7 7=0 11=2

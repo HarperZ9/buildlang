@@ -1,0 +1,71 @@
+// Hand cases of the M and A extensions: the list of tables. Written by
+// tests/tools/ma_oracle.py; do not edit by hand.
+
+fn xv_tables_1(st: &mut XSt) ~ Console {
+    xv_m1_1(st);
+    xv_m1_2(st);
+    xv_m1_3(st);
+    xv_m1_4(st);
+    xv_m1_5(st);
+    xv_m2_1(st);
+    xv_m2_2(st);
+    xv_m2_3(st);
+    xv_m2_4(st);
+    xv_m2_5(st);
+    xv_m3_1(st);
+    xv_m3_2(st);
+    xv_a1_1(st);
+    xv_a1_2(st);
+    xv_a1_3(st);
+    xv_a1_4(st);
+    xv_a1_5(st);
+    xv_a1_6(st);
+    xv_a2_1(st);
+    xv_a2_2(st);
+    xv_a2_3(st);
+    xv_a2_4(st);
+    xv_a2_5(st);
+    xv_a2_6(st);
+    xv_a3_1(st);
+    xv_a3_2(st);
+    xv_a3_3(st);
+    xv_a3_4(st);
+    xv_a3_5(st);
+    xv_a3_6(st);
+}
+
+fn xv_tables_2(st: &mut XSt) ~ Console {
+    xv_a4_1(st);
+    xv_a4_2(st);
+    xv_a4_3(st);
+    xv_a4_4(st);
+    xv_a4_5(st);
+    xv_a4_6(st);
+    xv_a5_1(st);
+    xv_a5_2(st);
+    xv_a5_3(st);
+    xv_a5_4(st);
+    xv_a5_5(st);
+    xv_a5_6(st);
+    xv_a6_1(st);
+    xv_a6_2(st);
+    xv_a6_3(st);
+    xv_a6_4(st);
+    xv_a6_5(st);
+    xv_a6_6(st);
+    xv_a7_1(st);
+    xv_a7_2(st);
+    xv_a7_3(st);
+    xv_a7_4(st);
+    xv_a7_5(st);
+    xv_a7_6(st);
+}
+
+// Cases 1 to 229 are M cases, 230 to 396 are A cases, and the last two
+// run an M word and an A word in the report profile.
+fn xv_tables(st: &mut XSt) ~ Console {
+    xv_tables_1(st);
+    xv_tables_2(st);
+    xv_report(st, 0x22081B3_u64);
+    xv_report(st, 0x20A1AF_u64);
+}

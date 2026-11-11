@@ -1,0 +1,166 @@
+// Hand-computed cases for the trap profile of emu-rv64, first part: the
+// harness and the CSRRW and CSRRS cases. Every word below was assembled by
+// hand and every expected value was worked out on paper. No emulator
+// produced them.
+//
+// A Zicsr word is  csr << 20 | rs1 << 15 | f3 << 12 | rd << 7 | 0x73.
+// f3: 1 CSRRW, 2 CSRRS, 3 CSRRC, 5 CSRRWI, 6 CSRRSI, 7 CSRRCI. In the
+// immediate forms the rs1 field holds the 5-bit immediate. Field values used
+// below: rs1 = x1 is 0x8000, rd = x3 is 0x180, rd = x1 is 0x80, and f3 << 12
+// is 0x1000, 0x2000, 0x3000, 0x5000, 0x6000 or 0x7000. So for example
+// CSRRW x3, mscratch, x1 is 0x34000000 + 0x8000 + 0x1000 + 0x180 + 0x73
+// = 0x340091F3. The comment on each case names the instruction; its word is
+// the same sum with that case's fields.
+//
+// Each case starts from the same state: pc = 0x80000000, x1 = a, x2 = b,
+// mstatus = 0x1808 (MIE = 1, MPIE = 0, MPP = 3), mtvec = 0x80000100,
+// mepc = 0x80000040, mcause = 0x55, mtval = 0x66, mie = 0x80, mip = 0x800,
+// mscratch = 0x1111222233334444, 512 bytes of memory, all 0 but the word.
+// A case may change the starting pc, mtvec or mstatus first. The word runs
+// once. The case passes when the result code, x0 to x3, pc, the step and
+// trap counts and every CSR equal the expected values, the last eight bytes
+// of memory are still 0 and nothing reached the serial output.
+
+// v: the variant under test. fail: number of the first failing case, or 0.
+// pc0, mtvec0, mstatus0: the start values of the next case.
+struct MSt { v: u64, show: bool, fail: u64, count: u64, pc0: u64, mtvec0: u64, mstatus0: u64 }
+
+// The expected state after the step.
+struct MExp {
+    rc: i64, x1: u64, x3: u64, pc: u64, mstatus: u64, mtvec: u64, mepc: u64,
+    mcause: u64, mtval: u64, mie: u64, mscratch: u64
+}
+
+// Expected: the instruction retired, x3 holds `x3`, nothing else changed.
+fn mx_ok(a: u64, x3: u64) -> MExp {
+    MExp { rc: 0, x1: a, x3: x3, pc: V_N, mstatus: MV_ST, mtvec: MV_TVEC, mepc: MV_EPC,
+           mcause: 0x55_u64, mtval: 0x66_u64, mie: 0x80_u64, mscratch: MV_SCR }
+}
+
+// Expected: a trap from pc 0x80000000 with MIE = 1 before it. mepc holds
+// the pc, MPIE takes the old MIE and MIE is 0, so mstatus is 0x1880.
+fn mx_trap(a: u64, cause: u64, tval: u64) -> MExp {
+    MExp { rc: 3, x1: a, x3: 0_u64, pc: MV_TVEC, mstatus: MV_ST_TRAP, mtvec: MV_TVEC, mepc: V_B,
+           mcause: cause, mtval: tval, mie: 0x80_u64, mscratch: MV_SCR }
+}
+
+// A copy of e with one value replaced. slot is a CSR number, 1 for x1 or
+// 2 for pc.
+fn mx_with(e: &MExp, slot: u64, v: u64) -> MExp {
+    let mut r = MExp { rc: e.rc, x1: e.x1, x3: e.x3, pc: e.pc, mstatus: e.mstatus, mtvec: e.mtvec,
+                       mepc: e.mepc, mcause: e.mcause, mtval: e.mtval, mie: e.mie, mscratch: e.mscratch };
+    if slot == 1_u64 { r.x1 = v; }
+    if slot == 2_u64 { r.pc = v; }
+    if slot == CSR_MSTATUS { r.mstatus = v; }
+    if slot == CSR_MIE { r.mie = v; }
+    if slot == CSR_MTVEC { r.mtvec = v; }
+    if slot == CSR_MSCRATCH { r.mscratch = v; }
+    if slot == CSR_MEPC { r.mepc = v; }
+    if slot == CSR_MCAUSE { r.mcause = v; }
+    if slot == CSR_MTVAL { r.mtval = v; }
+    r
+}
+
+fn mv_start(st: &MSt) -> Machine {
+    let mut m = emu_new_machine();
+    m.pc = st.pc0;
+    m.mstatus = st.mstatus0;
+    m.mtvec = st.mtvec0;
+    m.mepc = MV_EPC;
+    m.mcause = 0x55_u64;
+    m.mtval = 0x66_u64;
+    m.mie = 0x80_u64;
+    m.mip = 0x800_u64;
+    m.mscratch = MV_SCR;
+    m
+}
+
+fn mv_csr_ok(m: &Machine, e: &MExp) -> bool {
+    m.mstatus == e.mstatus && m.mtvec == e.mtvec && m.mepc == e.mepc && m.mcause == e.mcause &&
+    m.mtval == e.mtval && m.mie == e.mie && m.mscratch == e.mscratch && m.mip == 0x800_u64
+}
+
+fn mv_rest_ok(m: &Machine, x: &[u64], e: &MExp, b: u64, rc: i64) -> bool {
+    let mut steps: u64 = 0_u64;
+    let mut traps: u64 = 0_u64;
+    if e.rc == 0 { steps = 1_u64; }
+    if e.rc == 3 { traps = 1_u64; }
+    rc == e.rc && x[0] == 0_u64 && x[1] == e.x1 && x[2] == b && x[3] == e.x3 && m.pc == e.pc &&
+    m.steps == steps && m.traps == traps && m.out_len == 0_u64
+}
+
+fn mv_one(st: &mut MSt, word: u64, a: u64, b: u64, e: &MExp) ~ Console {
+    st.count = st.count + 1_u64;
+    let mut m = mv_start(st);
+    let mut x: [u64; 32] = [0_u64; 32];
+    let mut ram: [u8; 512] = [0_u8; 512];
+    let mut out: [u8; 8] = [0_u8; 8];
+    x[1] = a;
+    x[2] = b;
+    emu_poke(&mut ram, V_B, 4_u64, word);
+    let got = mstep_v(st.v, &mut m, &mut x, &mut ram, &mut out);
+    let tail = emu_peek(&ram, 0x800001F8_u64, 8_u64);
+    let ok = mv_rest_ok(&m, &x, e, b, got) && mv_csr_ok(&m, e) && tail == 0_u64;
+    if st.show {
+        println!("mcase {} word={:08x} rc={} x3={:x} pc={:08x} mstatus={:x} mepc={:x} mcause={:x} mtval={:x} pass={}",
+            st.count, word, got, x[3], m.pc, m.mstatus, m.mepc, m.mcause, m.mtval, ok);
+    }
+    if !ok && st.fail == 0_u64 { st.fail = st.count; }
+    st.pc0 = V_B;
+    st.mtvec0 = MV_TVEC;
+    st.mstatus0 = MV_ST;
+}
+
+// Cases 1 to 13: CSRRW, f3 = 1. The old value goes to rd, x1 goes to the CSR.
+fn mv_rw(st: &mut MSt) ~ Console {
+    let big = 0xAAAA5555AAAA5555_u64;
+    // 1: CSRRW x3, mscratch, x1. 2: rd = x0, word 0x34000000 + 0x8000 + 0x1000 + 0x73.
+    mv_one(st, 0x340091F3_u64, big, 0_u64, &mx_with(&mx_ok(big, MV_SCR), CSR_MSCRATCH, big));
+    mv_one(st, 0x34009073_u64, 0x1234_u64, 0_u64, &mx_with(&mx_ok(0x1234_u64, 0_u64), CSR_MSCRATCH, 0x1234_u64));
+    // 3: CSRRW x1, mscratch, x1 swaps: x1 gets the old value, the CSR gets the old x1.
+    let swap = mx_with(&mx_ok(MV_SCR, 0_u64), CSR_MSCRATCH, 0x77_u64);
+    mv_one(st, 0x340090F3_u64, 0x77_u64, 0_u64, &swap);
+    // 4, 5: mstatus (0x300). Only MIE (bit 3) and MPIE (bit 7) take the
+    // written value; MPP stays 3. All ones gives 0x1888, zero gives 0x1800.
+    mv_one(st, 0x300091F3_u64, V_ONES, 0_u64, &mx_with(&mx_ok(V_ONES, MV_ST), CSR_MSTATUS, 0x1888_u64));
+    mv_one(st, 0x300091F3_u64, 0_u64, 0_u64, &mx_with(&mx_ok(0_u64, MV_ST), CSR_MSTATUS, 0x1800_u64));
+    // 6: mepc (0x341) drops bits 1 and 0: 0x80000047 is stored as 0x80000044.
+    mv_one(st, 0x341091F3_u64, 0x80000047_u64, 0_u64, &mx_with(&mx_ok(0x80000047_u64, MV_EPC), CSR_MEPC, 0x80000044_u64));
+    // 7: mtvec (0x305) drops bit 1: 0x80000203 is stored as 0x80000201.
+    mv_one(st, 0x305091F3_u64, 0x80000203_u64, 0_u64, &mx_with(&mx_ok(0x80000203_u64, MV_TVEC), CSR_MTVEC, 0x80000201_u64));
+    // 8: mip (0x344) reads 0x800 and ignores the write. 9: misa (0x301) too.
+    mv_one(st, 0x344091F3_u64, V_ONES, 0_u64, &mx_ok(V_ONES, 0x800_u64));
+    mv_one(st, 0x301091F3_u64, 0_u64, 0_u64, &mx_ok(0_u64, MV_MISA));
+    // 10: mcause (0x342) and 11: mtval (0x343) hold all 64 bits.
+    mv_one(st, 0x342091F3_u64, 0x8000000000000007_u64, 0_u64, &mx_with(&mx_ok(0x8000000000000007_u64, 0x55_u64), CSR_MCAUSE, 0x8000000000000007_u64));
+    mv_one(st, 0x343091F3_u64, 0xDEAD_u64, 0_u64, &mx_with(&mx_ok(0xDEAD_u64, 0x66_u64), CSR_MTVAL, 0xDEAD_u64));
+    // 12: mie (0x304) keeps bits 3, 7 and 11: all ones is stored as 0x888.
+    mv_one(st, 0x304091F3_u64, V_ONES, 0_u64, &mx_with(&mx_ok(V_ONES, 0x80_u64), CSR_MIE, 0x888_u64));
+    // 13: CSRRW x0, mhartid (0xF14), x1 writes a read-only CSR: illegal
+    // instruction, cause 2, mtval = the word 0xF1400000 + 0x8000 + 0x1000 + 0x73.
+    mv_one(st, 0xF1409073_u64, 5_u64, 0_u64, &mx_trap(5_u64, 2_u64, 0xF1409073_u64));
+}
+
+// Cases 14 to 22: CSRRS, f3 = 2. The bits set in x1 are set in the CSR.
+// With rs1 = x0 the instruction only reads.
+fn mv_rs(st: &mut MSt) ~ Console {
+    // 14: CSRRS x3, mie, x1 with x1 = 0x808: 0x80 | 0x808 = 0x888.
+    mv_one(st, 0x3040A1F3_u64, 0x808_u64, 0_u64, &mx_with(&mx_ok(0x808_u64, 0x80_u64), CSR_MIE, 0x888_u64));
+    // 15: CSRRS x3, mscratch, x0 reads. Word 0x34000000 + 0x2000 + 0x180 + 0x73.
+    mv_one(st, 0x340021F3_u64, 9_u64, 0_u64, &mx_ok(9_u64, MV_SCR));
+    // 16: the same read of mhartid (0xF14), a read-only CSR, is legal and gives 0.
+    mv_one(st, 0xF14021F3_u64, 9_u64, 0_u64, &mx_ok(9_u64, 0_u64));
+    // 17: misa reads MXL = 2 in bits 63 and 62 and the I bit, bit 8.
+    mv_one(st, 0x301021F3_u64, 9_u64, 0_u64, &mx_ok(9_u64, MV_MISA));
+    // 18: CSRRS x3, mhartid, x1 with x1 = 0. The register index is not 0, so
+    // the instruction writes, whatever x1 holds: illegal instruction.
+    mv_one(st, 0xF140A1F3_u64, 0_u64, 0_u64, &mx_trap(0_u64, 2_u64, 0xF140A1F3_u64));
+    // 19, 20: CSR 0x7C0 and CSR 0xC00 do not exist here: illegal instruction.
+    mv_one(st, 0x7C0021F3_u64, 0_u64, 0_u64, &mx_trap(0_u64, 2_u64, 0x7C0021F3_u64));
+    mv_one(st, 0xC00021F3_u64, 0_u64, 0_u64, &mx_trap(0_u64, 2_u64, 0xC00021F3_u64));
+    // 21: CSRRS x3, mscratch, x1 sets the top four bits.
+    let top = 0xF000000000000000_u64;
+    mv_one(st, 0x3400A1F3_u64, top, 0_u64, &mx_with(&mx_ok(top, MV_SCR), CSR_MSCRATCH, 0xF111222233334444_u64));
+    // 22: CSRRS x3, mstatus, x0 reads 0x1808.
+    mv_one(st, 0x300021F3_u64, 0_u64, 0_u64, &mx_ok(0_u64, MV_ST));
+}

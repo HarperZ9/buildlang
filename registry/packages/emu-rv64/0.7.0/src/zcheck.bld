@@ -1,0 +1,251 @@
+// Hand cases for the serial run of emu-rv64, since 0.7.0. Cases 1 to 12
+// are here, the rest in zcheck2.bld.
+//
+// Every expected number (steps, bytes, exit code) was worked out by hand
+// before the run, and the working is in the comment beside the case.
+// Case 3 uses literal instruction words, with the encoding shown there.
+// Every other image is built with emu_encode from Insn records, the
+// encoder that the hand cases of `cases` check word by word.
+//
+// A step is one instruction executed or one trap taken. The halt word is
+// not executed, so it is never a step.
+
+// v: the planted defect under test, 0 for the run itself. fail: number of
+// the first failing case, or 0. bad: bit k is set when case k failed.
+struct ZSt { v: u64, show: bool, fail: u64, count: u64, bad: u64 }
+
+// What a case expects of a run.
+struct ZWant { rc: u64, halted: bool, code: u64, steps: u64, len: usize }
+
+fn zc_want(halted: bool, code: u64, steps: u64, len: usize) -> ZWant {
+    ZWant { rc: IMG_OK, halted: halted, code: code, steps: steps, len: len }
+}
+
+fn zc_note(st: &mut ZSt, k: u64, name: str, ok: bool, got: str) ~ Console {
+    st.count = st.count + 1_u64;
+    if !ok {
+        if st.fail == 0_u64 { st.fail = k; }
+        st.bad = st.bad | (1_u64 << k);
+    }
+    if !st.show { return; }
+    if ok {
+        println!("case {} {}: ok", k, name);
+    } else {
+        println!("case {} {}: MISMATCH {}", k, name, got);
+    }
+}
+
+// Judges one run. bytes: the case found the bytes of sink as expected.
+fn zc_judge(st: &mut ZSt, k: u64, name: str, r: &SerRun, len: usize, w: &ZWant, bytes: bool) ~ Console {
+    let ok = r.rc == w.rc && r.halted == w.halted && r.code == w.code && r.steps == w.steps
+        && len == w.len && bytes;
+    let got = format!("got rc={} halted={} code={} steps={} serial_len={} bytes_as_expected={}",
+                      r.rc, r.halted, r.code, r.steps, len, bytes);
+    let want = format!("want rc={} halted={} code={} steps={} serial_len={}",
+                       w.rc, w.halted, w.code, w.steps, w.len);
+    zc_note(st, k, name, ok, got + ", " + want);
+}
+
+// Appends one word to an image, least significant byte first.
+fn zc_put(img: &mut Vec<u8>, w: u64) {
+    img.push((w & 0xFF_u64) as u8);
+    img.push(((w >> 8_u64) & 0xFF_u64) as u8);
+    img.push(((w >> 16_u64) & 0xFF_u64) as u8);
+    img.push(((w >> 24_u64) & 0xFF_u64) as u8);
+}
+
+fn zc_enc(op: u64, rd: u64, rs1: u64, rs2: u64, imm: u64) -> u64 {
+    emu_encode(&Insn { op: op, rd: rd, rs1: rs1, rs2: rs2, imm: imm })
+}
+
+// The number -n as an immediate.
+fn zc_neg(n: u64) -> u64 { 0_u64.wrapping_sub(n) }
+
+// lui rd, imm: imm is the value the register receives, a multiple of 4096.
+fn zc_lui(img: &mut Vec<u8>, rd: u64, imm: u64) { zc_put(img, zc_enc(OP_LUI, rd, 0_u64, 0_u64, imm)); }
+
+fn zc_addi(img: &mut Vec<u8>, rd: u64, rs1: u64, imm: u64) { zc_put(img, zc_enc(OP_ADDI, rd, rs1, 0_u64, imm)); }
+
+// sb rs2, imm(rs1): stores the low byte of rs2.
+fn zc_sb(img: &mut Vec<u8>, rs2: u64, rs1: u64, imm: u64) { zc_put(img, zc_enc(OP_SB, 0_u64, rs1, rs2, imm)); }
+
+// jal x0, imm: a jump with no link.
+fn zc_jal(img: &mut Vec<u8>, imm: u64) { zc_put(img, zc_enc(OP_JAL, 0_u64, 0_u64, 0_u64, imm)); }
+
+// bne rs1, rs2, imm. BNE is the operation after BEQ.
+fn zc_bne(img: &mut Vec<u8>, rs1: u64, rs2: u64, imm: u64) {
+    zc_put(img, zc_enc(OP_BEQ + 1_u64, 0_u64, rs1, rs2, imm));
+}
+
+fn zc_halt(img: &mut Vec<u8>) { zc_put(img, SER_HALT_WORD); }
+
+// lui x5, 0x10000: x5 holds the address of the serial device.
+fn zc_dev(img: &mut Vec<u8>) { zc_lui(img, 5_u64, EMU_UART_BASE); }
+
+// True when sink holds the bytes 4F 4B 0A ("OK" and a line feed) from
+// index at on, and nothing after them.
+fn zc_okline(sink: &Vec<u8>, at: usize) -> bool {
+    sink.len() == at + 3 && sink[at] == 0x4F_u8 && sink[at + 1] == 0x4B_u8 && sink[at + 2] == 0x0A_u8
+}
+
+// True when sink holds n bytes and all of them are b.
+fn zc_all(sink: &Vec<u8>, n: usize, b: u8) -> bool {
+    if sink.len() != n { return false; }
+    let mut i: usize = 0;
+    while i < n {
+        if sink[i] != b { return false; }
+        i = i + 1;
+    }
+    true
+}
+
+// Cases 1 and 2: the shortest programs.
+//   case 1: the image is the halt word alone. The run sees it at the
+//           start, so 0 steps, and x10 was never written, so code 0.
+//   case 2: addi x10, x0, 42 then the halt word: 1 step, code 42.
+fn zc_short(st: &mut ZSt, ram: &mut [u8]) ~ Console {
+    let mut img: Vec<u8> = Vec::new();
+    let mut sink: Vec<u8> = Vec::new();
+    zc_halt(&mut img);
+    let r = ser_run_v(st.v, &img, img.len(), ram, 100000_u64, &mut sink);
+    zc_judge(st, 1_u64, "the halt word alone", &r, sink.len(), &zc_want(true, 0_u64, 0_u64, 0), true);
+    img.clear();
+    zc_addi(&mut img, 10_u64, 0_u64, 42_u64);
+    zc_halt(&mut img);
+    let q = ser_run_v(st.v, &img, img.len(), ram, 100000_u64, &mut sink);
+    zc_judge(st, 2_u64, "set the code to 42 and halt", &q, sink.len(), &zc_want(true, 42_u64, 1_u64, 0), true);
+}
+
+// The image of cases 3 and 4, as literal words:
+//   0x100002B7  lui x5, 0x10000     0x10000 << 12 | 5 << 7 | 0x37
+//   0x04F00313  addi x6, x0, 0x4F   0x04F << 20 | 6 << 7 | 0x13
+//   0x00628023  sb x6, 0(x5)        6 << 20 | 5 << 15 | 0x23
+//   0x04B00313  addi x6, x0, 0x4B
+//   0x00628023  sb x6, 0(x5)
+//   0x00A00313  addi x6, x0, 0x0A
+//   0x00628023  sb x6, 0(x5)
+//   0x00700513  addi x10, x0, 7     7 << 20 | 10 << 7 | 0x13
+//   0x0000006F  the halt word
+fn zc_ok_image(img: &mut Vec<u8>) {
+    zc_put(img, 0x100002B7_u64);
+    zc_put(img, 0x04F00313_u64);
+    zc_put(img, 0x00628023_u64);
+    zc_put(img, 0x04B00313_u64);
+    zc_put(img, 0x00628023_u64);
+    zc_put(img, 0x00A00313_u64);
+    zc_put(img, 0x00628023_u64);
+    zc_put(img, 0x00700513_u64);
+    zc_put(img, 0x0000006F_u64);
+}
+
+// Cases 3 and 4. Eight words come before the halt word and none of them
+// jumps, so 8 steps. Three of them store a byte: 3 bytes, 4F 4B 0A.
+//   case 4: sink holds the bytes 01 02 before the run. The run appends,
+//           so sink ends with 5 bytes and the first two are unchanged.
+fn zc_three(st: &mut ZSt, ram: &mut [u8]) ~ Console {
+    let mut img: Vec<u8> = Vec::new();
+    let mut sink: Vec<u8> = Vec::new();
+    zc_ok_image(&mut img);
+    let r = ser_run_v(st.v, &img, img.len(), ram, 100000_u64, &mut sink);
+    zc_judge(st, 3_u64, "print OK and a line feed, code 7", &r, sink.len(), &zc_want(true, 7_u64, 8_u64, 3),
+             zc_okline(&sink, 0));
+    sink.clear();
+    sink.push(1_u8);
+    sink.push(2_u8);
+    let q = ser_run_v(st.v, &img, img.len(), ram, 100000_u64, &mut sink);
+    let kept = sink.len() >= 2 && sink[0] == 1_u8 && sink[1] == 2_u8;
+    zc_judge(st, 4_u64, "the run appends to a sink that held 2 bytes", &q, sink.len(),
+             &zc_want(true, 7_u64, 8_u64, 5), kept && zc_okline(&sink, 2));
+}
+
+// Cases 5 to 7: the exit code.
+//   case 5: addi x11, x0, 3; addi x10, x0, 8; halt. 2 steps. The code is
+//           x10 = 8, not x11 = 3.
+//   case 6: lui x10, 0x12345; addi x10, x10, 0x678; halt. 2 steps.
+//           x10 = 0x12345000 + 0x678 = 0x12345678 = 305419896. The run
+//           reports all of it.
+//   case 7: the exit status of case 6 is the low 8 bits, 0x78 = 120.
+fn zc_codes(st: &mut ZSt, ram: &mut [u8]) ~ Console {
+    let mut img: Vec<u8> = Vec::new();
+    let mut sink: Vec<u8> = Vec::new();
+    zc_addi(&mut img, 11_u64, 0_u64, 3_u64);
+    zc_addi(&mut img, 10_u64, 0_u64, 8_u64);
+    zc_halt(&mut img);
+    let r = ser_run_v(st.v, &img, img.len(), ram, 100000_u64, &mut sink);
+    zc_judge(st, 5_u64, "the code is x10 and not x11", &r, sink.len(), &zc_want(true, 8_u64, 2_u64, 0), true);
+    img.clear();
+    zc_lui(&mut img, 10_u64, 0x12345000_u64);
+    zc_addi(&mut img, 10_u64, 10_u64, 0x678_u64);
+    zc_halt(&mut img);
+    let q = ser_run_v(st.v, &img, img.len(), ram, 100000_u64, &mut sink);
+    zc_judge(st, 6_u64, "a code above 255 is reported in full", &q, sink.len(),
+             &zc_want(true, 305419896_u64, 2_u64, 0), true);
+    let s = ser_status(&q, 0_u64);
+    zc_note(st, 7_u64, "the exit status of that run is 120", s == 120, format!("got {} want 120", s));
+}
+
+// Cases 8 to 10: where the halt word is, and the status register.
+//   case 8: jal x0, 8; the halt word as data; addi x10, x0, 5; halt.
+//           The jump passes over the data word, so pc is never there:
+//           2 steps (jal, addi), code 5.
+//   case 9: jal x0, 8; halt; addi x10, x0, 6; jal x0, -8. The halt word
+//           is at offset 4 and is reached by the jump back: 3 steps
+//           (jal, addi, jal), code 6.
+//   case 10: lui x5; addi x6, x0, 0x41; sb x6, 5(x5); sb x6, 0(x5);
+//            addi x10, x0, 1; halt. 5 steps. The store to offset 5, the
+//            line status register, sends nothing: 1 byte, 41.
+fn zc_places(st: &mut ZSt, ram: &mut [u8]) ~ Console {
+    let mut img: Vec<u8> = Vec::new();
+    let mut sink: Vec<u8> = Vec::new();
+    zc_jal(&mut img, 8_u64);
+    zc_halt(&mut img);
+    zc_addi(&mut img, 10_u64, 0_u64, 5_u64);
+    zc_halt(&mut img);
+    let r = ser_run_v(st.v, &img, img.len(), ram, 100000_u64, &mut sink);
+    zc_judge(st, 8_u64, "a halt word that is data and never reached", &r, sink.len(),
+             &zc_want(true, 5_u64, 2_u64, 0), true);
+    img.clear();
+    zc_jal(&mut img, 8_u64);
+    zc_halt(&mut img);
+    zc_addi(&mut img, 10_u64, 0_u64, 6_u64);
+    zc_jal(&mut img, zc_neg(8_u64));
+    let q = ser_run_v(st.v, &img, img.len(), ram, 100000_u64, &mut sink);
+    zc_judge(st, 9_u64, "a halt word reached by a jump back", &q, sink.len(), &zc_want(true, 6_u64, 3_u64, 0), true);
+    img.clear();
+    zc_dev(&mut img);
+    zc_addi(&mut img, 6_u64, 0_u64, 0x41_u64);
+    zc_sb(&mut img, 6_u64, 5_u64, 5_u64);
+    zc_sb(&mut img, 6_u64, 5_u64, 0_u64);
+    zc_addi(&mut img, 10_u64, 0_u64, 1_u64);
+    zc_halt(&mut img);
+    let p = ser_run_v(st.v, &img, img.len(), ram, 100000_u64, &mut sink);
+    zc_judge(st, 10_u64, "a store to the status register sends nothing", &p, sink.len(),
+             &zc_want(true, 1_u64, 5_u64, 1), zc_all(&sink, 1, 0x41_u8));
+}
+
+// Cases 11 and 12: a program that never halts.
+//   addi x10, x0, 5; lui x5; addi x6, x0, 0x2E; sb x6, 0(x5); jal x0, -4
+//   With a limit of 10 steps: 3 steps of setup, then sb jal sb jal sb jal
+//   sb, which is 7 more. 4 stores, so 4 bytes 2E. The run did not halt, so
+//   the code is 0 although x10 holds 5.
+//   case 12: the exit status of a run that did not halt is 124. The status
+//            of a halted run with code 42 is 42, and 125 when one byte
+//            could not be printed.
+fn zc_forever(st: &mut ZSt, ram: &mut [u8]) ~ Console {
+    let mut img: Vec<u8> = Vec::new();
+    let mut sink: Vec<u8> = Vec::new();
+    zc_addi(&mut img, 10_u64, 0_u64, 5_u64);
+    zc_dev(&mut img);
+    zc_addi(&mut img, 6_u64, 0_u64, 0x2E_u64);
+    zc_sb(&mut img, 6_u64, 5_u64, 0_u64);
+    zc_jal(&mut img, zc_neg(4_u64));
+    let r = ser_run_v(st.v, &img, img.len(), ram, 10_u64, &mut sink);
+    zc_judge(st, 11_u64, "a loop with no halt word stops at the limit of 10 steps", &r, sink.len(),
+             &zc_want(false, 0_u64, 10_u64, 4), zc_all(&sink, 4, 0x2E_u8));
+    let done = SerRun { rc: IMG_OK, halted: true, code: 42_u64, steps: 1_u64, hash: 0_u64 };
+    let a = ser_status(&r, 0_u64);
+    let b = ser_status(&done, 0_u64);
+    let c = ser_status(&done, 1_u64);
+    zc_note(st, 12_u64, "exit statuses 124, 42 and 125", a == 124 && b == 42 && c == 125,
+            format!("got {} {} {} want 124 42 125", a, b, c));
+}

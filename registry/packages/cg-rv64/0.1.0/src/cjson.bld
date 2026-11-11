@@ -1,0 +1,204 @@
+// cg-rv64: a JSON reader for the MIR file.
+//
+// The whole file is read into a tree of nodes. A node is six entries of
+// the vector n:
+//
+//   kind   one of the CJ_ constants
+//   a      number: its magnitude; string: index of its first byte in src;
+//          array or object: its first child, or CG_NONE
+//   b      number: 1 when it is negative; string: its length in bytes, as
+//          written, escapes not yet decoded
+//   next   the next child of the same parent, or CG_NONE
+//   kstart, klen   for a member of an object: where its key is in src
+//
+// A member of an object is its value node; the key rides on that node.
+// bad is set when the text is not JSON; pos is the read position.
+
+struct CjDoc { src: Vec<u8>, n: Vec<u64>, pos: usize, bad: bool }
+
+fn cj_node(d: &mut CjDoc, kind: u64, a: u64, b: u64) -> u64 {
+    let at = d.n.len() as u64;
+    d.n.push(kind);
+    d.n.push(a);
+    d.n.push(b);
+    d.n.push(CG_NONE);
+    d.n.push(0_u64);
+    d.n.push(0_u64);
+    at
+}
+
+// The byte at the read position, or 0 at the end.
+fn cj_peek(d: &CjDoc) -> u8 {
+    if d.pos < d.src.len() { return d.src[d.pos]; }
+    0_u8
+}
+
+fn cj_ws(d: &mut CjDoc) {
+    let mut go = true;
+    while go {
+        let c = cj_peek(d);
+        if c == 32_u8 || c == 10_u8 || c == 13_u8 || c == 9_u8 { d.pos = d.pos + 1; } else { go = false; }
+    }
+}
+
+// Reads the literal text s at the read position.
+fn cj_lit(d: &mut CjDoc, s: str, kind: u64) -> u64 {
+    let b = s.as_bytes();
+    let mut i: usize = 0;
+    while i < s.len() {
+        if cj_peek(d) != b[i] { d.bad = true; }
+        d.pos = d.pos + 1;
+        i = i + 1;
+    }
+    cj_node(d, kind, 0_u64, 0_u64)
+}
+
+// A string. The read position is on its opening quote. A backslash takes
+// the byte after it along, so an escaped quote does not end the string.
+fn cj_string(d: &mut CjDoc) -> u64 {
+    d.pos = d.pos + 1;
+    let start = d.pos;
+    let mut go = true;
+    while go {
+        let c = cj_peek(d);
+        if d.pos >= d.src.len() {
+            d.bad = true;
+            go = false;
+        } else if c == 34_u8 {
+            go = false;
+        } else if c == 92_u8 {
+            d.pos = d.pos + 2;
+        } else {
+            d.pos = d.pos + 1;
+        }
+    }
+    let node = cj_node(d, CJ_STR, start as u64, (d.pos - start) as u64);
+    d.pos = d.pos + 1;
+    node
+}
+
+// A number: an optional minus sign and decimal digits. A fraction or an
+// exponent makes it CJ_FLOAT, a magnitude past 64 bits CJ_BIG.
+fn cj_number(d: &mut CjDoc) -> u64 {
+    let mut neg: u64 = 0_u64;
+    if cj_peek(d) == 45_u8 {
+        neg = 1_u64;
+        d.pos = d.pos + 1;
+    }
+    let mut mag: u64 = 0_u64;
+    let mut kind = CJ_NUM;
+    let mut digits: u64 = 0_u64;
+    let mut c = cj_peek(d);
+    while c >= 48_u8 && c <= 57_u8 {
+        let v = (c - 48_u8) as u64;
+        if mag > (0xFFFFFFFFFFFFFFFF_u64 - v) / 10_u64 { kind = CJ_BIG; } else { mag = mag * 10_u64 + v; }
+        digits = digits + 1_u64;
+        d.pos = d.pos + 1;
+        c = cj_peek(d);
+    }
+    if digits == 0_u64 { d.bad = true; }
+    while c == 46_u8 || c == 101_u8 || c == 69_u8 || c == 43_u8 || c == 45_u8 || (c >= 48_u8 && c <= 57_u8) {
+        kind = CJ_FLOAT;
+        d.pos = d.pos + 1;
+        c = cj_peek(d);
+    }
+    cj_node(d, kind, mag, neg)
+}
+
+// Links child after prev (or as the first child of parent).
+fn cj_link(d: &mut CjDoc, parent: u64, prev: u64, child: u64) {
+    if prev == CG_NONE {
+        d.n[(parent + 1_u64) as usize] = child;
+    } else {
+        d.n[(prev + 3_u64) as usize] = child;
+    }
+}
+
+// An array or an object. The read position is on its opening bracket.
+fn cj_seq(d: &mut CjDoc, obj: bool) -> u64 {
+    let mut close: u8 = 93_u8;
+    let mut kind = CJ_ARR;
+    if obj {
+        close = 125_u8;
+        kind = CJ_OBJ;
+    }
+    let node = cj_node(d, kind, CG_NONE, 0_u64);
+    d.pos = d.pos + 1;
+    cj_ws(d);
+    let mut prev = CG_NONE;
+    let mut go = cj_peek(d) != close;
+    while go && !d.bad {
+        let child = cj_member(d, obj);
+        cj_link(d, node, prev, child);
+        prev = child;
+        cj_ws(d);
+        if cj_peek(d) == 44_u8 {
+            d.pos = d.pos + 1;
+        } else {
+            go = false;
+        }
+    }
+    if cj_peek(d) != close { d.bad = true; }
+    d.pos = d.pos + 1;
+    node
+}
+
+// One element of an array, or one `"key": value` of an object.
+fn cj_member(d: &mut CjDoc, obj: bool) -> u64 {
+    cj_ws(d);
+    let mut ks: u64 = 0_u64;
+    let mut kl: u64 = 0_u64;
+    if obj {
+        if cj_peek(d) != 34_u8 {
+            d.bad = true;
+            return CG_NONE;
+        }
+        let k = cj_string(d);
+        ks = d.n[(k + 1_u64) as usize];
+        kl = d.n[(k + 2_u64) as usize];
+        cj_ws(d);
+        if cj_peek(d) != 58_u8 { d.bad = true; }
+        d.pos = d.pos + 1;
+    }
+    let v = cj_value(d);
+    if v != CG_NONE {
+        d.n[(v + 4_u64) as usize] = ks;
+        d.n[(v + 5_u64) as usize] = kl;
+    }
+    v
+}
+
+fn cj_value(d: &mut CjDoc) -> u64 {
+    cj_ws(d);
+    let c = cj_peek(d);
+    if c == 123_u8 { return cj_seq(d, true); }
+    if c == 91_u8 { return cj_seq(d, false); }
+    if c == 34_u8 { return cj_string(d); }
+    if c == 116_u8 { return cj_lit(d, "true", CJ_TRUE); }
+    if c == 102_u8 { return cj_lit(d, "false", CJ_FALSE); }
+    if c == 110_u8 { return cj_lit(d, "null", CJ_NULL); }
+    if c == 45_u8 || (c >= 48_u8 && c <= 57_u8) { return cj_number(d); }
+    d.bad = true;
+    CG_NONE
+}
+
+// Reads the file into a document. The root is node 0. bad is set when
+// the file is missing, empty or not JSON, or text follows the root.
+fn cj_load(path: str) -> CjDoc ~ FileSystem {
+    let mut d = CjDoc { src: Vec::new(), n: Vec::new(), pos: 0, bad: false };
+    if !file_exists(path) {
+        d.bad = true;
+        return d;
+    }
+    let s = read_bytes(path);
+    let b = s.as_bytes();
+    let mut i: usize = 0;
+    while i < s.len() {
+        d.src.push(b[i]);
+        i = i + 1;
+    }
+    let root = cj_value(&mut d);
+    cj_ws(&mut d);
+    if root != 0_u64 || d.pos != d.src.len() { d.bad = true; }
+    d
+}

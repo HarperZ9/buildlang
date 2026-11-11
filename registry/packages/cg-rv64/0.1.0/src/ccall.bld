@@ -1,0 +1,208 @@
+// cg-rv64: calls.
+//
+// Calling convention, the generator's own (it is not the RISC-V psABI):
+// - Arguments are numbered from 0 in order. When the result is an
+//   aggregate, argument 0 is a hidden one, the address the result is
+//   written to, and the written arguments follow from 1.
+// - Arguments 0 to 7 travel in x10 to x17. Argument k from 8 on is stored
+//   by the caller at 8 * (k - 8) bytes above its stack pointer.
+// - A scalar travels as its value in the form of its type. An aggregate
+//   travels as the address of the caller's copy; the callee copies it
+//   into its own frame before it runs.
+// - A scalar result comes back in x10.
+// - The callee may change every register except x2, x26 and x27.
+
+// The entry of the function table with this name and a body.
+fn cc_find(g: &Cg, d: &CjDoc, name: u64) -> u64 {
+    let mut f = cj_first(d, g.funcs);
+    while f != CG_NONE {
+        if cj_kind(d, cj_get(d, f, "blocks")) == CJ_ARR && cj_same_str(d, cj_get(d, f, "name"), name) { return f; }
+        f = cj_next(d, f);
+    }
+    CG_NONE
+}
+
+// The number of a function to compile. A function met for the first
+// time is added to the list.
+fn cc_fid(g: &mut Cg, def: u64) -> u64 {
+    let mut i: usize = 0;
+    while i < g.todo.len() {
+        if g.todo[i] == def { return i as u64; }
+        i = i + 1;
+    }
+    g.todo.push(def);
+    (g.todo.len() - 1) as u64
+}
+
+// The register of argument number a. Defect 5 passes arguments 1 and 2
+// in each other's register.
+fn cc_reg(g: &Cg, a: u64) -> u64 {
+    if g.v == CGC_ARGREG && a == 1_u64 { return 12_u64; }
+    if g.v == CGC_ARGREG && a == 2_u64 { return 11_u64; }
+    10_u64 + a
+}
+
+// Places the arguments that travel on the stack (stack true) or those
+// that travel in registers.
+fn cc_args(g: &mut Cg, d: &CjDoc, args: u64, params: u64, hid: u64, stack: bool) {
+    let mut arg = cj_first(d, args);
+    let mut pt = cj_first(d, params);
+    let mut a = hid;
+    while arg != CG_NONE && pt != CG_NONE {
+        if (a >= CG_ARG_REGS) == stack {
+            let mut reg: u64 = 5_u64;
+            if !stack { reg = cc_reg(g, a); }
+            cc_arg(g, d, arg, pt, reg);
+            if stack { ci_mem(g, "sd", 5_u64, 2_u64, 8_u64 * (a - CG_ARG_REGS)); }
+        }
+        a = a + 1_u64;
+        arg = cj_next(d, arg);
+        pt = cj_next(d, pt);
+    }
+}
+
+// reg = argument arg for a parameter of type pt.
+fn cc_arg(g: &mut Cg, d: &CjDoc, arg: u64, pt: u64, reg: u64) {
+    if ct_scalar(d, pt) {
+        cv_load(g, d, reg, arg, pt);
+        return;
+    }
+    let id = cv_local(d, arg);
+    if !ct_agg(d, pt) || !cv_is_local(d, arg) || !ct_same(d, cv_lty(g, id), pt) {
+        cg_refuse(g, d, "argument that is not a scalar or an aggregate local of the parameter type");
+        return;
+    }
+    ci_add(g, reg, 2_u64, cv_loff(g, id));
+}
+
+// Stores the result register to the destination of a call. A call may
+// have no destination, or a Void one, and then the result is dropped.
+fn cc_result(g: &mut Cg, d: &CjDoc, body: u64, ret: u64) {
+    let dn = cj_get(d, body, "dest");
+    if cj_kind(d, dn) != CJ_NUM { return; }
+    let dt = cv_lty(g, cj_mag(d, dn));
+    if ct_kind(d, dt) == CT_VOID { return; }
+    if !ct_same(d, dt, ret) || !ct_scalar(d, ret) {
+        cg_refuse(g, d, "call whose destination does not have the type of the result");
+        return;
+    }
+    ci_store(g, d, 10_u64, 2_u64, cv_loff(g, cj_mag(d, dn)), ret);
+}
+
+// A call of a function of the program.
+fn cc_user(g: &mut Cg, d: &CjDoc, body: u64, name: u64) {
+    let def = cc_find(g, d, name);
+    let sig = cj_get(d, def, "sig");
+    let params = cj_get(d, sig, "params");
+    let ret = cj_get(d, sig, "ret");
+    let args = cj_get(d, body, "args");
+    if def == CG_NONE {
+        cg_refuse_tag(g, d, "call of a function that has no body in the MIR:", name);
+        return;
+    }
+    if cj_count(d, args) != cj_count(d, params) {
+        cg_refuse_tag(g, d, "call with a wrong argument count:", name);
+        return;
+    }
+    let mut hid: u64 = 0_u64;
+    if ct_agg(d, ret) { hid = 1_u64; }
+    cc_args(g, d, args, params, hid, true);
+    cc_args(g, d, args, params, hid, false);
+    if hid == 1_u64 {
+        let dn = cj_get(d, body, "dest");
+        if cj_kind(d, dn) != CJ_NUM || !ct_same(d, cv_lty(g, cj_mag(d, dn)), ret) {
+            cg_refuse(g, d, "call whose aggregate result has no local of its type to go to");
+            return;
+        }
+        ci_add(g, 10_u64, 2_u64, cv_loff(g, cj_mag(d, dn)));
+    }
+    let fid = cc_fid(g, def);
+    co_s(g, "    jal x1, ");
+    co_fn(g, fid);
+    co_ch(g, 10_u8);
+    if hid == 0_u64 && ct_kind(d, ret) != CT_VOID { cc_result(g, d, body, ret); }
+}
+
+// True when the runtime function name ends in the suffix the C backend
+// gives the element type e of a vector, an integer type.
+fn cc_suffix(d: &CjDoc, name: u64, e: u64) -> bool {
+    if ct_kind(d, e) != CT_INT { return false; }
+    let bits = ct_bits(d, e);
+    let sg = ct_signed(d, e);
+    let size = cj_str_is(d, cj_first(d, cj_body(d, e)), "ISize");
+    if size && sg { return cj_str_ends(d, name, "_isize"); }
+    if size { return cj_str_ends(d, name, "_usize"); }
+    if bits == 8_u64 && sg { return cj_str_ends(d, name, "_i8"); }
+    if bits == 8_u64 { return cj_str_ends(d, name, "_u8"); }
+    if bits == 16_u64 && sg { return cj_str_ends(d, name, "_i16"); }
+    if bits == 16_u64 { return cj_str_ends(d, name, "_u16"); }
+    if bits == 32_u64 && sg { return cj_str_ends(d, name, "_i32"); }
+    if bits == 32_u64 { return cj_str_ends(d, name, "_u32"); }
+    if sg { return cj_str_ends(d, name, "_i64"); }
+    cj_str_ends(d, name, "_u64")
+}
+
+// The element type of the vector local that is argument 0, or CG_NONE.
+fn cc_vec_elem(g: &Cg, d: &CjDoc, args: u64) -> u64 {
+    let a = cj_first(d, args);
+    let t = cv_lty(g, cv_local(d, a));
+    if !cv_is_local(d, a) || ct_kind(d, t) != CT_VEC { return CG_NONE; }
+    ct_elem(d, t)
+}
+
+// The vector operations the MIR writes as calls of the C runtime:
+// Vec_new, build_hvec_len, build_hvec_push_T and build_hvec_set_T, for
+// vectors of integers.
+fn cc_vec(g: &mut Cg, d: &CjDoc, body: u64, name: u64) {
+    let args = cj_get(d, body, "args");
+    let n = cj_count(d, args);
+    let a0 = cj_first(d, args);
+    let a1 = cj_next(d, a0);
+    let e = cc_vec_elem(g, d, args);
+    let dn = cj_get(d, body, "dest");
+    let dt = cv_lty(g, cj_mag(d, dn));
+    if cj_str_is(d, name, "Vec_new") && n == 0_u64 && ct_kind(d, dt) == CT_VEC && ct_kind(d, ct_elem(d, dt)) == CT_INT {
+        ci_jal(g, 1_u64, "rt_vec_new");
+        ci_store(g, d, 10_u64, 2_u64, cv_loff(g, cj_mag(d, dn)), dt);
+    } else if cj_str_is(d, name, "build_hvec_len") && n == 1_u64 && e != CG_NONE {
+        cv_load(g, d, 10_u64, a0, cv_lty(g, cv_local(d, a0)));
+        ci_m(g, "ld", 10_u64, 8_u64, 10_u64);
+        if cj_kind(d, dn) == CJ_NUM && ct_kind(d, dt) != CT_VOID {
+            if ct_kind(d, dt) != CT_INT || ct_bits(d, dt) != 64_u64 {
+                cg_refuse(g, d, "vector length stored to a local that is not 64 bits wide");
+                return;
+            }
+            ci_store(g, d, 10_u64, 2_u64, cv_loff(g, cj_mag(d, dn)), dt);
+        }
+    } else if cj_str_starts(d, name, "build_hvec_push_") && n == 2_u64 && cc_suffix(d, name, e) {
+        cv_load(g, d, 10_u64, a0, cv_lty(g, cv_local(d, a0)));
+        cv_load(g, d, 11_u64, a1, e);
+        ci_li(g, 12_u64, ct_size(g, d, e));
+        ci_jal(g, 1_u64, "rt_vec_push");
+    } else if cj_str_starts(d, name, "build_hvec_set_") && n == 3_u64 && cc_suffix(d, name, e) {
+        cv_load(g, d, 5_u64, cj_next(d, a1), e);
+        if cr_index(g, d, a0, a1, e, true) != CG_NONE { ci_store(g, d, 5_u64, 7_u64, 0_u64, e); }
+    } else {
+        cg_refuse_tag(g, d, "call of a runtime function the generator does not cover:", name);
+    }
+}
+
+// A Call terminator: the call, then a jump to the block that follows.
+fn cc_call(g: &mut Cg, d: &CjDoc, body: u64) {
+    let func = cj_get(d, body, "func");
+    let name = cj_body(d, func);
+    let target = cj_get(d, body, "target");
+    let named = (cj_tag_is(d, func, "Global") || cj_tag_is(d, func, "Function")) && cj_kind(d, name) == CJ_STR;
+    if !named || cj_kind(d, target) != CJ_NUM || cj_kind(d, cj_get(d, body, "unwind")) != CJ_NULL {
+        cg_refuse(g, d, "call that is not a direct call with one block to continue in");
+        return;
+    }
+    if cj_str_is(d, name, "printf") {
+        cp_printf(g, d, body);
+    } else if cj_str_is(d, name, "Vec_new") || cj_str_starts(d, name, "build_") {
+        cc_vec(g, d, body, name);
+    } else {
+        cc_user(g, d, body, name);
+    }
+    ci_goto(g, cj_mag(d, target));
+}

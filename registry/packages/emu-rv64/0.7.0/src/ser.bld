@@ -1,0 +1,142 @@
+// emu-rv64: the serial run, since 0.7.0.
+//
+// A serial run loads a flat image, steps the machine in the trap profile
+// and keeps every byte the program stores to the serial device, in order.
+// It ends when the program halts or when the step limit is reached.
+//
+// Halt convention: the program halts by reaching the word 0x0000006F,
+// `jal x0, 0`, a jump to itself. The run looks at the word at pc before
+// every step and does not execute the halt word. The exit code of the
+// program is the value of register x10 at that moment.
+
+// The outcome of a serial run. rc: the loader code, IMG_OK when the image
+// ran. halted: the program reached the halt word. code: x10 at the halt,
+// 0 when the run did not halt. steps: steps taken. hash: the state hash
+// of the end state, as rr_hash computes it.
+struct SerRun { rc: u64, halted: bool, code: u64, steps: u64, hash: u64 }
+
+// True when pc is in memory, a multiple of 4, and the word there is the
+// halt word. Defect 1 reads the word after the one at pc.
+fn ser_at_halt(v: u64, m: &Machine, ram: &[u8]) -> bool {
+    let mut pc = m.pc;
+    if v == SER_CTL_LATE { pc = pc.wrapping_add(4_u64); }
+    if (pc & 3_u64) != 0_u64 { return false; }
+    if !emu_in_ram(ram.len() as u64, pc, 4_u64) { return false; }
+    emu_peek(ram, pc, 4_u64) == SER_HALT_WORD
+}
+
+// Appends the bytes that wait in the output buffer to sink.
+fn ser_copy(m: &Machine, out: &[u8], sink: &mut Vec<u8>) {
+    let mut i: usize = 0;
+    while (i as u64) < m.out_len && i < out.len() {
+        sink.push(out[i]);
+        i = i + 1;
+    }
+}
+
+// One step. When the output buffer is full the core returns EMU_SMALL and
+// changes nothing; the bytes go to sink, the buffer is emptied into the
+// tape and the step runs again. Defect 2 empties the buffer without
+// keeping its bytes.
+fn ser_step(v: u64, m: &mut Machine, x: &mut [u64], ram: &mut [u8], out: &mut [u8], t: &mut Tape,
+            sink: &mut Vec<u8>) -> i64 {
+    let mut rc = emu_step(m, x, ram, out);
+    if rc == EMU_SMALL && m.out_len != 0_u64 {
+        if v != SER_CTL_DROP { ser_copy(m, out, sink); }
+        rr_drain(m, out, t);
+        rc = emu_step(m, x, ram, out);
+    }
+    rc
+}
+
+// Runs the first n bytes of img in the memory ram for at most max steps
+// and appends the serial bytes to sink. Defect 3 takes the exit code from
+// x11, defect 4 counts the halt as a step, defect 5 leaves the bytes
+// that still wait in the output buffer at the end out of sink, defect 6
+// looks at the step limit before the halt word.
+fn ser_run_v(v: u64, img: &[u8], n: usize, ram: &mut [u8], max: u64, sink: &mut Vec<u8>) -> SerRun {
+    let mut m = emu_new_machine();
+    let mut x: [u64; 32] = [0_u64; 32];
+    let mut out: [u8; 128] = [0_u8; 128];
+    let mut t = tape_new();
+    let mut r = SerRun { rc: IMG_OK, halted: false, code: 0_u64, steps: 0_u64, hash: 0_u64 };
+    r.rc = rr_boot(img, n, &mut m, &mut x, ram, &mut out, &mut t);
+    if r.rc != IMG_OK { return r; }
+    let mut live = true;
+    while live {
+        let over = r.steps >= max;
+        if ser_at_halt(v, &m, ram) && !(v == SER_CTL_LIMIT && over) {
+            r.halted = true;
+            r.code = x[10];
+            if v == SER_CTL_CODE { r.code = x[11]; }
+            if v == SER_CTL_STEP { r.steps = r.steps + 1_u64; }
+            live = false;
+        } else if over {
+            live = false;
+        } else {
+            let sc = ser_step(v, &mut m, &mut x, ram, &mut out, &mut t, sink);
+            if sc != EMU_OK && sc != EMU_TRAP { live = false; } else { r.steps = r.steps + 1_u64; }
+        }
+    }
+    r.hash = rr_hash(&m, &x, ram, &out, &t);
+    if v != SER_CTL_TAIL { ser_copy(&m, &out, sink); }
+    r
+}
+
+fn ser_run(img: &[u8], n: usize, ram: &mut [u8], max: u64, sink: &mut Vec<u8>) -> SerRun {
+    ser_run_v(0_u64, img, n, ram, max, sink)
+}
+
+// The FNV-1a hash of the bytes of sink, for a summary line.
+fn ser_fnv(sink: &Vec<u8>) -> u64 {
+    let mut h = FNV_BASIS;
+    let mut i: usize = 0;
+    while i < sink.len() {
+        h = fnv_byte(h, sink[i] as u64);
+        i = i + 1;
+    }
+    h
+}
+
+// Prints the bytes of sink to standard output. A byte from 1 to 127 is
+// printed as it is. Any other byte cannot pass through a string of this
+// language, so it is printed as `?` and counted. Returns that count.
+fn ser_print(sink: &Vec<u8>) -> u64 ~ Console {
+    let mut bad: u64 = 0_u64;
+    let mut line = "";
+    let mut i: usize = 0;
+    while i < sink.len() {
+        let mut c = sink[i];
+        if c == 0_u8 || c > 127_u8 {
+            bad = bad + 1_u64;
+            c = 63_u8;
+        }
+        line = line + format!("{}", c as char);
+        if c == 10_u8 || i + 1 == sink.len() {
+            print!("{}", line);
+            line = "";
+        }
+        i = i + 1;
+    }
+    bad
+}
+
+// A memory of n zero bytes.
+fn ser_ram(n: usize) -> Vec<u8> {
+    let mut ram: Vec<u8> = Vec::new();
+    let mut i: usize = 0;
+    while i < n {
+        ram.push(0_u8);
+        i = i + 1;
+    }
+    ram
+}
+
+// The exit status for the outcome of a run whose output had `bad` bytes
+// that could not be printed: the exit code of the program, cut to 0 to
+// 255, when it halted.
+fn ser_status(r: &SerRun, bad: u64) -> i64 {
+    if !r.halted { return SER_EXIT_LIMIT; }
+    if bad != 0_u64 { return SER_EXIT_BYTES; }
+    (r.code & 0xFF_u64) as i64
+}

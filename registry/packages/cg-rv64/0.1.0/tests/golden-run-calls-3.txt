@@ -1,0 +1,8 @@
+fib 233 1
+even false true
+ack 9
+many 8590001666
+wide 61131 -57
+refs 44 -128
+pick -1 70 -1
+slice 4000000087 77

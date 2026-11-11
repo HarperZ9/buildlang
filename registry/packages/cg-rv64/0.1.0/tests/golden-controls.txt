@@ -1,0 +1,23 @@
+0 the generator
+1 a signed value narrower than 64 bits is extended with zeros
+2 unsigned values are compared as signed
+3 an array or slice index is not checked against the length
+4 a field read through a pointer takes the offset of the field before it
+5 arguments 1 and 2 travel in each other's register
+6 an add that leaves its type does not trap
+7 a zero divisor does not trap
+8 every shift count is masked with 63
+9 a cast of a signed value to a wider type fills with zeros
+10 a stack argument is read one slot too high
+11 a subtract that leaves its type does not trap
+12 a multiply that leaves its type does not trap
+13 an indexed store writes eight bytes whatever the element width
+14 a signed remainder is taken as unsigned
+15 an aggregate result is copied back for its first 8 bytes only
+16 a hex number is padded with spaces where the format asks for zeros
+17 a negative decimal number is printed with no minus sign
+18 less-or-equal is compiled as less-than
+19 a vector index is not checked against the length
+20 a wrapping subtract takes its operands the wrong way round
+21 the smallest signed value divided by -1 does not trap
+22 a right shift of a signed value fills with zeros

@@ -1,0 +1,4 @@
+mfuzz seed=7 steps=50000
+  accepted, 50000 steps: retired=29291 csr=5969 mret=5044 fetch_faults=1348
+  traps by cause: 0=823 1=955 2=11090 3=1924 5=2386 7=1348 11=1876
+  interrupts by cause: 3=222 7=0 11=81 timer_accesses=0

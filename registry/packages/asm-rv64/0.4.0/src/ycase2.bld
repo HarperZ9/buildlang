@@ -1,0 +1,191 @@
+// Hand cases for the large limits of asm-rv64, second part: cases 8 to
+// 20. ycase.bld holds the harness.
+
+// Appends label name number k: the letter l, the digits of k, then
+// underscores up to a length of 7 + k % 25 characters, 7 to 31. The
+// digits make every name different. The lengths differ so that the search
+// for a duplicate, which compares lengths first, stays short.
+fn yc_name(src: &mut Vec<u8>, k: u64) {
+    let from = src.len();
+    yc_text(src, "l");
+    yc_num(src, k);
+    let len = 7 + (k % 25_u64) as usize;
+    while src.len() - from < len { src.push(95_u8); }
+}
+
+// Case 20: 65537 labels, one to a line, with the large limits. Labels 1
+// to 65536 are kept. Label 65537 is on line 65537: one error there,
+// "more than 65536 labels". A file with fewer errors or another line
+// would mean a different limit. The search for a duplicate label is a
+// linear one, so this case takes most of the time of the command; it
+// is the last case, and yc_run leaves it out when all is false.
+fn yc_many(st: &mut YcSt) ~ Console {
+    let mut src: Vec<u8> = Vec::new();
+    let mut k: u64 = 0_u64;
+    while k < 65537_u64 {
+        yc_name(&mut src, k);
+        yc_text(&mut src, ":\n");
+        k = k + 1_u64;
+    }
+    let mut o = as_out_new();
+    as_assemble_big(st.v, &src, src.len(), &mut o);
+    yc_note(st, "65537 labels, large limits: more than 65536 labels on line 65537", &o,
+            yc_one(&o, 65537_u64, AE_LABELS2));
+}
+
+// Assembles a short text with the small or the large limits.
+fn yc_asm(st: &YcSt, big: bool, text: str, o: &mut AsOut) {
+    let mut src: Vec<u8> = Vec::new();
+    yc_text(&mut src, text);
+    as_out_reset(o);
+    if big {
+        as_assemble_big(st.v, &src, src.len(), o);
+    } else {
+        as_assemble(st.v, &src, src.len(), o);
+    }
+}
+
+// True when o holds no error and n words, all zero but the last, which
+// is `last`.
+fn yc_gap(o: &AsOut, n: usize, last: u64) -> bool {
+    if o.errs.len() != 0 || o.count != n as u64 || o.words.len() != n { return false; }
+    let mut i: usize = 0;
+    while i + 1 < n {
+        if o.words[i] != 0_u64 { return false; }
+        i = i + 1;
+    }
+    o.words[n - 1] == last
+}
+
+// Cases 8 to 10: .org at the small limit.
+//   case 8:  .org 65536, small. An offset equal to the limit is allowed:
+//            65536 / 4 = 16384 zero words.
+//   case 9:  .org 65540, small. Past the limit: one error on line 1.
+//   case 10: .org 65540 then .word 7, large. 65540 / 4 = 16385 zero
+//            words, then the word 7: 16386 words.
+fn yc_org_small(st: &mut YcSt) ~ Console {
+    let mut o = as_out_new();
+    yc_asm(st, false, ".org 65536\n", &mut o);
+    yc_note(st, ".org 65536, small limits: 16384 zero words", &o, yc_gap(&o, 16384, 0_u64));
+    yc_asm(st, false, ".org 65540\n", &mut o);
+    yc_note(st, ".org 65540, small limits: image larger than 65536 bytes", &o, yc_one(&o, 1_u64, AE_BIG));
+    yc_asm(st, true, ".org 65540\n.word 7\n", &mut o);
+    yc_note(st, ".org 65540 and a word, large limits: 16386 words", &o, yc_gap(&o, 16386, 7_u64));
+}
+
+// Cases 11 to 13: .org at the large limit.
+//   case 11: .org 1048576, large. Equal to the limit: 262144 zero words.
+//   case 12: .org 1048580, large. Past the limit: one error on line 1.
+//   case 13: .org 1048576 then .word 1, large. The word would be at
+//            offset 1048576: one error on line 2.
+fn yc_org_big(st: &mut YcSt) ~ Console {
+    let mut o = as_out_new();
+    yc_asm(st, true, ".org 1048576\n", &mut o);
+    yc_note(st, ".org 1048576, large limits: 262144 zero words", &o, yc_gap(&o, 262144, 0_u64));
+    yc_asm(st, true, ".org 1048580\n", &mut o);
+    yc_note(st, ".org 1048580, large limits: image larger than 1048576 bytes", &o, yc_one(&o, 1_u64, AE_BIG2));
+    yc_asm(st, true, ".org 1048576\n.word 1\n", &mut o);
+    yc_note(st, ".org 1048576 and a word, large limits: refused on line 2", &o, yc_one(&o, 2_u64, AE_BIG2));
+}
+
+// Cases 14 and 15: a jump over more than 65536 bytes.
+//   line 1  jal x0, far
+//   line 2  .org 131072
+//   line 3  far: addi x10, x0, 1
+//   case 14, large: far is at 131072 = 0x20000. Offset bits 19 to 12 are
+//            0x20 and keep their place in the word: 0x20 << 12 | 0x6F =
+//            0x0002006F. 131072 / 4 = 32768 words before far, then
+//            addi x10, x0, 1 = 1 << 20 | 10 << 7 | 0x13 = 0x00100513:
+//            32769 words.
+//   case 15, small: line 2 is past the limit, one error. The location
+//            stays at 4, so far is defined and line 1 has no error.
+fn yc_far(st: &mut YcSt) ~ Console {
+    let mut o = as_out_new();
+    let text = "jal x0, far\n.org 131072\nfar: addi x10, x0, 1\n";
+    yc_asm(st, true, text, &mut o);
+    let mut ok = o.errs.len() == 0 && o.count == 32769_u64 && o.words.len() == 32769;
+    if ok {
+        ok = o.words[0] == 0x0002006F_u64 && o.words[1] == 0_u64 && o.words[32767] == 0_u64
+            && o.words[32768] == 0x00100513_u64;
+    }
+    yc_note(st, "a jump over 131072 bytes, large limits", &o, ok);
+    yc_asm(st, false, text, &mut o);
+    yc_note(st, "the same, small limits: refused on line 2", &o, yc_one(&o, 2_u64, AE_BIG));
+}
+
+// The program of case 16. 12 statements come before .org 0x40, 48 bytes,
+// so .org adds 4 zero words up to offset 64. 4 statements follow:
+// 12 + 4 + 4 = 20 words. Word 6 is 0xDEADBEEF and word 19 is 19.
+fn yc_medium() -> str {
+    let a = "start: lui x5, 0x10000\n addi x6, x0, 72\nloop: sb x6, 0(x5)\n addi x6, x6, -1\n bne x6, x0, loop\n";
+    let b = " beq x0, x0, skip\n .word 0xDEADBEEF\nskip: mul x7, x6, x6\n csrrw x0, mscratch, x7\n lr.d x8, (x2)\n";
+    let c = " sc.d x9, x8, (x2)\n jal x1, tail\n .org 0x40\ntail: sd x1, 8(x2)\n jalr x0, 0(x1)\n ecall\n .word 19\n";
+    a + b + c
+}
+
+// True when the two records hold the same words and the same errors.
+fn yc_equal(a: &AsOut, b: &AsOut) -> bool {
+    if a.count != b.count || a.words.len() != b.words.len() || a.errs.len() != b.errs.len() { return false; }
+    let mut i: usize = 0;
+    while i < a.words.len() {
+        if a.words[i] != b.words[i] { return false; }
+        i = i + 1;
+    }
+    i = 0;
+    while i < a.errs.len() {
+        if a.errs[i] != b.errs[i] { return false; }
+        i = i + 1;
+    }
+    true
+}
+
+// Cases 16 and 17: below the small limits the two assemblies agree.
+//   case 16: the program above gives the same 20 words both ways.
+//   case 17: four wrong lines give the same four errors both ways:
+//            line 1 immediate out of range (5000 is above 2047), line 2
+//            unknown mnemonic, line 3 undefined label, line 4 wrong
+//            operand count.
+fn yc_agree(st: &mut YcSt) ~ Console {
+    let mut o = as_out_new();
+    let mut p = as_out_new();
+    yc_asm(st, true, yc_medium(), &mut o);
+    yc_asm(st, false, yc_medium(), &mut p);
+    let mut ok = o.errs.len() == 0 && o.count == 20_u64 && yc_equal(&o, &p);
+    if ok {
+        ok = o.words[6] == 0xDEADBEEF_u64 && o.words[12] == 0_u64 && o.words[15] == 0_u64
+            && o.words[19] == 19_u64;
+    }
+    yc_note(st, "a program of 20 words: large and small limits give the same words", &o, ok);
+    let text = "addi x1, x0, 5000\nfoo x1\njal x0, nowhere\nadd x1, x2\n";
+    yc_asm(st, true, text, &mut o);
+    yc_asm(st, false, text, &mut p);
+    let same = o.errs.len() == 8 && yc_equal(&o, &p) && yc_err(&o, 0, 1_u64, AE_RANGE)
+        && yc_err(&o, 1, 2_u64, AE_MNEMONIC) && yc_err(&o, 2, 3_u64, AE_UNDEF) && yc_err(&o, 3, 4_u64, AE_COUNT);
+    yc_note(st, "four wrong lines: large and small limits give the same errors", &o, same);
+}
+
+// Cases 18 and 19: the reasons as printed.
+fn yc_reasons(st: &mut YcSt) ~ Console {
+    let o = as_out_new();
+    let old = as_err_text(AE_BIG) == "image larger than 65536 bytes"
+        && as_err_text(AE_LABELS) == "more than 1024 labels";
+    yc_note(st, "the reasons of the small limits are those of 0.3.0", &o, old);
+    let big = as_err_text(AE_BIG2) == "image larger than 1048576 bytes"
+        && as_err_text(AE_LABELS2) == "more than 65536 labels";
+    yc_note(st, "the reasons of the large limits", &o, big);
+}
+
+// Runs the cases against planted defect v. all: also run case 20.
+fn yc_run(v: u64, show: bool, all: bool) -> YcSt ~ Console {
+    let mut st = YcSt { v: v, show: show, count: 0_u64, fails: Vec::new() };
+    yc_labels(&mut st);
+    yc_words(&mut st);
+    yc_org_small(&mut st);
+    yc_org_big(&mut st);
+    yc_far(&mut st);
+    yc_agree(&mut st);
+    yc_reasons(&mut st);
+    if all { yc_many(&mut st); }
+    if show { println!("ycases: {} run, {} failed", st.count, st.fails.len()); }
+    st
+}

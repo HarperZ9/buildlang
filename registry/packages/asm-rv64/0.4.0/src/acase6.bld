@@ -1,0 +1,115 @@
+// Hand cases of asm-rv64, sixth part: files with errors, and the limits.
+// A file with any error gives no word, and every error names its line.
+
+// Five lines, three of them wrong. Lines 1 and 5 are right, and still no
+// word comes out.
+fn ac_l_errors(st: &mut AcSt) ~ Console {
+    let mut b: [u8; 1024] = [0_u8; 1024];
+    let mut e: [u64; 8] = [0_u64; 8];
+    let mut n = ac_ln(&mut b, 0, "a: addi x1, x0, 1");
+    n = ac_ln(&mut b, n, "beq x1, x0, missing");
+    n = ac_ln(&mut b, n, "a: addi x2, x0, 2");
+    n = ac_ln(&mut b, n, "addi x3, x0, 4096");
+    n = ac_ln(&mut b, n, "ecall");
+    e[0] = 2_u64; e[1] = AE_UNDEF; e[2] = 3_u64; e[3] = AE_DUP; e[4] = 4_u64; e[5] = AE_RANGE;
+    ac_bad(st, "three errors", &b, n, &e, 3);
+    // A bad label and a bad statement on one line give two errors there.
+    n = ac_ln(&mut b, 0, "ecall");
+    n = ac_ln(&mut b, n, "1x: foo");
+    e[0] = 2_u64; e[1] = AE_LABEL; e[2] = 2_u64; e[3] = AE_MNEMONIC;
+    ac_bad(st, "two errors on one line", &b, n, &e, 2);
+    // A second definition is refused where it stands, also when the
+    // first is a line of its own and the name is never used.
+    n = ac_ln(&mut b, 0, "twice:");
+    n = ac_ln(&mut b, n, "ecall");
+    n = ac_ln(&mut b, n, "twice:");
+    e[0] = 3_u64; e[1] = AE_DUP;
+    ac_bad(st, "duplicate label", &b, n, &e, 1);
+    // A comment does not hide the error before it, and the line number
+    // counts blank lines and comment lines.
+    n = ac_ln(&mut b, 0, "# line 1");
+    n = ac_ln(&mut b, n, "");
+    n = ac_ln(&mut b, n, "addi x1, x0, 2048 # line 3");
+    e[0] = 3_u64; e[1] = AE_RANGE;
+    ac_bad(st, "line numbers", &b, n, &e, 1);
+}
+
+// .org may not move back, and a label takes the offset .org sets.
+//   00  addi x1, x0, 1   0x00100093    04  zero    08  zero
+//   0C  there: jal x0, there   0x0000006F
+//   10  beq x1, x1, -4   0xFE108EE3
+fn ac_l_org(st: &mut AcSt) ~ Console {
+    let mut b: [u8; 1024] = [0_u8; 1024];
+    let mut e: [u64; 8] = [0_u64; 8];
+    let mut w: [u64; 5] = [0_u64; 5];
+    let mut n = ac_ln(&mut b, 0, "ecall");
+    n = ac_ln(&mut b, n, "ecall");
+    n = ac_ln(&mut b, n, ".org 4");
+    e[0] = 3_u64; e[1] = AE_ORG;
+    ac_bad(st, ".org before the location", &b, n, &e, 1);
+    n = ac_ln(&mut b, 0, "addi x1, x0, 1");
+    n = ac_ln(&mut b, n, ".org 12");
+    n = ac_ln(&mut b, n, "there: jal x0, there");
+    n = ac_ln(&mut b, n, "beq x1, x1, there");
+    w[0] = 0x00100093_u64; w[3] = 0x0000006F_u64; w[4] = 0xFE108EE3_u64;
+    ac_prog(st, ".org forward", &b, n, &w, 5);
+}
+
+// The image limit: 16384 words. .org 0x10000 reaches it exactly, and one
+// more statement is refused.
+fn ac_l_big(st: &mut AcSt) ~ Console {
+    st.count = st.count + 1_u64;
+    let mut b: [u8; 64] = [0_u8; 64];
+    let mut n = ac_ln(&mut b, 0, ".org 0x10000");
+    let mut o = as_out_new();
+    let bad = as_assemble(st.v, &b, n, &mut o);
+    let mut ok = bad == 0_u64 && o.count == AS_WORDS_MAX;
+    let mut i: usize = 0;
+    while ok && i < o.words.len() {
+        if o.words[i] != 0_u64 { ok = false; }
+        i = i + 1;
+    }
+    n = ac_ln(&mut b, n, "ecall");
+    let mut p = as_out_new();
+    let bad2 = as_assemble(st.v, &b, n, &mut p);
+    let full = bad2 == 1_u64 && p.count == 0_u64 && p.errs[0] == 2_u64 && p.errs[1] == AE_BIG;
+    if st.show {
+        println!("acase {} program image limit: words={} errors={}, then errors={} pass={}",
+                 st.count, o.count, bad, bad2, ok && full);
+    }
+    if !(ok && full) { ac_fail(st); }
+}
+
+// The label limit: 1024 labels are accepted and label 1025 is refused on
+// its line. Line k defines the label n followed by k.
+fn ac_l_labels(st: &mut AcSt) ~ Console {
+    st.count = st.count + 1_u64;
+    let mut b: [u8; 16384] = [0_u8; 16384];
+    let mut n: usize = 0;
+    let mut at_limit: usize = 0;
+    let mut k: u64 = 1_u64;
+    while k <= 1025_u64 {
+        if k == 1025_u64 { at_limit = n; }
+        n = ad_dec(&mut b, ad_put(&mut b, n, "n"), k);
+        n = ad_ch(&mut b, ad_ch(&mut b, n, 58_u8), 10_u8);
+        k = k + 1_u64;
+    }
+    let mut o = as_out_new();
+    let bad = as_assemble(st.v, &b, at_limit, &mut o);
+    let mut p = as_out_new();
+    let bad2 = as_assemble(st.v, &b, n, &mut p);
+    let ok = bad == 0_u64 && o.labs.len() == 3 * AS_LABELS_MAX && bad2 == 1_u64
+        && p.errs[0] == 1025_u64 && p.errs[1] == AE_LABELS;
+    if st.show {
+        println!("acase {} program label limit: 1024 labels errors={}, 1025 labels errors={} pass={}",
+                 st.count, bad, bad2, ok);
+    }
+    if !ok { ac_fail(st); }
+}
+
+fn ac_layouts(st: &mut AcSt) ~ Console {
+    ac_l_errors(st);
+    ac_l_org(st);
+    ac_l_big(st);
+    ac_l_labels(st);
+}

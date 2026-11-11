@@ -1,0 +1,194 @@
+// cg-rv64: the runtime, emitted as assembly text in front of the
+// compiled functions. Printing goes byte by byte to the data register of
+// the serial device at 0x10000000. A runtime routine may change x5 to
+// x7, x10 to x17 and x28 to x31.
+
+// One instruction line and one label line.
+fn cq(g: &mut Cg, s: str) {
+    co_s(g, "    ");
+    co_s(g, s);
+    co_ch(g, 10_u8);
+}
+
+fn cql(g: &mut Cg, s: str) {
+    co_s(g, s);
+    co_s(g, ":\n");
+}
+
+// rt_puts: prints the bytes at x10 up to a zero byte.
+fn cq_puts(g: &mut Cg) {
+    cql(g, "rt_puts");
+    cq(g, "lui x5, 0x10000");
+    cql(g, "rt_puts_next");
+    cq(g, "lbu x6, 0(x10)");
+    cq(g, "beq x6, x0, rt_puts_end");
+    cq(g, "sb x6, 0(x5)");
+    cq(g, "addi x10, x10, 1");
+    cq(g, "jal x0, rt_puts_next");
+    cql(g, "rt_puts_end");
+    cq(g, "jalr x0, 0(x1)");
+}
+
+// rt_put_u64: prints x10 as an unsigned decimal number. The digits are
+// made last first in 32 bytes of stack. rt_put_i64 prints a minus sign
+// for a negative x10 and then its magnitude. Defect 17 leaves the minus
+// sign out.
+fn cq_dec(g: &mut Cg) {
+    cql(g, "rt_put_i64");
+    cq(g, "bge x10, x0, rt_put_u64");
+    if g.v != CGC_MINUS {
+        cq(g, "lui x5, 0x10000");
+        cq(g, "addi x6, x0, 45");
+        cq(g, "sb x6, 0(x5)");
+    }
+    cq(g, "sub x10, x0, x10");
+    cql(g, "rt_put_u64");
+    cq(g, "addi x2, x2, -32");
+    cq(g, "addi x5, x2, 31");
+    cq(g, "sb x0, 0(x5)");
+    cq(g, "addi x6, x0, 10");
+    cql(g, "rt_put_u64_digit");
+    cq(g, "remu x7, x10, x6");
+    cq(g, "divu x10, x10, x6");
+    cq(g, "addi x7, x7, 48");
+    cq(g, "addi x5, x5, -1");
+    cq(g, "sb x7, 0(x5)");
+    cq(g, "bne x10, x0, rt_put_u64_digit");
+    cq(g, "lui x6, 0x10000");
+    cql(g, "rt_put_u64_out");
+    cq(g, "lbu x7, 0(x5)");
+    cq(g, "beq x7, x0, rt_put_u64_end");
+    cq(g, "sb x7, 0(x6)");
+    cq(g, "addi x5, x5, 1");
+    cq(g, "jal x0, rt_put_u64_out");
+    cql(g, "rt_put_u64_end");
+    cq(g, "addi x2, x2, 32");
+    cq(g, "jalr x0, 0(x1)");
+}
+
+// rt_put_hex: prints x10 in lower-case hex, at least x11 characters,
+// padded on the left with the byte in x12.
+fn cq_hex(g: &mut Cg) {
+    cql(g, "rt_put_hex");
+    cq(g, "addi x5, x0, 1");
+    cq(g, "srli x6, x10, 4");
+    cql(g, "rt_put_hex_count");
+    cq(g, "beq x6, x0, rt_put_hex_pad");
+    cq(g, "addi x5, x5, 1");
+    cq(g, "srli x6, x6, 4");
+    cq(g, "jal x0, rt_put_hex_count");
+    cql(g, "rt_put_hex_pad");
+    cq(g, "lui x7, 0x10000");
+    cql(g, "rt_put_hex_fill");
+    cq(g, "bge x5, x11, rt_put_hex_digit");
+    cq(g, "sb x12, 0(x7)");
+    cq(g, "addi x11, x11, -1");
+    cq(g, "jal x0, rt_put_hex_fill");
+    cql(g, "rt_put_hex_digit");
+    cq(g, "addi x5, x5, -1");
+    cq(g, "slli x6, x5, 2");
+    cq(g, "srl x6, x10, x6");
+    cq(g, "andi x6, x6, 15");
+    cq(g, "addi x28, x0, 10");
+    cq(g, "blt x6, x28, rt_put_hex_low");
+    cq(g, "addi x6, x6, 39");
+    cql(g, "rt_put_hex_low");
+    cq(g, "addi x6, x6, 48");
+    cq(g, "sb x6, 0(x7)");
+    cq(g, "bne x5, x0, rt_put_hex_digit");
+    cq(g, "jalr x0, 0(x1)");
+}
+
+// A trap routine: prints one line of text and halts with an exit code.
+fn cq_trap(g: &mut Cg, label: str, text: str, code: u64) {
+    cql(g, label);
+    cv_text(g, 10_u64, text);
+    ci_li(g, 11_u64, code);
+    cq(g, "jal x0, rt_die");
+}
+
+// rt_die: prints the text at x10 and halts with the exit code in x11.
+// rt_halt: the halt word; the exit code is in x10.
+fn cq_die(g: &mut Cg) {
+    cql(g, "rt_die");
+    cq(g, "addi x9, x11, 0");
+    cq(g, "jal x1, rt_puts");
+    cq(g, "addi x10, x9, 0");
+    cql(g, "rt_halt");
+    cq(g, "jal x0, 0");
+}
+
+// The arithmetic traps. Each prints the line the hosted program prints
+// to standard error and halts with the hosted exit status, 101.
+fn cq_traps(g: &mut Cg) {
+    cq_trap(g, "rt_ovf_add", "attempt to add with overflow\n", CG_EXIT_TRAP);
+    cq_trap(g, "rt_ovf_sub", "attempt to subtract with overflow\n", CG_EXIT_TRAP);
+    cq_trap(g, "rt_ovf_mul", "attempt to multiply with overflow\n", CG_EXIT_TRAP);
+    cq_trap(g, "rt_ovf_neg", "attempt to negate with overflow\n", CG_EXIT_TRAP);
+    cq_trap(g, "rt_div_zero", "attempt to divide by zero\n", CG_EXIT_TRAP);
+    cq_trap(g, "rt_ovf_div", "attempt to divide with overflow\n", CG_EXIT_TRAP);
+    cq_trap(g, "rt_rem_zero", "attempt to calculate the remainder with a divisor of zero\n", CG_EXIT_TRAP);
+    cq_trap(g, "rt_ovf_rem", "attempt to calculate the remainder with overflow\n", CG_EXIT_TRAP);
+    cq_trap(g, "rt_stack", "stack overflow\n", CG_EXIT_STACK);
+    cq_trap(g, "rt_memory", "out of memory\n", CG_EXIT_MEMORY);
+}
+
+// rt_oob: x10 = length, x11 = index. Prints the line of bl_index_oob:
+// the length unsigned and the index signed. rt_vec_oob: x10 = index,
+// x11 = length, the line of the vector store, both unsigned.
+fn cq_oob(g: &mut Cg) {
+    cql(g, "rt_oob");
+    cq(g, "addi x8, x10, 0");
+    cq(g, "addi x9, x11, 0");
+    cv_text(g, 10_u64, "index out of bounds: the len is ");
+    cq(g, "jal x1, rt_puts");
+    cq(g, "addi x10, x8, 0");
+    cq(g, "jal x1, rt_put_u64");
+    cv_text(g, 10_u64, " but the index is ");
+    cq(g, "jal x1, rt_puts");
+    cq(g, "addi x10, x9, 0");
+    cq(g, "jal x1, rt_put_i64");
+    cq(g, "jal x0, rt_oob_end");
+    cql(g, "rt_vec_oob");
+    cq(g, "addi x8, x10, 0");
+    cq(g, "addi x9, x11, 0");
+    cv_text(g, 10_u64, "Vec index out of bounds: ");
+    cq(g, "jal x1, rt_puts");
+    cq(g, "addi x10, x8, 0");
+    cq(g, "jal x1, rt_put_u64");
+    cv_text(g, 10_u64, " >= ");
+    cq(g, "jal x1, rt_puts");
+    cq(g, "addi x10, x9, 0");
+    cq(g, "jal x1, rt_put_u64");
+    cql(g, "rt_oob_end");
+    cv_text(g, 10_u64, "\n");
+    ci_li(g, 11_u64, CG_EXIT_TRAP);
+    cq(g, "jal x0, rt_die");
+}
+
+// rt_mtrap: the machine trap handler, reached through mtvec when the
+// processor takes an exception (a load outside memory, for one). No
+// correct generated program reaches it. It prints the three trap
+// registers and halts with 102.
+fn cq_mtrap(g: &mut Cg) {
+    cql(g, "rt_mtrap");
+    cv_text(g, 10_u64, "machine trap: mcause=");
+    cq(g, "jal x1, rt_puts");
+    cq(g, "csrrs x10, mcause, x0");
+    cq(g, "jal x1, rt_mtrap_hex");
+    cv_text(g, 10_u64, " mepc=");
+    cq(g, "jal x1, rt_puts");
+    cq(g, "csrrs x10, mepc, x0");
+    cq(g, "jal x1, rt_mtrap_hex");
+    cv_text(g, 10_u64, " mtval=");
+    cq(g, "jal x1, rt_puts");
+    cq(g, "csrrs x10, mtval, x0");
+    cq(g, "jal x1, rt_mtrap_hex");
+    cv_text(g, 10_u64, "\n");
+    ci_li(g, 11_u64, CG_EXIT_MACHINE);
+    cq(g, "jal x0, rt_die");
+    cql(g, "rt_mtrap_hex");
+    cq(g, "addi x11, x0, 1");
+    cq(g, "addi x12, x0, 48");
+    cq(g, "jal x0, rt_put_hex");
+}

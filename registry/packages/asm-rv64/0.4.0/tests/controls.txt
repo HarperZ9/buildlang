@@ -1,0 +1,19 @@
+# id | where | planted defect | refused by
+# Command acontrols. The hand case is the first that fails; the property kind and round are those of seed 1, 20000 rounds.
+1 | as_lab_offset | the offset to a label is measured from the next instruction, 4 bytes too short | hand case 139, property 66 at round 0
+2 | as_store | bits 4 to 0 and bits 9 to 5 of a store offset change places | hand case 106, property 61 at round 0
+3 | as_num | the minus sign of a number is dropped | hand case 20, property 65 at round 3
+4 | as_imm | every range check accepts one value past the top of the range | hand case 246, property 65 at round 22
+5 | as_dir_word | pass 1 does not count .word, so every later label is 4 bytes short | hand case 347, property 66 at round 0
+6 | as_store | a store takes rs1 and rs2 in each other's place | hand case 90, property 61 at round 0
+7 | as_num | the digits after 0x are read in base 10 | hand case 107, property 66 at round 0
+8 | as_pass | the text after # is assembled as one more line | hand case 215, property 69 at round 0
+9 | as_label | a second definition of a label is accepted and the first stays in use | hand case 352, property 68 at round 0
+10 | as_lab_offset | an undefined label reads as offset 0 of the image | hand case 280, property 67 at round 0
+# The atomic forms, since 0.2.0.
+11 | as_atomic | sc and the AMOs take rs1 and rs2 in each other's place | hand case 379, property 66 at round 0
+12 | as_op_atomic | a .w atomic mnemonic is assembled as the .d one | hand case 378, property 66 at round 0
+13 | as_f_addr | the register in brackets is taken for an offset and the address register is left x0 | hand case 378, property 66 at round 0
+# The large limits, since 0.4.0. Command ycontrols; acontrols does not run these two. The hand cases are those of ycases, 1 to 19; every failing case is listed.
+14 | as_lab_loc | in a large assembly a label past the 1024th takes the offset of label 1024 | large hand case 1
+15 | as_cut, as_emit | a large assembly drops every word past 65536 bytes | large hand cases 3, 6, 10, 11, 14

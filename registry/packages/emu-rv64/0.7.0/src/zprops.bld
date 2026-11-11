@@ -1,0 +1,169 @@
+// Property rules for the serial run of emu-rv64, with no model, since
+// 0.7.0. Kinds 110 to 118 of tests/props.txt.
+//
+// Each round draws one program from a seeded generator. The program has
+// no branch, so the bytes it sends, its exit code and its exact number of
+// steps are known from its layout before it runs:
+//
+//   lui x5, 0x10000                      1 step
+//   K times: addi x6, x0, B; sb x6, 0(x5)    2 steps each, B is 1 to 127
+//   addi x11, x0, T                      1 step, T differs from the code
+//   A instructions on x7, x8 and x9      1 step each, A is 0 to 6
+//   the code C into x10                  1 step when C < 2048, else 2
+//   the halt word
+//
+// K is 0 to 400, and one program in eight has 0 to 2 bytes. Counters in ct: 0 rounds, 1 steps of the first run of
+// each round, 2 bytes sent, 3 programs of more than 128 bytes, 4 programs
+// of no byte, 5 arithmetic instructions, 6 codes above 255.
+
+// One drawn program: bytes sent, exit code, steps to the halt.
+struct ZProg { k: usize, code: u64, steps: u64 }
+
+// The arithmetic part: n instructions that write x7, x8 or x9 and read
+// x6 to x9 and x11. They change no byte sent and not the code.
+// Operation 36 is XOR.
+fn zp_arith(r: &mut Rng, img: &mut Vec<u8>, n: u64) {
+    let mut j: u64 = 0_u64;
+    while j < n {
+        let t = rng_next(r);
+        let rd = 7_u64 + t % 3_u64;
+        let rs1 = 6_u64 + (t >> 8_u64) % 4_u64;
+        let form = (t >> 16_u64) % 3_u64;
+        if form == 0_u64 { zc_addi(img, rd, rs1, (t >> 24_u64) & 0x7FF_u64); }
+        if form == 1_u64 { zc_put(img, zc_enc(OP_ADD, rd, rs1, 11_u64, 0_u64)); }
+        if form == 2_u64 { zc_put(img, zc_enc(36_u64, rd, rs1, 11_u64, 0_u64)); }
+        j = j + 1_u64;
+    }
+}
+
+// Loads the code c, below 0x7FFFF000, into x10. Returns the steps taken.
+// A code below 2048 fits one addi. Else lui places the upper part, with
+// 0x800 added first because addi adds a signed 12-bit number.
+fn zp_code(img: &mut Vec<u8>, c: u64) -> u64 {
+    if c < 2048_u64 {
+        zc_addi(img, 10_u64, 0_u64, c);
+        return 1_u64;
+    }
+    let hi = ((c + 0x800_u64) >> 12_u64) << 12_u64;
+    let mut lo = c & 0xFFF_u64;
+    if lo >= 0x800_u64 { lo = zc_neg(0x1000_u64 - lo); }
+    zc_lui(img, 10_u64, hi);
+    zc_addi(img, 10_u64, 10_u64, lo);
+    2_u64
+}
+
+// Draws a program into img and the bytes it will send into want.
+fn zp_make(r: &mut Rng, img: &mut Vec<u8>, want: &mut Vec<u8>, ct: &mut [u64]) -> ZProg {
+    img.clear();
+    want.clear();
+    let pick = rng_next(r);
+    let mut k = (pick % 401_u64) as usize;
+    if ((pick >> 28_u64) & 7_u64) == 0_u64 { k = k % 3; }
+    let extra = (pick >> 16_u64) % 7_u64;
+    let mut c = rng_next(r) % 0x7FFFF000_u64;
+    if ((pick >> 24_u64) & 3_u64) == 0_u64 { c = c % 256_u64; }
+    zc_dev(img);
+    let mut i: usize = 0;
+    while i < k {
+        let b = 1_u64 + rng_next(r) % 127_u64;
+        zc_addi(img, 6_u64, 0_u64, b);
+        zc_sb(img, 6_u64, 5_u64, 0_u64);
+        want.push(b as u8);
+        i = i + 1;
+    }
+    zc_addi(img, 11_u64, 0_u64, (c + 1_u64) & 0x3FF_u64);
+    zp_arith(r, img, extra);
+    let load = zp_code(img, c);
+    zc_halt(img);
+    ct[2] = ct[2] + k as u64;
+    if k > 128 { ct[3] = ct[3] + 1_u64; }
+    if k == 0 { ct[4] = ct[4] + 1_u64; }
+    ct[5] = ct[5] + extra;
+    if c > 255_u64 { ct[6] = ct[6] + 1_u64; }
+    ZProg { k: k, code: c, steps: 2_u64 + 2_u64 * (k as u64) + extra + load }
+}
+
+// The first index at which sink differs from want, or the length of sink
+// when sink is a prefix of want. An index past the end of want is the
+// length of want.
+fn zp_diff(sink: &Vec<u8>, want: &Vec<u8>) -> usize {
+    let mut i: usize = 0;
+    while i < sink.len() {
+        if i >= want.len() || sink[i] != want[i] { return i; }
+        i = i + 1;
+    }
+    sink.len()
+}
+
+// The bytes a program of k bytes has sent after s steps: store j is step
+// 2 * j + 1, so the count is (s - 1) / 2, at most k.
+fn zp_sent(k: usize, s: u64) -> usize {
+    if s == 0_u64 { return 0; }
+    let n = ((s - 1_u64) / 2_u64) as usize;
+    if n > k { return k; }
+    n
+}
+
+// Kinds 110 to 115 on the full run, and a second run in the same memory.
+fn zp_full(v: u64, round: u64, p: &ZProg, img: &[u8], n: usize, want: &Vec<u8>, ram: &mut [u8]) -> Refusal {
+    let mut a: Vec<u8> = Vec::new();
+    let mut b: Vec<u8> = Vec::new();
+    let ra = ser_run_v(v, img, n, ram, 1000000_u64, &mut a);
+    if ra.rc != IMG_OK || !ra.halted { return fz_refuse(ZP_HALT, round, ra.rc, IMG_OK); }
+    if ra.steps != p.steps { return fz_refuse(ZP_STEPS, round, ra.steps, p.steps); }
+    if ra.code != p.code { return fz_refuse(ZP_CODE, round, ra.code, p.code); }
+    if a.len() != p.k { return fz_refuse(ZP_LEN, round, a.len() as u64, p.k as u64); }
+    let d = zp_diff(&a, want);
+    if d != p.k { return fz_refuse(ZP_BYTES, round, d as u64, p.k as u64); }
+    let rb = ser_run_v(v, img, n, ram, 1000000_u64, &mut b);
+    let same = rb.hash == ra.hash && rb.steps == ra.steps && rb.code == ra.code && rb.halted
+        && b.len() == a.len() && zp_diff(&b, &a) == a.len();
+    if !same { return fz_refuse(ZP_AGAIN, round, rb.hash, ra.hash); }
+    // Kind 118: a limit of exactly the steps of the program is a halt in
+    // the same end state. A refusal reports 0 for "did not halt".
+    b.clear();
+    let rc = ser_run_v(v, img, n, ram, p.steps, &mut b);
+    if !rc.halted { return fz_refuse(ZP_EXACT, round, 0_u64, 1_u64); }
+    if rc.hash != ra.hash || rc.steps != p.steps || b.len() != p.k {
+        return fz_refuse(ZP_EXACT, round, rc.hash, ra.hash);
+    }
+    fz_refuse(0, round, 0_u64, 0_u64)
+}
+
+// One run with a limit of max steps, below the steps of the program. It
+// must not halt, must take max steps, report code 0 and send exactly the
+// bytes of the stores it reached.
+fn zp_cut(v: u64, kind: i64, round: u64, p: &ZProg, max: u64, img: &[u8], n: usize, want: &Vec<u8>,
+          ram: &mut [u8]) -> Refusal {
+    let mut c: Vec<u8> = Vec::new();
+    let r = ser_run_v(v, img, n, ram, max, &mut c);
+    let sent = zp_sent(p.k, max);
+    if r.halted || r.steps != max || r.code != 0_u64 { return fz_refuse(kind, round, r.steps, max); }
+    if c.len() != sent || zp_diff(&c, want) != sent { return fz_refuse(kind, round, c.len() as u64, sent as u64); }
+    fz_refuse(0, round, 0_u64, 0_u64)
+}
+
+// Every rule, round after round, until the first runs of the rounds add
+// up to at least `steps` steps. Returns the first refusal; its step is
+// the round.
+fn zprop_run(v: u64, seed: u64, steps: u64, ct: &mut [u64]) -> Refusal {
+    let mut r = Rng { s: seed };
+    let mut img: Vec<u8> = Vec::new();
+    let mut want: Vec<u8> = Vec::new();
+    let mut ram = ser_ram(ZC_RAM);
+    let mut round: u64 = 0_u64;
+    while ct[1] < steps {
+        let p = zp_make(&mut r, &mut img, &mut want, ct);
+        ct[1] = ct[1] + p.steps;
+        let f = zp_full(v, round, &p, &img, img.len(), &want, &mut ram);
+        if f.kind != 0 { return f; }
+        let g = zp_cut(v, ZP_SHORT, round, &p, p.steps - 1_u64, &img, img.len(), &want, &mut ram);
+        if g.kind != 0 { return g; }
+        let at = rng_next(&mut r) % p.steps;
+        let h = zp_cut(v, ZP_CUT, round, &p, at, &img, img.len(), &want, &mut ram);
+        if h.kind != 0 { return h; }
+        round = round + 1_u64;
+        ct[0] = round;
+    }
+    fz_refuse(0, round, 0_u64, 0_u64)
+}

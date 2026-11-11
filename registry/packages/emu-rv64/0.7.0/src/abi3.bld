@@ -1,0 +1,36 @@
+// emu-rv64: the constants of the serial run, since 0.7.0. The file sorts
+// before every file that uses them.
+
+// The memory a serial run gives the machine, and the largest image it
+// loads. See SPEC.md, "Serial run".
+const SER_RAM: usize = 4194304;
+const SER_IMG_MAX: usize = 1048576;
+// The halt word: `jal x0, 0`, a jump to itself.
+const SER_HALT_WORD: u64 = 0x0000006F_u64;
+// Exit status of the command `serial` when the run did not halt, and when
+// the output holds a byte the command cannot print.
+const SER_EXIT_LIMIT: i64 = 124;
+const SER_EXIT_BYTES: i64 = 125;
+
+// Planted defects of the serial run. 0 is the run itself.
+// tests/controls.txt describes each one.
+const SER_CTL_LATE: u64 = 1_u64;
+const SER_CTL_DROP: u64 = 2_u64;
+const SER_CTL_CODE: u64 = 3_u64;
+const SER_CTL_STEP: u64 = 4_u64;
+const SER_CTL_TAIL: u64 = 5_u64;
+const SER_CTL_LIMIT: u64 = 6_u64;
+const SER_CTL_COUNT: u64 = 6_u64;
+
+// Property kinds of zprops. tests/props.txt describes each one.
+const ZP_HALT: i64 = 110;
+const ZP_STEPS: i64 = 111;
+const ZP_CODE: i64 = 112;
+const ZP_LEN: i64 = 113;
+const ZP_BYTES: i64 = 114;
+const ZP_AGAIN: i64 = 115;
+const ZP_SHORT: i64 = 116;
+const ZP_CUT: i64 = 117;
+const ZP_EXACT: i64 = 118;
+// The memory the checks zcases and zprops give a serial run.
+const ZC_RAM: usize = 8192;

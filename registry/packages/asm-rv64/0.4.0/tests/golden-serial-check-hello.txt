@@ -1,0 +1,4 @@
+serial-check source=tests/hello.s bytes=56 ram=4194304 max=1000
+  halted=true code=0 steps=76 serial_len=14 serial_fnv=549c7564fcdf760b
+  hash=f1cee365e7c9bbd3
+  second run: equal

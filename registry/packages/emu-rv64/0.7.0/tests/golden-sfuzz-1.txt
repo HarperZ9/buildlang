@@ -1,0 +1,5 @@
+sfuzz seed=1 steps=20000
+  accepted, 20000 steps in 625 rounds: begun in U=1289 S=6874 M=11837, retired in U=170 S=2146 M=6305
+  through page tables: fetches=1951 data=666  mret=335 sret=451 csr=1853
+  traps by cause: 0=66 1=1056 2=2617 3=316 4=49 5=1575 6=167 7=2006 8=10 9=104 11=210 12=1290 13=455 15=600
+  interrupts by cause: 1=91 3=123 5=93 7=359 9=67 11=125  traps taken in S-mode=4486

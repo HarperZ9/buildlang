@@ -1,0 +1,72 @@
+// Controls of the large limits of asm-rv64, since 0.4.0: the assembler
+// with one planted defect at a time in the path of as_assemble_big. The
+// defect number is passed down to the assembler, as for the controls of
+// actl.bld, and number 0 is the assembler the commands use. The hand
+// cases of ycase.bld and ycase2.bld must refuse both defects. The
+// controls run cases 1 to 19. Case 20, the limit of 65536 labels, takes
+// most of the time of ycases and holds no word and no label offset that
+// either defect could change, so only ycases runs it.
+//
+//   asm-rv64 ycases      the hand cases of the large limits
+//   asm-rv64 ycontrols   shows that both planted defects are refused
+
+fn yc_ctl_name(v: u64) -> str {
+    if v == ACTL_YLABEL { return "in a large assembly a label past the 1024th takes the offset of label 1024"; }
+    "a large assembly drops every word past 65536 bytes"
+}
+
+// Runs the hand cases against defect v and prints which fail. Returns 1
+// when at least one fails, else 0.
+fn yc_ctl_cases(v: u64) -> i64 ~ Console {
+    let st = yc_run(v, false, false);
+    if st.fails.len() == 0 {
+        println!("  accepted, {} cases", st.count);
+        return 0;
+    }
+    let mut list = "";
+    let mut i: usize = 0;
+    while i < st.fails.len() {
+        list = list + format!(" {}", st.fails[i]);
+        i = i + 1;
+    }
+    println!("  REFUSED, {} of {} hand cases fail:{}", st.fails.len(), st.count, list);
+    1
+}
+
+// Judges variant 0 and the two defects. Returns the number of variants
+// judged wrongly: the assembler refused, or a defect accepted.
+fn yc_controls() -> i64 ~ Console {
+    let mut wrong: i64 = 0;
+    println!("variant 0: the assembler");
+    println!(" large cases 1 to 19:");
+    if yc_ctl_cases(0_u64) != 0 { wrong = wrong + 1; }
+    let mut v = ACTL_YLABEL;
+    while v <= ACTL_YDROP {
+        println!("control {}: {}", v, yc_ctl_name(v));
+        println!(" large cases 1 to 19:");
+        if yc_ctl_cases(v) == 0 { wrong = wrong + 1; }
+        v = v + 1_u64;
+    }
+    if wrong == 0 {
+        println!("result: the assembler accepted, 2 of 2 planted defects of the large limits refused by cases 1 to 19");
+    } else {
+        println!("result: FAILED, {} variants judged wrongly", wrong);
+    }
+    wrong
+}
+
+// Runs a check command of the large limits. Returns -1 when the first
+// argument is not one, else the exit status.
+fn yc_main() -> i64 ~ Console + Process + Environment {
+    let cmd = args_get(1);
+    if cmd == "ycases" {
+        let st = yc_run(0_u64, true, true);
+        if st.fails.len() > 0 { return 1; }
+        return 0;
+    }
+    if cmd == "ycontrols" {
+        if yc_controls() != 0 { return 1; }
+        return 0;
+    }
+    -1
+}

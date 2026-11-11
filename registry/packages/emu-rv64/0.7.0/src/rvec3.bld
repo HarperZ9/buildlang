@@ -1,0 +1,179 @@
+// Hand-computed cases 20 to 27 of emu-rv64: runs of the two built-in images
+// through the loader, with checkpoints.
+//
+// The timer image is the program of iprog.bld, and the numbers come from
+// the working there. In 10000 steps it takes 99 interrupts and retires 9901
+// instructions, and the end state hashes to f1b4f1df12342aae, the value the
+// 0.3.0 command `icases` printed for the same program loaded word by word.
+// After 9999 steps the hash is 02a86ecc64904958, also from 0.3.0.
+//
+// In 20000 steps the interrupts fall on steps 100 k + 1 for k = 1 to 199,
+// and each handler sends one byte "." four steps later, the last at step
+// 19905. So 199 bytes are sent. The output buffer holds 128; the store of
+// byte 129 finds it full, the 128 bytes are emptied, and 71 stay in it.
+//
+// The fault of case 23: the handler loads x11 from mtimecmp in step
+// 100 k + 2 and nothing else writes x11. Bit 0 of x11 is flipped after step
+// 1950 of the second run. The checkpoint at step 2000 sees it, step 2002
+// loads x11 again, and every later checkpoint is equal.
+//
+// The trap image is the program of mprog.bld: 12 steps retire 11
+// instructions, take 1 trap, send the byte 21 and leave pc at 0x8000001C.
+
+const RV_HASH: u64 = 0xF1B4F1DF12342AAE_u64;
+const RV_HASH_9999: u64 = 0x02A86ECC64904958_u64;
+
+// What a run left behind.
+struct RunOut {
+    rc: u64, irqs: u64, total: u64, sent: u64, dig: u64,
+    retired: u64, traps: u64, pc: u64, out0: u64
+}
+
+// Runs plan p on built-in image `which` in the caller's arrays.
+fn rv_exec(p: &Plan, which: u64, m: &mut Machine, x: &mut [u64], ram: &mut [u8], out: &mut [u8], t: &mut Tape, ck: &mut Vec<u64>) -> RunOut {
+    let mut img: [u8; 256] = [0_u8; 256];
+    let n = img_builtin(which, &mut img);
+    let rc = rr_run(p, &img, n, m, x, ram, out, t, ck);
+    RunOut { rc: rc, irqs: t.irqs, total: t.sent + m.out_len, sent: t.sent, dig: t.dig,
+             retired: m.steps, traps: m.traps, pc: m.pc, out0: out[0] as u64 }
+}
+
+// One run in arrays of its own. Memory holds AA before the load.
+fn rv_once(p: &Plan, which: u64, ck: &mut Vec<u64>) -> RunOut {
+    let mut m = emu_new_machine();
+    let mut x: [u64; 32] = [0_u64; 32];
+    let mut ram: [u8; 256] = [0xAA_u8; 256];
+    let mut out: [u8; 128] = [0_u8; 128];
+    let mut t = tape_new();
+    rv_exec(p, which, &mut m, &mut x, &mut ram, &mut out, &mut t, ck)
+}
+
+// Two runs of the timer image, one after the other in the same arrays, as
+// the command `replay` does. Returns what the second run left.
+fn rv_twice(pa: &Plan, pb: &Plan, a: &mut Vec<u64>, b: &mut Vec<u64>) -> RunOut {
+    let mut m = emu_new_machine();
+    let mut x: [u64; 32] = [0_u64; 32];
+    let mut ram: [u8; 256] = [0xAA_u8; 256];
+    let mut out: [u8; 128] = [0_u8; 128];
+    let mut t = tape_new();
+    rv_exec(pa, 1_u64, &mut m, &mut x, &mut ram, &mut out, &mut t, a);
+    rv_exec(pb, 1_u64, &mut m, &mut x, &mut ram, &mut out, &mut t, b)
+}
+
+// True when the first n entries of the lists are equal.
+fn rv_prefix(a: &Vec<u64>, b: &Vec<u64>, n: usize) -> bool {
+    if a.len() < n || b.len() < n { return false; }
+    let mut i: usize = 0;
+    while i < n {
+        if a[i] != b[i] { return false; }
+        i = i + 1;
+    }
+    true
+}
+
+// The last entry of a list, or 0 for an empty one.
+fn rv_last(a: &Vec<u64>) -> u64 {
+    if a.len() == 0 { return 0_u64; }
+    a[a.len() - 1]
+}
+
+// Cases 20 to 22: the timer image for 10000 and for 9999 steps.
+fn rv_runs(st: &mut RSt) ~ Console {
+    let mut a: Vec<u64> = Vec::new();
+    let mut b: Vec<u64> = Vec::new();
+    let mut c: Vec<u64> = Vec::new();
+    let mut d: Vec<u64> = Vec::new();
+    let r = rv_once(&plan_new(st.v, 0_u64, 10000_u64, RR_EVERY), 1_u64, &mut a);
+    let ok20 = r.rc == IMG_OK && a.len() == 10 && rv_last(&a) == RV_HASH && r.irqs == 99_u64 &&
+               r.total == 99_u64 && r.retired == 9901_u64;
+    rv_note(st, 20_u64, ok20, format!("timer image, 10000 steps: {} checkpoints, {} interrupts, hash {:016x}",
+                                      a.len(), r.irqs, rv_last(&a)));
+    rv_twice(&plan_new(st.v, 0_u64, 10000_u64, RR_EVERY), &plan_new(st.v, 1_u64, 10000_u64, RR_EVERY), &mut b, &mut c);
+    let ok21 = rctl_same(st.v, &b, &c) && rv_last(&c) == RV_HASH && c.len() == 10;
+    rv_note(st, 21_u64, ok21, format!("two runs in the same arrays agree at {} checkpoints", rctl_diff(st.v, &b, &c)));
+    rv_once(&plan_new(st.v, 0_u64, 9999_u64, RR_EVERY), 1_u64, &mut d);
+    let ok22 = d.len() == 10 && rv_last(&d) == RV_HASH_9999 && rv_prefix(&a, &d, 9);
+    rv_note(st, 22_u64, ok22, format!("9999 steps: the same first 9 checkpoints, then hash {:016x}", rv_last(&d)));
+}
+
+// Cases 23 and 24: a fault that heals, and a run with no checkpoints. When
+// the cases are shown, case 23 also prints what the command `replay` prints
+// for the two lists.
+fn rv_faults(st: &mut RSt) ~ Console {
+    let mut a: Vec<u64> = Vec::new();
+    let mut b: Vec<u64> = Vec::new();
+    let mut c: Vec<u64> = Vec::new();
+    let mut pb = plan_new(st.v, 1_u64, 10000_u64, RR_EVERY);
+    pb.poke = 1950_u64;
+    rv_twice(&plan_new(st.v, 0_u64, 10000_u64, RR_EVERY), &pb, &mut a, &mut b);
+    let d = rctl_diff(st.v, &a, &b);
+    let ok23 = d == 1_u64 && ck_step(d, RR_EVERY, 10000_u64) == 2000_u64 && !rctl_same(st.v, &a, &b) &&
+               rv_last(&a) == rv_last(&b) && rv_last(&b) == RV_HASH;
+    rv_note(st, 23_u64, ok23, format!("x11 changed after step 1950 of run 2: first difference at index {}, final hashes equal={}",
+                                      d, rv_last(&a) == rv_last(&b)));
+    if st.show { replay_show(&a, &b, 10000_u64); }
+    rv_once(&plan_new(st.v, 0_u64, 10000_u64, 0_u64), 1_u64, &mut c);
+    rv_note(st, 24_u64, c.len() == 1 && rv_last(&c) == RV_HASH,
+            format!("no checkpoints before the end: hash {:016x}", rv_last(&c)));
+}
+
+// The hash of the loaded timer image before any step, built without the
+// loader.
+fn rv_start_hash() -> u64 {
+    let m = emu_new_machine();
+    let x: [u64; 32] = [0_u64; 32];
+    let mut ram: [u8; 256] = [0_u8; 256];
+    let out: [u8; 128] = [0_u8; 128];
+    iprog_load(&mut ram);
+    state_hash(&m, &x, &ram, &out)
+}
+
+// Cases 25 to 27: a full output buffer, a run of 0 steps, the trap image.
+fn rv_edges(st: &mut RSt) ~ Console {
+    let mut a: Vec<u64> = Vec::new();
+    let mut b: Vec<u64> = Vec::new();
+    let mut c: Vec<u64> = Vec::new();
+    let mut d: Vec<u64> = Vec::new();
+    let dots: [u8; 128] = [0x2E_u8; 128];
+    let r = rv_twice(&plan_new(st.v, 0_u64, 20000_u64, RR_EVERY), &plan_new(st.v, 1_u64, 20000_u64, RR_EVERY), &mut a, &mut b);
+    let ok25 = r.irqs == 199_u64 && r.total == 199_u64 && r.sent == 128_u64 && r.dig == rv_fnv(&dots, 128) &&
+               a.len() == 20 && rctl_same(st.v, &a, &b);
+    rv_note(st, 25_u64, ok25, format!("20000 steps: {} bytes sent, {} emptied from the buffer, two runs agree={}",
+                                      r.total, r.sent, rctl_same(st.v, &a, &b)));
+    rv_once(&plan_new(st.v, 0_u64, 0_u64, RR_EVERY), 1_u64, &mut c);
+    rv_note(st, 26_u64, c.len() == 1 && rv_last(&c) == rv_start_hash(),
+            format!("0 steps: one checkpoint, the hash of the loaded state {:016x}", rv_last(&c)));
+    let q = rv_once(&plan_new(st.v, 0_u64, 12_u64, RR_EVERY), 2_u64, &mut d);
+    let ok27 = q.rc == IMG_OK && q.retired == 11_u64 && q.traps == 1_u64 && q.irqs == 0_u64 &&
+               q.pc == 0x8000001C_u64 && q.total == 1_u64 && q.out0 == 0x21_u64;
+    rv_note(st, 27_u64, ok27, format!("trap image, 12 steps: retired={} traps={} pc={:08x} byte={:02x}",
+                                      q.retired, q.traps, q.pc, q.out0));
+}
+
+fn rv_everything(st: &mut RSt) ~ Console {
+    rv_order(st);
+    rv_sizes(st);
+    rv_again(st);
+    rv_reset(st);
+    rv_hashes(st);
+    rv_compare(st);
+    rv_runs(st);
+    rv_faults(st);
+    rv_edges(st);
+}
+
+// Runs the cases against variant v. Returns the number of the first failing
+// case, or 0.
+fn rvec_run(v: u64, show: bool) -> u64 ~ Console {
+    let mut st = RSt { v: v, show: show, fail: 0_u64, count: 0_u64, bad: 0_u64 };
+    rv_everything(&mut st);
+    if show { println!("rcases: {} run, first failure {}", st.count, st.fail); }
+    st.fail
+}
+
+// The failing cases of variant v: bit k is set when case k failed.
+fn rvec_mask(v: u64) -> u64 ~ Console {
+    let mut st = RSt { v: v, show: false, fail: 0_u64, count: 0_u64, bad: 0_u64 };
+    rv_everything(&mut st);
+    st.bad
+}

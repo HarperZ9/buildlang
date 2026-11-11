@@ -1,0 +1,1 @@
+hand tests/hand-xcases.s: 398 words, tests/emu-golden-xcases.txt has 398 case words, equal=true

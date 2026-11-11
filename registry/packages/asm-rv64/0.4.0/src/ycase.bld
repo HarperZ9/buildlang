@@ -1,0 +1,170 @@
+// Hand cases for the large limits of asm-rv64, since 0.4.0: the harness
+// and cases 1 to 7. Cases 8 to 20 are in ycase2.bld.
+//
+// The large limits are those of as_assemble_big: an image of at most
+// 1048576 bytes (262144 words) and at most 65536 labels. as_assemble keeps
+// the limits of 0.3.0: 65536 bytes (16384 words) and 1024 labels. Each
+// source is built in memory. The expected line numbers, counts and words
+// were worked out by hand and the working is in the comment of each case.
+
+// v: the planted defect under test, 0 for none. show: print every case.
+// count: cases run so far. fails: the numbers of the cases that failed.
+struct YcSt { v: u64, show: bool, count: u64, fails: Vec<u64> }
+
+fn yc_note(st: &mut YcSt, name: str, o: &AsOut, ok: bool) ~ Console {
+    st.count = st.count + 1_u64;
+    if st.show {
+        println!("ycase {} {}: words={} errors={} pass={}", st.count, name, o.count, o.errs.len() / 2, ok);
+    }
+    if !ok { st.fails.push(st.count); }
+}
+
+// Appends text to a source.
+fn yc_text(src: &mut Vec<u8>, s: str) {
+    let b = s.as_bytes();
+    let mut i: usize = 0;
+    while i < s.len() {
+        src.push(b[i]);
+        i = i + 1;
+    }
+}
+
+// Appends the decimal digits of n.
+fn yc_num(src: &mut Vec<u8>, n: u64) {
+    let mut d: [u8; 20] = [0_u8; 20];
+    let mut k: usize = 0;
+    let mut v = n;
+    while v != 0_u64 || k == 0 {
+        d[k] = (48_u64 + v % 10_u64) as u8;
+        v = v / 10_u64;
+        k = k + 1;
+    }
+    while k > 0 {
+        k = k - 1;
+        src.push(d[k]);
+    }
+}
+
+// True when error number i of o, counted from 0, is on the given line
+// with the given code.
+fn yc_err(o: &AsOut, i: usize, line: u64, code: u64) -> bool {
+    o.errs.len() >= 2 * i + 2 && o.errs[2 * i] == line && o.errs[2 * i + 1] == code
+}
+
+// True when o holds exactly one error, on the given line with the given
+// code, and no image.
+fn yc_one(o: &AsOut, line: u64, code: u64) -> bool {
+    o.errs.len() == 2 && o.count == 0_u64 && yc_err(o, 0, line, code)
+}
+
+// True when o holds no error and an image of n words in which words
+// from to n - 1 hold their own index less `from`.
+fn yc_iota(o: &AsOut, from: usize, n: usize) -> bool {
+    if o.errs.len() != 0 || o.count != n as u64 || o.words.len() != n { return false; }
+    let mut i = from;
+    while i < n {
+        if o.words[i] != (i - from) as u64 { return false; }
+        i = i + 1;
+    }
+    true
+}
+
+// The source of cases 1 and 2, 1101 lines:
+//   line 1          jal x0, l1099
+//   line 2 + K      lK: .word K        for K = 0 to 1099
+// 1100 labels. Label lK is at offset 4 + 4 * K, so l1099 is at 4400.
+fn yc_label_src(src: &mut Vec<u8>) {
+    yc_text(src, "jal x0, l1099\n");
+    let mut k: u64 = 0_u64;
+    while k < 1100_u64 {
+        yc_text(src, "l");
+        yc_num(src, k);
+        yc_text(src, ": .word ");
+        yc_num(src, k);
+        yc_text(src, "\n");
+        k = k + 1_u64;
+    }
+}
+
+// Cases 1 and 2: 1100 labels.
+//   case 1, large: 1101 words. Word 0 is jal x0, 4400. 4400 = 0x1130:
+//           offset bits 10 to 1 are 0x098 and go to word bits 30 to 21,
+//           offset bit 12 goes to word bit 12, so the word is
+//           0x098 << 21 | 1 << 12 | 0x6F = 0x1300106F. Word 1 + K is K.
+//   case 2, small: labels 1 to 1024 (l0 to l1023) are kept. Label 1025
+//           is l1024 on line 2 + 1024 = 1026, and every label from there
+//           to line 1101 is refused: 76 errors. l1099 is then not
+//           defined, so line 1 has "undefined label": 77 errors, the
+//           first on line 1, the second on line 1026, the last on 1101.
+fn yc_labels(st: &mut YcSt) ~ Console {
+    let mut src: Vec<u8> = Vec::new();
+    yc_label_src(&mut src);
+    let mut o = as_out_new();
+    as_assemble_big(st.v, &src, src.len(), &mut o);
+    let ok = yc_iota(&o, 1, 1101) && o.words[0] == 0x1300106F_u64;
+    yc_note(st, "1100 labels, large limits, a jump to the last label", &o, ok);
+    as_out_reset(&mut o);
+    as_assemble(st.v, &src, src.len(), &mut o);
+    let no = o.count == 0_u64 && o.errs.len() == 154 && yc_err(&o, 0, 1_u64, AE_UNDEF)
+        && yc_err(&o, 1, 1026_u64, AE_LABELS) && yc_err(&o, 76, 1101_u64, AE_LABELS);
+    yc_note(st, "1100 labels, small limits: more than 1024 labels from line 1026", &o, no);
+}
+
+// The source of cases 3 to 7: line K + 1 is `.word K`, for K = 0 to
+// 262144, so 262145 lines. at receives the length in bytes of the first
+// 16384, 16385, 262144 and 262145 lines.
+fn yc_word_src(src: &mut Vec<u8>, at: &mut [usize]) {
+    let mut k: u64 = 0_u64;
+    while k < 262145_u64 {
+        yc_text(src, ".word ");
+        yc_num(src, k);
+        yc_text(src, "\n");
+        k = k + 1_u64;
+        if k == 16384_u64 { at[0] = src.len(); }
+        if k == 16385_u64 { at[1] = src.len(); }
+        if k == 262144_u64 { at[2] = src.len(); }
+    }
+    at[3] = src.len();
+}
+
+// Cases 3 to 5: the small image limit, 16384 words = 65536 bytes.
+//   case 3, large, 16385 lines: 16385 words = 65540 bytes, word K is K.
+//   case 4, small, 16385 lines: line 16385 would place word 16385 at
+//           offset 65536. One error there, "image larger than 65536
+//           bytes".
+//   case 5, small, 16384 lines: exactly the limit, 16384 words.
+fn yc_small_edge(st: &mut YcSt, src: &[u8], at: &[usize]) ~ Console {
+    let mut o = as_out_new();
+    as_assemble_big(st.v, src, at[1], &mut o);
+    yc_note(st, "16385 words, large limits: an image of 65540 bytes", &o, yc_iota(&o, 0, 16385));
+    as_out_reset(&mut o);
+    as_assemble(st.v, src, at[1], &mut o);
+    yc_note(st, "16385 words, small limits: image larger than 65536 bytes on line 16385", &o,
+            yc_one(&o, 16385_u64, AE_BIG));
+    as_out_reset(&mut o);
+    as_assemble(st.v, src, at[0], &mut o);
+    yc_note(st, "16384 words, small limits: exactly the limit", &o, yc_iota(&o, 0, 16384));
+}
+
+// Cases 6 and 7: the large image limit, 262144 words = 1048576 bytes.
+//   case 6, large, 262144 lines: exactly the limit, word K is K.
+//   case 7, large, 262145 lines: line 262145 would place a word at
+//           offset 1048576. One error there, "image larger than 1048576
+//           bytes".
+fn yc_big_edge(st: &mut YcSt, src: &[u8], at: &[usize]) ~ Console {
+    let mut o = as_out_new();
+    as_assemble_big(st.v, src, at[2], &mut o);
+    yc_note(st, "262144 words, large limits: exactly the limit", &o, yc_iota(&o, 0, 262144));
+    as_out_reset(&mut o);
+    as_assemble_big(st.v, src, at[3], &mut o);
+    yc_note(st, "262145 words, large limits: image larger than 1048576 bytes on line 262145", &o,
+            yc_one(&o, 262145_u64, AE_BIG2));
+}
+
+fn yc_words(st: &mut YcSt) ~ Console {
+    let mut src: Vec<u8> = Vec::new();
+    let mut at: [usize; 4] = [0; 4];
+    yc_word_src(&mut src, &mut at);
+    yc_small_edge(st, &src, &at);
+    yc_big_edge(st, &src, &at);
+}

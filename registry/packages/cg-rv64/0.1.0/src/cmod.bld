@@ -1,0 +1,136 @@
+// cg-rv64: the module level. Compiles the entry function and every
+// function it can reach through direct calls, in the order they are
+// first called.
+
+// Compiles function number fid of the list.
+fn cm_function(g: &mut Cg, d: &CjDoc, fid: u64) {
+    let f = g.todo[fid as usize];
+    let sig = cj_get(d, f, "sig");
+    g.fnode = f;
+    g.fid = fid;
+    g.name = cj_get(d, f, "name");
+    g.ret = cj_get(d, sig, "ret");
+    g.hid = 0_u64;
+    if ct_agg(d, g.ret) { g.hid = 1_u64; }
+    let fixed = cj_kind(d, cj_get(d, sig, "is_variadic")) == CJ_FALSE;
+    let plain = fixed && cj_str_is(d, cj_get(d, sig, "calling_conv"), "Build");
+    if !plain || !ct_known(g, d, g.ret) {
+        cg_refuse(g, d,
+            "variadic function, foreign calling convention or a result type the generator does not cover");
+        return;
+    }
+    cf_layout(g, d, f);
+    co_comment(g, d, g.name);
+    co_fn(g, fid);
+    co_s(g, ":\n");
+    cf_enter(g, d, f);
+    let blocks = cj_get(d, f, "blocks");
+    let mut seen: Vec<u64> = Vec::new();
+    if !cf_reach(d, blocks, &mut seen) {
+        cg_refuse(g, d, "block list with a missing block or a block out of order");
+        return;
+    }
+    let mut b = cj_first(d, blocks);
+    let mut i: u64 = 0_u64;
+    while b != CG_NONE {
+        if seen[i as usize] == 1_u64 { cm_block(g, d, b, i); }
+        i = i + 1_u64;
+        b = cj_next(d, b);
+    }
+}
+
+fn cm_block(g: &mut Cg, d: &CjDoc, b: u64, i: u64) {
+    co_block(g, i);
+    co_s(g, ":\n");
+    let mut s = cj_first(d, cj_get(d, b, "stmts"));
+    while s != CG_NONE {
+        cs_stmt(g, d, s);
+        s = cj_next(d, s);
+    }
+    cf_term(g, d, cj_get(d, b, "terminator"));
+}
+
+// The function with a body whose name is the text s.
+fn cm_find(g: &Cg, d: &CjDoc, s: str) -> u64 {
+    let mut f = cj_first(d, g.funcs);
+    while f != CG_NONE {
+        if cj_kind(d, cj_get(d, f, "blocks")) == CJ_ARR && cj_str_is(d, cj_get(d, f, "name"), s) { return f; }
+        f = cj_next(d, f);
+    }
+    CG_NONE
+}
+
+// True when the number (magnitude mag, negative neg) is a value of the
+// scalar type t: 0 or 1 for a Bool, the range of an integer type.
+fn cm_arg_fits(d: &CjDoc, t: u64, mag: u64, neg: bool) -> bool {
+    if ct_kind(d, t) == CT_BOOL { return !neg && mag <= 1_u64; }
+    if ct_kind(d, t) != CT_INT { return false; }
+    let bits = ct_bits(d, t);
+    let half = 1_u64 << (bits - 1_u64);
+    if !ct_signed(d, t) { return !neg && (bits == 64_u64 || mag <= (half - 1_u64) * 2_u64 + 1_u64); }
+    if neg { return mag <= half; }
+    mag < half
+}
+
+// Loads the arguments of the entry function from the command line.
+// args holds a magnitude and a sign for each. The entry function takes
+// at most 8 parameters, each a Bool or an integer, and returns nothing
+// or a scalar, which is dropped.
+fn cm_entry(g: &mut Cg, d: &CjDoc, def: u64, args: &Vec<u64>) {
+    let sig = cj_get(d, def, "sig");
+    let params = cj_get(d, sig, "params");
+    let n = cj_count(d, params);
+    g.name = cj_get(d, def, "name");
+    if n > CG_ARG_REGS || (n as usize) * 2 != args.len() || ct_agg(d, cj_get(d, sig, "ret")) {
+        cg_refuse(g, d,
+            "entry function with a wrong argument count, more than 8 parameters or an aggregate result");
+        return;
+    }
+    let mut pt = cj_first(d, params);
+    let mut k: u64 = 0_u64;
+    while pt != CG_NONE {
+        let mag = args[(2_u64 * k) as usize];
+        let neg = args[(2_u64 * k + 1_u64) as usize] == 1_u64;
+        if !cm_arg_fits(d, pt, mag, neg) {
+            cg_refuse(g, d,
+                "entry argument outside the range of its parameter, or a parameter that is no Bool or integer");
+            return;
+        }
+        let mut bits = mag;
+        if neg { bits = (0_u64).wrapping_sub(mag); }
+        ci_li(g, 10_u64 + k, bits);
+        k = k + 1_u64;
+        pt = cj_next(d, pt);
+    }
+}
+
+// Generates the whole program for the entry function named `entry`.
+// The text is in g.out; g.bad is set when anything was refused.
+fn cm_generate(g: &mut Cg, d: &CjDoc, entry: str, args: &Vec<u64>) {
+    let module = cj_get(d, 0_u64, "module");
+    if d.bad || !cj_str_is(d, cj_get(d, 0_u64, "schema"), "buildlang.mir/v1") {
+        cg_refuse(g, d, "the file is not buildlang.mir/v1 JSON");
+        return;
+    }
+    g.funcs = cj_get(d, module, "functions");
+    g.types = cj_get(d, module, "types");
+    g.strings = cj_get(d, module, "strings");
+    g.globals = cj_get(d, module, "globals");
+    let def = cm_find(g, d, entry);
+    if def == CG_NONE {
+        cg_refuse(g, d, "the entry function is not in the MIR with a body");
+        return;
+    }
+    g.todo.push(def);
+    cq_start(g);
+    cm_entry(g, d, def, args);
+    cq(g, "jal x1, fn_0");
+    cq(g, "addi x10, x0, 0");
+    cq(g, "jal x0, rt_halt");
+    cq_runtime(g);
+    let mut i: u64 = 0_u64;
+    while (i as usize) < g.todo.len() {
+        cm_function(g, d, i);
+        i = i + 1_u64;
+    }
+}

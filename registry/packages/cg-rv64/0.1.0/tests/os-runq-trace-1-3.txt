@@ -1,0 +1,201 @@
+wake 1 -> -2
+add 1 -> -2
+tick -> -1
+tick -> -1
+block -> -3
+wake 1 -> -2
+tick -> -1
+wake 0 -> -3
+tick -> -1
+tick -> -1
+add 0 -> 0
+next -> 0
+tick -> 0
+tick -> 0
+tick -> 0
+add 1 -> -2
+tick -> 0
+remove 0 -> 0
+block -> -3
+tick -> -1
+next -> -1
+remove 0 -> -3
+add 1 -> -2
+block -> -3
+wake 0 -> -3
+add 1 -> -2
+add 1 -> -2
+tick -> -1
+add 1 -> -2
+tick -> -1
+remove 0 -> -3
+remove 1 -> -2
+tick -> -1
+exit -> -3
+add 1 -> -2
+tick -> -1
+remove 1 -> -2
+tick -> -1
+tick -> -1
+tick -> -1
+tick -> -1
+tick -> -1
+add 0 -> 0
+exit -> -3
+add 1 -> -2
+remove 1 -> -2
+wake 0 -> -3
+add 1 -> -2
+block -> -3
+add 1 -> -2
+tick -> 0
+tick -> 0
+add 0 -> -3
+wake 1 -> -2
+tick -> 0
+exit -> -1
+tick -> -1
+next -> -1
+tick -> -1
+wake 0 -> -3
+tick -> -1
+block -> -3
+remove 1 -> -2
+tick -> -1
+wake 1 -> -2
+block -> -3
+tick -> -1
+exit -> -3
+tick -> -1
+wake 1 -> -2
+tick -> -1
+block -> -3
+tick -> -1
+add 0 -> 0
+exit -> -3
+tick -> 0
+tick -> 0
+add 1 -> -2
+tick -> 0
+tick -> 0
+exit -> -1
+tick -> -1
+tick -> -1
+tick -> -1
+remove 1 -> -2
+next -> -1
+tick -> -1
+tick -> -1
+tick -> -1
+tick -> -1
+wake 1 -> -2
+next -> -1
+add 1 -> -2
+add 1 -> -2
+tick -> -1
+remove 0 -> -3
+add 0 -> 0
+tick -> 0
+remove 1 -> -2
+wake 0 -> -3
+wake 0 -> -3
+tick -> 0
+tick -> 0
+wake 1 -> -2
+tick -> 0
+tick -> 0
+add 0 -> -3
+tick -> 0
+wake 0 -> -3
+next -> 0
+wake 1 -> -2
+add 1 -> -2
+tick -> 0
+remove 1 -> -2
+wake 0 -> -3
+block -> -1
+tick -> -1
+add 1 -> -2
+tick -> -1
+add 1 -> -2
+tick -> -1
+tick -> -1
+tick -> -1
+tick -> -1
+tick -> -1
+next -> -1
+next -> -1
+exit -> -3
+tick -> -1
+wake 0 -> 0
+add 0 -> -3
+tick -> 0
+tick -> 0
+block -> -1
+tick -> -1
+tick -> -1
+tick -> -1
+tick -> -1
+tick -> -1
+tick -> -1
+wake 1 -> -2
+add 1 -> -2
+add 1 -> -2
+block -> -3
+exit -> -3
+tick -> -1
+tick -> -1
+block -> -3
+block -> -3
+add 1 -> -2
+wake 1 -> -2
+remove 1 -> -2
+tick -> -1
+wake 0 -> 0
+block -> -3
+tick -> 0
+add 0 -> -3
+tick -> 0
+exit -> -1
+add 1 -> -2
+tick -> -1
+remove 0 -> -3
+tick -> -1
+tick -> -1
+add 1 -> -2
+tick -> -1
+next -> -1
+exit -> -3
+tick -> -1
+wake 1 -> -2
+wake 1 -> -2
+block -> -3
+block -> -3
+wake 1 -> -2
+block -> -3
+block -> -3
+add 0 -> 0
+tick -> 0
+wake 0 -> -3
+tick -> 0
+next -> 0
+tick -> 0
+add 1 -> -2
+block -> -1
+wake 0 -> 0
+wake 1 -> -2
+wake 1 -> -2
+block -> -3
+block -> -3
+block -> -3
+tick -> 0
+exit -> -1
+tick -> -1
+add 1 -> -2
+add 0 -> 0
+next -> 0
+block -> -1
+tick -> -1
+wake 0 -> 0
+tick -> 0
+cap=1 cur=0 left=4 digest=af63be4c8601b992

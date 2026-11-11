@@ -1,0 +1,10 @@
+variant 0: the assembler
+ large cases 1 to 19:
+  accepted, 19 cases
+control 14: in a large assembly a label past the 1024th takes the offset of label 1024
+ large cases 1 to 19:
+  REFUSED, 1 of 19 hand cases fail: 1
+control 15: a large assembly drops every word past 65536 bytes
+ large cases 1 to 19:
+  REFUSED, 5 of 19 hand cases fail: 3 6 10 11 14
+result: the assembler accepted, 2 of 2 planted defects of the large limits refused by cases 1 to 19

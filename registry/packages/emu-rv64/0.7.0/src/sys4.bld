@@ -1,0 +1,142 @@
+// emu-rv64 core, system profile, fourth part: loads, stores and atomic
+// instructions through address translation.
+//
+// An access of n bytes may cross from one page into the next. Each page is
+// translated by itself, so the two parts can lie anywhere in physical
+// memory. Every check comes before any effect: a trap changes no register
+// and no byte of memory. Rules: SPEC.md, "Memory access in the system
+// profile".
+
+// The parts of an access of n bytes at virtual address va. With cause 0,
+// bytes 0 to na - 1 are at pa and the rest, if any, at pb. With another
+// cause, tval is the virtual address of the first byte of the part that
+// faulted: "stval will contain the virtual address of the portion of the
+// access that caused the fault."
+struct Span { cause: u64, tval: u64, pa: u64, pb: u64, na: u64 }
+
+fn sys_span(v: u64, m: &Machine, ram: &[u8], va: u64, n: u64, acc: u64) -> Span {
+    let mut s = Span { cause: 0_u64, tval: va, pa: 0_u64, pb: 0_u64, na: n };
+    let a = sys_translate(v, m, ram, va, acc);
+    if a.cause != 0_u64 { s.cause = a.cause; return s; }
+    s.pa = a.pa;
+    let room = 4096_u64 - (va & 0xFFF_u64);
+    if n <= room { return s; }
+    let next = va.wrapping_add(room);
+    let b = sys_translate(v, m, ram, next, acc);
+    if b.cause != 0_u64 { s.cause = b.cause; s.tval = next; return s; }
+    s.pb = b.pa;
+    s.na = room;
+    s
+}
+
+// The physical check of a translated access. An access inside one page may
+// name the serial device (one byte), one timer register, or memory. An
+// access across two pages must lie in memory with both parts. On a miss
+// the access fault of the kind is recorded with the virtual address of
+// the first byte that is outside memory.
+fn sys_phys(v: u64, len: u64, s: &mut Span, va: u64, n: u64, acc: u64) {
+    if s.na == n {
+        if emu_in_uart(s.pa, n) || emu_timer_reg(s.pa, n) != 0_u64 || emu_in_ram(len, s.pa, n) { return; }
+        s.cause = sys_fault(v, acc, false);
+        s.tval = va.wrapping_add(emu_fault_addr(len, s.pa) - s.pa);
+        return;
+    }
+    let nb = n - s.na;
+    if emu_in_ram(len, s.pa, s.na) && emu_in_ram(len, s.pb, nb) { return; }
+    s.cause = sys_fault(v, acc, false);
+    if !emu_in_ram(len, s.pa, s.na) {
+        s.tval = va.wrapping_add(emu_fault_addr(len, s.pa) - s.pa);
+    } else {
+        s.tval = va.wrapping_add(s.na).wrapping_add(emu_fault_addr(len, s.pb) - s.pb);
+    }
+}
+
+// Translates and checks an access; the result has cause 0 when it may go
+// ahead.
+fn sys_reach(v: u64, m: &Machine, ram: &[u8], va: u64, n: u64, acc: u64) -> Span {
+    let mut s = sys_span(v, m, ram, va, n, acc);
+    if s.cause == 0_u64 { sys_phys(v, ram.len() as u64, &mut s, va, n, acc); }
+    s
+}
+
+// A load. "Attempting to execute a load or load-reserved instruction whose
+// effective address lies within a page without read permissions raises a
+// load page-fault exception."
+fn sys_load(v: u64, m: &mut Machine, x: &mut [u64], ram: &[u8], d: &Insn) -> i64 {
+    let va = x[d.rs1 as usize].wrapping_add(d.imm);
+    let n = emu_access_len(d.op);
+    let s = sys_reach(v, m, ram, va, n, 1_u64);
+    if s.cause != 0_u64 { return sys_trap(v, m, s.cause, s.tval); }
+    let mut val: u64 = 0_u64;
+    if s.na < n {
+        val = emu_peek(ram, s.pa, s.na) | (emu_peek(ram, s.pb, n - s.na) << (8_u64 * s.na));
+    } else {
+        if emu_in_uart(s.pa, n) {
+            if s.pa == EMU_UART_LSR { val = 0x60_u64; }
+        } else {
+            val = emu_a_read(m, ram, s.pa, n, emu_timer_reg(s.pa, n));
+        }
+    }
+    if d.op - OP_LB < 3_u64 { val = emu_sext(val, 8_u64 * n); }
+    if d.rd != 0_u64 { x[d.rd as usize] = val; }
+    m.pc = m.pc.wrapping_add(4_u64);
+    m.steps = m.steps + 1_u64;
+    EMU_OK
+}
+
+// A byte stored to the serial device: offset 0 appends to `out`, the other
+// offsets have no effect. EMU_SMALL when `out` is full.
+fn sys_uart_put(m: &mut Machine, out: &mut [u8], pa: u64, b: u64) -> i64 {
+    if pa != EMU_UART_BASE { return EMU_OK; }
+    if m.out_len >= out.len() as u64 { return EMU_SMALL; }
+    out[m.out_len as usize] = (b & 0xFF_u64) as u8;
+    m.out_len = m.out_len + 1_u64;
+    EMU_OK
+}
+
+// A store. "Attempting to execute a store, store-conditional, AMO, or
+// cache-block zero instruction whose effective address lies within a page
+// without write permissions raises a store page-fault exception."
+fn sys_store(v: u64, m: &mut Machine, x: &[u64], ram: &mut [u8], out: &mut [u8], d: &Insn) -> i64 {
+    let va = x[d.rs1 as usize].wrapping_add(d.imm);
+    let n = emu_access_len(d.op);
+    let b = x[d.rs2 as usize];
+    let s = sys_reach(v, m, ram, va, n, 2_u64);
+    if s.cause != 0_u64 { return sys_trap(v, m, s.cause, s.tval); }
+    if s.na < n {
+        emu_poke(ram, s.pa, s.na, b);
+        emu_poke(ram, s.pb, n - s.na, b >> (8_u64 * s.na));
+    } else {
+        if emu_in_uart(s.pa, n) {
+            if sys_uart_put(m, out, s.pa, b) != EMU_OK { return EMU_SMALL; }
+        } else {
+            emu_a_write(m, ram, s.pa, n, emu_timer_reg(s.pa, n), b);
+        }
+    }
+    m.pc = m.pc.wrapping_add(4_u64);
+    m.steps = m.steps + 1_u64;
+    EMU_OK
+}
+
+// An atomic instruction. The alignment check comes first, on the virtual
+// address, as in the trap profile. Then the address is translated, as a
+// load for LR and as a store for SC and the AMOs: "AMOs never raise load
+// page-fault exceptions." Then the physical check, and the effect of
+// lib7.bld on the physical address, so the reservation holds a physical
+// address. An aligned access never crosses a page.
+fn sys_atomic(v: u64, m: &mut Machine, x: &mut [u64], ram: &mut [u8], d: &Insn) -> i64 {
+    let n = emu_a_width(d.op);
+    let va = x[d.rs1 as usize];
+    let mut acc: u64 = 2_u64;
+    if emu_a_kind(d.op) == 0_u64 { acc = 1_u64; }
+    if (va & (n - 1_u64)) != 0_u64 { return sys_trap(v, m, EXC_LOAD_ALIGN + 2_u64 * (acc - 1_u64), va); }
+    let a = sys_translate(v, m, ram, va, acc);
+    if a.cause != 0_u64 { return sys_trap(v, m, a.cause, va); }
+    let tr = emu_timer_reg(a.pa, n);
+    let len = ram.len() as u64;
+    if tr == 0_u64 && !emu_in_ram(len, a.pa, n) {
+        let at = va.wrapping_add(emu_fault_addr(len, a.pa) - a.pa);
+        return sys_trap(v, m, sys_fault(v, acc, false), at);
+    }
+    emu_a_apply(m, x, ram, d, a.pa, tr)
+}

@@ -1,0 +1,63 @@
+# mode golden args... (run from the package folder)
+# the planted defects, by number
+exact tests/golden-controls.txt controls
+# os-pfa 0.1.0, its own function trace as the entry, for the core (first argument 0) and the reference model (1);
+# each expected file is a copy of tests/golden-trace-*.txt of os-pfa 0.1.0, and the arguments are those of its cases.txt
+exact tests/os-pfa-trace-70-5.txt run tests/mir/os-pfa.mir.json trace 2000000000 0 70 5 400
+exact tests/os-pfa-trace-70-5.txt run tests/mir/os-pfa.mir.json trace 2000000000 1 70 5 400
+exact tests/os-pfa-trace-512-9.txt run tests/mir/os-pfa.mir.json trace 2000000000 0 512 9 1500
+exact tests/os-pfa-trace-512-9.txt run tests/mir/os-pfa.mir.json trace 2000000000 1 512 9 1500
+exact tests/os-pfa-trace-1-3.txt run tests/mir/os-pfa.mir.json trace 2000000000 0 1 3 200
+exact tests/os-pfa-trace-1-3.txt run tests/mir/os-pfa.mir.json trace 2000000000 1 1 3 200
+# os-runq 0.1.0, the same way
+exact tests/os-runq-trace-1-3.txt run tests/mir/os-runq.mir.json trace 2000000000 0 1 3 200
+exact tests/os-runq-trace-1-3.txt run tests/mir/os-runq.mir.json trace 2000000000 1 1 3 200
+exact tests/os-runq-trace-3-5.txt run tests/mir/os-runq.mir.json trace 2000000000 0 3 5 600
+exact tests/os-runq-trace-3-5.txt run tests/mir/os-runq.mir.json trace 2000000000 1 3 5 600
+exact tests/os-runq-trace-8-4.txt run tests/mir/os-runq.mir.json trace 2000000000 0 8 4 1500
+exact tests/os-runq-trace-8-4.txt run tests/mir/os-runq.mir.json trace 2000000000 1 8 4 1500
+exact tests/os-runq-trace-16-9.txt run tests/mir/os-runq.mir.json trace 2000000000 0 16 9 2000
+exact tests/os-runq-trace-16-9.txt run tests/mir/os-runq.mir.json trace 2000000000 1 16 9 2000
+# two runs of one image in one memory: the same steps, bytes and state hash; a trap halts with 101; a step limit is reported
+exact tests/golden-check-os-pfa-70-5.txt run-check tests/mir/os-pfa.mir.json trace 2000000000 0 70 5 400
+exact tests/golden-check-os-runq-ref-8-4.txt run-check tests/mir/os-runq.mir.json trace 2000000000 1 8 4 1500
+exact tests/golden-check-calls-9.txt run-check tests/mir/calls.mir.json run 100000000 9
+exact tests/golden-check-calls-limit.txt run-check tests/mir/calls.mir.json run 1000 3
+# the assembly text of two programs
+exact tests/golden-gen-os-pfa-70-5.s gen tests/mir/os-pfa.mir.json trace 0 70 5 400
+exact tests/golden-gen-calls-3.s gen tests/mir/calls.mir.json run 3
+# corpus programs: each expected file is the output of the hosted program, standard output then standard error
+exact tests/golden-run-structs-1.txt run tests/mir/structs.mir.json run 100000000 1
+exact tests/golden-run-calls-3.txt run tests/mir/calls.mir.json run 100000000 3
+exact tests/golden-run-vecs-2.txt run tests/mir/vecs.mir.json run 100000000 2
+# index traps: an array, a slice, a negative index, a vector read, a vector store, a large index
+exact tests/golden-run-calls-8.txt run tests/mir/calls.mir.json run 100000000 8
+exact tests/golden-run-calls-9.txt run tests/mir/calls.mir.json run 100000000 9
+exact tests/golden-run-calls-10.txt run tests/mir/calls.mir.json run 100000000 10
+exact tests/golden-run-calls-11.txt run tests/mir/calls.mir.json run 100000000 11
+exact tests/golden-run-calls-12.txt run tests/mir/calls.mir.json run 100000000 12
+exact tests/golden-run-calls-13.txt run tests/mir/calls.mir.json run 100000000 13
+# arithmetic traps of the signed types: i8 add, divide by zero, remainder by zero, negate, divide and remainder of the smallest value by -1,
+# i16 add below the range, i64 multiply, and one i64 case just inside the range
+exact tests/golden-run-traps_s-0.txt run tests/mir/traps_s.mir.json run 100000000 0
+exact tests/golden-run-traps_s-3.txt run tests/mir/traps_s.mir.json run 100000000 3
+exact tests/golden-run-traps_s-4.txt run tests/mir/traps_s.mir.json run 100000000 4
+exact tests/golden-run-traps_s-9.txt run tests/mir/traps_s.mir.json run 100000000 9
+exact tests/golden-run-traps_s-10.txt run tests/mir/traps_s.mir.json run 100000000 10
+exact tests/golden-run-traps_s-11.txt run tests/mir/traps_s.mir.json run 100000000 11
+exact tests/golden-run-traps_s-22.txt run tests/mir/traps_s.mir.json run 100000000 22
+exact tests/golden-run-traps_s-50.txt run tests/mir/traps_s.mir.json run 100000000 50
+exact tests/golden-run-traps_s-53.txt run tests/mir/traps_s.mir.json run 100000000 53
+# refusals: floating point, a string that is no constant, a runtime call, a missing entry function, a wrong
+# argument count, an argument outside its type, an entry function that returns an aggregate, a file that is no MIR
+exact tests/golden-refuse-float.txt gen tests/mir/refuse_float.mir.json run 1
+exact tests/golden-refuse-str.txt gen tests/mir/refuse_str.mir.json run 1
+exact tests/golden-refuse-exit.txt gen tests/mir/refuse_exit.mir.json run 1
+exact tests/golden-refuse-entry.txt gen tests/mir/calls.mir.json nosuch
+exact tests/golden-refuse-count.txt gen tests/mir/calls.mir.json run 1 2
+exact tests/golden-refuse-range.txt gen tests/mir/calls.mir.json fib -1
+exact tests/golden-refuse-aggregate.txt gen tests/mir/calls.mir.json wide 1 2 3 4 5 6 7 8
+exact tests/golden-refuse-notmir.txt gen tests/cases.txt run 1
+# a missing file and an argument that is no number
+exact tests/golden-missing.txt gen tests/mir/no-such.json run 1
+exact tests/golden-badarg.txt gen tests/mir/calls.mir.json run x

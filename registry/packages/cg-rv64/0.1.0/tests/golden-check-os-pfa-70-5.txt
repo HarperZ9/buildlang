@@ -1,0 +1,4 @@
+run-check image_bytes=15628 ram=4194304 max=2000000000
+  halted=true code=0 steps=535755 serial_len=6016 serial_fnv=0766cb9912605b17
+  hash=e57c4234a19246eb
+  second run: equal
