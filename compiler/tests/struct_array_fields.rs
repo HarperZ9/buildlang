@@ -160,6 +160,37 @@ fn g7_a_field_array_borrowed_as_a_slice_is_the_field() {
     assert_prints("g7", src, "36\n66\n1 21 22 23 5\n");
 }
 
+/// `S { a: 9, ..base }` takes every field it does not write from `base`, an
+/// array among them. The `..base` part was ignored: the reproduction
+/// `T { b: 20, ..t }` printed `0 20 0`. A literal that writes every field
+/// out of order and still names a base keeps each value with its own field.
+#[test]
+fn a_struct_update_literal_takes_the_other_fields_from_its_base() {
+    if !has_cc() {
+        return;
+    }
+    let src = "struct S { a: u8, w: [u16; 3], b: i32, c: u8 }\n\
+               struct T { a: u8, b: u8, c: u8 }\n\
+               fn main() ~ Console {\n\
+               let o = S { a: 1_u8, w: [4_u16, 5_u16, 6_u16], b: -2, c: 3_u8 };\n\
+               let n = S { a: 9_u8, ..o };\n\
+               let m = S { c: 7_u8, w: [8_u16, 9_u16, 10_u16], ..o };\n\
+               let all = S { c: 11_u8, b: 12, w: [13_u16, 14_u16, 15_u16], a: 16_u8, ..o };\n\
+               let t = T { a: 1_u8, b: 2_u8, c: 3_u8 };\n\
+               let u = T { b: 20_u8, ..t };\n\
+               println!(\"{} {} {} {} {} {}\", n.a, n.w[0], n.w[1], n.w[2], n.b, n.c);\n\
+               println!(\"{} {} {} {} {} {}\", m.a, m.w[0], m.w[1], m.w[2], m.b, m.c);\n\
+               println!(\"{} {} {} {} {} {}\", all.a, all.w[0], all.w[1], all.w[2], all.b, all.c);\n\
+               println!(\"{} {} {} {} {} {}\", o.a, o.w[0], o.w[1], o.w[2], o.b, o.c);\n\
+               println!(\"{} {} {}\", u.a, u.b, u.c);\n\
+               }\n";
+    assert_prints(
+        "update",
+        src,
+        "9 4 5 6 -2 3\n1 8 9 10 -2 7\n16 13 14 15 12 11\n1 4 5 6 -2 3\n1 20 3\n",
+    );
+}
+
 /// One store per shape of place: (name, statement, length of the indexed
 /// array, the values printed after the store when the index is 1). In range
 /// the program prints every array; out of range it must stop with exit code
