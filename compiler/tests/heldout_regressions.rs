@@ -216,10 +216,19 @@ fn run_keeps_a_crashed_programs_exit_code() {
         .output()
         .expect("run buildc run");
     let code = out.status.code();
-    // A stack overflow is 0xC00000FD on Windows and a signal on Unix (reported
-    // as 128 + signal). Before the fix, Windows reported 0xFD & 0xFF = 253.
+    // A stack overflow is a signal on Unix (reported as 128 + signal). On
+    // Windows it is 0xC00000FD (STATUS_STACK_OVERFLOW) when the guard page
+    // catches it, and 0xC0000005 (STATUS_ACCESS_VIOLATION) when a frame steps
+    // past the guard page; which one a run gets depends on the frame layout
+    // and the runner. Both are the crashed program's own full 32-bit code.
+    // Before the fix, Windows reported only the low byte: 253 or 5.
     if cfg!(windows) {
-        assert_eq!(code.map(|c| c as u32), Some(0xC000_00FD), "{:?}", code);
+        let full = code.map(|c| c as u32);
+        assert!(
+            full == Some(0xC000_00FD) || full == Some(0xC000_0005),
+            "the full crash code must survive, got {:?}",
+            code
+        );
     } else {
         let c = code.expect("an exit code");
         assert!(c > 128, "a signal death must read as 128 + signal, got {c}");
