@@ -311,7 +311,17 @@ impl<'ctx> MirLowerer<'ctx> {
 
         // Compute init value if present
         let init_val = if let Some(init) = &local.init {
-            let lowered = self.lower_expr(&init.expr);
+            // `let s: &[T] = &v;` (a vector or an array) takes the same slice view as a `&[T]`
+            // argument does.
+            let lowered = if self.is_slice_source_ref(&init.expr) {
+                match self.array_ref_as_slice(explicit_ty.clone(), &init.expr) {
+                    Ok(Some(v)) => Ok(v),
+                    Ok(None) => self.lower_expr(&init.expr),
+                    Err(e) => Err(e),
+                }
+            } else {
+                self.lower_expr(&init.expr)
+            };
             self.untyped_vec_new_binding = false;
             Some(lowered?)
         } else {
@@ -2320,11 +2330,23 @@ impl<'ctx> MirLowerer<'ctx> {
         let ExprKind::Ref { expr: inner, .. } = &arg.kind else {
             return Ok(None);
         };
-        if !matches!(inner.kind, ExprKind::Ident(_) | ExprKind::Path(_)) {
+        // A vector may also be a struct field (`&bag.items`); an array is only
+        // taken by name, as before.
+        let named = matches!(inner.kind, ExprKind::Ident(_) | ExprKind::Path(_));
+        if !named && !matches!(inner.kind, ExprKind::Field { .. }) {
             return Ok(None);
         }
         let arr = self.lower_expr(inner)?;
-        let MirType::Array(have, n) = self.type_of_value(&arr) else {
+        let arr_ty = self.type_of_value(&arr);
+        if let MirType::Vec(have) = &arr_ty {
+            return self
+                .vec_ref_as_slice(arr, have, elem, target.clone(), inner.span)
+                .map(Some);
+        }
+        if !named {
+            return self.lower_expr(arg).map(Some);
+        }
+        let MirType::Array(have, n) = arr_ty else {
             // not an array: lower the reference the ordinary way
             return self.lower_expr(arg).map(Some);
         };
@@ -2363,6 +2385,91 @@ impl<'ctx> MirLowerer<'ctx> {
             },
         );
         Ok(Some(values::local(result)))
+    }
+
+    /// Whether `expr` is `&name` or `&mut name` with `name` a vector or a fixed
+    /// array local.
+    fn is_slice_source_ref(&self, expr: &ast::Expr) -> bool {
+        let ExprKind::Ref { expr: inner, .. } = &expr.kind else {
+            return false;
+        };
+        let ExprKind::Ident(ident) = &inner.kind else {
+            return false;
+        };
+        self.var_map.get(&ident.name).is_some_and(|&id| {
+            matches!(
+                self.type_of_value(&values::local(id)),
+                MirType::Vec(_) | MirType::Array(_, _)
+            )
+        })
+    }
+
+    /// `&v` passed where a `&[T]` is expected, with `v: Vec<T>`: build the fat
+    /// pointer `{ data, len }` from the vector's buffer and current length and
+    /// pass its address. Before this the vector handle itself was passed and
+    /// the callee read it as a slice. The view is taken at the call: it holds
+    /// the buffer the vector has at that moment.
+    fn vec_ref_as_slice(
+        &mut self,
+        vec: MirValue,
+        have: &MirType,
+        elem: &MirType,
+        target: Box<MirType>,
+        span: crate::lexer::Span,
+    ) -> CodegenResult<MirValue> {
+        if have != elem {
+            return Err(CodegenError::Rejected {
+                message: format!(
+                    "this vector holds `{have}` but the parameter is a slice of `{elem}`"
+                ),
+                location: (span.end.0 > span.start.0).then_some((span.start.0, span.end.0)),
+                help: Some(format!(
+                    "annotate the vector's element type: `let name: Vec<{elem}> = ...`"
+                )),
+            });
+        }
+        let builder = self
+            .current_fn
+            .as_mut()
+            .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
+        let size = builder.create_local(MirType::usize());
+        builder.assign(
+            size,
+            MirRValue::NullaryOp(crate::codegen::ir::NullaryOp::SizeOf, elem.clone()),
+        );
+        let data = builder.create_local(MirType::Ptr(Box::new(elem.clone())));
+        let after_data = builder.create_block();
+        builder.call(
+            MirValue::Function(Arc::from("build_hvec_data")),
+            vec![vec.clone(), values::local(size)],
+            Some(data),
+            after_data,
+        );
+        builder.switch_to_block(after_data);
+        let len = builder.create_local(MirType::usize());
+        let after_len = builder.create_block();
+        builder.call(
+            MirValue::Function(Arc::from("build_hvec_len")),
+            vec![vec],
+            Some(len),
+            after_len,
+        );
+        builder.switch_to_block(after_len);
+        let fat = builder.create_local((*target).clone());
+        builder.aggregate(
+            fat,
+            AggregateKind::Struct(MirType::slice_type_name(elem)),
+            vec![values::local(data), values::local(len)],
+        );
+        let result = builder.create_local(MirType::Ptr(target));
+        builder.assign(
+            result,
+            MirRValue::AddressOf {
+                is_mut: false,
+                place: MirPlace::local(fat),
+            },
+        );
+        Ok(values::local(result))
     }
 
     fn lower_call(&mut self, func: &ast::Expr, args: &[ast::Expr]) -> CodegenResult<MirValue> {
