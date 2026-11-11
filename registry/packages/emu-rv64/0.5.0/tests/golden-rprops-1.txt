@@ -1,0 +1,3 @@
+rprops seed=1 steps=20000
+  accepted, 68 images, 20031 steps, 9033 retired, 10998 traps, 49 interrupts, 4712 checkpoints
+  images: 13 random bytes, 16 stream words, 21 with a handler, 18 timer; 8 of 256 bytes; 0 flipped bytes overwritten

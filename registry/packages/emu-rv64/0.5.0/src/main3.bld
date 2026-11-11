@@ -1,0 +1,115 @@
+// emu-rv64 command line, third part: the checks of the timer and the
+// interrupts.
+//
+//   emu-rv64 icases              hand-computed timer and interrupt cases and
+//                                the timer program
+//   emu-rv64 ifuzz SEED STEPS    differential run of the interrupt stream
+//                                against the reference model
+//   emu-rv64 iprops SEED STEPS   property run, no model
+//   emu-rv64 icontrols           shows that every planted defect is refused
+
+// Runs one check (0 differential, 1 properties) for variant v. Returns 1
+// when the check refuses the variant, else 0.
+fn icheck_one(check: u64, v: u64, seed: u64, steps: u64) -> i64 ~ Console {
+    let mut ct: [u64; 20] = [0_u64; 20];
+    let mut f = fz_refuse(0, 0_u64, 0_u64, 0_u64);
+    if check == 0_u64 {
+        f = ifuzz_run(v, seed, steps, &mut ct);
+    } else {
+        f = iprop_run(v, seed, steps, &mut ct);
+    }
+    if f.kind != 0 {
+        show_refusal(&f);
+        return 1;
+    }
+    if check == 0_u64 {
+        mshow_counts(steps, &ct);
+    } else {
+        println!("  accepted, 59 and 56 cases, {} round trips, {} raw words, {} timer round trips",
+                 steps, steps, steps);
+        println!("  {} stream steps, {} interrupts judged, timer program 99 interrupts", steps, ct[0]);
+    }
+    0
+}
+
+fn icontrol_name(v: u64) ~ Console {
+    if v == 0_u64 { println!("variant 0: the core"); }
+    if v == 13_u64 { println!("control 13: an interrupt is taken while MIE is 0"); }
+    if v == 14_u64 { println!("control 14: an interrupt leaves bit 63 of mcause clear"); }
+    if v == 15_u64 { println!("control 15: an interrupt saves pc + 4 in mepc"); }
+    if v == 16_u64 { println!("control 16: vectored handler at BASE + cause"); }
+    if v == 17_u64 { println!("control 17: timer pending only while mtime > mtimecmp"); }
+    if v == 18_u64 { println!("control 18: timer interrupt taken before software"); }
+    if v == 19_u64 { println!("control 19: mtime rises before the interrupt check"); }
+}
+
+// Shows more of what refuses control v than the first refusal: every
+// failing hand-computed case, and the verdict of the stream properties
+// (kinds 46 to 50) when they run alone. Returns 1 when either is empty.
+fn icontrol_more(v: u64) -> i64 ~ Console {
+    let mask = ivec_mask(v);
+    let mut k: u64 = 1_u64;
+    while k < 64_u64 {
+        if ((mask >> k) & 1_u64) == 1_u64 { println!(" hand-computed case {} fails", k); }
+        k = k + 1_u64;
+    }
+    let mut ct: [u64; 20] = [0_u64; 20];
+    let f = ipr_stream(v, 1_u64, 20000_u64, &mut ct);
+    println!(" stream properties alone:");
+    if f.kind == 0 { println!("  accepted"); } else { show_refusal(&f); }
+    if mask == 0_u64 || f.kind == 0 { return 1; }
+    0
+}
+
+// Every control must be refused by both checks, and the core must pass both.
+fn icontrols() -> i64 ~ Console {
+    let mut bad: i64 = 0;
+    let mut v: u64 = 0_u64;
+    while v <= ICTL_LAST {
+        icontrol_name(v);
+        println!(" differential:");
+        let d = icheck_one(0_u64, v, 1_u64, 20000_u64);
+        println!(" properties:");
+        let q = icheck_one(1_u64, v, 1_u64, 20000_u64);
+        if v == 0_u64 && (d + q) != 0 { bad = bad + 1; }
+        let mut more: i64 = 0;
+        if v != 0_u64 { more = icontrol_more(v); }
+        if v != 0_u64 && (d == 0 || q == 0 || more != 0) {
+            println!("  ACCEPTED A PLANTED DEFECT");
+            bad = bad + 1;
+        }
+        v = v + 1_u64;
+        if v == 1_u64 { v = ICTL_FIRST; }
+    }
+    if bad == 0 {
+        println!("result: core accepted, 7 of 7 controls refused by both checks");
+    } else {
+        println!("result: FAILED, {} variants judged wrongly", bad);
+    }
+    bad
+}
+
+// Runs a timer or interrupt command. Returns -1 when the first argument is
+// not one, else the exit status.
+fn irq_main() -> i64 ~ Console + Process + Environment {
+    let cmd = args_get(1);
+    if cmd == "icases" {
+        let bad = ivec_run(0_u64, true);
+        let prog = program_timer(0_u64, true);
+        if bad != 0_u64 || prog != 0_u64 { return 1; }
+        return 0;
+    }
+    if cmd == "icontrols" {
+        if icontrols() != 0 { return 1; }
+        return 0;
+    }
+    if cmd == "ifuzz" || cmd == "iprops" {
+        let seed = args_get(2).parse_int() as u64;
+        let steps = args_get(3).parse_int() as u64;
+        let mut check: u64 = 0_u64;
+        if cmd == "iprops" { check = 1_u64; }
+        println!("{} seed={} steps={}", cmd, seed, steps);
+        return icheck_one(check, 0_u64, seed, steps);
+    }
+    -1
+}

@@ -1,0 +1,178 @@
+// emu-rv64: a deterministic RV64I machine core.
+//
+// RV64I is the 64-bit base integer instruction set of RISC-V. This core
+// decodes one 32-bit instruction word and applies it to a machine: 32
+// registers, a program counter, flat memory and one serial output register.
+// Since 0.2.0 it also knows the Zicsr instructions, MRET and the machine-mode
+// control and status registers (lib4.bld), so a machine can take a trap.
+// Since 0.3.0 it has a timer device, takes machine interrupts and knows WFI
+// (lib5.bld). The timer counts steps; it never reads a clock of the host.
+// Since 0.5.0 the trap profile also executes the M extension (lib6.bld) and
+// the A extension (lib7.bld).
+//
+// The core holds no memory and reads no clock or input. The caller passes the
+// registers `x`, the memory `ram` and the serial output buffer `out`. One
+// state and one memory image give one result on every host.
+// Contract: see SPEC.md. Every function is total and returns a code.
+
+// pc: address of the next instruction. steps: instructions completed.
+// out_len: bytes written to the serial output so far. profile: what a step
+// does with an exception. traps: traps taken. The rest are the machine-mode
+// control and status registers, the two timer registers and, last, the
+// reservation an LR instruction leaves: res is its width in bytes, 4 or 8,
+// or 0 for none, and res_addr its address. Only the trap profile reads or
+// writes them.
+struct Machine {
+    pc: u64, steps: u64, out_len: u64, profile: u64, traps: u64,
+    mstatus: u64, mtvec: u64, mepc: u64, mcause: u64, mtval: u64,
+    mie: u64, mip: u64, mscratch: u64, mtime: u64, mtimecmp: u64,
+    res: u64, res_addr: u64
+}
+
+// One decoded instruction. imm is sign-extended to 64 bits, except for a CSR
+// instruction, where it is the CSR number, 0 to 4095, and for an atomic
+// instruction, where it is the two ordering bits. A field the instruction
+// does not use is 0.
+struct Insn { op: u64, rd: u64, rs1: u64, rs2: u64, imm: u64 }
+
+// A machine in the report profile: a step stops and reports every exception
+// to the caller, exactly as version 0.1.0 does.
+fn emu_new() -> Machine {
+    Machine { pc: EMU_RAM_BASE, steps: 0_u64, out_len: 0_u64, profile: EMU_PROFILE_REPORT,
+              traps: 0_u64, mstatus: MS_MPP, mtvec: 0_u64, mepc: 0_u64, mcause: 0_u64,
+              mtval: 0_u64, mie: 0_u64, mip: 0_u64, mscratch: 0_u64,
+              mtime: 0_u64, mtimecmp: !0_u64, res: 0_u64, res_addr: 0_u64 }
+}
+
+// A machine in the trap profile, in its reset state: interrupts disabled,
+// every writable CSR 0, pc at the start of memory, mtime 0 and mtimecmp
+// all ones, so no timer interrupt is pending.
+fn emu_new_machine() -> Machine {
+    let mut m = emu_new();
+    m.profile = EMU_PROFILE_TRAP;
+    m
+}
+
+// Sign-extends the low `bits` bits of v. bits is 1 to 63.
+fn emu_sext(v: u64, bits: u64) -> u64 {
+    let low = v & !(!0_u64 << bits);
+    if ((low >> (bits - 1_u64)) & 1_u64) == 1_u64 {
+        return low | (!0_u64 << bits);
+    }
+    low
+}
+
+fn emu_class(op: u64) -> u64 {
+    if op == 0_u64 || op > OP_LAST { return 0_u64; }
+    if op >= OP_LR_W { return CL_A; }
+    if op >= OP_MUL { return CL_R; }
+    if op >= OP_CSRRW && op <= OP_CSRRCI { return CL_CSR; }
+    if op <= OP_AUIPC { return CL_U; }
+    if op == OP_JAL { return CL_J; }
+    if op == OP_JALR { return CL_I; }
+    if op <= OP_BGEU { return CL_B; }
+    if op <= OP_LWU { return CL_I; }
+    if op <= OP_SD { return CL_S; }
+    if op <= OP_SRAI { return CL_I; }
+    if op <= OP_AND { return CL_R; }
+    if op <= OP_SRAIW { return CL_I; }
+    if op <= OP_SRAW { return CL_R; }
+    if op == OP_FENCE { return CL_I; }
+    CL_SYS
+}
+
+// Clears every field the instruction does not use.
+fn emu_canon(d: &Insn) -> Insn {
+    let c = emu_class(d.op);
+    let mut r = Insn { op: d.op, rd: d.rd, rs1: d.rs1, rs2: d.rs2, imm: d.imm };
+    if c == 0_u64 { r.op = 0_u64; }
+    if c == 0_u64 || c == CL_SYS { r.rd = 0_u64; r.rs1 = 0_u64; r.rs2 = 0_u64; r.imm = 0_u64; }
+    if c == CL_U || c == CL_J { r.rs1 = 0_u64; r.rs2 = 0_u64; }
+    if c == CL_I { r.rs2 = 0_u64; }
+    if c == CL_CSR { r.rs2 = 0_u64; r.imm = r.imm & 0xFFF_u64; }
+    if c == CL_B || c == CL_S { r.rd = 0_u64; }
+    if c == CL_R { r.imm = 0_u64; }
+    if c == CL_A { r.imm = r.imm & 3_u64; }
+    if d.op == OP_LR_W || d.op == OP_LR_D { r.rs2 = 0_u64; }
+    r
+}
+
+fn emu_imm_i(w: u64) -> u64 { emu_sext(w >> 20_u64, 12_u64) }
+
+fn emu_imm_s(w: u64) -> u64 {
+    emu_sext(((w >> 25_u64) << 5_u64) | ((w >> 7_u64) & 0x1F_u64), 12_u64)
+}
+
+fn emu_imm_b(w: u64) -> u64 {
+    let v = (((w >> 31_u64) & 1_u64) << 12_u64) | (((w >> 7_u64) & 1_u64) << 11_u64)
+        | (((w >> 25_u64) & 0x3F_u64) << 5_u64) | (((w >> 8_u64) & 0xF_u64) << 1_u64);
+    emu_sext(v, 13_u64)
+}
+
+fn emu_imm_u(w: u64) -> u64 { emu_sext(w & 0xFFFFF000_u64, 32_u64) }
+
+fn emu_imm_j(w: u64) -> u64 {
+    let v = (((w >> 31_u64) & 1_u64) << 20_u64) | (((w >> 12_u64) & 0xFF_u64) << 12_u64)
+        | (((w >> 20_u64) & 1_u64) << 11_u64) | (((w >> 21_u64) & 0x3FF_u64) << 1_u64);
+    emu_sext(v, 21_u64)
+}
+
+fn emu_dec_branch(f3: u64) -> u64 {
+    if f3 == 0_u64 { return 5_u64; }
+    if f3 == 1_u64 { return 6_u64; }
+    if f3 >= 4_u64 { return f3 + 3_u64; }
+    0_u64
+}
+
+// Register-immediate operations on 64 bits. Shifts carry a 6-bit amount.
+fn emu_dec_opimm(w: u64, f3: u64) -> u64 {
+    let top = w >> 26_u64;
+    if f3 == 0_u64 { return OP_ADDI; }
+    if f3 == 1_u64 { if top == 0_u64 { return OP_SLLI; } return 0_u64; }
+    if f3 == 2_u64 { return 23_u64; }
+    if f3 == 3_u64 { return 24_u64; }
+    if f3 == 4_u64 { return 25_u64; }
+    if f3 == 5_u64 {
+        if top == 0_u64 { return OP_SRLI; }
+        if top == 0x10_u64 { return OP_SRAI; }
+        return 0_u64;
+    }
+    if f3 == 6_u64 { return 26_u64; }
+    27_u64
+}
+
+// Register-register operations on 64 bits.
+fn emu_dec_op(f3: u64, f7: u64) -> u64 {
+    if f7 == 0_u64 {
+        if f3 == 0_u64 { return OP_ADD; }
+        if f3 <= 4_u64 { return 32_u64 + f3; }
+        if f3 == 5_u64 { return 37_u64; }
+        return 33_u64 + f3;
+    }
+    if f7 == 0x20_u64 {
+        if f3 == 0_u64 { return 32_u64; }
+        if f3 == 5_u64 { return 38_u64; }
+    }
+    0_u64
+}
+
+// The 32-bit ("W") forms. Their shifts carry a 5-bit amount.
+fn emu_dec_w(imm_form: bool, f3: u64, f7: u64) -> u64 {
+    if imm_form {
+        if f3 == 0_u64 { return OP_ADDIW; }
+        if f3 == 1_u64 && f7 == 0_u64 { return OP_SLLIW; }
+        if f3 == 5_u64 && f7 == 0_u64 { return 43_u64; }
+        if f3 == 5_u64 && f7 == 0x20_u64 { return OP_SRAIW; }
+        return 0_u64;
+    }
+    if f7 == 0_u64 {
+        if f3 == 0_u64 { return OP_ADDW; }
+        if f3 == 1_u64 { return 47_u64; }
+        if f3 == 5_u64 { return 48_u64; }
+    }
+    if f7 == 0x20_u64 {
+        if f3 == 0_u64 { return 46_u64; }
+        if f3 == 5_u64 { return OP_SRAW; }
+    }
+    0_u64
+}

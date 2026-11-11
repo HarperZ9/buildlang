@@ -1,0 +1,227 @@
+// Property run of asm-rv64, second part: random programs with labels.
+//
+// The generator lays a program out before any text exists. It counts 4
+// bytes for an instruction and for .word and the size of the gap for
+// .org, so it knows the offset of every statement and of every label
+// without asking the assembler. From those offsets and the encoder of
+// emu-rv64 it computes the words the program must give.
+
+// One program. shape holds 3 numbers per statement: type, argument and
+// style. Type 0 is an instruction, 1 a branch or jal to a label, 2 .word
+// with the value as argument, 3 .org with the gap in words as argument.
+// st holds 8 numbers per statement: type, op, rd, rs1, rs2, imm, label
+// and style. off holds the offset of each statement and, last, the end
+// of the image. lpos holds, per label, the statement it stands before
+// (the number of statements for a label at the end), loff its offset.
+// want holds the words.
+struct ApProg { shape: Vec<u64>, st: Vec<u64>, off: Vec<u64>, lpos: Vec<u64>, loff: Vec<u64>, want: Vec<u64> }
+
+fn ap_prog_new() -> ApProg {
+    ApProg { shape: Vec::new(), st: Vec::new(), off: Vec::new(), lpos: Vec::new(), loff: Vec::new(), want: Vec::new() }
+}
+
+fn ap_stmts(p: &ApProg) -> usize { p.shape.len() / 3 }
+
+fn ap_st_push(p: &mut ApProg, ty: u64, d: &Insn, lab: u64, style: u64) {
+    p.st.push(ty);
+    p.st.push(d.op);
+    p.st.push(d.rd);
+    p.st.push(d.rs1);
+    p.st.push(d.rs2);
+    p.st.push(d.imm);
+    p.st.push(lab);
+    p.st.push(style);
+}
+
+fn ap_st_insn(p: &ApProg, i: usize) -> Insn {
+    Insn { op: p.st[8 * i + 1], rd: p.st[8 * i + 2], rs1: p.st[8 * i + 3], rs2: p.st[8 * i + 4], imm: p.st[8 * i + 5] }
+}
+
+// The shape: 4 to 24 statements with their types, and the offsets. Twelve
+// statements in twenty are instructions, five use a label, two are .word
+// and one is .org with a gap of 1 to 3 words.
+fn ap_gen_shape(r: &mut Rng, p: &mut ApProg) {
+    let count = 4_u64 + rng_next(r) % 21_u64;
+    let mut loc: u64 = 0_u64;
+    let mut i: u64 = 0_u64;
+    while i < count {
+        let pick = rng_next(r);
+        let t = pick % 20_u64;
+        let mut ty: u64 = 0_u64;
+        let mut arg: u64 = 0_u64;
+        let mut size: u64 = 4_u64;
+        if t >= 12_u64 { ty = 1_u64; }
+        if t >= 17_u64 {
+            ty = 2_u64;
+            arg = (pick >> 8_u64) & 0xFFFFFFFF_u64;
+        }
+        if t == 19_u64 {
+            ty = 3_u64;
+            arg = 1_u64 + (pick >> 8_u64) % 3_u64;
+            size = 4_u64 * arg;
+        }
+        p.shape.push(ty);
+        p.shape.push(arg);
+        p.shape.push((pick >> 48_u64) & 15_u64);
+        p.off.push(loc);
+        loc = loc + size;
+        i = i + 1_u64;
+    }
+    p.off.push(loc);
+}
+
+// The labels: 1 to 6, each before a random statement or at the end.
+fn ap_gen_labels(r: &mut Rng, p: &mut ApProg) {
+    let count = 1_u64 + rng_next(r) % 6_u64;
+    let places = (ap_stmts(p) + 1) as u64;
+    let mut j: u64 = 0_u64;
+    while j < count {
+        let at = rng_next(r) % places;
+        p.lpos.push(at);
+        p.loff.push(p.off[at as usize]);
+        j = j + 1_u64;
+    }
+}
+
+// A branch or jal from offset `from` to label number lab.
+fn ap_gen_use(r: &mut Rng, p: &ApProg, from: u64, lab: u64) -> Insn {
+    let pick = rng_next(r);
+    let mut d = Insn { op: OP_JAL, rd: (pick >> 8_u64) & 31_u64, rs1: 0_u64, rs2: 0_u64,
+                       imm: p.loff[lab as usize].wrapping_sub(from) };
+    if pick % 7_u64 < 6_u64 {
+        d.op = OP_BEQ + pick % 7_u64;
+        d.rd = 0_u64;
+        d.rs1 = (pick >> 16_u64) & 31_u64;
+        d.rs2 = (pick >> 24_u64) & 31_u64;
+    }
+    d
+}
+
+// The contents of the statements, and the words the program must give.
+fn ap_gen_fill(r: &mut Rng, p: &mut ApProg) {
+    let labels = p.lpos.len() as u64;
+    let mut i: usize = 0;
+    while i < ap_stmts(p) {
+        let ty = p.shape[3 * i];
+        let style = p.shape[3 * i + 2];
+        let mut d = Insn { op: 0_u64, rd: 0_u64, rs1: 0_u64, rs2: 0_u64, imm: p.shape[3 * i + 1] };
+        let mut lab: u64 = AS_NONE;
+        if ty == 0_u64 { d = ap_insn(r); }
+        if ty == 1_u64 {
+            lab = rng_next(r) % labels;
+            d = ap_gen_use(r, p, p.off[i], lab);
+        }
+        ap_st_push(p, ty, &d, lab, style);
+        if ty <= 1_u64 { p.want.push(emu_encode(&d)); }
+        if ty == 2_u64 { p.want.push(d.imm); }
+        let mut gap: u64 = 0_u64;
+        while ty == 3_u64 && gap < d.imm {
+            p.want.push(0_u64);
+            gap = gap + 1_u64;
+        }
+        i = i + 1;
+    }
+}
+
+// Makes a new random program in p.
+fn ap_gen(r: &mut Rng, p: &mut ApProg) {
+    p.shape.clear();
+    p.st.clear();
+    p.off.clear();
+    p.lpos.clear();
+    p.loff.clear();
+    p.want.clear();
+    ap_gen_shape(r, p);
+    ap_gen_labels(r, p);
+    ap_gen_fill(r, p);
+}
+
+// How a program is written. omit: a label whose definition is left out,
+// or AS_NONE. dup: a label defined once more on a last line, or AS_NONE.
+// noise: 0, or the seed of comments and blank lines to add.
+struct ApLook { omit: u64, dup: u64, noise: u64 }
+
+// What the writer reports. n: bytes written. use_line: the first line
+// that uses the omitted label, 0 for none. last_line: the line of the
+// second definition of the duplicated label.
+struct ApInfo { n: usize, line: u64, use_line: u64, last_line: u64 }
+
+// A comment that holds the text of an instruction.
+fn ap_w_comment(buf: &mut [u8], at: usize, nr: &mut Rng) -> usize {
+    let d = ap_insn(nr);
+    ad_insn(buf, ad_put(buf, at, " # "), &d, rng_next(nr) & 15_u64)
+}
+
+// The definitions of the labels that stand before statement i. A label
+// with an even number is on a line of its own; one with an odd number
+// shares the line of the statement when it is the last before it.
+fn ap_w_labels(p: &ApProg, buf: &mut [u8], k: &ApLook, nr: &mut Rng, i: usize, info: &mut ApInfo) -> usize {
+    let mut at = info.n;
+    let mut open = false;
+    let mut j: usize = 0;
+    while j < p.lpos.len() {
+        if p.lpos[j] == i as u64 && j as u64 != k.omit {
+            if open {
+                at = ad_ch(buf, at, 10_u8);
+                info.line = info.line + 1_u64;
+            }
+            at = ad_ch(buf, ad_lab(buf, at, j as u64), 58_u8);
+            open = true;
+            if (j & 1) == 0 || i == ap_stmts(p) {
+                if k.noise != 0_u64 && (rng_next(nr) & 1_u64) == 0_u64 { at = ap_w_comment(buf, at, nr); }
+                at = ad_ch(buf, at, 10_u8);
+                info.line = info.line + 1_u64;
+                open = false;
+            }
+        }
+        j = j + 1;
+    }
+    if open { at = ad_ch(buf, at, 32_u8); }
+    at
+}
+
+// The text of statement i.
+fn ap_w_stmt(p: &ApProg, buf: &mut [u8], at: usize, i: usize) -> usize {
+    let ty = p.st[8 * i];
+    let style = p.st[8 * i + 7];
+    let d = ap_st_insn(p, i);
+    let mut g = AdArg { neg: false, mag: d.imm, lab: AS_NONE };
+    if ty == 0_u64 { return ad_insn(buf, at, &d, style); }
+    if ty == 1_u64 {
+        g.lab = p.st[8 * i + 6];
+        return ad_insn_arg(buf, at, &d, style, &g);
+    }
+    if ty == 3_u64 { g.mag = p.off[i] + 4_u64 * d.imm; }
+    let mut q = ad_put(buf, at, ".org");
+    if ty == 2_u64 { q = ad_put(buf, at, ".word"); }
+    ad_num(buf, ad_gap(buf, q, style), &g, (style & AD_RADIX) == 0_u64)
+}
+
+// Writes the program as text into buf.
+fn ap_write(p: &ApProg, buf: &mut [u8], k: &ApLook) -> ApInfo {
+    let mut info = ApInfo { n: 0, line: 1_u64, use_line: 0_u64, last_line: 0_u64 };
+    let mut nr = Rng { s: k.noise };
+    let mut i: usize = 0;
+    while i <= ap_stmts(p) {
+        if k.noise != 0_u64 && rng_next(&mut nr) % 4_u64 == 0_u64 {
+            if (rng_next(&mut nr) & 1_u64) == 0_u64 { info.n = ap_w_comment(buf, info.n, &mut nr); }
+            info.n = ad_ch(buf, info.n, 10_u8);
+            info.line = info.line + 1_u64;
+        }
+        let at = ap_w_labels(p, buf, k, &mut nr, i, &mut info);
+        info.n = at;
+        if i < ap_stmts(p) {
+            info.n = ap_w_stmt(p, buf, info.n, i);
+            if p.st[8 * i] == 1_u64 && p.st[8 * i + 6] == k.omit && info.use_line == 0_u64 { info.use_line = info.line; }
+            if k.noise != 0_u64 { info.n = ap_w_comment(buf, info.n, &mut nr); }
+            info.n = ad_ch(buf, info.n, 10_u8);
+            info.line = info.line + 1_u64;
+        }
+        i = i + 1;
+    }
+    if k.dup != AS_NONE {
+        info.n = ad_ch(buf, ad_ch(buf, ad_lab(buf, info.n, k.dup), 58_u8), 10_u8);
+        info.last_line = info.line;
+    }
+    info
+}

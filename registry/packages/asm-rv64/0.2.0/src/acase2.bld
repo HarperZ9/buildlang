@@ -1,0 +1,138 @@
+// Hand cases of asm-rv64, second part: one statement, one word. Register
+// forms, immediates, shifts, loads and stores. The harness and the source
+// of the expected words are in acase.bld.
+
+// Register-register forms: rd, rs1, rs2. Each mnemonic once with three
+// different registers, then the lowest and highest register numbers.
+fn ac_reg(st: &mut AcSt) ~ Console {
+    ac_w(st, "add x3, x1, x2", 0x002081B3_u64);
+    ac_w(st, "sub x3, x1, x2", 0x402081B3_u64);
+    ac_w(st, "sll x3, x1, x2", 0x002091B3_u64);
+    ac_w(st, "slt x3, x1, x2", 0x0020A1B3_u64);
+    ac_w(st, "sltu x3, x1, x2", 0x0020B1B3_u64);
+    ac_w(st, "xor x3, x1, x2", 0x0020C1B3_u64);
+    ac_w(st, "srl x3, x1, x2", 0x0020D1B3_u64);
+    ac_w(st, "sra x3, x1, x2", 0x4020D1B3_u64);
+    ac_w(st, "or x3, x1, x2", 0x0020E1B3_u64);
+    ac_w(st, "and x3, x1, x2", 0x0020F1B3_u64);
+    ac_w(st, "addw x3, x1, x2", 0x002081BB_u64);
+    ac_w(st, "subw x3, x1, x2", 0x402081BB_u64);
+    ac_w(st, "sllw x3, x1, x2", 0x002091BB_u64);
+    ac_w(st, "srlw x3, x1, x2", 0x0020D1BB_u64);
+    ac_w(st, "sraw x3, x1, x2", 0x4020D1BB_u64);
+    ac_w(st, "add x0, x0, x0", 0x00000033_u64);
+    ac_w(st, "add x31, x31, x31", 0x01FF8FB3_u64);
+    ac_w(st, "sub x10, x20, x30", 0x41EA0533_u64);
+    ac_w(st, "and x9, x19, x29", 0x01D9F4B3_u64);
+}
+
+// Register-immediate forms: rd, rs1, imm. Each mnemonic with the lowest
+// and highest immediate, -1 and 0.
+fn ac_imm(st: &mut AcSt) ~ Console {
+    ac_w(st, "addi x3, x1, -2048", 0x80008193_u64);
+    ac_w(st, "addi x3, x1, -1", 0xFFF08193_u64);
+    ac_w(st, "addi x3, x1, 0", 0x00008193_u64);
+    ac_w(st, "addi x3, x1, 2047", 0x7FF08193_u64);
+    ac_w(st, "slti x3, x1, -2048", 0x8000A193_u64);
+    ac_w(st, "slti x3, x1, -1", 0xFFF0A193_u64);
+    ac_w(st, "slti x3, x1, 0", 0x0000A193_u64);
+    ac_w(st, "slti x3, x1, 2047", 0x7FF0A193_u64);
+    ac_w(st, "sltiu x3, x1, -2048", 0x8000B193_u64);
+    ac_w(st, "sltiu x3, x1, -1", 0xFFF0B193_u64);
+    ac_w(st, "sltiu x3, x1, 0", 0x0000B193_u64);
+    ac_w(st, "sltiu x3, x1, 2047", 0x7FF0B193_u64);
+    ac_w(st, "xori x3, x1, -2048", 0x8000C193_u64);
+    ac_w(st, "xori x3, x1, -1", 0xFFF0C193_u64);
+    ac_w(st, "xori x3, x1, 0", 0x0000C193_u64);
+    ac_w(st, "xori x3, x1, 2047", 0x7FF0C193_u64);
+    ac_w(st, "ori x3, x1, -2048", 0x8000E193_u64);
+    ac_w(st, "ori x3, x1, -1", 0xFFF0E193_u64);
+    ac_w(st, "ori x3, x1, 0", 0x0000E193_u64);
+    ac_w(st, "ori x3, x1, 2047", 0x7FF0E193_u64);
+    ac_w(st, "andi x3, x1, -2048", 0x8000F193_u64);
+    ac_w(st, "andi x3, x1, -1", 0xFFF0F193_u64);
+    ac_w(st, "andi x3, x1, 0", 0x0000F193_u64);
+    ac_w(st, "andi x3, x1, 2047", 0x7FF0F193_u64);
+    ac_w(st, "addiw x3, x1, -2048", 0x8000819B_u64);
+    ac_w(st, "addiw x3, x1, -1", 0xFFF0819B_u64);
+    ac_w(st, "addiw x3, x1, 0", 0x0000819B_u64);
+    ac_w(st, "addiw x3, x1, 2047", 0x7FF0819B_u64);
+}
+
+// Shifts by a constant: the lowest and highest amount of each. The 64-bit
+// forms take 0 to 63, the 32-bit forms 0 to 31.
+fn ac_shift(st: &mut AcSt) ~ Console {
+    ac_w(st, "slli x3, x1, 0", 0x00009193_u64);
+    ac_w(st, "slli x3, x1, 1", 0x00109193_u64);
+    ac_w(st, "slli x3, x1, 63", 0x03F09193_u64);
+    ac_w(st, "srli x3, x1, 0", 0x0000D193_u64);
+    ac_w(st, "srli x3, x1, 1", 0x0010D193_u64);
+    ac_w(st, "srli x3, x1, 63", 0x03F0D193_u64);
+    ac_w(st, "srai x3, x1, 0", 0x4000D193_u64);
+    ac_w(st, "srai x3, x1, 1", 0x4010D193_u64);
+    ac_w(st, "srai x3, x1, 63", 0x43F0D193_u64);
+    ac_w(st, "slliw x3, x1, 0", 0x0000919B_u64);
+    ac_w(st, "slliw x3, x1, 1", 0x0010919B_u64);
+    ac_w(st, "slliw x3, x1, 31", 0x01F0919B_u64);
+    ac_w(st, "srliw x3, x1, 0", 0x0000D19B_u64);
+    ac_w(st, "srliw x3, x1, 1", 0x0010D19B_u64);
+    ac_w(st, "srliw x3, x1, 31", 0x01F0D19B_u64);
+    ac_w(st, "sraiw x3, x1, 0", 0x4000D19B_u64);
+    ac_w(st, "sraiw x3, x1, 1", 0x4010D19B_u64);
+    ac_w(st, "sraiw x3, x1, 31", 0x41F0D19B_u64);
+}
+
+// Loads and jalr: rd, imm(rs1), with the lowest and highest offset, -1
+// and 0.
+fn ac_load(st: &mut AcSt) ~ Console {
+    ac_w(st, "lb x3, -2048(x1)", 0x80008183_u64);
+    ac_w(st, "lb x3, 2047(x1)", 0x7FF08183_u64);
+    ac_w(st, "lh x3, -2048(x1)", 0x80009183_u64);
+    ac_w(st, "lh x3, 2047(x1)", 0x7FF09183_u64);
+    ac_w(st, "lw x3, -2048(x1)", 0x8000A183_u64);
+    ac_w(st, "lw x3, 2047(x1)", 0x7FF0A183_u64);
+    ac_w(st, "ld x3, -2048(x1)", 0x8000B183_u64);
+    ac_w(st, "ld x3, 2047(x1)", 0x7FF0B183_u64);
+    ac_w(st, "lbu x3, -2048(x1)", 0x8000C183_u64);
+    ac_w(st, "lbu x3, 2047(x1)", 0x7FF0C183_u64);
+    ac_w(st, "lhu x3, -2048(x1)", 0x8000D183_u64);
+    ac_w(st, "lhu x3, 2047(x1)", 0x7FF0D183_u64);
+    ac_w(st, "lwu x3, -2048(x1)", 0x8000E183_u64);
+    ac_w(st, "lwu x3, 2047(x1)", 0x7FF0E183_u64);
+    ac_w(st, "lb x3, -1(x1)", 0xFFF08183_u64);
+    ac_w(st, "lb x3, 0(x1)", 0x00008183_u64);
+    ac_w(st, "ld x31, 8(x30)", 0x008F3F83_u64);
+    ac_w(st, "lbu x3, 5(x1)", 0x0050C183_u64);
+    ac_w(st, "jalr x3, -2048(x1)", 0x800081E7_u64);
+    ac_w(st, "jalr x3, -1(x1)", 0xFFF081E7_u64);
+    ac_w(st, "jalr x3, 0(x1)", 0x000081E7_u64);
+    ac_w(st, "jalr x3, 2047(x1)", 0x7FF081E7_u64);
+    ac_w(st, "jalr x0, 0(x1)", 0x00008067_u64);
+    ac_w(st, "jalr x1, 5(x31)", 0x005F80E7_u64);
+}
+
+// Stores: rs2, imm(rs1). The two registers differ in every case, so a swap
+// shows. The last five offsets have unequal low and middle bits.
+fn ac_store(st: &mut AcSt) ~ Console {
+    ac_w(st, "sb x2, -2048(x1)", 0x80208023_u64);
+    ac_w(st, "sb x2, -1(x1)", 0xFE208FA3_u64);
+    ac_w(st, "sb x2, 0(x1)", 0x00208023_u64);
+    ac_w(st, "sb x2, 2047(x1)", 0x7E208FA3_u64);
+    ac_w(st, "sh x2, -2048(x1)", 0x80209023_u64);
+    ac_w(st, "sh x2, -1(x1)", 0xFE209FA3_u64);
+    ac_w(st, "sh x2, 0(x1)", 0x00209023_u64);
+    ac_w(st, "sh x2, 2047(x1)", 0x7E209FA3_u64);
+    ac_w(st, "sw x2, -2048(x1)", 0x8020A023_u64);
+    ac_w(st, "sw x2, -1(x1)", 0xFE20AFA3_u64);
+    ac_w(st, "sw x2, 0(x1)", 0x0020A023_u64);
+    ac_w(st, "sw x2, 2047(x1)", 0x7E20AFA3_u64);
+    ac_w(st, "sd x2, -2048(x1)", 0x8020B023_u64);
+    ac_w(st, "sd x2, -1(x1)", 0xFE20BFA3_u64);
+    ac_w(st, "sd x2, 0(x1)", 0x0020B023_u64);
+    ac_w(st, "sd x2, 2047(x1)", 0x7E20BFA3_u64);
+    ac_w(st, "sd x2, 8(x1)", 0x0020B423_u64);
+    ac_w(st, "sw x5, 0x155(x6)", 0x14532AA3_u64);
+    ac_w(st, "sb x7, -86(x8)", 0xFA740523_u64);
+    ac_w(st, "sh x31, 1(x0)", 0x01F010A3_u64);
+    ac_w(st, "sd x0, 32(x31)", 0x020FB023_u64);
+}

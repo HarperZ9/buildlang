@@ -1,0 +1,4 @@
+ifuzz seed=1 steps=20000
+  accepted, 20000 steps: retired=12914 csr=3771 mret=2346 fetch_faults=421
+  traps by cause: 0=255 1=257 2=2710 3=443 5=1129 7=682 11=456
+  interrupts by cause: 3=370 7=322 11=462 timer_accesses=1393

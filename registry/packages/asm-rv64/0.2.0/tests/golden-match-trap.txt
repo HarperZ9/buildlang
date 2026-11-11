@@ -1,0 +1,1 @@
+match tests/trap.s: 84 bytes, built-in image trap of emu-rv64 has 84 bytes, equal=true

@@ -1,0 +1,215 @@
+// A hand-assembled timer program for the trap profile of emu-rv64, and the
+// state hash that shows a run repeats exactly.
+//
+// The program installs a handler, sets mtimecmp to 100, enables the timer
+// interrupt and loops. The handler moves mtimecmp forward by 100, prints
+// one byte "." and counts in x12.
+//
+// Main code, loaded at 0x80000000:
+//   00  0x020042B7  lui x5, 0x2004        x5 = 0x02004000, mtimecmp
+//                   0x02004 << 12 + 5 << 7 (0x280) + 0x37
+//   04  0x06400313  addi x6, x0, 100
+//                   100 << 20 (0x06400000) + 6 << 7 (0x300) + 0x13
+//   08  0x0062B023  sd x6, 0(x5)          mtimecmp = 100
+//                   6 << 20 (0x600000) + 5 << 15 (0x28000) + 3 << 12 + 0x23
+//   0C  0x100006B7  lui x13, 0x10000      x13 = 0x10000000, the serial device
+//                   0x10000 << 12 + 13 << 7 (0x680) + 0x37
+//   10  0x02E00713  addi x14, x0, 0x2E    the byte "."
+//                   0x02E << 20 + 14 << 7 (0x700) + 0x13
+//   14  0x00000397  auipc x7, 0           x7 = 0x80000014
+//                   7 << 7 (0x380) + 0x17
+//   18  0x02C38393  addi x7, x7, 0x2C     x7 = 0x80000040, the handler
+//                   0x02C << 20 + 7 << 15 (0x38000) + 0x380 + 0x13
+//   1C  0x30539073  csrrw x0, mtvec, x7   direct mode, BASE = 0x80000040
+//                   0x305 << 20 + 0x38000 + 1 << 12 + 0x73
+//   20  0x08000413  addi x8, x0, 0x80     bit 7, the timer bit of mie
+//                   0x080 << 20 + 8 << 7 (0x400) + 0x13
+//   24  0x30441073  csrrw x0, mie, x8
+//                   0x304 << 20 + 8 << 15 (0x40000) + 1 << 12 + 0x73
+//   28  0x30046073  csrrsi x0, mstatus, 8   MIE = 1
+//                   0x300 << 20 + 8 << 15 (0x40000) + 6 << 12 + 0x73
+//   2C  0x00150513  addi x10, x10, 1      the loop
+//                   1 << 20 + 10 << 15 (0x50000) + 10 << 7 (0x500) + 0x13
+//   30  0xFFDFF06F  jal x0, -4            back to 2C
+//                   offset -4: bit 20 = 1, bits 10 to 1 = 0x3FE, bit 11 = 1,
+//                   bits 19 to 12 = 0xFF, so 1 << 31 + 0x3FE << 21
+//                   (0x7FC00000) + 1 << 20 + 0xFF << 12 + 0x6F
+// Handler, at 0x80000040:
+//   40  0x0002B583  ld x11, 0(x5)         x11 = mtimecmp
+//                   5 << 15 (0x28000) + 3 << 12 + 11 << 7 (0x580) + 0x03
+//   44  0x06458593  addi x11, x11, 100
+//                   100 << 20 + 11 << 15 (0x58000) + 0x580 + 0x13
+//   48  0x00B2B023  sd x11, 0(x5)         mtimecmp moves on by 100
+//                   11 << 20 (0xB00000) + 0x28000 + 3 << 12 + 0x23
+//   4C  0x00E68023  sb x14, 0(x13)        prints "."
+//                   14 << 20 (0xE00000) + 13 << 15 (0x68000) + 0x23
+//   50  0x00160613  addi x12, x12, 1      counts the interrupt
+//                   1 << 20 + 12 << 15 (0x60000) + 12 << 7 (0x600) + 0x13
+//   54  0x30200073  mret
+//
+// How many interrupts in M = 10000 steps. mtime starts at 0 and rises by
+// one at the end of every step, so step s starts with mtime = s - 1. Steps
+// 1 to 11 are the eleven instructions at 00 to 28; MIE is 1 from step 12
+// on. The interrupt is taken by the first step that starts with MIE = 1
+// and mtime >= mtimecmp = 100, which is step 101. The handler runs in steps
+// 102 to 107 and step 104 sets mtimecmp to 200. Step 108 starts with mtime
+// 107, so nothing is pending until step 201. Deliveries fall on the steps
+// 100 k + 1, and 100 k + 1 <= 10000 holds for k = 1 to 99: N = 99.
+// End state: traps 99, steps 10000 - 99 = 9901, mtime 10000, mtimecmp
+// 100 + 99 * 100 = 10000, x12 = 99, 99 bytes of output. Of the 9901
+// retired instructions 11 are setup and 6 * 99 = 594 handler, so the loop
+// retired 9296, half of them the ADDI: x10 = 4648, and pc is back at 2C.
+// The last delivery, step 9901, came after 9900 - 11 - 98 * 6 = 9301 loop
+// instructions, an odd number, so it replaced the JAL: mepc = 0x80000030.
+// mstatus ends at 0x1888 (MRET sets MIE and MPIE).
+
+const IP_STEPS: u64 = 10000_u64;
+const IP_IRQS: u64 = 99_u64;
+
+// FNV-1a, 64 bits, one byte: xor, then multiply by the prime 0x100000001B3
+// modulo 2^64.
+fn fnv_byte(h: u64, b: u64) -> u64 {
+    (h ^ (b & 0xFF_u64)).wrapping_mul(0x100000001B3_u64)
+}
+
+// A 64-bit word goes in as eight bytes, least significant first.
+fn fnv_word(h: u64, w: u64) -> u64 {
+    let mut r = h;
+    let mut k: u64 = 0_u64;
+    while k < 8_u64 {
+        r = fnv_byte(r, w >> (8_u64 * k));
+        k = k + 1_u64;
+    }
+    r
+}
+
+fn fnv_machine(h: u64, m: &Machine) -> u64 {
+    let mut r = fnv_word(h, m.pc);
+    r = fnv_word(r, m.steps);
+    r = fnv_word(r, m.out_len);
+    r = fnv_word(r, m.profile);
+    r = fnv_word(r, m.traps);
+    r = fnv_word(r, m.mstatus);
+    r = fnv_word(r, m.mtvec);
+    r = fnv_word(r, m.mepc);
+    r = fnv_word(r, m.mcause);
+    r = fnv_word(r, m.mtval);
+    r = fnv_word(r, m.mie);
+    r = fnv_word(r, m.mip);
+    r = fnv_word(r, m.mscratch);
+    r = fnv_word(r, m.mtime);
+    r = fnv_word(r, m.mtimecmp);
+    // Since 0.5.0: the reservation, only while one is held, so a state
+    // without one hashes as it did in 0.4.0.
+    if m.res != 0_u64 { r = fnv_word(fnv_word(r, m.res), m.res_addr); }
+    r
+}
+
+// The hash of the whole state: the registers, every field of the machine,
+// every byte of memory and every byte of the output buffer, in that order.
+fn state_hash(m: &Machine, x: &[u64], ram: &[u8], out: &[u8]) -> u64 {
+    let mut h: u64 = 0xCBF29CE484222325_u64;
+    let mut i: usize = 0;
+    while i < x.len() {
+        h = fnv_word(h, x[i]);
+        i = i + 1;
+    }
+    h = fnv_machine(h, m);
+    i = 0;
+    while i < ram.len() {
+        h = fnv_byte(h, ram[i] as u64);
+        i = i + 1;
+    }
+    i = 0;
+    while i < out.len() {
+        h = fnv_byte(h, out[i] as u64);
+        i = i + 1;
+    }
+    h
+}
+
+fn iprog_load(ram: &mut [u8]) {
+    emu_poke(ram, 0x80000000_u64, 4_u64, 0x020042B7_u64);
+    emu_poke(ram, 0x80000004_u64, 4_u64, 0x06400313_u64);
+    emu_poke(ram, 0x80000008_u64, 4_u64, 0x0062B023_u64);
+    emu_poke(ram, 0x8000000C_u64, 4_u64, 0x100006B7_u64);
+    emu_poke(ram, 0x80000010_u64, 4_u64, 0x02E00713_u64);
+    emu_poke(ram, 0x80000014_u64, 4_u64, 0x00000397_u64);
+    emu_poke(ram, 0x80000018_u64, 4_u64, 0x02C38393_u64);
+    emu_poke(ram, 0x8000001C_u64, 4_u64, 0x30539073_u64);
+    emu_poke(ram, 0x80000020_u64, 4_u64, 0x08000413_u64);
+    emu_poke(ram, 0x80000024_u64, 4_u64, 0x30441073_u64);
+    emu_poke(ram, 0x80000028_u64, 4_u64, 0x30046073_u64);
+    emu_poke(ram, 0x8000002C_u64, 4_u64, 0x00150513_u64);
+    emu_poke(ram, 0x80000030_u64, 4_u64, 0xFFDFF06F_u64);
+    emu_poke(ram, 0x80000040_u64, 4_u64, 0x0002B583_u64);
+    emu_poke(ram, 0x80000044_u64, 4_u64, 0x06458593_u64);
+    emu_poke(ram, 0x80000048_u64, 4_u64, 0x00B2B023_u64);
+    emu_poke(ram, 0x8000004C_u64, 4_u64, 0x00E68023_u64);
+    emu_poke(ram, 0x80000050_u64, 4_u64, 0x00160613_u64);
+    emu_poke(ram, 0x80000054_u64, 4_u64, 0x30200073_u64);
+}
+
+// What one run reports: the state hash, the timer interrupts seen, and
+// whether the end state is the one worked out above.
+struct IRun { hash: u64, irqs: u64, ok: bool }
+
+fn iprog_end_ok(m: &Machine, x: &[u64], out: &[u8]) -> bool {
+    let counts = m.steps == 9901_u64 && m.traps == 99_u64 && m.out_len == 99_u64;
+    let timer = m.mtime == 10000_u64 && m.mtimecmp == 10000_u64;
+    let regs = m.pc == 0x8000002C_u64 && x[10] == 4648_u64 && x[11] == 10000_u64 && x[12] == 99_u64 &&
+               x[5] == 0x02004000_u64 && x[7] == 0x80000040_u64;
+    let csrs = m.mstatus == 0x1888_u64 && m.mepc == 0x80000030_u64 && m.mtval == 0_u64 &&
+               m.mcause == (EMU_SIGN | 7_u64) && m.mtvec == 0x80000040_u64 && m.mie == 0x80_u64;
+    let mut dots: u64 = 0_u64;
+    let mut i: usize = 0;
+    while i < out.len() {
+        if out[i] as u64 == 0x2E_u64 { dots = dots + 1_u64; }
+        i = i + 1;
+    }
+    counts && timer && regs && csrs && dots == 99_u64
+}
+
+// Runs the program from a fresh state for `steps` steps of variant v.
+fn iprog_once(v: u64, steps: u64, show: bool) -> IRun ~ Console {
+    let mut m = emu_new_machine();
+    let mut x: [u64; 32] = [0_u64; 32];
+    let mut ram: [u8; 256] = [0_u8; 256];
+    let mut out: [u8; 128] = [0_u8; 128];
+    iprog_load(&mut ram);
+    let mut irqs: u64 = 0_u64;
+    let mut i: u64 = 0_u64;
+    while i < steps {
+        let rc = istep_v(v, &mut m, &mut x, &mut ram, &mut out);
+        if rc == EMU_TRAP && m.mcause == (EMU_SIGN | 7_u64) { irqs = irqs + 1_u64; }
+        i = i + 1_u64;
+    }
+    let h = state_hash(&m, &x, &ram, &out);
+    if show {
+        println!("program timer: run of {} steps: interrupts={} steps={} traps={} pc={:08x} out_len={}",
+                 steps, irqs, m.steps, m.traps, m.pc, m.out_len);
+        println!("  x10={} x12={} mtime={} mtimecmp={} mepc={:08x} mstatus={:x} hash={:016x}",
+                 x[10], x[12], m.mtime, m.mtimecmp, m.mepc, m.mstatus, h);
+    }
+    IRun { hash: h, irqs: irqs, ok: iprog_end_ok(&m, &x, &out) }
+}
+
+// Runs the program twice for 10000 steps and once for 9999. Returns 0 when
+// both long runs end in the state worked out above with 99 interrupts and
+// equal hashes, the short run hashes differently, and the hash function
+// gives the known FNV-1a value of the one byte "a". Else 1.
+fn program_timer(v: u64, show: bool) -> u64 ~ Console {
+    let known = fnv_byte(0xCBF29CE484222325_u64, 0x61_u64) == 0xAF63DC4C8601EC8C_u64;
+    let a = iprog_once(v, IP_STEPS, show);
+    let b = iprog_once(v, IP_STEPS, show);
+    let c = iprog_once(v, IP_STEPS - 1_u64, show);
+    let same = a.hash == b.hash && a.irqs == b.irqs;
+    let good = known && same && a.ok && b.ok && a.irqs == IP_IRQS && c.hash != a.hash;
+    if show {
+        println!("program timer: expected interrupts={} hash_self_check={} hashes_equal={} shorter_run_differs={}",
+                 IP_IRQS, known, same, c.hash != a.hash);
+    }
+    if good { return 0_u64; }
+    if show { println!("program timer: FAILED"); }
+    1_u64
+}

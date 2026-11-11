@@ -1,0 +1,31 @@
+rcase 1 bytes 73 00 20 30 read as the word 30200073: pass=true
+rcase 2 4 bytes into 16 that held AA: bytes 4 to 15 are zero: pass=true
+rcase 3 6 bytes: the short second word reads 0000beef: pass=true
+rcase 4 16 bytes into 16: code 0 and the last byte is 16: pass=true
+rcase 5 17 bytes into 16: code 2 and memory unchanged: pass=true
+rcase 6 0 bytes: code 1 and memory unchanged: pass=true
+rcase 7 8 bytes FF, then 2 bytes: bytes 2 to 15 are zero: pass=true
+rcase 8 256 bytes into 256 read back equal: pass=true
+rcase 9 first run: machine, registers, output and tape are reset: pass=true
+rcase 10 second run: the same start state: pass=true
+rcase 11 FNV-1a: empty cbf29ce484222325, a af63dc4c8601ec8c, foobar 85944171f73967e8: pass=true
+rcase 12 two states that differ only in mtime hash differently: pass=true
+rcase 13 two states that differ only in one output byte hash differently: pass=true
+rcase 14 one emptied byte 2E or 2F hashes differently, and with none emptied the hash is the 0.3.0 state hash: pass=true
+rcase 15 a register, a memory byte and pc each change the hash: pass=true
+rcase 16 1 2 3 against 1 2 3: no difference, index 3: pass=true
+rcase 17 1 9 3 against 1 2 3: first difference at index 1: pass=true
+rcase 18 1 2 9 against 1 2 3: first difference at index 2: pass=true
+rcase 19 1 2 against 1 2 3: lists differ, index 2: pass=true
+rcase 20 timer image, 10000 steps: 10 checkpoints, 99 interrupts, hash f1b4f1df12342aae: pass=true
+rcase 21 two runs in the same arrays agree at 10 checkpoints: pass=true
+rcase 22 9999 steps: the same first 9 checkpoints, then hash 02a86ecc64904958: pass=true
+rcase 23 x11 changed after step 1950 of run 2: first difference at index 1, final hashes equal=true: pass=true
+  step 1000 hash=3da57ed236ce90af
+  step 2000: run 1 hash=ccd553a2669cfd76 run 2 hash=bb8145e3d7b016d7
+  RUNS DISAGREE, first at step 2000
+rcase 24 no checkpoints before the end: hash f1b4f1df12342aae: pass=true
+rcase 25 20000 steps: 199 bytes sent, 128 emptied from the buffer, two runs agree=true: pass=true
+rcase 26 0 steps: one checkpoint, the hash of the loaded state 0ec4679014a3e3dc: pass=true
+rcase 27 trap image, 12 steps: retired=11 traps=1 pc=8000001c byte=21: pass=true
+rcases: 27 run, first failure 0

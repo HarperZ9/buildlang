@@ -1,0 +1,65 @@
+// Controls of asm-rv64: the assembler with one planted defect at a time.
+// The defect number is passed down to the assembler; there is no second
+// copy of its code, and number 0 is the assembler the commands use. The
+// hand cases must refuse every defect, and the property rules, run
+// without the cases, must refuse every defect.
+
+fn ac_ctl_name(v: u64) -> str {
+    if v == ACTL_BRANCH { return "a label offset is measured from the next instruction"; }
+    if v == ACTL_SBITS { return "store offset bits 4 to 0 and 9 to 5 change places"; }
+    if v == ACTL_SIGN { return "the minus sign of a number is dropped"; }
+    if v == ACTL_RANGE { return "every range check accepts one value past the top"; }
+    if v == ACTL_WORD { return "label offsets do not count .word"; }
+    if v == ACTL_STORE { return "a store takes rs1 and rs2 in each other's place"; }
+    if v == ACTL_HEX { return "the digits after 0x are read in base 10"; }
+    if v == ACTL_COMMENT { return "the text after # is assembled as one more line"; }
+    if v == ACTL_DUP { return "a second definition of a label is accepted"; }
+    if v == ACTL_AMOSWAP { return "an atomic form takes rs1 and rs2 in each other's place"; }
+    if v == ACTL_WIDTH { return "a .w atomic mnemonic is assembled as .d"; }
+    if v == ACTL_PAREN { return "the register in brackets is taken for an offset and the address register is x0"; }
+    "an undefined label reads as offset 0"
+}
+
+// Runs the hand cases against defect v and prints which fail. Returns 1
+// when at least one fails, else 0.
+fn ac_ctl_cases(v: u64) -> i64 ~ Console {
+    let st = ac_run(v, false);
+    if st.fails.len() == 0 {
+        println!("  accepted, {} cases", st.count);
+        return 0;
+    }
+    let mut list = "";
+    let mut i: usize = 0;
+    while i < st.fails.len() && i < 8 {
+        list = list + format!(" {}", st.fails[i]);
+        i = i + 1;
+    }
+    if st.fails.len() > 8 { list = list + " ..."; }
+    println!("  REFUSED, {} of {} hand cases fail:{}", st.fails.len(), st.count, list);
+    1
+}
+
+// Judges every variant with both checks. Returns the number of variants
+// judged wrongly: the assembler refused, or a defect accepted by either
+// check.
+fn ac_controls(seed: u64, steps: u64) -> i64 ~ Console {
+    let mut wrong: i64 = 0;
+    let mut v: u64 = 0_u64;
+    while v <= ACTL_COUNT {
+        if v == 0_u64 { println!("variant 0: the assembler"); } else { println!("control {}: {}", v, ac_ctl_name(v)); }
+        println!(" cases:");
+        let by_cases = ac_ctl_cases(v);
+        println!(" properties:");
+        let by_props = ap_show(v, seed, steps);
+        if v == 0_u64 && (by_cases != 0 || by_props != 0) { wrong = wrong + 1; }
+        if v != 0_u64 && (by_cases == 0 || by_props == 0) { wrong = wrong + 1; }
+        v = v + 1_u64;
+    }
+    if wrong == 0 {
+        println!("result: the assembler accepted, {} of {} planted defects refused by the cases and by the properties",
+                 ACTL_COUNT, ACTL_COUNT);
+    } else {
+        println!("result: FAILED, {} variants judged wrongly", wrong);
+    }
+    wrong
+}

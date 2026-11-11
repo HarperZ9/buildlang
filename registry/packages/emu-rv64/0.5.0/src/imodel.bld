@@ -1,0 +1,181 @@
+// Reference model for the timer, the interrupts and WFI of emu-rv64. It
+// continues mmodel.bld and is built a different way from lib5.bld on
+// purpose:
+//   - the two timer registers live in slots RC_TIME and RC_CMP of the
+//     caller array `c`, not in the Machine;
+//   - "timer interrupt pending" is the missing borrow of the subtraction
+//     mtime - mtimecmp, worked one bit per turn, not a comparison;
+//   - a timer register is read and written one byte per turn, and each byte
+//     address is found by walking the sixteen byte addresses;
+//   - the priority order is a table that is scanned from the front;
+//   - the vectored handler address is BASE plus the cause added four times.
+// Nothing outside the checks calls this file.
+
+// Puts the model CSR array in the reset state of the machine.
+fn ref_reset(c: &mut [u64]) {
+    let mut i: usize = 0;
+    while i < 13 {
+        c[i] = 0_u64;
+        i = i + 1;
+    }
+    c[RC_CMP] = ref_fill(0_u64, 0_u64, 1_u64);
+}
+
+// 1 when the subtraction a - b borrows out of bit 63, which is when a is
+// below b as unsigned numbers. One bit per turn.
+fn ref_borrow(a: u64, b: u64) -> u64 {
+    let mut br: u64 = 0_u64;
+    let mut i: u64 = 0_u64;
+    while i < 64_u64 {
+        let p = ref_bit(a, i);
+        let q = ref_bit(b, i);
+        let same = 1_u64 ^ p ^ q;
+        br = ((1_u64 ^ p) & q) | (same & br);
+        i = i + 1_u64;
+    }
+    br
+}
+
+// mip as software reads it: bits 3 and 11 from the host, bit 7 from the
+// timer.
+fn ref_pending(c: &[u64]) -> u64 {
+    let soft = ref_put(0_u64, 3_u64, c[RC_IP], 3_u64, 1_u64);
+    let both = ref_put(soft, 11_u64, c[RC_IP], 11_u64, 1_u64);
+    let due = 1_u64 ^ ref_borrow(c[RC_TIME], c[RC_CMP]);
+    ref_put(both, 7_u64, due, 0_u64, 1_u64)
+}
+
+// The interrupt to take, or 0. The table holds the causes in priority
+// order.
+fn ref_irq_scan(c: &[u64]) -> u64 {
+    if c[RC_MIE] == 0_u64 { return 0_u64; }
+    let order: [u64; 3] = [11_u64, 3_u64, 7_u64];
+    let pend = ref_pending(c);
+    let mut i: usize = 0;
+    while i < 3 {
+        let k = order[i];
+        if ref_bit(pend, k) == 1_u64 && ref_bit(c[RC_IE], k) == 1_u64 { return k; }
+        i = i + 1;
+    }
+    0_u64
+}
+
+// Interrupt entry. Returns the step code 3.
+fn ref_irq(m: &mut Machine, c: &mut [u64], cause: u64) -> i64 {
+    c[RC_MEPC] = ref_put(0_u64, 2_u64, m.pc, 2_u64, 62_u64);
+    c[RC_MCAUSE] = ref_put(cause, 63_u64, 1_u64, 0_u64, 1_u64);
+    c[RC_MTVAL] = 0_u64;
+    c[RC_MPIE] = c[RC_MIE];
+    c[RC_MIE] = 0_u64;
+    let mut to = ref_put(0_u64, 2_u64, c[RC_MTVEC], 2_u64, 62_u64);
+    if ref_bit(c[RC_MTVEC], 0_u64) == 1_u64 {
+        let mut i: u64 = 0_u64;
+        while i < 4_u64 {
+            to = ref_add(to, cause);
+            i = i + 1_u64;
+        }
+    }
+    m.pc = to;
+    m.traps = ref_add(m.traps, 1_u64);
+    3
+}
+
+// Which timer byte lives at address `at`: 1 to 8 for bytes 0 to 7 of
+// mtimecmp, 9 to 16 for bytes 0 to 7 of mtime, 0 for neither.
+fn ref_timer_slot(at: u64) -> u64 {
+    let mut i: u64 = 0_u64;
+    while i < 8_u64 {
+        if at == ref_add(0x02004000_u64, i) { return i + 1_u64; }
+        if at == ref_add(0x0200BFF8_u64, i) { return i + 9_u64; }
+        i = i + 1_u64;
+    }
+    0_u64
+}
+
+// Bytes touched by load or store operation `op`, 11 to 21.
+fn ref_width(op: u64) -> u64 {
+    if op == 12_u64 || op == 16_u64 || op == 19_u64 { return 2_u64; }
+    if op == 13_u64 || op == 17_u64 || op == 20_u64 { return 4_u64; }
+    if op == 14_u64 || op == 21_u64 { return 8_u64; }
+    1_u64
+}
+
+// The address a load or store word reaches.
+fn ref_reach(x: &[u64], w: u64, op: u64) -> u64 {
+    let a = x[ref_put(0_u64, 0_u64, w, 15_u64, 5_u64) as usize];
+    if op >= 18_u64 { return ref_add(a, ref_imm(w, 2_u64)); }
+    ref_add(a, ref_imm(w, 1_u64))
+}
+
+// True when every byte of the access is a byte of one timer register.
+fn ref_timer_all(x: &[u64], w: u64, op: u64) -> bool {
+    let addr = ref_reach(x, w, op);
+    let first = ref_timer_slot(addr);
+    let mut i: u64 = 0_u64;
+    while i < ref_width(op) {
+        let s = ref_timer_slot(ref_add(addr, i));
+        if s == 0_u64 { return false; }
+        if (s > 8_u64) != (first > 8_u64) { return false; }
+        i = i + 1_u64;
+    }
+    true
+}
+
+// reg with its byte k replaced by byte i of src.
+fn ref_byte_set(reg: u64, k: u64, src: u64, i: u64) -> u64 {
+    let mut r: u64 = 0_u64;
+    let mut j: u64 = 0_u64;
+    while j < 8_u64 {
+        if j == k {
+            r = ref_put(r, 8_u64 * j, src, 8_u64 * i, 8_u64);
+        } else {
+            r = ref_put(r, 8_u64 * j, reg, 8_u64 * j, 8_u64);
+        }
+        j = j + 1_u64;
+    }
+    r
+}
+
+// A load from or a store to the timer, one byte per turn. The caller has
+// checked ref_timer_all.
+fn ref_timer_step(m: &mut Machine, x: &mut [u64], c: &mut [u64], w: u64, op: u64) -> i64 {
+    let addr = ref_reach(x, w, op);
+    let n = ref_width(op);
+    let b = x[ref_put(0_u64, 0_u64, w, 20_u64, 5_u64) as usize];
+    let rd = ref_put(0_u64, 0_u64, w, 7_u64, 5_u64);
+    let mut val: u64 = 0_u64;
+    let mut i: u64 = 0_u64;
+    while i < n {
+        let slot = ref_timer_slot(ref_add(addr, i));
+        let mut which: usize = RC_CMP;
+        let mut k = slot - 1_u64;
+        if slot > 8_u64 { which = RC_TIME; k = slot - 9_u64; }
+        if op >= 18_u64 {
+            c[which] = ref_byte_set(c[which], k, b, i);
+        } else {
+            val = ref_put(val, 8_u64 * i, c[which], 8_u64 * k, 8_u64);
+        }
+        i = i + 1_u64;
+    }
+    if op <= 13_u64 && n < 8_u64 { val = ref_fill(val, 8_u64 * n, ref_bit(val, 8_u64 * n - 1_u64)); }
+    if op <= 17_u64 && rd != 0_u64 { x[rd as usize] = val; }
+    m.pc = ref_add(m.pc, 4_u64);
+    m.steps = ref_add(m.steps, 1_u64);
+    0
+}
+
+// One step of the reference machine in the trap profile. Same contract as
+// emu_mstep: the interrupt scan reads the time the step before left, and
+// the time rises by one after a step that returned 0 or 3.
+fn ref_mstep(m: &mut Machine, x: &mut [u64], ram: &mut [u8], out: &mut [u8], c: &mut [u64]) -> i64 {
+    if x.len() < 32 { return -4; }
+    let cause = ref_irq_scan(c);
+    let mut rc: i64 = 3;
+    if cause != 0_u64 {
+        rc = ref_irq(m, c, cause);
+    } else {
+        rc = ref_mstep_run(m, x, ram, out, c);
+    }
+    if rc == 0 || rc == 3 { c[RC_TIME] = ref_add(c[RC_TIME], 1_u64); }
+    rc
+}

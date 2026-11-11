@@ -1,0 +1,134 @@
+// emu-rv64 core, fifth part: the timer device, machine interrupts and WFI.
+//
+// An interrupt is a trap whose cause lies outside the instruction stream: a
+// device asks for attention and the machine enters the handler in place of
+// running the next instruction. The timer is the one device that asks by
+// itself here. It has two 64-bit registers. mtime counts steps. mtimecmp is
+// the value software compares it with: the timer interrupt is pending
+// exactly while mtime >= mtimecmp, unsigned. Rules: SPEC.md, "Timer",
+// "Interrupts" and "WFI".
+
+// The number of bytes a load or store operation touches.
+fn emu_access_len(op: u64) -> u64 {
+    if op >= OP_SB { return 1_u64 << (op - OP_SB); }
+    let k = op - OP_LB;
+    if k >= 4_u64 { return 1_u64 << (k - 4_u64); }
+    1_u64 << k
+}
+
+// Which timer register holds all n bytes from addr: 1 mtimecmp, 2 mtime,
+// 0 neither. An access that leaves a register on either side is 0.
+fn emu_timer_reg(addr: u64, n: u64) -> u64 {
+    if addr >= EMU_MTIMECMP && addr - EMU_MTIMECMP < 8_u64 {
+        if n <= 8_u64 - (addr - EMU_MTIMECMP) { return 1_u64; }
+        return 0_u64;
+    }
+    if addr >= EMU_MTIME && addr - EMU_MTIME < 8_u64 {
+        if n <= 8_u64 - (addr - EMU_MTIME) { return 2_u64; }
+    }
+    0_u64
+}
+
+// The timer register a load or store instruction reaches, or 0. The caller
+// has checked the register numbers of d.
+fn emu_timer_hit(x: &[u64], d: &Insn) -> u64 {
+    if d.op < OP_LB || d.op > OP_SD { return 0_u64; }
+    emu_timer_reg(x[d.rs1 as usize].wrapping_add(d.imm), emu_access_len(d.op))
+}
+
+// A mask of the low n bytes. n is 1, 2, 4 or 8.
+fn emu_byte_mask(n: u64) -> u64 {
+    if n >= 8_u64 { return !0_u64; }
+    (1_u64 << (8_u64 * n)) - 1_u64
+}
+
+// A load from or a store to a timer register. The caller has checked
+// emu_timer_hit. Bytes are little-endian: byte 0 is the least significant.
+fn emu_timer_exec(m: &mut Machine, x: &mut [u64], d: &Insn) -> i64 {
+    let addr = x[d.rs1 as usize].wrapping_add(d.imm);
+    let n = emu_access_len(d.op);
+    let cmp = emu_timer_reg(addr, n) == 1_u64;
+    let mut base = EMU_MTIME;
+    let mut reg = m.mtime;
+    if cmp { base = EMU_MTIMECMP; reg = m.mtimecmp; }
+    let shift = 8_u64 * (addr - base);
+    let mask = emu_byte_mask(n);
+    if d.op >= OP_SB {
+        let v = (reg & !(mask << shift)) | ((x[d.rs2 as usize] & mask) << shift);
+        if cmp { m.mtimecmp = v; } else { m.mtime = v; }
+    } else {
+        let mut val = (reg >> shift) & mask;
+        if d.op - OP_LB < 3_u64 { val = emu_sext(val, 8_u64 * n); }
+        if d.rd != 0_u64 { x[d.rd as usize] = val; }
+    }
+    m.pc = m.pc.wrapping_add(4_u64);
+    m.steps = m.steps + 1_u64;
+    EMU_OK
+}
+
+// mip as software reads it. MTIP, bit 7, is computed from the timer. MSIP,
+// bit 3, and MEIP, bit 11, are the bits the host set in Machine.mip.
+fn emu_mip_now(m: &Machine) -> u64 {
+    let mut p = m.mip & (MI_MSIP | MI_MEIP);
+    if m.mtime >= m.mtimecmp { p = p | MI_MTIP; }
+    p
+}
+
+// The cause of the interrupt to take now, or 0 for none. An interrupt is
+// taken when mstatus.MIE is 1 and its bit is set in both mip and mie.
+// Priority: external (11), then software (3), then timer (7).
+fn emu_irq_pick(m: &Machine) -> u64 {
+    if (m.mstatus & MS_MIE) == 0_u64 { return 0_u64; }
+    let p = emu_mip_now(m) & m.mie;
+    if (p & MI_MEIP) != 0_u64 { return IRQ_EXT; }
+    if (p & MI_MSIP) != 0_u64 { return IRQ_SOFT; }
+    if (p & MI_MTIP) != 0_u64 { return IRQ_TIMER; }
+    0_u64
+}
+
+// Takes interrupt `cause` in place of the instruction at pc. mepc holds the
+// pc of that instruction, mcause the cause with bit 63 set, mtval 0. The
+// handler is at BASE in direct mode and at BASE + 4 * cause in vectored
+// mode, where BASE is mtvec without its low two bits. Returns EMU_TRAP.
+fn emu_irq_take(m: &mut Machine, cause: u64) -> i64 {
+    m.mepc = m.pc & !3_u64;
+    m.mcause = EMU_SIGN | cause;
+    m.mtval = 0_u64;
+    let mut s = MS_MPP;
+    if (m.mstatus & MS_MIE) != 0_u64 { s = s | MS_MPIE; }
+    m.mstatus = s;
+    let base = m.mtvec & !3_u64;
+    m.pc = base;
+    if (m.mtvec & 1_u64) != 0_u64 { m.pc = base.wrapping_add(4_u64 * cause); }
+    m.traps = m.traps + 1_u64;
+    EMU_TRAP
+}
+
+// WFI retires as a no-op: the machine does not wait.
+fn emu_wfi(m: &mut Machine) -> i64 {
+    m.pc = m.pc.wrapping_add(4_u64);
+    m.steps = m.steps + 1_u64;
+    EMU_OK
+}
+
+// The end of a step: mtime rises by one when the step retired an
+// instruction or took a trap, and stays when the step changed nothing.
+fn emu_tick(m: &mut Machine, rc: i64) {
+    if rc == EMU_OK || rc == EMU_TRAP { m.mtime = m.mtime.wrapping_add(1_u64); }
+}
+
+// One step in the trap profile. The interrupt check comes first and reads
+// the mtime the previous step left. Then either the interrupt is taken or
+// one instruction runs. The timer ticks last.
+fn emu_mstep(m: &mut Machine, x: &mut [u64], ram: &mut [u8], out: &mut [u8]) -> i64 {
+    if x.len() < 32 { return EMU_SMALL; }
+    let cause = emu_irq_pick(m);
+    let mut rc: i64 = EMU_TRAP;
+    if cause != 0_u64 {
+        rc = emu_irq_take(m, cause);
+    } else {
+        rc = emu_mstep_run(m, x, ram, out);
+    }
+    emu_tick(m, rc);
+    rc
+}

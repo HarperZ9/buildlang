@@ -1,0 +1,1 @@
+error: cannot read image tests/no-such.img

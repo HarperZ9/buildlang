@@ -1,0 +1,218 @@
+// Hand cases of the M extension, part 2. Written by
+// tests/tools/ma_oracle.py; do not edit by hand. Each row is
+// word, a, b, expected x3 for `op x3, x1, x2`.
+
+fn xv_m2_1(st: &mut XSt) ~ Console {
+    // 101: divu x3, x1, x2
+    xv_m(st, 0x220D1B3_u64, 0x7FFFFFFFFFFFFFFF_u64, 0xFFFFFFFFFFFFFFFF_u64, 0x0_u64);
+    // 102: divu x3, x1, x2
+    xv_m(st, 0x220D1B3_u64, 0x1_u64, 0x8000000000000000_u64, 0x0_u64);
+    // 103: divu x3, x1, x2
+    xv_m(st, 0x220D1B3_u64, 0xFFFFFFFFFFFFFFFF_u64, 0x1_u64, 0xFFFFFFFFFFFFFFFF_u64);
+    // 104: divu x3, x1, x2
+    xv_m(st, 0x220D1B3_u64, 0x8000000000000001_u64, 0xFFFFFFFF_u64, 0x80000000_u64);
+    // 105: divu x3, x1, x2
+    xv_m(st, 0x220D1B3_u64, 0x5_u64, 0x7_u64, 0x0_u64);
+    // 106: divu x3, x1, x2
+    xv_m(st, 0x220D1B3_u64, 0xFFFFFFFFFFFFFFFB_u64, 0x7_u64, 0x2492492492492491_u64);
+    // 107: divu x3, x1, x2
+    xv_m(st, 0x220D1B3_u64, 0x8000000000000000_u64, 0x2_u64, 0x4000000000000000_u64);
+    // 108: divu x3, x1, x2
+    xv_m(st, 0x220D1B3_u64, 0x8000000000000000_u64, 0x8000000000000000_u64, 0x1_u64);
+    // 109: divu x3, x1, x2
+    xv_m(st, 0x220D1B3_u64, 0xFFFFFFFFFFFFFFFF_u64, 0x7FFFFFFFFFFFFFFF_u64, 0x2_u64);
+    // 110: divu x3, x1, x2
+    xv_m(st, 0x220D1B3_u64, 0x100000000_u64, 0xFFFFFFFF_u64, 0x1_u64);
+    // 111: rem x3, x1, x2
+    xv_m(st, 0x220E1B3_u64, 0x7_u64, 0x2_u64, 0x1_u64);
+    // 112: rem x3, x1, x2
+    xv_m(st, 0x220E1B3_u64, 0xFFFFFFFFFFFFFFF9_u64, 0x2_u64, 0xFFFFFFFFFFFFFFFF_u64);
+    // 113: rem x3, x1, x2
+    xv_m(st, 0x220E1B3_u64, 0x7_u64, 0xFFFFFFFFFFFFFFFE_u64, 0x1_u64);
+    // 114: rem x3, x1, x2
+    xv_m(st, 0x220E1B3_u64, 0xFFFFFFFFFFFFFFF9_u64, 0xFFFFFFFFFFFFFFFE_u64, 0xFFFFFFFFFFFFFFFF_u64);
+    // 115: rem x3, x1, x2
+    xv_m(st, 0x220E1B3_u64, 0x0_u64, 0x0_u64, 0x0_u64);
+    // 116: rem x3, x1, x2
+    xv_m(st, 0x220E1B3_u64, 0x1_u64, 0x0_u64, 0x1_u64);
+    // 117: rem x3, x1, x2
+    xv_m(st, 0x220E1B3_u64, 0xFFFFFFFFFFFFFFFF_u64, 0x0_u64, 0xFFFFFFFFFFFFFFFF_u64);
+    // 118: rem x3, x1, x2
+    xv_m(st, 0x220E1B3_u64, 0x8000000000000000_u64, 0x0_u64, 0x8000000000000000_u64);
+    // 119: rem x3, x1, x2
+    xv_m(st, 0x220E1B3_u64, 0x3039_u64, 0x0_u64, 0x3039_u64);
+    // 120: rem x3, x1, x2
+    xv_m(st, 0x220E1B3_u64, 0x8000000000000000_u64, 0xFFFFFFFFFFFFFFFF_u64, 0x0_u64);
+}
+
+fn xv_m2_2(st: &mut XSt) ~ Console {
+    // 121: rem x3, x1, x2
+    xv_m(st, 0x220E1B3_u64, 0x8000000000000000_u64, 0x1_u64, 0x0_u64);
+    // 122: rem x3, x1, x2
+    xv_m(st, 0x220E1B3_u64, 0x7FFFFFFFFFFFFFFF_u64, 0xFFFFFFFFFFFFFFFF_u64, 0x0_u64);
+    // 123: rem x3, x1, x2
+    xv_m(st, 0x220E1B3_u64, 0x1_u64, 0x8000000000000000_u64, 0x1_u64);
+    // 124: rem x3, x1, x2
+    xv_m(st, 0x220E1B3_u64, 0xFFFFFFFFFFFFFFFF_u64, 0x1_u64, 0x0_u64);
+    // 125: rem x3, x1, x2
+    xv_m(st, 0x220E1B3_u64, 0x8000000000000001_u64, 0xFFFFFFFF_u64, 0xFFFFFFFF80000001_u64);
+    // 126: rem x3, x1, x2
+    xv_m(st, 0x220E1B3_u64, 0x5_u64, 0x7_u64, 0x5_u64);
+    // 127: rem x3, x1, x2
+    xv_m(st, 0x220E1B3_u64, 0xFFFFFFFFFFFFFFFB_u64, 0x7_u64, 0xFFFFFFFFFFFFFFFB_u64);
+    // 128: rem x3, x1, x2
+    xv_m(st, 0x220E1B3_u64, 0x8000000000000000_u64, 0x2_u64, 0x0_u64);
+    // 129: rem x3, x1, x2
+    xv_m(st, 0x220E1B3_u64, 0x8000000000000000_u64, 0x8000000000000000_u64, 0x0_u64);
+    // 130: rem x3, x1, x2
+    xv_m(st, 0x220E1B3_u64, 0xFFFFFFFFFFFFFFFF_u64, 0x7FFFFFFFFFFFFFFF_u64, 0xFFFFFFFFFFFFFFFF_u64);
+    // 131: rem x3, x1, x2
+    xv_m(st, 0x220E1B3_u64, 0x100000000_u64, 0xFFFFFFFF_u64, 0x1_u64);
+    // 132: remu x3, x1, x2
+    xv_m(st, 0x220F1B3_u64, 0x7_u64, 0x2_u64, 0x1_u64);
+    // 133: remu x3, x1, x2
+    xv_m(st, 0x220F1B3_u64, 0xFFFFFFFFFFFFFFF9_u64, 0x2_u64, 0x1_u64);
+    // 134: remu x3, x1, x2
+    xv_m(st, 0x220F1B3_u64, 0x7_u64, 0xFFFFFFFFFFFFFFFE_u64, 0x7_u64);
+    // 135: remu x3, x1, x2
+    xv_m(st, 0x220F1B3_u64, 0xFFFFFFFFFFFFFFF9_u64, 0xFFFFFFFFFFFFFFFE_u64, 0xFFFFFFFFFFFFFFF9_u64);
+    // 136: remu x3, x1, x2
+    xv_m(st, 0x220F1B3_u64, 0x0_u64, 0x0_u64, 0x0_u64);
+    // 137: remu x3, x1, x2
+    xv_m(st, 0x220F1B3_u64, 0x1_u64, 0x0_u64, 0x1_u64);
+    // 138: remu x3, x1, x2
+    xv_m(st, 0x220F1B3_u64, 0xFFFFFFFFFFFFFFFF_u64, 0x0_u64, 0xFFFFFFFFFFFFFFFF_u64);
+    // 139: remu x3, x1, x2
+    xv_m(st, 0x220F1B3_u64, 0x8000000000000000_u64, 0x0_u64, 0x8000000000000000_u64);
+    // 140: remu x3, x1, x2
+    xv_m(st, 0x220F1B3_u64, 0x3039_u64, 0x0_u64, 0x3039_u64);
+}
+
+fn xv_m2_3(st: &mut XSt) ~ Console {
+    // 141: remu x3, x1, x2
+    xv_m(st, 0x220F1B3_u64, 0x8000000000000000_u64, 0xFFFFFFFFFFFFFFFF_u64, 0x8000000000000000_u64);
+    // 142: remu x3, x1, x2
+    xv_m(st, 0x220F1B3_u64, 0x8000000000000000_u64, 0x1_u64, 0x0_u64);
+    // 143: remu x3, x1, x2
+    xv_m(st, 0x220F1B3_u64, 0x7FFFFFFFFFFFFFFF_u64, 0xFFFFFFFFFFFFFFFF_u64, 0x7FFFFFFFFFFFFFFF_u64);
+    // 144: remu x3, x1, x2
+    xv_m(st, 0x220F1B3_u64, 0x1_u64, 0x8000000000000000_u64, 0x1_u64);
+    // 145: remu x3, x1, x2
+    xv_m(st, 0x220F1B3_u64, 0xFFFFFFFFFFFFFFFF_u64, 0x1_u64, 0x0_u64);
+    // 146: remu x3, x1, x2
+    xv_m(st, 0x220F1B3_u64, 0x8000000000000001_u64, 0xFFFFFFFF_u64, 0x80000001_u64);
+    // 147: remu x3, x1, x2
+    xv_m(st, 0x220F1B3_u64, 0x5_u64, 0x7_u64, 0x5_u64);
+    // 148: remu x3, x1, x2
+    xv_m(st, 0x220F1B3_u64, 0xFFFFFFFFFFFFFFFB_u64, 0x7_u64, 0x4_u64);
+    // 149: remu x3, x1, x2
+    xv_m(st, 0x220F1B3_u64, 0x8000000000000000_u64, 0x2_u64, 0x0_u64);
+    // 150: remu x3, x1, x2
+    xv_m(st, 0x220F1B3_u64, 0x8000000000000000_u64, 0x8000000000000000_u64, 0x0_u64);
+    // 151: remu x3, x1, x2
+    xv_m(st, 0x220F1B3_u64, 0xFFFFFFFFFFFFFFFF_u64, 0x7FFFFFFFFFFFFFFF_u64, 0x1_u64);
+    // 152: remu x3, x1, x2
+    xv_m(st, 0x220F1B3_u64, 0x100000000_u64, 0xFFFFFFFF_u64, 0x1_u64);
+    // 153: mulw x3, x1, x2
+    xv_m(st, 0x22081BB_u64, 0x7_u64, 0x6_u64, 0x2A_u64);
+    // 154: mulw x3, x1, x2
+    xv_m(st, 0x22081BB_u64, 0x7FFFFFFF_u64, 0x2_u64, 0xFFFFFFFFFFFFFFFE_u64);
+    // 155: mulw x3, x1, x2
+    xv_m(st, 0x22081BB_u64, 0xFFFFFFFF_u64, 0xFFFFFFFF_u64, 0x1_u64);
+    // 156: mulw x3, x1, x2
+    xv_m(st, 0x22081BB_u64, 0x100000003_u64, 0x200000005_u64, 0xF_u64);
+    // 157: mulw x3, x1, x2
+    xv_m(st, 0x22081BB_u64, 0x80000000_u64, 0x80000000_u64, 0x0_u64);
+    // 158: mulw x3, x1, x2
+    xv_m(st, 0x22081BB_u64, 0x10000_u64, 0x8000_u64, 0xFFFFFFFF80000000_u64);
+    // 159: mulw x3, x1, x2
+    xv_m(st, 0x22081BB_u64, 0xFFFFFFFFFFFFFFFF_u64, 0x1_u64, 0xFFFFFFFFFFFFFFFF_u64);
+    // 160: mulw x3, x1, x2
+    xv_m(st, 0x22081BB_u64, 0x80000000_u64, 0x1_u64, 0xFFFFFFFF80000000_u64);
+}
+
+fn xv_m2_4(st: &mut XSt) ~ Console {
+    // 161: mulw x3, x1, x2
+    xv_m(st, 0x22081BB_u64, 0xFFFF_u64, 0x10001_u64, 0xFFFFFFFFFFFFFFFF_u64);
+    // 162: divw x3, x1, x2
+    xv_m(st, 0x220C1BB_u64, 0x7_u64, 0x2_u64, 0x3_u64);
+    // 163: divw x3, x1, x2
+    xv_m(st, 0x220C1BB_u64, 0xFFFFFFFFFFFFFFF9_u64, 0x2_u64, 0xFFFFFFFFFFFFFFFD_u64);
+    // 164: divw x3, x1, x2
+    xv_m(st, 0x220C1BB_u64, 0x7_u64, 0xFFFFFFFFFFFFFFFE_u64, 0xFFFFFFFFFFFFFFFD_u64);
+    // 165: divw x3, x1, x2
+    xv_m(st, 0x220C1BB_u64, 0xFFFFFFFFFFFFFFF9_u64, 0xFFFFFFFFFFFFFFFE_u64, 0x3_u64);
+    // 166: divw x3, x1, x2
+    xv_m(st, 0x220C1BB_u64, 0x0_u64, 0x0_u64, 0xFFFFFFFFFFFFFFFF_u64);
+    // 167: divw x3, x1, x2
+    xv_m(st, 0x220C1BB_u64, 0x5_u64, 0x0_u64, 0xFFFFFFFFFFFFFFFF_u64);
+    // 168: divw x3, x1, x2
+    xv_m(st, 0x220C1BB_u64, 0x80000000_u64, 0x0_u64, 0xFFFFFFFFFFFFFFFF_u64);
+    // 169: divw x3, x1, x2
+    xv_m(st, 0x220C1BB_u64, 0xFFFFFFFF00000005_u64, 0x0_u64, 0xFFFFFFFFFFFFFFFF_u64);
+    // 170: divw x3, x1, x2
+    xv_m(st, 0x220C1BB_u64, 0xFFFFFFFFFFFFFFFF_u64, 0x0_u64, 0xFFFFFFFFFFFFFFFF_u64);
+    // 171: divw x3, x1, x2
+    xv_m(st, 0x220C1BB_u64, 0x80000000_u64, 0xFFFFFFFF_u64, 0xFFFFFFFF80000000_u64);
+    // 172: divw x3, x1, x2
+    xv_m(st, 0x220C1BB_u64, 0xAAAAAAAA80000000_u64, 0x55555555FFFFFFFF_u64, 0xFFFFFFFF80000000_u64);
+    // 173: divw x3, x1, x2
+    xv_m(st, 0x220C1BB_u64, 0xFFFFFFFF_u64, 0x1_u64, 0xFFFFFFFFFFFFFFFF_u64);
+    // 174: divw x3, x1, x2
+    xv_m(st, 0x220C1BB_u64, 0x7FFFFFFF_u64, 0xFFFFFFFF_u64, 0xFFFFFFFF80000001_u64);
+    // 175: divw x3, x1, x2
+    xv_m(st, 0x220C1BB_u64, 0x100000000_u64, 0x3_u64, 0x0_u64);
+    // 176: divw x3, x1, x2
+    xv_m(st, 0x220C1BB_u64, 0x80000000_u64, 0x2_u64, 0xFFFFFFFFC0000000_u64);
+    // 177: divw x3, x1, x2
+    xv_m(st, 0x220C1BB_u64, 0x100000007_u64, 0x100000000_u64, 0xFFFFFFFFFFFFFFFF_u64);
+    // 178: divw x3, x1, x2
+    xv_m(st, 0x220C1BB_u64, 0xFFFFFFFE_u64, 0x7FFFFFFF_u64, 0x0_u64);
+    // 179: divuw x3, x1, x2
+    xv_m(st, 0x220D1BB_u64, 0x7_u64, 0x2_u64, 0x3_u64);
+    // 180: divuw x3, x1, x2
+    xv_m(st, 0x220D1BB_u64, 0xFFFFFFFFFFFFFFF9_u64, 0x2_u64, 0x7FFFFFFC_u64);
+}
+
+fn xv_m2_5(st: &mut XSt) ~ Console {
+    // 181: divuw x3, x1, x2
+    xv_m(st, 0x220D1BB_u64, 0x7_u64, 0xFFFFFFFFFFFFFFFE_u64, 0x0_u64);
+    // 182: divuw x3, x1, x2
+    xv_m(st, 0x220D1BB_u64, 0xFFFFFFFFFFFFFFF9_u64, 0xFFFFFFFFFFFFFFFE_u64, 0x0_u64);
+    // 183: divuw x3, x1, x2
+    xv_m(st, 0x220D1BB_u64, 0x0_u64, 0x0_u64, 0xFFFFFFFFFFFFFFFF_u64);
+    // 184: divuw x3, x1, x2
+    xv_m(st, 0x220D1BB_u64, 0x5_u64, 0x0_u64, 0xFFFFFFFFFFFFFFFF_u64);
+    // 185: divuw x3, x1, x2
+    xv_m(st, 0x220D1BB_u64, 0x80000000_u64, 0x0_u64, 0xFFFFFFFFFFFFFFFF_u64);
+    // 186: divuw x3, x1, x2
+    xv_m(st, 0x220D1BB_u64, 0xFFFFFFFF00000005_u64, 0x0_u64, 0xFFFFFFFFFFFFFFFF_u64);
+    // 187: divuw x3, x1, x2
+    xv_m(st, 0x220D1BB_u64, 0xFFFFFFFFFFFFFFFF_u64, 0x0_u64, 0xFFFFFFFFFFFFFFFF_u64);
+    // 188: divuw x3, x1, x2
+    xv_m(st, 0x220D1BB_u64, 0x80000000_u64, 0xFFFFFFFF_u64, 0x0_u64);
+    // 189: divuw x3, x1, x2
+    xv_m(st, 0x220D1BB_u64, 0xAAAAAAAA80000000_u64, 0x55555555FFFFFFFF_u64, 0x0_u64);
+    // 190: divuw x3, x1, x2
+    xv_m(st, 0x220D1BB_u64, 0xFFFFFFFF_u64, 0x1_u64, 0xFFFFFFFFFFFFFFFF_u64);
+    // 191: divuw x3, x1, x2
+    xv_m(st, 0x220D1BB_u64, 0x7FFFFFFF_u64, 0xFFFFFFFF_u64, 0x0_u64);
+    // 192: divuw x3, x1, x2
+    xv_m(st, 0x220D1BB_u64, 0x100000000_u64, 0x3_u64, 0x0_u64);
+    // 193: divuw x3, x1, x2
+    xv_m(st, 0x220D1BB_u64, 0x80000000_u64, 0x2_u64, 0x40000000_u64);
+    // 194: divuw x3, x1, x2
+    xv_m(st, 0x220D1BB_u64, 0x100000007_u64, 0x100000000_u64, 0xFFFFFFFFFFFFFFFF_u64);
+    // 195: divuw x3, x1, x2
+    xv_m(st, 0x220D1BB_u64, 0xFFFFFFFE_u64, 0x7FFFFFFF_u64, 0x2_u64);
+    // 196: remw x3, x1, x2
+    xv_m(st, 0x220E1BB_u64, 0x7_u64, 0x2_u64, 0x1_u64);
+    // 197: remw x3, x1, x2
+    xv_m(st, 0x220E1BB_u64, 0xFFFFFFFFFFFFFFF9_u64, 0x2_u64, 0xFFFFFFFFFFFFFFFF_u64);
+    // 198: remw x3, x1, x2
+    xv_m(st, 0x220E1BB_u64, 0x7_u64, 0xFFFFFFFFFFFFFFFE_u64, 0x1_u64);
+    // 199: remw x3, x1, x2
+    xv_m(st, 0x220E1BB_u64, 0xFFFFFFFFFFFFFFF9_u64, 0xFFFFFFFFFFFFFFFE_u64, 0xFFFFFFFFFFFFFFFF_u64);
+    // 200: remw x3, x1, x2
+    xv_m(st, 0x220E1BB_u64, 0x0_u64, 0x0_u64, 0x0_u64);
+}

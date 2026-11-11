@@ -1,0 +1,226 @@
+// Property check for the M and A extensions of emu-rv64, second part: the
+// rules of the A extension and the run. No reference model, and none of
+// the code of lib7.bld beyond the step function under test. Each rule
+// runs one to four instructions on a machine with 256 bytes of memory and
+// looks only at registers, memory and the trap registers.
+//
+//   77  SC with no LR before it does not store and writes a nonzero value;
+//       LR returns the value in memory; the SC after it to the same address
+//       and width stores and writes 0; a second SC does not store and
+//       writes a nonzero value; an SC to another address than the LR, or of
+//       the other width, does not store
+//   78  an AMO writes the old value of memory to rd and stores the result
+//       of its operator, worked out here with signed host integers; the
+//       two ordering bits change nothing
+//   79  AMOSWAP twice, the second time with the value the first returned,
+//       leaves memory as it was
+//   80  an atomic instruction at an address that is not a multiple of its
+//       width traps with cause 4 (LR) or 6, mtval = the address and mepc =
+//       its pc, and changes no register and no memory
+//   81  an atomic instruction past the end of memory traps with cause 5
+//       (LR) or 7 and mtval = the address, also an SC with no reservation
+//   82  misa reads 2 in bits 63 and 62 and exactly the bits A, I and M
+//   83  the state hash changes with the width and with the address of a
+//       held reservation, and a state with none hashes as it did before
+
+// Encodes an atomic instruction of kind k (0 LR, 1 SC, 2 to 10 the AMOs)
+// and width n, with the address in x1.
+fn xp_a_word(k: u64, n: u64, rd: u64, rs2: u64, bits: u64) -> u64 {
+    let mut op = OP_LR_W + k;
+    if n == 8_u64 { op = OP_LR_D + k; }
+    let d = Insn { op: op, rd: rd, rs1: 1_u64, rs2: rs2, imm: bits };
+    emu_encode(&emu_canon(&d))
+}
+
+// Runs the first `count` words on a fresh machine. x and ram are prepared
+// by the caller; the words go to the start of memory. mtvec is 0x800000C0.
+// Returns the machine; rc[0] receives the code of the last step.
+fn xp_go(v: u64, words: &[u64], count: u64, x: &mut [u64], ram: &mut [u8], rc: &mut [i64]) -> Machine {
+    let mut m = emu_new_machine();
+    let mut out: [u8; 8] = [0_u8; 8];
+    m.mtvec = 0x800000C0_u64;
+    let mut k: u64 = 0_u64;
+    while k < count {
+        emu_poke(ram, EMU_RAM_BASE + 4_u64 * k, 4_u64, words[k as usize]);
+        k = k + 1_u64;
+    }
+    rc[0] = EMU_OK;
+    k = 0_u64;
+    while k < count && rc[0] == EMU_OK {
+        rc[0] = xstep_v(v, &mut m, x, ram, &mut out);
+        k = k + 1_u64;
+    }
+    m
+}
+
+// The n-byte value v as a signed host integer.
+fn xp_signed(v: u64, n: u64) -> i64 {
+    if n == 8_u64 { return v as i64; }
+    ((v << 32_u64) as i64) >> 32
+}
+
+// What AMO kind k of width n leaves in memory, as n bytes.
+fn xp_combine(k: u64, n: u64, old: u64, src: u64) -> u64 {
+    let mask = emu_byte_mask(n);
+    let o = old & mask;
+    let s = src & mask;
+    let mut r = s;
+    if k == 3_u64 { r = o.wrapping_add(s); }
+    if k == 4_u64 { r = o ^ s; }
+    if k == 5_u64 { r = o & s; }
+    if k == 6_u64 { r = o | s; }
+    if k == 7_u64 && xp_signed(o, n) < xp_signed(s, n) { r = o; }
+    if k == 8_u64 && xp_signed(o, n) > xp_signed(s, n) { r = o; }
+    if k == 9_u64 && o < s { r = o; }
+    if k == 10_u64 && o > s { r = o; }
+    r & mask
+}
+
+// The value a load of n bytes puts in a register.
+fn xp_ext(v: u64, n: u64) -> u64 {
+    if n == 8_u64 { return v; }
+    emu_sext(v, 32_u64)
+}
+
+// Kind 77 at address `at` with width n. x2 and x5 are two sources; x6 is
+// an address the LR did not name.
+fn xp_lrsc(v: u64, i: u64, at: u64, n: u64, old: u64, src: u64) -> Refusal {
+    let mut x: [u64; 32] = [0_u64; 32];
+    let mut ram: [u8; 256] = [0_u8; 256];
+    let mut rc: [i64; 1] = [0; 1];
+    x[1] = at;
+    x[2] = src;
+    x[5] = !src;
+    emu_poke(&mut ram, at, n, old);
+    let mut w: [u64; 4] = [0_u64; 4];
+    w[0] = xp_a_word(1_u64, n, 10_u64, 2_u64, 0_u64);
+    w[1] = xp_a_word(0_u64, n, 11_u64, 0_u64, 0_u64);
+    w[2] = xp_a_word(1_u64, n, 12_u64, 2_u64, 0_u64);
+    w[3] = xp_a_word(1_u64, n, 13_u64, 5_u64, 0_u64);
+    let mask = emu_byte_mask(n);
+    let m1 = xp_go(v, &w, 1_u64, &mut x, &mut ram, &mut rc);
+    if rc[0] != EMU_OK || x[10] == 0_u64 { return fz_refuse(77, i, x[10], 1_u64); }
+    if emu_peek(&ram, at, n) != (old & mask) { return fz_refuse(77, i, emu_peek(&ram, at, n), old & mask); }
+    x[10] = 0_u64;
+    let m2 = xp_go(v, &w, 4_u64, &mut x, &mut ram, &mut rc);
+    if rc[0] != EMU_OK || m2.steps != 4_u64 { return fz_refuse(77, i, m2.steps, 4_u64); }
+    if x[11] != xp_ext(old & mask, n) { return fz_refuse(77, i, x[11], xp_ext(old & mask, n)); }
+    if x[12] != 0_u64 { return fz_refuse(77, i, x[12], 0_u64); }
+    if x[13] == 0_u64 { return fz_refuse(77, i, x[13], 1_u64); }
+    if emu_peek(&ram, at, n) != (src & mask) { return fz_refuse(77, i, emu_peek(&ram, at, n), src & mask); }
+    if m1.steps != 1_u64 { return fz_refuse(77, i, m1.steps, 1_u64); }
+    fz_refuse(0, i, 0_u64, 0_u64)
+}
+
+// Kind 77, the pairs that must not store: LR at `at`, then an SC at the
+// next doubleword, and LR then an SC of the other width at `at`.
+fn xp_lrsc_miss(v: u64, i: u64, at: u64, n: u64, old: u64, src: u64) -> Refusal {
+    let mut x: [u64; 32] = [0_u64; 32];
+    let mut ram: [u8; 256] = [0_u8; 256];
+    let mut rc: [i64; 1] = [0; 1];
+    let base = at & !7_u64;
+    x[1] = base;
+    x[2] = src;
+    emu_poke(&mut ram, base, 8_u64, old);
+    emu_poke(&mut ram, base + 8_u64, 8_u64, !old);
+    let mut w: [u64; 4] = [0_u64; 4];
+    w[0] = xp_a_word(0_u64, n, 11_u64, 0_u64, 0_u64);
+    w[1] = xp_a_word(1_u64, 12_u64 - n, 12_u64, 2_u64, 0_u64);
+    let ma = xp_go(v, &w, 2_u64, &mut x, &mut ram, &mut rc);
+    if rc[0] != EMU_OK || x[12] == 0_u64 || ma.steps != 2_u64 { return fz_refuse(77, i, x[12], 2_u64); }
+    if emu_peek(&ram, base, 8_u64) != old { return fz_refuse(77, i, emu_peek(&ram, base, 8_u64), old); }
+    // ADDI x1, x1, 8 = 8 << 20 | 1 << 15 | 1 << 7 | 0x13 = 0x00808093
+    w[1] = 0x00808093_u64;
+    w[2] = xp_a_word(1_u64, n, 13_u64, 2_u64, 0_u64);
+    let mb = xp_go(v, &w, 3_u64, &mut x, &mut ram, &mut rc);
+    if rc[0] != EMU_OK || x[13] == 0_u64 || mb.steps != 3_u64 { return fz_refuse(77, i, x[13], 3_u64); }
+    if emu_peek(&ram, base + 8_u64, 8_u64) != !old { return fz_refuse(77, i, x[13], 4_u64); }
+    fz_refuse(0, i, 0_u64, 0_u64)
+}
+
+// Kinds 78 and 79 for AMO kind k at `at`. bits are the two ordering bits.
+fn xp_amo(v: u64, i: u64, k: u64, at: u64, n: u64, old: u64, src: u64, bits: u64) -> Refusal {
+    let mut x: [u64; 32] = [0_u64; 32];
+    let mut ram: [u8; 256] = [0_u8; 256];
+    let mut rc: [i64; 1] = [0; 1];
+    let mask = emu_byte_mask(n);
+    x[1] = at;
+    x[2] = src;
+    emu_poke(&mut ram, at, n, old);
+    let mut w: [u64; 4] = [0_u64; 4];
+    w[0] = xp_a_word(k, n, 10_u64, 2_u64, bits);
+    w[1] = xp_a_word(2_u64, n, 11_u64, 2_u64, 0_u64);
+    w[2] = xp_a_word(2_u64, n, 12_u64, 11_u64, 0_u64);
+    let m1 = xp_go(v, &w, 1_u64, &mut x, &mut ram, &mut rc);
+    let want = xp_combine(k, n, old, src);
+    if rc[0] != EMU_OK || m1.steps != 1_u64 { return fz_refuse(78, i, k, n); }
+    if x[10] != xp_ext(old & mask, n) { return fz_refuse(78, i, x[10], xp_ext(old & mask, n)); }
+    if emu_peek(&ram, at, n) != want { return fz_refuse(78, i, emu_peek(&ram, at, n), want); }
+    emu_poke(&mut ram, at, n, old);
+    let m2 = xp_go(v, &w, 3_u64, &mut x, &mut ram, &mut rc);
+    if rc[0] != EMU_OK || m2.steps != 3_u64 { return fz_refuse(79, i, m2.steps, 3_u64); }
+    if emu_peek(&ram, at, n) != want { return fz_refuse(79, i, emu_peek(&ram, at, n), want); }
+    if x[12] != xp_ext(src & mask, n) { return fz_refuse(79, i, x[12], xp_ext(src & mask, n)); }
+    fz_refuse(0, i, 0_u64, 0_u64)
+}
+
+// Kinds 80 and 81 for atomic kind k: `at` is a bad address, `cause` the
+// cause an LR must report there; the others report cause + 2.
+fn xp_fault(v: u64, i: u64, kind: i64, k: u64, at: u64, n: u64, cause: u64) -> Refusal {
+    let mut x: [u64; 32] = [0_u64; 32];
+    let mut ram: [u8; 256] = [0_u8; 256];
+    let mut rc: [i64; 1] = [0; 1];
+    x[1] = at;
+    x[2] = 0x5A5A_u64;
+    x[10] = 0x77_u64;
+    emu_poke(&mut ram, EMU_RAM_BASE + 128_u64, 8_u64, 0x0102030405060708_u64);
+    emu_poke(&mut ram, EMU_RAM_BASE + 136_u64, 8_u64, 0x1112131415161718_u64);
+    let mut w: [u64; 4] = [0_u64; 4];
+    w[0] = xp_a_word(k, n, 10_u64, 2_u64, 0_u64);
+    let m = xp_go(v, &w, 1_u64, &mut x, &mut ram, &mut rc);
+    let mut want = cause;
+    if k != 0_u64 { want = cause + 2_u64; }
+    if rc[0] != EMU_TRAP || m.mcause != want { return fz_refuse(kind, i, m.mcause, want); }
+    if m.mtval != at || m.mepc != EMU_RAM_BASE { return fz_refuse(kind, i, m.mtval, at); }
+    if x[10] != 0x77_u64 || x[1] != at || x[2] != 0x5A5A_u64 { return fz_refuse(kind, i, x[10], 0x77_u64); }
+    let lo = emu_peek(&ram, EMU_RAM_BASE + 128_u64, 8_u64);
+    let hi = emu_peek(&ram, EMU_RAM_BASE + 136_u64, 8_u64);
+    if lo != 0x0102030405060708_u64 || hi != 0x1112131415161718_u64 { return fz_refuse(kind, i, lo, hi); }
+    fz_refuse(0, i, 0_u64, 0_u64)
+}
+
+// Kind 82. CSRRS x10, misa, x0 = 0x301 << 20 | 2 << 12 | 10 << 7 | 0x73.
+fn xp_misa(v: u64, i: u64) -> Refusal {
+    let mut x: [u64; 32] = [0_u64; 32];
+    let mut ram: [u8; 256] = [0_u8; 256];
+    let mut rc: [i64; 1] = [0; 1];
+    let mut w: [u64; 4] = [0_u64; 4];
+    w[0] = 0x30102573_u64;
+    let m = xp_go(v, &w, 1_u64, &mut x, &mut ram, &mut rc);
+    let want = (2_u64 << 62_u64) | (1_u64 << 12_u64) | (1_u64 << 8_u64) | 1_u64;
+    if rc[0] != EMU_OK || m.steps != 1_u64 || x[10] != want { return fz_refuse(82, i, x[10], want); }
+    fz_refuse(0, i, 0_u64, 0_u64)
+}
+
+// Kind 83. `at` is any address; the machine never ran.
+fn xp_hash(i: u64, at: u64) -> Refusal {
+    let mut m = emu_new_machine();
+    let x: [u64; 32] = [0_u64; 32];
+    let ram: [u8; 64] = [0_u8; 64];
+    let out: [u8; 8] = [0_u8; 8];
+    m.mscratch = at;
+    let none = state_hash(&m, &x, &ram, &out);
+    m.res = 8_u64;
+    m.res_addr = at;
+    let held = state_hash(&m, &x, &ram, &out);
+    m.res_addr = at + 8_u64;
+    let moved = state_hash(&m, &x, &ram, &out);
+    m.res = 4_u64;
+    let narrow = state_hash(&m, &x, &ram, &out);
+    m.res = 0_u64;
+    m.res_addr = 0_u64;
+    let again = state_hash(&m, &x, &ram, &out);
+    if held == none || moved == held || narrow == moved { return fz_refuse(83, i, held, none); }
+    if again != none { return fz_refuse(83, i, again, none); }
+    fz_refuse(0, i, 0_u64, 0_u64)
+}

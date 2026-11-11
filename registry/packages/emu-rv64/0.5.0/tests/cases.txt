@@ -1,0 +1,59 @@
+# mode golden args... (run from the package folder)
+# hand-computed cases: every word and every result was worked out on paper
+exact tests/golden-cases.txt cases
+# seeded differential runs against the reference model
+exact tests/golden-fuzz-1.txt fuzz 1 20000
+exact tests/golden-fuzz-7.txt fuzz 7 50000
+# seeded property run, no model
+exact tests/golden-props-1.txt props 1 20000
+# every planted defect must be refused by both checks
+exact tests/golden-controls.txt controls
+# trap profile: hand-computed CSR, trap and MRET cases and the trap-handler program
+exact tests/golden-mcases.txt mcases
+# trap profile: seeded differential runs against the reference model, CSRs compared after every step
+exact tests/golden-mfuzz-1.txt mfuzz 1 20000
+exact tests/golden-mfuzz-7.txt mfuzz 7 50000
+# trap profile: seeded property run, no model
+exact tests/golden-mprops-1.txt mprops 1 20000
+# trap profile: every planted defect must be refused by both checks
+exact tests/golden-mcontrols.txt mcontrols
+# timer and interrupts: hand-computed cases and the timer program, run twice with the state hash compared
+exact tests/golden-icases.txt icases
+# timer and interrupts: seeded differential runs with frequent interrupts, mtime and mtimecmp compared after every step
+exact tests/golden-ifuzz-1.txt ifuzz 1 20000
+exact tests/golden-ifuzz-7.txt ifuzz 7 50000
+# timer and interrupts: seeded property run, no model
+exact tests/golden-iprops-1.txt iprops 1 20000
+# timer and interrupts: every planted defect must be refused by both checks
+exact tests/golden-icontrols.txt icontrols
+# flat images: hand-computed loader, start state, hash, compare and run cases
+exact tests/golden-rcases.txt rcases
+# flat images: seeded property run on random images, no model
+exact tests/golden-rprops-1.txt rprops 1 20000
+# flat images: every planted defect must be refused by the cases and by the property rules
+exact tests/golden-rcontrols.txt rcontrols
+# flat images: the built-in timer image as hex, and the committed file compared with it
+exact tests/golden-image-timer.txt image timer
+exact tests/golden-image-check.txt image timer tests/timer.img
+# flat images: the timer image file run once, and run twice with the state hash compared every 1000 steps
+exact tests/golden-run-timer.txt run tests/timer.img 10000
+exact tests/golden-replay-timer.txt replay tests/timer.img 10000
+# flat images: the same file in 65536 bytes of memory, long enough to empty the output buffer
+exact tests/golden-replay-timer-64k.txt replay tests/timer.img 25000 65536
+# flat images: a missing file, an empty file and a file larger than memory are refused
+exact tests/golden-run-missing.txt run tests/no-such.img 10
+exact tests/golden-run-empty.txt run tests/empty.img 10
+exact tests/golden-run-large.txt run tests/golden-cases.txt 10
+# M and A extensions: hand cases of every instruction; the words and the expected values come from tests/tools/ma_oracle.py
+exact tests/golden-xcases.txt xcases
+# M and A extensions: seeded differential runs of a stream weighted toward M and A words and edge operands
+exact tests/golden-xfuzz-1.txt xfuzz 1 20000
+exact tests/golden-xfuzz-7.txt xfuzz 7 50000
+# M and A extensions: seeded property run, no model
+exact tests/golden-xprops-1.txt xprops 1 20000
+# M and A extensions: every planted defect must be refused by the differential check, the properties and the hand cases
+exact tests/golden-xcontrols.txt xcontrols
+# the program tests/mulatomic.s of asm-rv64 0.2.0 (MUL, DIV, REM and an LR/SC retry loop), from the committed image
+exact tests/golden-run-mulatomic.txt run tests/mulatomic.img 100
+exact tests/golden-replay-mulatomic.txt replay tests/mulatomic.img 100
+exact tests/golden-replay-mulatomic-5000.txt replay tests/mulatomic.img 5000
