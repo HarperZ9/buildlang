@@ -1,0 +1,143 @@
+// Hand cases of asm-rv64: the harness. A case is a piece of text and what
+// the assembler must make of it: one word, a list of words, or a list of
+// errors. No case asks the encoder what the word should be.
+//
+// Where the expected words come from:
+//   - the timer and trap programs: the built-in images of emu-rv64, which
+//     are the words its author assembled by hand (iprog.bld, mprog.bld);
+//   - the serial and sum programs: the words in main.bld of emu-rv64;
+//   - every other word: the sum of the shifted fields of the instruction
+//     format, worked out outside this package by a short script that
+//     shares no code with the encoder or the assembler. Where the same
+//     statement is a hand case of emu-rv64, the word is the same.
+
+// v: the planted defect under test, 0 for none. show: print every case.
+// count: cases run so far. fails: the numbers of the cases that failed.
+struct AcSt { v: u64, show: bool, count: u64, fails: Vec<u64> }
+
+fn ac_fail(st: &mut AcSt) {
+    st.fails.push(st.count);
+}
+
+// Appends one line of text and a line feed.
+fn ac_ln(buf: &mut [u8], at: usize, s: str) -> usize {
+    ad_ch(buf, ad_put(buf, at, s), 10_u8)
+}
+
+// One statement that must give exactly the word `want`.
+fn ac_w(st: &mut AcSt, text: str, want: u64) ~ Console {
+    st.count = st.count + 1_u64;
+    let mut buf: [u8; 256] = [0_u8; 256];
+    let n = ad_put(&mut buf, 0, text);
+    let mut o = as_out_new();
+    let bad = as_assemble(st.v, &buf, n, &mut o);
+    let mut got: u64 = 0_u64;
+    if o.words.len() > 0 { got = o.words[0]; }
+    let ok = bad == 0_u64 && o.count == 1_u64 && got == want;
+    if st.show {
+        println!("acase {} `{}` words={} errors={} word={:08x} pass={}", st.count, text, o.count, bad, got, ok);
+    }
+    if !ok { ac_fail(st); }
+}
+
+// One statement that must be refused with exactly one error, on line 1,
+// with the given code, and must give no word.
+fn ac_e(st: &mut AcSt, text: str, code: u64) ~ Console {
+    st.count = st.count + 1_u64;
+    let mut buf: [u8; 256] = [0_u8; 256];
+    let n = ad_put(&mut buf, 0, text);
+    let mut o = as_out_new();
+    let bad = as_assemble(st.v, &buf, n, &mut o);
+    let mut got: u64 = 0_u64;
+    let mut line: u64 = 0_u64;
+    if o.errs.len() > 1 {
+        line = o.errs[0];
+        got = o.errs[1];
+    }
+    let ok = bad == 1_u64 && o.count == 0_u64 && line == 1_u64 && got == code;
+    if st.show {
+        println!("acase {} `{}` words={} errors={} refused: {} pass={}", st.count, text, o.count, bad, as_err_text(got), ok);
+    }
+    if !ok { ac_fail(st); }
+}
+
+// A program of n bytes that must give exactly the first k words of want.
+fn ac_prog(st: &mut AcSt, name: str, buf: &[u8], n: usize, want: &[u64], k: usize) ~ Console {
+    st.count = st.count + 1_u64;
+    let mut o = as_out_new();
+    let bad = as_assemble(st.v, buf, n, &mut o);
+    let mut ok = bad == 0_u64 && o.count as usize == k;
+    let mut i: usize = 0;
+    while ok && i < k {
+        if o.words[i] != want[i] { ok = false; }
+        i = i + 1;
+    }
+    if st.show {
+        println!("acase {} program {}: words={} errors={} want {} words pass={}", st.count, name, o.count, bad, k, ok);
+    }
+    if !ok { ac_fail(st); }
+}
+
+// A program of n bytes that must give no word and exactly the k errors
+// of want, which holds pairs (line, code) in line order.
+fn ac_bad(st: &mut AcSt, name: str, buf: &[u8], n: usize, want: &[u64], k: usize) ~ Console {
+    st.count = st.count + 1_u64;
+    let mut o = as_out_new();
+    let bad = as_assemble(st.v, buf, n, &mut o);
+    let mut ok = bad as usize == k && o.count == 0_u64 && o.errs.len() == 2 * k;
+    let mut i: usize = 0;
+    while ok && i < 2 * k {
+        if o.errs[i] != want[i] { ok = false; }
+        i = i + 1;
+    }
+    if st.show {
+        println!("acase {} program {}: words={} errors={} want {} errors pass={}", st.count, name, o.count, bad, k, ok);
+        i = 0;
+        while i + 1 < o.errs.len() {
+            println!("  line {}: {}", o.errs[i], as_err_text(o.errs[i + 1]));
+            i = i + 2;
+        }
+    }
+    if !ok { ac_fail(st); }
+}
+
+// A program of n bytes that must give exactly the first len bytes of a
+// built-in image of emu-rv64 (1 timer, 2 trap).
+fn ac_image(st: &mut AcSt, name: str, buf: &[u8], n: usize, which: u64) ~ Console {
+    st.count = st.count + 1_u64;
+    let mut want: [u8; 256] = [0_u8; 256];
+    let len = img_builtin(which, &mut want);
+    let mut o = as_out_new();
+    let bad = as_assemble(st.v, buf, n, &mut o);
+    let ok = bad == 0_u64 && len > 0 && ax_bytes_equal(&o, &want, len);
+    if st.show {
+        println!("acase {} program {}: words={} errors={} image of emu-rv64 has {} bytes pass={}",
+                 st.count, name, o.count, bad, len, ok);
+    }
+    if !ok { ac_fail(st); }
+}
+
+// Runs every hand case against defect v. Returns the state, which holds
+// the number of cases and the list of those that failed.
+fn ac_run(v: u64, show: bool) -> AcSt ~ Console {
+    let mut st = AcSt { v: v, show: show, count: 0_u64, fails: Vec::new() };
+    ac_reg(&mut st);
+    ac_imm(&mut st);
+    ac_shift(&mut st);
+    ac_load(&mut st);
+    ac_store(&mut st);
+    ac_branch(&mut st);
+    ac_jump(&mut st);
+    ac_upper(&mut st);
+    ac_csr(&mut st);
+    ac_csr_names(&mut st);
+    ac_misc(&mut st);
+    ac_forms(&mut st);
+    ac_refuse_a(&mut st);
+    ac_refuse_b(&mut st);
+    ac_refuse_c(&mut st);
+    ac_programs(&mut st);
+    ac_layouts(&mut st);
+    if show { println!("acases: {} run, {} failed", st.count, st.fails.len()); }
+    st
+}

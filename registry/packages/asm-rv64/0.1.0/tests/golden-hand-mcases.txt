@@ -1,0 +1,1 @@
+hand tests/hand-mcases.s: 59 words, tests/emu-golden-mcases.txt has 59 case words, equal=true

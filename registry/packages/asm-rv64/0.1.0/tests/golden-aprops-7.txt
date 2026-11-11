@@ -1,0 +1,3 @@
+aprops seed=7 steps=50000
+  accepted, 50000 instructions, 100000 raw words of which 37720 decoded, 16757 edge values, 33243 refusals
+  6250 programs, 87483 statements, 5892 with a used label left out

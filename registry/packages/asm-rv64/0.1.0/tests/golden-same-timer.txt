@@ -1,0 +1,1 @@
+same tests/timer.s: 88 bytes, file tests/emu-timer.img has 88 bytes, equal=true

@@ -1,0 +1,199 @@
+// asm-rv64 command line, the commands that read a file:
+//
+//   asm-rv64 asm FILE          assemble FILE and print the words as hex
+//   asm-rv64 bytes FILE        assemble FILE and print the image as hex
+//                              bytes, 16 to a line, lowest address first
+//   asm-rv64 dis FILE          print the text of the hex words in FILE
+//   asm-rv64 match FILE NAME   assemble FILE and compare the bytes with a
+//                              built-in image of emu-rv64 (timer or trap)
+//   asm-rv64 same FILE IMAGE   assemble FILE and compare the bytes with
+//                              the bytes of the file IMAGE
+//   asm-rv64 hand FILE GOLDEN  assemble FILE and compare the words with
+//                              the `word=` values in a golden file of the
+//                              hand-computed cases of emu-rv64
+//
+// file_into, hex_dump, img_name and img_builtin are functions of emu-rv64.
+
+// Reads a file into buf. Returns its length, or minus the exit status
+// after printing why the file was refused.
+fn ax_load(path: str, buf: &mut [u8]) -> i64 ~ Console + FileSystem {
+    if !file_exists(path) {
+        println!("error: cannot read {}", path);
+        return -3;
+    }
+    let len = file_into(path, buf);
+    if len > buf.len() {
+        println!("error: {} has {} bytes and the limit is {}", path, len, buf.len());
+        return -5;
+    }
+    len as i64
+}
+
+// Prints every error of an assembly, one to a line.
+fn ax_errors(path: str, o: &AsOut) ~ Console {
+    let mut i: usize = 0;
+    while i + 1 < o.errs.len() {
+        println!("{}:{}: error: {}", path, o.errs[i], as_err_text(o.errs[i + 1]));
+        i = i + 2;
+    }
+    println!("errors: {}, no output", o.errs.len() / 2);
+}
+
+// Assembles a file into o. Returns 0, or the exit status after printing
+// the reason.
+fn ax_file(path: str, o: &mut AsOut) -> i64 ~ Console + FileSystem {
+    let mut src: [u8; 65536] = [0_u8; 65536];
+    let n = ax_load(path, &mut src);
+    if n < 0 { return 0 - n; }
+    if as_assemble(0_u64, &src, n as usize, o) != 0_u64 {
+        ax_errors(path, o);
+        return 1;
+    }
+    0
+}
+
+fn ax_cmd_asm(path: str) -> i64 ~ Console + FileSystem {
+    let mut o = as_out_new();
+    let rc = ax_file(path, &mut o);
+    if rc != 0 { return rc; }
+    let mut i: usize = 0;
+    while (i as u64) < o.count {
+        println!("{:08x}", o.words[i]);
+        i = i + 1;
+    }
+    0
+}
+
+// The image as bytes in hex. A host tool turns the text into a file:
+// asm-rv64 bytes FILE | xxd -r -p > IMAGE
+fn ax_cmd_bytes(path: str) -> i64 ~ Console + FileSystem {
+    let mut img: [u8; 65536] = [0_u8; 65536];
+    let mut o = as_out_new();
+    let rc = ax_file(path, &mut o);
+    if rc != 0 { return rc; }
+    let n = (o.count as usize) * 4;
+    let mut i: usize = 0;
+    while i < n {
+        img[i] = as_byte(&o, i);
+        i = i + 1;
+    }
+    hex_dump(&img, n);
+    0
+}
+
+// Reads the hex words of a listing, one word of 8 hex digits to a line.
+// Returns the number of the first line that is not one, or 0.
+fn ax_hex_words(src: &[u8], n: usize, words: &mut Vec<u64>) -> u64 {
+    let mut bad: u64 = 0_u64;
+    let mut line: u64 = 1_u64;
+    let mut lo: usize = 0;
+    while lo < n {
+        let mut e = lo;
+        while e < n && src[e] != 10_u8 { e = e + 1; }
+        let a = as_skip(src, lo, e);
+        let b = as_word_end(src, a, e);
+        if a < e {
+            let r = as_digits(src, a, b, 16_u64, 16_u64);
+            if (!r.ok || b != a + 8 || as_skip(src, b, e) != e) && bad == 0_u64 { bad = line; }
+            words.push(r.mag);
+        }
+        line = line + 1_u64;
+        lo = e + 1;
+    }
+    bad
+}
+
+fn ax_cmd_dis(path: str) -> i64 ~ Console + FileSystem {
+    let mut src: [u8; 65536] = [0_u8; 65536];
+    let mut text: [u8; 128] = [0_u8; 128];
+    let n = ax_load(path, &mut src);
+    if n < 0 { return 0 - n; }
+    let mut words: Vec<u64> = Vec::new();
+    let bad = ax_hex_words(&src, n as usize, &mut words);
+    if bad != 0_u64 {
+        println!("{}:{}: error: not a word of 8 hex digits", path, bad);
+        println!("errors: 1, no output");
+        return 1;
+    }
+    let mut i: usize = 0;
+    while i < words.len() {
+        let e = ad_word(&mut text, 0, words[i], 0_u64);
+        println!("{}", ad_text(&text, 0, e));
+        i = i + 1;
+    }
+    0
+}
+
+// Compares the image in o, as bytes, with the first n bytes of want.
+fn ax_bytes_equal(o: &AsOut, want: &[u8], n: usize) -> bool {
+    let mut same = (o.count as usize) * 4 == n;
+    let mut i: usize = 0;
+    while same && i < n {
+        if as_byte(o, i) != want[i] { same = false; }
+        i = i + 1;
+    }
+    same
+}
+
+fn ax_cmd_match(path: str, name: str) -> i64 ~ Console + FileSystem {
+    let mut want: [u8; 256] = [0_u8; 256];
+    let n = img_builtin(img_name(name), &mut want);
+    if n == 0 {
+        println!("error: no built-in image {} (timer, trap)", name);
+        return 2;
+    }
+    let mut o = as_out_new();
+    let rc = ax_file(path, &mut o);
+    if rc != 0 { return rc; }
+    let same = ax_bytes_equal(&o, &want, n);
+    println!("match {}: {} bytes, built-in image {} of emu-rv64 has {} bytes, equal={}",
+             path, o.count * 4_u64, name, n, same);
+    if same { return 0; }
+    1
+}
+
+fn ax_cmd_same(path: str, image: str) -> i64 ~ Console + FileSystem {
+    let mut want: [u8; 65536] = [0_u8; 65536];
+    let n = ax_load(image, &mut want);
+    if n < 0 { return 0 - n; }
+    let mut o = as_out_new();
+    let rc = ax_file(path, &mut o);
+    if rc != 0 { return rc; }
+    let same = ax_bytes_equal(&o, &want, n as usize);
+    println!("same {}: {} bytes, file {} has {} bytes, equal={}", path, o.count * 4_u64, image, n, same);
+    if same { return 0; }
+    1
+}
+
+// Collects the 8 hex digits after every `word=` in the text.
+fn ax_case_words(src: &[u8], n: usize, words: &mut Vec<u64>) {
+    let mut i: usize = 0;
+    while i + 13 <= n {
+        if as_is(src, i, i + 5, "word=") {
+            let r = as_digits(src, i + 5, i + 13, 16_u64, 16_u64);
+            if r.ok { words.push(r.mag); }
+        }
+        i = i + 1;
+    }
+}
+
+fn ax_cmd_hand(path: str, golden: str) -> i64 ~ Console + FileSystem {
+    let mut text: [u8; 65536] = [0_u8; 65536];
+    let n = ax_load(golden, &mut text);
+    if n < 0 { return 0 - n; }
+    let mut want: Vec<u64> = Vec::new();
+    ax_case_words(&text, n as usize, &mut want);
+    let mut o = as_out_new();
+    let rc = ax_file(path, &mut o);
+    if rc != 0 { return rc; }
+    let mut same = o.count as usize == want.len() && want.len() > 0;
+    let mut i: usize = 0;
+    while same && i < want.len() {
+        if o.words[i] != want[i] { same = false; }
+        i = i + 1;
+    }
+    println!("hand {}: {} words, {} has {} case words, equal={}", path, o.count, golden, want.len(), same);
+    if same { return 0; }
+    println!("  first difference at word {}", i);
+    1
+}

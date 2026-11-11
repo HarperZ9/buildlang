@@ -18,6 +18,23 @@
         }
       }
     },
+    "asm-rv64": {
+      "version": "0.1.0",
+      "description": "RV64I text assembler grown from the encoder of emu-rv64: one instruction per line, labels, .word and .org, the RV64I user set, Zicsr, MRET and WFI, with a renderer for the reverse direction; it holds no bit layout of its own and is checked by hand cases, the hand-assembled words and images of emu-rv64, property rules against that encoder and decoder, and planted controls",
+      "author": "Zain Dana Harper",
+      "license": "AGPL-3.0-only",
+      "checksum": "sha256:4a5c7b2c77fee4ee774f6e24e688bd1006742649cc05cdd9c83ee2cb7a5c8a21",
+      "path": "packages/asm-rv64/0.1.0",
+      "versions": {
+        "0.1.0": {
+          "path": "packages/asm-rv64/0.1.0",
+          "checksum": "sha256:4a5c7b2c77fee4ee774f6e24e688bd1006742649cc05cdd9c83ee2cb7a5c8a21",
+          "dependencies": {
+            "emu-rv64": "=0.4.0"
+          }
+        }
+      }
+    },
     "canonical-record": {
       "version": "1.0.0",
       "description": "RFC 8785 (JCS) canonical JSON, its SHA-256, and the cr1 numeric-array digest (port of Flywheel harness/canonical_record.py)",

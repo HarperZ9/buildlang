@@ -1,0 +1,193 @@
+// Property run of asm-rv64, first part: single statements. No second
+// assembler is used. The rules compare the assembler with the encoder
+// and the decoder of emu-rv64, through text the renderer writes.
+// Rng, rng_next, gen_insn, Refusal and fz_refuse are from emu-rv64.
+//
+//   61  for a random instruction i, written as text in a random style, the
+//       assembler gives the word the encoder gives for i
+//   62  for a random 32-bit word w the decoder accepts, the text of
+//       decode(w) assembles to w
+//   63  the canonical text of i assembles to the same word, and the text
+//       of that word is the same text, byte for byte
+//   64  the lowest and the highest value of a number operand are accepted
+//       and give the word the encoder gives
+//   65  a value one past either end of the range, a value far outside it,
+//       and an odd branch or jump offset are refused: one error on line 1
+//       with the right code, and no word
+
+// What a run did, so that a reader can see it was not empty.
+struct ApCt { insns: u64, raw: u64, decoded: u64, edges: u64, refused: u64, progs: u64, stmts: u64, uses: u64 }
+
+fn ap_ct_new() -> ApCt {
+    ApCt { insns: 0_u64, raw: 0_u64, decoded: 0_u64, edges: 0_u64, refused: 0_u64, progs: 0_u64, stmts: 0_u64, uses: 0_u64 }
+}
+
+// A CSR number: one of the 14 the core implements.
+fn ap_csr(r: &mut Rng) -> u64 {
+    let k = rng_next(r) % 14_u64;
+    if k < 2_u64 { return CSR_MSTATUS + k; }
+    if k < 4_u64 { return CSR_MIE + k - 2_u64; }
+    if k < 9_u64 { return CSR_MSCRATCH + k - 4_u64; }
+    CSR_MVENDORID + k - 9_u64
+}
+
+// A random instruction in canonical form, any of the 60 operations. The
+// generator of emu-rv64 makes operations 1 to 52. Half of the CSR numbers
+// are implemented ones, which have a name, and half are any 12-bit number.
+fn ap_insn(r: &mut Rng) -> Insn {
+    let pick = rng_next(r) % 60_u64;
+    if pick < 52_u64 { return gen_insn(r); }
+    let op = OP_CSRRW + pick - 52_u64;
+    let regs = rng_next(r);
+    let mut d = Insn { op: op, rd: 0_u64, rs1: 0_u64, rs2: 0_u64, imm: 0_u64 };
+    if op >= OP_MRET { return d; }
+    d.rd = regs & 31_u64;
+    d.rs1 = (regs >> 8_u64) & 31_u64;
+    d.imm = (regs >> 32_u64) & 0xFFF_u64;
+    if ((regs >> 16_u64) & 1_u64) == 0_u64 { d.imm = ap_csr(r); }
+    d
+}
+
+// Assembles n bytes of text into o. Returns the word, or AS_NONE when the
+// result is not exactly one word and no error.
+fn ap_one(v: u64, buf: &[u8], n: usize, o: &mut AsOut) -> u64 {
+    as_out_reset(o);
+    let bad = as_assemble(v, buf, n, o);
+    if bad != 0_u64 || o.count != 1_u64 { return AS_NONE; }
+    o.words[0]
+}
+
+fn ap_bytes_same(a: &[u8], an: usize, b: &[u8], bn: usize) -> bool {
+    if an != bn { return false; }
+    let mut same = true;
+    let mut i: usize = 0;
+    while i < an {
+        if a[i] != b[i] { same = false; }
+        i = i + 1;
+    }
+    same
+}
+
+// Rule 62 for one word.
+fn ap_raw(v: u64, w: u64, style: u64, i: u64, o: &mut AsOut, ct: &mut ApCt) -> Refusal {
+    let mut t: [u8; 128] = [0_u8; 128];
+    ct.raw = ct.raw + 1_u64;
+    let e = emu_decode(w);
+    if e.op == 0_u64 { return fz_refuse(0, i, 0_u64, 0_u64); }
+    ct.decoded = ct.decoded + 1_u64;
+    let n = ad_insn(&mut t, 0, &e, style);
+    let got = ap_one(v, &t, n, o);
+    if got != w { return fz_refuse(AP_WORD, i, got, w); }
+    fz_refuse(0, i, 0_u64, 0_u64)
+}
+
+// Rules 61, 62 and 63 for one random instruction, one random word and one
+// word that differs from an instruction in a single bit.
+fn ap_step_insn(v: u64, r: &mut Rng, i: u64, o: &mut AsOut, ct: &mut ApCt) -> Refusal {
+    let mut t: [u8; 128] = [0_u8; 128];
+    let mut c: [u8; 128] = [0_u8; 128];
+    let d = ap_insn(r);
+    let sel = rng_next(r);
+    let want = emu_encode(&d);
+    ct.insns = ct.insns + 1_u64;
+    let n = ad_insn(&mut t, 0, &d, sel & 15_u64);
+    let got = ap_one(v, &t, n, o);
+    if got != want { return fz_refuse(AP_ENCODE, i, got, want); }
+    let n1 = ad_insn(&mut t, 0, &d, 0_u64);
+    let plain = ap_one(v, &t, n1, o);
+    let n2 = ad_word(&mut c, 0, plain, 0_u64);
+    if plain != want || !ap_bytes_same(&t, n1, &c, n2) { return fz_refuse(AP_TEXT, i, plain, want); }
+    let f = ap_raw(v, rng_next(r) & 0xFFFFFFFF_u64, (sel >> 4_u64) & 15_u64, i, o, ct);
+    if f.kind != 0 { return f; }
+    ap_raw(v, want ^ (1_u64 << ((sel >> 8_u64) & 31_u64)), (sel >> 16_u64) & 15_u64, i, o, ct)
+}
+
+// The magnitude of the lowest value of the number operand of form k.
+fn ap_lo(k: u64) -> u64 {
+    if k == AK_I || k == AK_LOAD || k == AK_STORE { return 2048_u64; }
+    if k == AK_B { return 4096_u64; }
+    if k == AK_J { return 1048576_u64; }
+    0_u64
+}
+
+// The highest value of the number operand of form k.
+fn ap_hi(k: u64) -> u64 {
+    if k == AK_I || k == AK_LOAD || k == AK_STORE { return 2047_u64; }
+    if k == AK_B { return 4094_u64; }
+    if k == AK_J { return 1048574_u64; }
+    if k == AK_SH6 { return 63_u64; }
+    if k == AK_SH5 || k == AK_CSRI { return 31_u64; }
+    if k == AK_U { return 1048575_u64; }
+    4095_u64
+}
+
+// The record d with its number operand replaced by the value of g.
+fn ap_with(d: &Insn, k: u64, g: &AdArg) -> Insn {
+    let mut e = Insn { op: d.op, rd: d.rd, rs1: d.rs1, rs2: d.rs2, imm: g.mag };
+    if g.neg { e.imm = 0_u64.wrapping_sub(g.mag); }
+    if k == AK_U { e.imm = emu_sext((g.mag << 12_u64) & 0xFFFFF000_u64, 32_u64); }
+    if k == AK_FENCE { e.imm = emu_sext(g.mag, 12_u64); }
+    if k == AK_CSRI {
+        e.imm = d.imm;
+        e.rs1 = g.mag;
+    }
+    e
+}
+
+// A value outside the range of form k, and the error it must give.
+// sel 2: one past the top. 3: one past the bottom. 4: far above. 5: far
+// below. For a branch or jump the steps are 2, so the offset stays even,
+// and sel 5 is an odd offset instead, in or out of range.
+fn ap_outside(r: &mut Rng, k: u64, sel: u64, g: &mut AdArg) -> u64 {
+    let target = k == AK_B || k == AK_J;
+    let mut step: u64 = 1_u64;
+    if target { step = 2_u64; }
+    let far = step * (1_u64 + rng_next(r) % 100000_u64);
+    let pick = rng_next(r);
+    if target && sel == 5_u64 {
+        g.neg = (pick & 1_u64) == 1_u64;
+        g.mag = ((pick >> 1_u64) % (2_u64 * ap_hi(k))) | 1_u64;
+        return AE_ALIGN;
+    }
+    g.neg = sel == 3_u64 || sel == 5_u64;
+    if sel == 2_u64 { g.mag = ap_hi(k) + step; }
+    if sel == 3_u64 { g.mag = ap_lo(k) + step; }
+    if sel == 4_u64 { g.mag = ap_hi(k) + far; }
+    if sel == 5_u64 { g.mag = ap_lo(k) + far; }
+    if target { return AE_FAR; }
+    AE_RANGE
+}
+
+// Rules 64 and 65 for one random instruction that has a number operand.
+fn ap_step_edge(v: u64, r: &mut Rng, i: u64, o: &mut AsOut, ct: &mut ApCt) -> Refusal {
+    let mut t: [u8; 128] = [0_u8; 128];
+    let mut d = ap_insn(r);
+    while as_kind(d.op) == AK_NONE || as_kind(d.op) == AK_R { d = ap_insn(r); }
+    let k = as_kind(d.op);
+    let pick = rng_next(r);
+    let sel = pick % 6_u64;
+    let style = (pick >> 8_u64) & 15_u64;
+    let mut g = AdArg { neg: false, mag: ap_hi(k), lab: AS_NONE };
+    if sel < 2_u64 {
+        if sel == 0_u64 {
+            g.mag = ap_lo(k);
+            g.neg = g.mag != 0_u64;
+        }
+        let e = ap_with(&d, k, &g);
+        let want = emu_encode(&e);
+        let m = ad_insn_arg(&mut t, 0, &e, style, &g);
+        let got = ap_one(v, &t, m, o);
+        ct.edges = ct.edges + 1_u64;
+        if got != want { return fz_refuse(AP_EDGE, i, got, want); }
+        return fz_refuse(0, i, 0_u64, 0_u64);
+    }
+    let code = ap_outside(r, k, sel, &mut g);
+    let n = ad_insn_arg(&mut t, 0, &d, style, &g);
+    as_out_reset(o);
+    let bad = as_assemble(v, &t, n, o);
+    ct.refused = ct.refused + 1_u64;
+    let mut got: u64 = 0_u64;
+    if o.errs.len() > 1 && o.errs[0] == 1_u64 { got = o.errs[1]; }
+    if bad != 1_u64 || o.count != 0_u64 || got != code { return fz_refuse(AP_REFUSE, i, got, code); }
+    fz_refuse(0, i, 0_u64, 0_u64)
+}

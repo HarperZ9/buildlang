@@ -1,0 +1,13 @@
+# Build.lock: written by `buildc pkg resolve`. Do not edit by hand.
+lock-version = 1
+
+[root]
+name = "asm-rv64"
+version = "0.1.0"
+requires = ["emu-rv64 =0.4.0"]
+
+[[package]]
+name = "emu-rv64"
+version = "0.4.0"
+checksum = "sha256:9135a29af6c1d768064757ef08be98df75fe88611840d49859f5fd855af14afb"
+dependencies = []

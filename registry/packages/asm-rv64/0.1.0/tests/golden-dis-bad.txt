@@ -1,0 +1,2 @@
+tests/timer.s:1: error: not a word of 8 hex digits
+errors: 1, no output
