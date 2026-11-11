@@ -1,0 +1,96 @@
+// Planted controls for the system profile of emu-rv64, variants 38 to 57.
+// Each is the core with one defect put in on purpose. The defects live in
+// the core itself, behind the variant number every function of the system
+// profile takes: variant 0, which emu_step passes, has none. The checks
+// must refuse every one; the command scontrols shows which check refuses
+// which. Nothing outside the checks passes a variant other than 0.
+//
+//   38  the canonical test of a virtual address is missing
+//   39  a misaligned superpage is accepted
+//   40  the U bit of a page is ignored
+//   41  SUM is ignored: S-mode may always read and write a user page
+//   42  MXR is ignored: an execute-only page is never readable
+//   43  a PTE with W and without R is accepted as a leaf
+//   44  the walk has two levels
+//   45  the walk has four levels
+//   46  the A bit is ignored
+//   47  the D bit is ignored
+//   48  MPRV also applies to the fetch
+//   49  a delegated trap goes to S-mode also when taken in M-mode
+//   50  SRET returns to S-mode whatever SPP holds
+//   51  TSR is ignored
+//   52  TVM is ignored
+//   53  TW is ignored
+//   54  a delegated interrupt is blocked in U-mode while SIE is clear
+//   55  sstatus reads all of mstatus
+//   56  satp accepts a write with an unsupported MODE
+//   57  a store page fault is reported with cause 13
+
+fn scontrol_name(v: u64) ~ Console {
+    if v == 0_u64 { println!("variant 0: the core"); }
+    if v == SC_CANON { println!("control 38: no canonical test"); }
+    if v == SC_SUPER { println!("control 39: misaligned superpage accepted"); }
+    if v == SC_UBIT { println!("control 40: U bit ignored"); }
+    if v == SC_SUM { println!("control 41: SUM ignored"); }
+    if v == SC_MXR { println!("control 42: MXR ignored"); }
+    if v == SC_WONLY { println!("control 43: W without R accepted"); }
+    if v == SC_TWO { println!("control 44: walk of two levels"); }
+    if v == SC_FOUR { println!("control 45: walk of four levels"); }
+    if v == SC_ABIT { println!("control 46: A bit ignored"); }
+    if v == SC_DBIT { println!("control 47: D bit ignored"); }
+    if v == SC_MPRV { println!("control 48: MPRV applied to the fetch"); }
+    if v == SC_DELEG { println!("control 49: delegation taken in M-mode"); }
+    if v == SC_SRET { println!("control 50: SRET ignores SPP"); }
+    if v == SC_TSR { println!("control 51: TSR ignored"); }
+    if v == SC_TVM { println!("control 52: TVM ignored"); }
+    if v == SC_TW { println!("control 53: TW ignored"); }
+    if v == SC_SIE { println!("control 54: S interrupt blocked in U by SIE"); }
+    if v == SC_SSTATUS { println!("control 55: sstatus shows machine fields"); }
+    if v == SC_SATP { println!("control 56: satp accepts an unsupported MODE"); }
+    if v == SC_CAUSE { println!("control 57: store page fault with cause 13"); }
+}
+
+// Runs the three checks on variant v and prints what each says. Returns
+// the number of checks that refused it, 0 to 3.
+fn scontrol_one(v: u64) -> i64 ~ Console {
+    scontrol_name(v);
+    println!(" differential:");
+    let d = scheck_one(0_u64, v, 1_u64, 20000_u64);
+    println!(" properties:");
+    let q = scheck_one(1_u64, v, 1_u64, 20000_u64);
+    let st = svec_run(v, false);
+    println!(" hand cases: {} of {} fail, first failure {}", st.bad, st.count, st.fail);
+    let mut c: i64 = 0;
+    if st.bad != 0_u64 { c = 1; }
+    println!(" refused by: cases={} fuzz={} props={}", c, d, q);
+    c + d + q
+}
+
+// Every control must be refused, and the core must pass all three checks.
+// A control that fewer than three checks refuse is listed: it marks a
+// weak check. The exit status is 1 when the core is refused or a control
+// is refused by no check.
+fn scontrols() -> i64 ~ Console {
+    let mut bad: i64 = 0;
+    let mut all: u64 = 0_u64;
+    let mut weak: u64 = 0_u64;
+    let mut v: u64 = 0_u64;
+    while v <= SCTL_LAST {
+        let n = scontrol_one(v);
+        if v == 0_u64 && n != 0 { bad = bad + 1; }
+        if v != 0_u64 && n == 0 { println!("  ACCEPTED A PLANTED DEFECT"); bad = bad + 1; }
+        if v != 0_u64 && n == 3 { all = all + 1_u64; }
+        if v != 0_u64 && n > 0 && n < 3 {
+            println!("  WEAK: control {} is refused by {} of 3 checks", v, n);
+            weak = weak + 1_u64;
+        }
+        v = v + 1_u64;
+        if v == 1_u64 { v = SCTL_FIRST; }
+    }
+    if bad == 0 {
+        println!("result: core accepted, {} of 20 controls refused by all three checks, {} by one or two", all, weak);
+    } else {
+        println!("result: FAILED, {} variants judged wrongly", bad);
+    }
+    bad
+}

@@ -1,0 +1,170 @@
+// Property rules for the system profile of emu-rv64, third part: the rules
+// that build their own small machine, the invariants and the run.
+
+// One Zicsr read of CSR n into x10 by machine s, which this function owns.
+// Returns the value read, or all ones when the step did not retire.
+fn sp_read_csr(v: u64, s: &mut Machine, n: u64) -> u64 {
+    let mut x: [u64; 32] = [0_u64; 32];
+    let mut ram: [u8; 64] = [0_u8; 64];
+    let mut out: [u8; 8] = [0_u8; 8];
+    let d = Insn { op: OP_CSRRS, rd: 10_u64, rs1: 0_u64, rs2: 0_u64, imm: n };
+    emu_poke(&mut ram, EMU_RAM_BASE, 4_u64, emu_encode(&d));
+    s.prv = PRIV_S;
+    s.satp = 0_u64;
+    s.pc = EMU_RAM_BASE;
+    s.mtimecmp = !0_u64;
+    if sys_step_v(v, s, &mut x, &mut ram, &mut out) != EMU_OK { return !0_u64; }
+    x[10]
+}
+
+// Kind 96: the three views. In S-mode, sstatus reads the bits of mstatus
+// that the figure of sstatus names (SIE, SPIE, SPP, SUM, MXR, UXL), sie
+// reads mie and mideleg, and sip reads mip and mideleg. Each read runs on
+// a copy of the machine in which no interrupt can be taken.
+fn sp_views(v: u64, i: u64, m: &Machine) -> Refusal {
+    let mut a = ipr_copy(m);
+    a.mie = 0_u64;
+    let st = sp_read_csr(v, &mut a, 0x100_u64);
+    if st != (m.mstatus & 0x2000C0122_u64) { return fz_refuse(96, i, st, m.mstatus); }
+    let mut b = ipr_copy(m);
+    b.mip = 0_u64;
+    let ie = sp_read_csr(v, &mut b, 0x104_u64);
+    if ie != (m.mie & m.mideleg) { return fz_refuse(96, i, ie, m.mie); }
+    let mut c = ipr_copy(m);
+    c.mie = 0_u64;
+    let ip = sp_read_csr(v, &mut c, 0x144_u64);
+    if ip != (m.mip & m.mideleg) { return fz_refuse(96, i, ip, m.mip); }
+    fz_refuse(0, i, 0_u64, 0_u64)
+}
+
+// Kind 104: a load in S-mode from one drawn page, four times. The page is
+// execute-only: the load must fault with cause 13 while MXR is clear and
+// must read the data while MXR is set. Then the page is a readable user
+// page: the load must fault while SUM is clear and read while it is set.
+// The tables: root at page 1 of memory, entry 2 a gigapage for the code,
+// entry 1 a pointer to page 2, there a pointer to page 3, there the leaf
+// for page 4.
+fn sp_drawn_page(v: u64, i: u64, pick: u64) -> Refusal {
+    let va = (1_u64 << 30_u64) | (((pick >> 8_u64) & 511_u64) << 21_u64) | (((pick >> 20_u64) & 511_u64) << 12_u64) | ((pick >> 32_u64) & 0xFF8_u64);
+    let data = pick ^ 0x5DEECE66D_u64;
+    let mut t: u64 = 0_u64;
+    while t < 4_u64 {
+        let mut x: [u64; 32] = [0_u64; 32];
+        let mut ram: [u8; 32768] = [0_u8; 32768];
+        let mut out: [u8; 8] = [0_u8; 8];
+        let mut flags: u64 = 0xC9_u64;
+        if t >= 2_u64 { flags = 0xD3_u64; }
+        emu_poke(&mut ram, 0x80001010_u64, 8_u64, (0x80000_u64 << 10_u64) | 0xCF_u64);
+        emu_poke(&mut ram, 0x80001008_u64, 8_u64, (0x80002_u64 << 10_u64) | 1_u64);
+        emu_poke(&mut ram, 0x80002000_u64 + 8_u64 * ((va >> 21_u64) & 511_u64), 8_u64, (0x80003_u64 << 10_u64) | 1_u64);
+        emu_poke(&mut ram, 0x80003000_u64 + 8_u64 * ((va >> 12_u64) & 511_u64), 8_u64, (0x80004_u64 << 10_u64) | flags);
+        emu_poke(&mut ram, 0x80004000_u64 + (va & 0xFFF_u64), 8_u64, data);
+        let d = Insn { op: OP_LB + 3_u64, rd: 10_u64, rs1: 1_u64, rs2: 0_u64, imm: 0_u64 };
+        emu_poke(&mut ram, EMU_RAM_BASE, 4_u64, emu_encode(&d));
+        let mut m = emu_new_system();
+        m.prv = PRIV_S;
+        m.satp = (8_u64 << 60_u64) | 0x80001_u64;
+        if t == 1_u64 { m.mstatus = m.mstatus | 0x80000_u64; }
+        if t == 3_u64 { m.mstatus = m.mstatus | 0x40000_u64; }
+        x[1] = va;
+        let rc = sys_step_v(v, &mut m, &mut x, &mut ram, &mut out);
+        let open = t == 1_u64 || t == 3_u64;
+        if open && (rc != EMU_OK || x[10] != data) { return fz_refuse(104, i, x[10], data); }
+        if !open && (rc != EMU_TRAP || m.mcause != 13_u64 || m.mtval != va || x[10] != 0_u64) { return fz_refuse(104, i, m.mcause, 13_u64); }
+        t = t + 1_u64;
+    }
+    fz_refuse(0, i, 0_u64, 0_u64)
+}
+
+// Kind 99: what holds after every step. satp has MODE 0 with every other
+// bit 0, or MODE 8 with no ASID bit. mstatus has no bit outside its
+// writable fields but UXL = SXL = 2, and MPP is not 2. The delegation and
+// interrupt-enable registers hold only bits that exist, the saved pcs are
+// multiples of 4, the vector modes are 0 or 1, and the mode is U, S or M.
+fn sp_invariants(i: u64, m: &Machine) -> Refusal {
+    let mode = m.satp >> 60_u64;
+    let satp_ok = m.satp == 0_u64 || (mode == 8_u64 && ((m.satp >> 44_u64) & 0xFFFF_u64) == 0_u64);
+    if !satp_ok { return fz_refuse(99, i, m.satp, 0_u64); }
+    let st_ok = (m.mstatus & !0x7E19AA_u64) == 0xA00000000_u64 && (m.mstatus & 0x1800_u64) != 0x1000_u64;
+    if !st_ok { return fz_refuse(99, i, m.mstatus, 0_u64); }
+    let sets = (m.medeleg & !0xB3FF_u64) == 0_u64 && (m.mideleg & !0x222_u64) == 0_u64 && (m.mie & !0xAAA_u64) == 0_u64;
+    let pcs = (m.mepc & 3_u64) == 0_u64 && (m.sepc & 3_u64) == 0_u64 && (m.mtvec & 2_u64) == 0_u64 && (m.stvec & 2_u64) == 0_u64;
+    let prv_ok = m.prv == PRIV_U || m.prv == PRIV_S || m.prv == PRIV_M;
+    if !(sets && pcs && prv_ok && m.menvcfg <= 1_u64 && m.senvcfg <= 1_u64) { return fz_refuse(99, i, m.prv, m.medeleg); }
+    fz_refuse(0, i, 0_u64, 0_u64)
+}
+
+// The rules of one step, after it.
+fn sp_judge(i: u64, rc: i64, was: &Machine, now: &Machine, xa: &[u64], x0: &[u64], ram: &[u8], p: &SpPre) -> Refusal {
+    let f = sp_irq(i, was, now, rc);
+    if f.kind != 0 { return f; }
+    if rc == EMU_OK {
+        let g = sp_rights(i, was, p);
+        if g.kind != 0 { return g; }
+        let h = sp_allowed(i, was, now, p.word);
+        if h.kind != 0 { return h; }
+    }
+    if rc == EMU_TRAP {
+        let g = sp_untouched(i, was, now, xa, x0, ram, p);
+        if g.kind != 0 { return g; }
+        let mut cause = now.mcause;
+        if now.prv == PRIV_S { cause = now.scause; }
+        if (cause & EMU_SIGN) == 0_u64 {
+            let h = sp_sync(i, was, now, cause, p);
+            if h.kind != 0 { return h; }
+        }
+    }
+    sp_invariants(i, now)
+}
+
+// The rules that do not belong to a step, judged before every sixteenth
+// step on the state the stream has reached.
+fn sp_aside(v: u64, i: u64, r: &mut Rng, m: &Machine, ram: &[u8], other: &mut [u8]) -> Refusal {
+    let va = sfz_va(r);
+    let f = sp_identity(v, i, m, ram, va);
+    if f.kind != 0 { return f; }
+    let g = sp_path_only(v, i, m, ram, other, va, rng_next(r) % 3_u64);
+    if g.kind != 0 { return g; }
+    let h = sp_views(v, i, m);
+    if h.kind != 0 { return h; }
+    sp_drawn_page(v, i, rng_next(r))
+}
+
+// Runs the rules over `steps` steps of the stream of sfuzz, through
+// variant v. The second register array, memory and model array exist only
+// because the generators fill two machines.
+fn sprop_run(v: u64, seed: u64, steps: u64) -> Refusal {
+    let mut r = Rng { s: seed };
+    let mut xa: [u64; 32] = [0_u64; 32];
+    let mut xb: [u64; 32] = [0_u64; 32];
+    let mut x0: [u64; 32] = [0_u64; 32];
+    let mut ra: [u8; 32768] = [0_u8; 32768];
+    let mut rb: [u8; 32768] = [0_u8; 32768];
+    let mut oa: [u8; 64] = [0_u8; 64];
+    let mut c: [u64; 34] = [0_u64; 34];
+    let mut last: [u64; 1] = [EMU_RAM_BASE + 0x5000_u64];
+    let mut ma = emu_new_system();
+    let mut mb = emu_new();
+    let mut i: u64 = 0_u64;
+    while i < steps {
+        if i % 256_u64 == 0_u64 { sfz_tables(&mut r, &mut ra, &mut rb); }
+        if i % 32_u64 == 0_u64 { sfz_state(&mut r, &mut ma, &mut c); }
+        if i % 32_u64 == 0_u64 || ma.out_len == FZ_OUT { sfz_pcs(&mut r, &mut ma, &mut mb, &mut c); }
+        if i % 8_u64 == 4_u64 { sfz_hop(&mut r, &mut ma, &mut mb, &mut c); }
+        if i % 4_u64 == 0_u64 { fz_seed(&mut r, &mut xa, &mut xb); }
+        let w = sfz_place(&ma, &mut ra, &mut rb, sfz_word(&mut r, &mut xa, &mut xb, &mut last));
+        if i % 16_u64 == 3_u64 {
+            let f = sp_aside(v, i, &mut r, &ma, &ra, &mut rb);
+            if f.kind != 0 { return f; }
+        }
+        let p = sp_pre(&ma, &xa, &ra, w);
+        let was = ipr_copy(&ma);
+        let mut k: usize = 0;
+        while k < 32 { x0[k] = xa[k]; k = k + 1; }
+        let rc = sys_step_v(v, &mut ma, &mut xa, &mut ra, &mut oa);
+        let g = sp_judge(i, rc, &was, &ma, &xa, &x0, &ra, &p);
+        if g.kind != 0 { return g; }
+        i = i + 1_u64;
+    }
+    fz_refuse(0, steps, 0_u64, 0_u64)
+}
