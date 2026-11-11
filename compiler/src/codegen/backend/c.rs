@@ -21,9 +21,11 @@ use crate::codegen::ir::*;
 use crate::codegen::runtime;
 use crate::codegen::{GeneratedCode, OutputFormat};
 
+mod aggregates;
 mod header;
 pub(crate) mod lowlevel;
 mod parallel;
+mod places;
 mod vec_hoist;
 mod vec_hoist_emit;
 mod vec_hoist_stores;
@@ -127,6 +129,9 @@ pub struct CBackend {
     /// takes its width from a global operand before a literal one, so
     /// `TICKS + 1` with `static mut TICKS: u64` calls `bl_uadd_u64` (G6).
     global_int_types: std::collections::HashMap<String, (IntSize, bool)>,
+    /// Field names and types of each struct, for building a struct with an
+    /// array member one member at a time (see `c/aggregates.rs`).
+    struct_fields: aggregates::StructFields,
 }
 
 impl CBackend {
@@ -151,6 +156,7 @@ impl CBackend {
             current_vec_hoist: None,
             vector_free_fns: std::collections::HashSet::new(),
             plain_structs: std::collections::HashSet::new(),
+            struct_fields: aggregates::StructFields::new(),
             current_fn_flag_block_frees: std::collections::HashMap::new(),
             experimental_free_override_for_test: None,
             global_int_types: std::collections::HashMap::new(),
@@ -1271,6 +1277,7 @@ impl CBackend {
         // Function definitions
         self.vector_free_fns = vec_hoist::vector_free_functions(module);
         self.plain_structs = vec_hoist_stores::plain_structs(module);
+        self.struct_fields = aggregates::struct_fields(module);
         for func in &module.functions {
             if !func.is_declaration() {
                 self.generate_function(func)?;
@@ -2897,7 +2904,7 @@ impl CBackend {
                         write!(self.output, "{} = {};\n", dest_name, rvalue).unwrap();
                     }
                 } else if let MirRValue::Aggregate {
-                    kind: AggregateKind::Struct(_),
+                    kind: kind @ AggregateKind::Struct(_),
                     operands,
                 } = value
                 {
@@ -2914,7 +2921,9 @@ impl CBackend {
                             false
                         }
                     });
-                    if has_array_operand && operands.len() == 1 {
+                    if self.emit_struct_with_array_members(&dest_name, kind, operands, locals)? {
+                        // Built one member at a time (G26).
+                    } else if has_array_operand && operands.len() == 1 {
                         // Single array field → memcpy the array into the struct
                         let src = self.value_to_c(&operands[0], locals);
                         self.write_indent();
@@ -2985,6 +2994,9 @@ impl CBackend {
                 }
             }
             MirStmtKind::DerefAssign { ptr, value } => {
+                if self.emit_array_deref_store(*ptr, value, locals)? {
+                    return Ok(());
+                }
                 let ptr_name = self.local_name(*ptr, locals);
                 self.write_indent();
                 let rvalue = self.rvalue_to_c(value, locals)?;
@@ -2995,6 +3007,9 @@ impl CBackend {
                 field_name,
                 value,
             } => {
+                if self.emit_array_field_store(*ptr, field_name, value, locals)? {
+                    return Ok(());
+                }
                 let ptr_name = self.local_name(*ptr, locals);
                 self.write_indent();
                 let rvalue = self.rvalue_to_c(value, locals)?;
@@ -3006,6 +3021,9 @@ impl CBackend {
                 field_name,
                 value,
             } => {
+                if self.emit_array_field_store(*base, field_name, value, locals)? {
+                    return Ok(());
+                }
                 let base_name = self.local_name(*base, locals);
                 self.write_indent();
                 let rvalue = self.rvalue_to_c(value, locals)?;
@@ -3027,6 +3045,18 @@ impl CBackend {
             } => {
                 let base_str = self.value_to_c(base, locals);
                 let index_str = self.value_to_c(index, locals);
+                // An element that is itself an array is copied, not assigned.
+                if matches!(elem_ty, MirType::Array(..)) {
+                    let target = Self::slice_element_access(base, &base_str, &index_str, locals)
+                        .or_else(|| {
+                            Self::array_element_access(base, &base_str, &index_str, locals)
+                        });
+                    if let Some(target) = target {
+                        if self.emit_array_element_store(&target, elem_ty, value, locals)? {
+                            return Ok(());
+                        }
+                    }
+                }
                 self.write_indent();
                 let rvalue = self.rvalue_to_c(value, locals)?;
                 // Heap Vec elements go through the typed setter; a slice/array/
@@ -4553,7 +4583,7 @@ impl CBackend {
                         format!("&{}", self.local_name(place.local, locals))
                     }
                 } else {
-                    format!("&({})", self.place_to_c(place, locals)?)
+                    self.address_of_place(place, locals)?
                 }
             }
             MirRValue::Cast {
@@ -4594,6 +4624,7 @@ impl CBackend {
                 format!("(({}){})", t, v)
             }
             MirRValue::Aggregate { kind, operands } => {
+                self.check_aggregate_has_no_array_member(kind, operands, locals)?;
                 let vals: Vec<_> = operands
                     .iter()
                     .map(|o| self.value_to_c(o, locals))
@@ -5370,69 +5401,6 @@ impl CBackend {
                 }
             })
             .unwrap_or_else(|| format!("_{}", id.0))
-    }
-
-    /// Render a place (lvalue) as a C expression: the base local followed by
-    /// each projection. `&(place_to_c(p))` is the address of the REAL location,
-    /// which is what makes `&mut p.x`, `&mut arr[i]`, `arr[0].x = v`, and
-    /// `a.b.c = v` write through instead of into a copied temporary. Deref and
-    /// Field track the running type so a field through a pointer renders `->`.
-    fn place_to_c(&self, place: &MirPlace, locals: &[MirLocal]) -> CodegenResult<String> {
-        let mut expr = self.local_name(place.local, locals);
-        let mut cur_ty = locals.get(place.local.0 as usize).map(|l| l.ty.clone());
-        // Unwrap one collection layer to the element type (for an Index step).
-        let elem_of = |ty: &Option<MirType>| -> Option<MirType> {
-            match ty {
-                Some(MirType::Array(elem, _))
-                | Some(MirType::Slice(elem))
-                | Some(MirType::Vec(elem)) => Some((**elem).clone()),
-                Some(MirType::Ptr(inner)) => match inner.as_ref() {
-                    MirType::Array(elem, _) | MirType::Slice(elem) => Some((**elem).clone()),
-                    other => Some(other.clone()),
-                },
-                _ => None,
-            }
-        };
-        for proj in &place.projections {
-            match proj {
-                PlaceProjection::Deref => {
-                    expr = format!("(*{})", expr);
-                    cur_ty = match cur_ty {
-                        Some(MirType::Ptr(inner)) => Some(*inner),
-                        _ => None,
-                    };
-                }
-                PlaceProjection::Field(_idx, name, fty) => {
-                    let field = Self::escape_c_keyword(name);
-                    if matches!(cur_ty, Some(MirType::Ptr(_))) {
-                        expr = format!("{}->{}", expr, field);
-                    } else {
-                        expr = format!("({}).{}", expr, field);
-                    }
-                    cur_ty = Some(fty.clone());
-                }
-                PlaceProjection::Index(idx_local) => {
-                    let idx = self.local_name(*idx_local, locals);
-                    expr = format!("({})[{}]", expr, idx);
-                    cur_ty = elem_of(&cur_ty);
-                }
-                PlaceProjection::ConstantIndex { offset, from_end } => {
-                    if *from_end {
-                        return Err(CodegenError::Internal(
-                            "from-end constant index is not supported as a C place".to_string(),
-                        ));
-                    }
-                    expr = format!("({})[{}]", expr, offset);
-                    cur_ty = elem_of(&cur_ty);
-                }
-                PlaceProjection::Subslice { .. } | PlaceProjection::Downcast(_) => {
-                    return Err(CodegenError::Internal(
-                        "subslice/downcast is not supported as a C place".to_string(),
-                    ));
-                }
-            }
-        }
-        Ok(expr)
     }
 
     /// Increment 5: emit a guarded free for a flag-managed owner:
