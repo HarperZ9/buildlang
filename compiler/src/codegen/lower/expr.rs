@@ -1442,6 +1442,14 @@ impl<'ctx> MirLowerer<'ctx> {
         Ok(values::local(result))
     }
 
+    /// `expr` without the parentheses around it.
+    fn unparenthesised(expr: &ast::Expr) -> &ast::Expr {
+        match &expr.kind {
+            ExprKind::Paren(inner) => Self::unparenthesised(inner),
+            _ => expr,
+        }
+    }
+
     fn lower_unary(&mut self, op: AstUnaryOp, inner: &ast::Expr) -> CodegenResult<MirValue> {
         // Lower inner expression FIRST before borrowing builder
         let inner_val = self.lower_expr(inner)?;
@@ -1462,7 +1470,19 @@ impl<'ctx> MirLowerer<'ctx> {
                             "integer overflow in unary `-` during constant lowering".to_string(),
                         ));
                     };
-                    return Ok(MirValue::Const(MirConst::Int(negated, ty.clone())));
+                    // An unsuffixed literal one above a signed maximum was
+                    // widened; its negation is the minimum of the type meant.
+                    let unsuffixed = matches!(
+                        Self::unparenthesised(inner).kind,
+                        ExprKind::Literal(Literal::Int { suffix: None, .. })
+                    );
+                    let ty = unsuffixed
+                        .then(|| {
+                            super::limits::negated_min_type(negated, self.expected_type.as_ref())
+                        })
+                        .flatten()
+                        .unwrap_or_else(|| ty.clone());
+                    return Ok(MirValue::Const(MirConst::Int(negated, ty)));
                 }
                 MirValue::Const(MirConst::Float(v, ty)) => {
                     return Ok(MirValue::Const(MirConst::Float(-v, ty.clone())));
