@@ -1575,7 +1575,10 @@ impl<'ctx> MirLowerer<'ctx> {
     /// element, a vector swizzle, a call result), so the caller keeps its
     /// existing value-based path. This is what lets `arr[0].x = v`, `a.b.c = v`,
     /// and `&mut arr[i]` address the real location instead of a discarded copy.
-    fn lower_place(&mut self, expr: &ast::Expr) -> CodegenResult<Option<(MirPlace, MirType)>> {
+    pub(super) fn lower_place(
+        &mut self,
+        expr: &ast::Expr,
+    ) -> CodegenResult<Option<(MirPlace, MirType)>> {
         match &expr.kind {
             ExprKind::Ident(ident) => match self.var_map.get(&ident.name).copied() {
                 Some(local) => {
@@ -1646,20 +1649,26 @@ impl<'ctx> MirLowerer<'ctx> {
                     Some(p) => p,
                     None => return Ok(None),
                 };
-                // Only a fixed-layout array or slice held BY VALUE indexes in
-                // place here. A Vec routes through its runtime setter, and a
-                // slice/array behind a pointer keeps the tested IndexStore ABI;
-                // both return None so the caller's existing path handles them.
+                // A fixed array or a slice indexes in place, held by value or
+                // behind a reference (`xs[i].y = v` with `xs: &mut [S]` used
+                // to store into a copy of the element). The backend checks
+                // the index against the length the base carries. A Vec routes
+                // through its runtime setter and returns None.
                 let elem_ty = match &base_ty {
                     MirType::Array(elem, _) | MirType::Slice(elem) => (**elem).clone(),
+                    MirType::Ptr(inner) => match inner.as_ref() {
+                        MirType::Array(elem, _) | MirType::Slice(elem) => (**elem).clone(),
+                        _ => return Ok(None),
+                    },
                     _ => return Ok(None),
                 };
                 let idx_val = self.lower_expr(index)?;
                 let idx_local = match idx_val {
                     MirValue::Local(id) => id,
                     other => {
+                        let idx_ty = self.type_of_value(&other);
                         let builder = self.current_fn.as_mut().unwrap();
-                        let t = builder.create_local(MirType::i32());
+                        let t = builder.create_local(idx_ty);
                         builder.assign(t, MirRValue::Use(other));
                         t
                     }
@@ -1689,7 +1698,7 @@ impl<'ctx> MirLowerer<'ctx> {
     /// apply the operator, and return the combined value. The read happens after
     /// `val` is already lowered, matching the evaluation order every other
     /// assignment arm uses.
-    fn compound_store_value(
+    pub(super) fn compound_store_value(
         &mut self,
         op: ast::AssignOp,
         target: &ast::Expr,
@@ -1724,7 +1733,7 @@ impl<'ctx> MirLowerer<'ctx> {
     /// identity `*(&place) = v` is exactly `place = v`, and it reuses the
     /// AddressOf + DerefAssign machinery every backend already lowers, so no new
     /// statement kind is needed for projected stores.
-    fn store_through_place(
+    pub(super) fn store_through_place(
         &mut self,
         place: MirPlace,
         place_ty: MirType,
@@ -1766,6 +1775,14 @@ impl<'ctx> MirLowerer<'ctx> {
                     cur = expr;
                 }
                 ExprKind::Paren(inner) => cur = inner,
+                // An index into a fixed array inside the element is one more
+                // projection (`v[i].w[j] = e`), like a field.
+                ExprKind::Index { expr, .. }
+                    if matches!(self.infer_expr_type(expr), MirType::Array(..)) =>
+                {
+                    fields += 1;
+                    cur = expr;
+                }
                 ExprKind::Index { .. } if fields > 0 => break cur,
                 _ => return Ok(None),
             }
@@ -1866,6 +1883,10 @@ impl<'ctx> MirLowerer<'ctx> {
             ExprKind::Paren(e) => {
                 ExprKind::Paren(Box::new(Self::replace_expr_node(e, target, with)))
             }
+            ExprKind::Index { expr: e, index } => ExprKind::Index {
+                expr: Box::new(Self::replace_expr_node(e, target, with)),
+                index: index.clone(),
+            },
             other => other.clone(),
         };
         ast::Expr::new(kind, expr.span)
@@ -2022,12 +2043,13 @@ impl<'ctx> MirLowerer<'ctx> {
                     temp
                 }
             };
-            let builder = self.current_fn.as_mut().unwrap();
-            if obj_ty.is_pointer() {
-                builder.push_field_deref_assign(obj_local, field.name.clone(), MirRValue::Use(val));
-            } else {
-                builder.push_field_assign(obj_local, field.name.clone(), MirRValue::Use(val));
+            // A base held by value here is a copy the lowering just made
+            // (a global struct, a call result): the store would vanish.
+            if !obj_ty.is_pointer() {
+                return Err(Self::unaddressable_field(obj.span));
             }
+            let builder = self.current_fn.as_mut().unwrap();
+            builder.push_field_deref_assign(obj_local, field.name.clone(), MirRValue::Use(val));
             return Ok(values::unit());
         }
 
@@ -2097,8 +2119,17 @@ impl<'ctx> MirLowerer<'ctx> {
         // write fell through every target arm and was silently dropped (the
         // element kept its old value). Dispatches to a typed runtime setter.
         if let ExprKind::Index { expr: arr, index } = &target.kind {
+            // The array is a field or an element: store where it lives (G27).
+            if let Some(done) = self.store_into_projected_array(op, target, arr, &val)? {
+                return Ok(done);
+            }
             let mut recv_val = self.lower_expr(arr)?;
             let mut recv_ty = self.type_of_value(&recv_val);
+            // Any other array that is not a plain name was just copied into
+            // a temporary; a store into it would vanish without a diagnostic.
+            if !super::array_places::is_named(arr) && matches!(recv_ty, MirType::Array(..)) {
+                return Err(Self::unaddressable_array(arr.span));
+            }
             // `v: &mut Vec<T>`: load the vector handle, then store through it.
             // Without this `v[i] = x` on a borrowed vector was dropped.
             if let MirType::Ptr(inner) = &recv_ty {
@@ -2333,10 +2364,20 @@ impl<'ctx> MirLowerer<'ctx> {
             return Ok(None);
         };
         let ExprKind::Ref { expr: inner, .. } = &arg.kind else {
-            return Ok(None);
+            // A reference the function already holds (`v: &Vec<T>`).
+            return self.forwarded_ref_as_slice(arg, elem, target.as_ref());
         };
-        // A vector may also be a struct field (`&bag.items`); an array is only
-        // taken by name, as before.
+        // `&*v` and `&mut *v` reborrow what `v` points at.
+        if let ExprKind::Deref(referent) = &inner.kind {
+            if let Some(fat) = self.forwarded_ref_as_slice(referent, elem, target.as_ref())? {
+                return Ok(Some(fat));
+            }
+        }
+        // An array in a field or an element is borrowed where it lives.
+        if let Some(fat) = self.projected_array_ref_as_slice(inner, elem, target.as_ref())? {
+            return Ok(Some(fat));
+        }
+        // A vector may also be a struct field (`&bag.items`).
         let named = matches!(inner.kind, ExprKind::Ident(_) | ExprKind::Path(_));
         if !named && !matches!(inner.kind, ExprKind::Field { .. }) {
             return Ok(None);
@@ -2396,10 +2437,13 @@ impl<'ctx> MirLowerer<'ctx> {
     /// array local.
     fn is_slice_source_ref(&self, expr: &ast::Expr) -> bool {
         let ExprKind::Ref { expr: inner, .. } = &expr.kind else {
-            return false;
+            return self.is_collection_ref(expr);
         };
         let ExprKind::Ident(ident) = &inner.kind else {
-            return false;
+            return matches!(
+                self.infer_expr_type(inner),
+                MirType::Vec(_) | MirType::Array(..)
+            );
         };
         self.var_map.get(&ident.name).is_some_and(|&id| {
             matches!(
@@ -2414,7 +2458,7 @@ impl<'ctx> MirLowerer<'ctx> {
     /// pass its address. Before this the vector handle itself was passed and
     /// the callee read it as a slice. The view is taken at the call: it holds
     /// the buffer the vector has at that moment.
-    fn vec_ref_as_slice(
+    pub(super) fn vec_ref_as_slice(
         &mut self,
         vec: MirValue,
         have: &MirType,
@@ -3876,7 +3920,7 @@ impl<'ctx> MirLowerer<'ctx> {
     /// out i32 defaults at result-merge sites (match arms, etc.). Returns
     /// MirType::i32() as the "could not infer" sentinel, matching the
     /// surrounding lowering conventions.
-    fn infer_expr_type(&self, expr: &ast::Expr) -> MirType {
+    pub(super) fn infer_expr_type(&self, expr: &ast::Expr) -> MirType {
         match &expr.kind {
             ExprKind::Literal(_) => self.infer_single_arg_type(expr),
             ExprKind::Paren(inner) => self.infer_expr_type(inner),

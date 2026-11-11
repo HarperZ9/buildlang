@@ -1,0 +1,555 @@
+// Written by gen_matrix.py; do not edit. Expected output: literals.expected
+struct L0 { w: [u8; 1], a: u8, z: i64 }
+fn lit0() ~ Console { let s = L0 { z: (-9217047861513573822_i64), a: 205_u8, w: [255_u8] }; println!("L0 {} {} {}", s.a, s.w[0], s.z); }
+struct L1 { a: i64, w: [u8; 1], z: u16 }
+fn lit1() ~ Console { let s = L1 { a: (-9215048996885899012_i64), w: [255_u8], z: 60440_u16 }; println!("L1 {} {} {}", s.a, s.w[0], s.z); }
+struct L2 { a: u16, z: i32, w: [u8; 1] }
+fn lit2() ~ Console { let s = L2 { a: 55877_u16, z: 658400467_i32, w: [255_u8] }; println!("L2 {} {} {}", s.a, s.w[0], s.z); }
+struct L3 { w: [u8; 2], a: i32, z: u8 }
+fn lit3() ~ Console { let s = L3 { w: [255_u8, 0_u8], a: (-230544072_i32), z: 3_u8 }; println!("L3 {} {} {} {}", s.a, s.w[0], s.w[1], s.z); }
+struct L4 { a: u8, w: [u8; 2], z: i64 }
+fn lit4() ~ Console { let s = L4 { a: 244_u8, w: [255_u8, 0_u8], z: (-9218803767040740964_i64) }; println!("L4 {} {} {} {}", s.a, s.w[0], s.w[1], s.z); }
+struct L5 { a: i64, z: u16, w: [u8; 2] }
+fn lit5() ~ Console { let s = L5 { w: [255_u8, 0_u8], z: 6179_u16, a: (-9218795023903841320_i64) }; println!("L5 {} {} {} {}", s.a, s.w[0], s.w[1], s.z); }
+struct L6 { w: [u8; 3], a: u16, z: i32 }
+fn lit6() ~ Console { let s = L6 { w: [255_u8, 0_u8, 88_u8], a: 35968_u16, z: (-1826779914_i32) }; println!("L6 {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.z); }
+struct L7 { a: i32, w: [u8; 3], z: u8 }
+fn lit7() ~ Console { let s = L7 { a: (-1439751112_i32), w: [255_u8, 0_u8, 119_u8], z: 108_u8 }; println!("L7 {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.z); }
+struct L8 { a: u8, z: i64, w: [u8; 3] }
+fn lit8() ~ Console { let s = L8 { a: 241_u8, z: (-9215802496800921450_i64), w: [255_u8, 0_u8, 227_u8] }; println!("L8 {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.z); }
+struct L9 { w: [u8; 5], a: i64, z: u16 }
+fn lit9() ~ Console { let s = L9 { w: [255_u8, 0_u8, 67_u8, 223_u8, 238_u8], a: (-9219130586197635037_i64), z: 16754_u16 }; println!("L9 {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.z); }
+struct L10 { a: u16, w: [u8; 5], z: i32 }
+fn lit10() ~ Console { let s = L10 { z: 1448510161_i32, w: [255_u8, 0_u8, 129_u8, 190_u8, 214_u8], a: 10549_u16 }; println!("L10 {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.z); }
+struct L11 { a: i32, z: u8, w: [u8; 5] }
+fn lit11() ~ Console { let s = L11 { a: (-1125338275_i32), z: 28_u8, w: [255_u8, 0_u8, 101_u8, 227_u8, 76_u8] }; println!("L11 {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.z); }
+struct L12 { w: [u8; 8], a: u8, z: i64 }
+fn lit12() ~ Console { let s = L12 { w: [255_u8, 0_u8, 201_u8, 67_u8, 45_u8, 242_u8, 45_u8, 96_u8], a: 225_u8, z: (-9220831172208341777_i64) }; println!("L12 {} {} {} {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.w[5], s.w[6], s.w[7], s.z); }
+struct L13 { a: i64, w: [u8; 8], z: u16 }
+fn lit13() ~ Console { let s = L13 { a: (-9221826611954840016_i64), w: [255_u8, 0_u8, 114_u8, 50_u8, 117_u8, 33_u8, 81_u8, 177_u8], z: 3663_u16 }; println!("L13 {} {} {} {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.w[5], s.w[6], s.w[7], s.z); }
+struct L14 { a: u16, z: i32, w: [u8; 8] }
+fn lit14() ~ Console { let s = L14 { a: 7496_u16, z: 7856402_i32, w: [255_u8, 0_u8, 151_u8, 86_u8, 13_u8, 234_u8, 128_u8, 3_u8] }; println!("L14 {} {} {} {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.w[5], s.w[6], s.w[7], s.z); }
+struct L15 { w: [i8; 1], a: i32, z: u8 }
+fn lit15() ~ Console { let s = L15 { z: 36_u8, a: (-64214844_i32), w: [127_i8] }; println!("L15 {} {} {}", s.a, s.w[0], s.z); }
+struct L16 { a: u8, w: [i8; 1], z: i64 }
+fn lit16() ~ Console { let s = L16 { a: 56_u8, w: [127_i8], z: (-9214557065311706673_i64) }; println!("L16 {} {} {}", s.a, s.w[0], s.z); }
+struct L17 { a: i64, z: u16, w: [i8; 1] }
+fn lit17() ~ Console { let s = L17 { a: (-9220239545926059663_i64), z: 16959_u16, w: [127_i8] }; println!("L17 {} {} {}", s.a, s.w[0], s.z); }
+struct L18 { w: [i8; 2], a: u16, z: i32 }
+fn lit18() ~ Console { let s = L18 { w: [127_i8, (-128_i8)], a: 10029_u16, z: 1787195699_i32 }; println!("L18 {} {} {} {}", s.a, s.w[0], s.w[1], s.z); }
+struct L19 { a: i32, w: [i8; 2], z: u8 }
+fn lit19() ~ Console { let s = L19 { a: (-1295855714_i32), w: [127_i8, (-128_i8)], z: 109_u8 }; println!("L19 {} {} {} {}", s.a, s.w[0], s.w[1], s.z); }
+struct L20 { a: u8, z: i64, w: [i8; 2] }
+fn lit20() ~ Console { let s = L20 { w: [127_i8, (-128_i8)], z: (-9222258696912725052_i64), a: 150_u8 }; println!("L20 {} {} {} {}", s.a, s.w[0], s.w[1], s.z); }
+struct L21 { w: [i8; 3], a: i64, z: u16 }
+fn lit21() ~ Console { let s = L21 { w: [127_i8, (-128_i8), 24_i8], a: (-9222215874671855507_i64), z: 55624_u16 }; println!("L21 {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.z); }
+struct L22 { a: u16, w: [i8; 3], z: i32 }
+fn lit22() ~ Console { let s = L22 { a: 15087_u16, w: [127_i8, (-128_i8), (-50_i8)], z: 153450952_i32 }; println!("L22 {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.z); }
+struct L23 { a: i32, z: u8, w: [i8; 3] }
+fn lit23() ~ Console { let s = L23 { a: 248590415_i32, z: 137_u8, w: [127_i8, (-128_i8), 26_i8] }; println!("L23 {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.z); }
+struct L24 { w: [i8; 5], a: u8, z: i64 }
+fn lit24() ~ Console { let s = L24 { w: [127_i8, (-128_i8), (-18_i8), (-66_i8), 2_i8], a: 128_u8, z: (-9215574648892307326_i64) }; println!("L24 {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.z); }
+struct L25 { a: i64, w: [i8; 5], z: u16 }
+fn lit25() ~ Console { let s = L25 { z: 5900_u16, w: [127_i8, (-128_i8), (-113_i8), (-31_i8), 103_i8], a: (-9222639578030956602_i64) }; println!("L25 {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.z); }
+struct L26 { a: u16, z: i32, w: [i8; 5] }
+fn lit26() ~ Console { let s = L26 { a: 15313_u16, z: 1483116966_i32, w: [127_i8, (-128_i8), (-24_i8), (-49_i8), 3_i8] }; println!("L26 {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.z); }
+struct L27 { w: [i8; 8], a: i32, z: u8 }
+fn lit27() ~ Console { let s = L27 { w: [127_i8, (-128_i8), 120_i8, 5_i8, (-92_i8), 104_i8, 124_i8, (-39_i8)], a: (-1247275980_i32), z: 171_u8 }; println!("L27 {} {} {} {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.w[5], s.w[6], s.w[7], s.z); }
+struct L28 { a: u8, w: [i8; 8], z: i64 }
+fn lit28() ~ Console { let s = L28 { a: 127_u8, w: [127_i8, (-128_i8), 116_i8, (-90_i8), 111_i8, 28_i8, 76_i8, 106_i8], z: (-9220283875375400742_i64) }; println!("L28 {} {} {} {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.w[5], s.w[6], s.w[7], s.z); }
+struct L29 { a: i64, z: u16, w: [i8; 8] }
+fn lit29() ~ Console { let s = L29 { a: (-9219856194610757726_i64), z: 45903_u16, w: [127_i8, (-128_i8), 45_i8, (-12_i8), (-57_i8), (-7_i8), 60_i8, (-9_i8)] }; println!("L29 {} {} {} {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.w[5], s.w[6], s.w[7], s.z); }
+struct L30 { w: [u16; 1], a: u16, z: i32 }
+fn lit30() ~ Console { let s = L30 { z: 641316245_i32, a: 34362_u16, w: [65535_u16] }; println!("L30 {} {} {}", s.a, s.w[0], s.z); }
+struct L31 { a: i32, w: [u16; 1], z: u8 }
+fn lit31() ~ Console { let s = L31 { a: (-1705281983_i32), w: [65535_u16], z: 122_u8 }; println!("L31 {} {} {}", s.a, s.w[0], s.z); }
+struct L32 { a: u8, z: i64, w: [u16; 1] }
+fn lit32() ~ Console { let s = L32 { a: 168_u8, z: (-9220462460145330637_i64), w: [65535_u16] }; println!("L32 {} {} {}", s.a, s.w[0], s.z); }
+struct L33 { w: [u16; 2], a: i64, z: u16 }
+fn lit33() ~ Console { let s = L33 { w: [65535_u16, 0_u16], a: (-9218982521484610766_i64), z: 33996_u16 }; println!("L33 {} {} {} {}", s.a, s.w[0], s.w[1], s.z); }
+struct L34 { a: u16, w: [u16; 2], z: i32 }
+fn lit34() ~ Console { let s = L34 { a: 58590_u16, w: [65535_u16, 0_u16], z: (-314733239_i32) }; println!("L34 {} {} {} {}", s.a, s.w[0], s.w[1], s.z); }
+struct L35 { a: i32, z: u8, w: [u16; 2] }
+fn lit35() ~ Console { let s = L35 { w: [65535_u16, 0_u16], z: 159_u8, a: 1228986624_i32 }; println!("L35 {} {} {} {}", s.a, s.w[0], s.w[1], s.z); }
+struct L36 { w: [u16; 3], a: u8, z: i64 }
+fn lit36() ~ Console { let s = L36 { w: [65535_u16, 0_u16, 1079_u16], a: 144_u8, z: (-9215809234948702121_i64) }; println!("L36 {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.z); }
+struct L37 { a: i64, w: [u16; 3], z: u16 }
+fn lit37() ~ Console { let s = L37 { a: (-9217644796967713918_i64), w: [65535_u16, 0_u16, 3044_u16], z: 37562_u16 }; println!("L37 {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.z); }
+struct L38 { a: u16, z: i32, w: [u16; 3] }
+fn lit38() ~ Console { let s = L38 { a: 2214_u16, z: (-311649706_i32), w: [65535_u16, 0_u16, 30845_u16] }; println!("L38 {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.z); }
+struct L39 { w: [u16; 5], a: i32, z: u8 }
+fn lit39() ~ Console { let s = L39 { w: [65535_u16, 0_u16, 32718_u16, 26617_u16, 48299_u16], a: 666507855_i32, z: 51_u8 }; println!("L39 {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.z); }
+struct L40 { a: u8, w: [u16; 5], z: i64 }
+fn lit40() ~ Console { let s = L40 { z: (-9215058947426982129_i64), w: [65535_u16, 0_u16, 25229_u16, 46207_u16, 23491_u16], a: 133_u8 }; println!("L40 {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.z); }
+struct L41 { a: i64, z: u16, w: [u16; 5] }
+fn lit41() ~ Console { let s = L41 { a: (-9218644589182243725_i64), z: 12298_u16, w: [65535_u16, 0_u16, 9576_u16, 38065_u16, 43054_u16] }; println!("L41 {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.z); }
+struct L42 { w: [u16; 8], a: u16, z: i32 }
+fn lit42() ~ Console { let s = L42 { w: [65535_u16, 0_u16, 54165_u16, 9502_u16, 5908_u16, 59455_u16, 34702_u16, 28324_u16], a: 35706_u16, z: 689237503_i32 }; println!("L42 {} {} {} {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.w[5], s.w[6], s.w[7], s.z); }
+struct L43 { a: i32, w: [u16; 8], z: u8 }
+fn lit43() ~ Console { let s = L43 { a: (-988111622_i32), w: [65535_u16, 0_u16, 32169_u16, 33430_u16, 49976_u16, 46509_u16, 4866_u16, 2054_u16], z: 117_u8 }; println!("L43 {} {} {} {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.w[5], s.w[6], s.w[7], s.z); }
+struct L44 { a: u8, z: i64, w: [u16; 8] }
+fn lit44() ~ Console { let s = L44 { a: 229_u8, z: (-9216287623277406825_i64), w: [65535_u16, 0_u16, 15016_u16, 42798_u16, 933_u16, 49482_u16, 18721_u16, 17815_u16] }; println!("L44 {} {} {} {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.w[5], s.w[6], s.w[7], s.z); }
+struct L45 { w: [i16; 1], a: i64, z: u16 }
+fn lit45() ~ Console { let s = L45 { z: 5289_u16, a: (-9219791873647929355_i64), w: [32767_i16] }; println!("L45 {} {} {}", s.a, s.w[0], s.z); }
+struct L46 { a: u16, w: [i16; 1], z: i32 }
+fn lit46() ~ Console { let s = L46 { a: 59070_u16, w: [32767_i16], z: 147674123_i32 }; println!("L46 {} {} {}", s.a, s.w[0], s.z); }
+struct L47 { a: i32, z: u8, w: [i16; 1] }
+fn lit47() ~ Console { let s = L47 { a: 1432827809_i32, z: 168_u8, w: [32767_i16] }; println!("L47 {} {} {}", s.a, s.w[0], s.z); }
+struct L48 { w: [i16; 2], a: u8, z: i64 }
+fn lit48() ~ Console { let s = L48 { w: [32767_i16, (-32768_i16)], a: 36_u8, z: (-9216532294164439123_i64) }; println!("L48 {} {} {} {}", s.a, s.w[0], s.w[1], s.z); }
+struct L49 { a: i64, w: [i16; 2], z: u16 }
+fn lit49() ~ Console { let s = L49 { a: (-9219424130250634515_i64), w: [32767_i16, (-32768_i16)], z: 55433_u16 }; println!("L49 {} {} {} {}", s.a, s.w[0], s.w[1], s.z); }
+struct L50 { a: u16, z: i32, w: [i16; 2] }
+fn lit50() ~ Console { let s = L50 { w: [32767_i16, (-32768_i16)], z: 647232249_i32, a: 61474_u16 }; println!("L50 {} {} {} {}", s.a, s.w[0], s.w[1], s.z); }
+struct L51 { w: [i16; 3], a: i32, z: u8 }
+fn lit51() ~ Console { let s = L51 { w: [32767_i16, (-32768_i16), 14738_i16], a: 1028504038_i32, z: 232_u8 }; println!("L51 {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.z); }
+struct L52 { a: u8, w: [i16; 3], z: i64 }
+fn lit52() ~ Console { let s = L52 { a: 231_u8, w: [32767_i16, (-32768_i16), (-13934_i16)], z: (-9215999858189696221_i64) }; println!("L52 {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.z); }
+struct L53 { a: i64, z: u16, w: [i16; 3] }
+fn lit53() ~ Console { let s = L53 { a: (-9217330260112142014_i64), z: 50379_u16, w: [32767_i16, (-32768_i16), 20023_i16] }; println!("L53 {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.z); }
+struct L54 { w: [i16; 5], a: u16, z: i32 }
+fn lit54() ~ Console { let s = L54 { w: [32767_i16, (-32768_i16), 23129_i16, (-3468_i16), (-5618_i16)], a: 6426_u16, z: (-1161038649_i32) }; println!("L54 {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.z); }
+struct L55 { a: i32, w: [i16; 5], z: u8 }
+fn lit55() ~ Console { let s = L55 { z: 28_u8, w: [32767_i16, (-32768_i16), 5304_i16, 31955_i16, 12044_i16], a: 1075068864_i32 }; println!("L55 {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.z); }
+struct L56 { a: u8, z: i64, w: [i16; 5] }
+fn lit56() ~ Console { let s = L56 { a: 251_u8, z: (-9220126873327995319_i64), w: [32767_i16, (-32768_i16), 28139_i16, 29485_i16, (-14444_i16)] }; println!("L56 {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.z); }
+struct L57 { w: [i16; 8], a: i64, z: u16 }
+fn lit57() ~ Console { let s = L57 { w: [32767_i16, (-32768_i16), (-29955_i16), (-27043_i16), 14699_i16, (-18544_i16), 25727_i16, (-12389_i16)], a: (-9219717963277856046_i64), z: 63347_u16 }; println!("L57 {} {} {} {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.w[5], s.w[6], s.w[7], s.z); }
+struct L58 { a: u16, w: [i16; 8], z: i32 }
+fn lit58() ~ Console { let s = L58 { a: 26370_u16, w: [32767_i16, (-32768_i16), 27959_i16, (-29638_i16), 5025_i16, 30628_i16, (-10566_i16), 2564_i16], z: 1214883779_i32 }; println!("L58 {} {} {} {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.w[5], s.w[6], s.w[7], s.z); }
+struct L59 { a: i32, z: u8, w: [i16; 8] }
+fn lit59() ~ Console { let s = L59 { a: 1779564756_i32, z: 135_u8, w: [32767_i16, (-32768_i16), (-21830_i16), (-24623_i16), 28001_i16, (-5114_i16), (-15347_i16), (-9406_i16)] }; println!("L59 {} {} {} {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.w[5], s.w[6], s.w[7], s.z); }
+struct L60 { w: [u32; 1], a: u8, z: i64 }
+fn lit60() ~ Console { let s = L60 { z: (-9219671136378951243_i64), a: 45_u8, w: [4294967295_u32] }; println!("L60 {} {} {}", s.a, s.w[0], s.z); }
+struct L61 { a: i64, w: [u32; 1], z: u16 }
+fn lit61() ~ Console { let s = L61 { a: (-9222412911595424440_i64), w: [4294967295_u32], z: 29146_u16 }; println!("L61 {} {} {}", s.a, s.w[0], s.z); }
+struct L62 { a: u16, z: i32, w: [u32; 1] }
+fn lit62() ~ Console { let s = L62 { a: 3857_u16, z: 1726207577_i32, w: [4294967295_u32] }; println!("L62 {} {} {}", s.a, s.w[0], s.z); }
+struct L63 { w: [u32; 2], a: i32, z: u8 }
+fn lit63() ~ Console { let s = L63 { w: [4294967295_u32, 0_u32], a: 1615129957_i32, z: 40_u8 }; println!("L63 {} {} {} {}", s.a, s.w[0], s.w[1], s.z); }
+struct L64 { a: u8, w: [u32; 2], z: i64 }
+fn lit64() ~ Console { let s = L64 { a: 7_u8, w: [4294967295_u32, 0_u32], z: (-9222207335772218183_i64) }; println!("L64 {} {} {} {}", s.a, s.w[0], s.w[1], s.z); }
+struct L65 { a: i64, z: u16, w: [u32; 2] }
+fn lit65() ~ Console { let s = L65 { w: [4294967295_u32, 0_u32], z: 38352_u16, a: (-9219555462807385739_i64) }; println!("L65 {} {} {} {}", s.a, s.w[0], s.w[1], s.z); }
+struct L66 { w: [u32; 3], a: u16, z: i32 }
+fn lit66() ~ Console { let s = L66 { w: [4294967295_u32, 0_u32, 3599947173_u32], a: 19622_u16, z: 1161842754_i32 }; println!("L66 {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.z); }
+struct L67 { a: i32, w: [u32; 3], z: u8 }
+fn lit67() ~ Console { let s = L67 { a: (-2140515797_i32), w: [4294967295_u32, 0_u32, 4002781075_u32], z: 27_u8 }; println!("L67 {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.z); }
+struct L68 { a: u8, z: i64, w: [u32; 3] }
+fn lit68() ~ Console { let s = L68 { a: 235_u8, z: (-9223207107057053491_i64), w: [4294967295_u32, 0_u32, 3093808515_u32] }; println!("L68 {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.z); }
+struct L69 { w: [u32; 5], a: i64, z: u16 }
+fn lit69() ~ Console { let s = L69 { w: [4294967295_u32, 0_u32, 1276115080_u32, 4149387020_u32, 2668860766_u32], a: (-9214566584433684295_i64), z: 10496_u16 }; println!("L69 {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.z); }
+struct L70 { a: u16, w: [u32; 5], z: i32 }
+fn lit70() ~ Console { let s = L70 { z: (-1830925233_i32), w: [4294967295_u32, 0_u32, 4169381348_u32, 2511365197_u32, 3828994427_u32], a: 57593_u16 }; println!("L70 {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.z); }
+struct L71 { a: i32, z: u8, w: [u32; 5] }
+fn lit71() ~ Console { let s = L71 { a: (-1692415464_i32), z: 132_u8, w: [4294967295_u32, 0_u32, 263565305_u32, 725494321_u32, 1815151618_u32] }; println!("L71 {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.z); }
+struct L72 { w: [u32; 8], a: u8, z: i64 }
+fn lit72() ~ Console { let s = L72 { w: [4294967295_u32, 0_u32, 3106895162_u32, 3303107035_u32, 331103804_u32, 2805066349_u32, 1956568982_u32, 3955497551_u32], a: 153_u8, z: (-9215663069945578392_i64) }; println!("L72 {} {} {} {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.w[5], s.w[6], s.w[7], s.z); }
+struct L73 { a: i64, w: [u32; 8], z: u16 }
+fn lit73() ~ Console { let s = L73 { a: (-9219836590270969390_i64), w: [4294967295_u32, 0_u32, 1906817241_u32, 3667015377_u32, 2515697321_u32, 1944503553_u32, 1088730599_u32, 895732705_u32], z: 49305_u16 }; println!("L73 {} {} {} {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.w[5], s.w[6], s.w[7], s.z); }
+struct L74 { a: u16, z: i32, w: [u32; 8] }
+fn lit74() ~ Console { let s = L74 { a: 48987_u16, z: (-1865669390_i32), w: [4294967295_u32, 0_u32, 391642843_u32, 4230959989_u32, 629575108_u32, 9168018_u32, 1921753842_u32, 3106568634_u32] }; println!("L74 {} {} {} {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.w[5], s.w[6], s.w[7], s.z); }
+struct L75 { w: [i32; 1], a: i32, z: u8 }
+fn lit75() ~ Console { let s = L75 { z: 143_u8, a: (-109678561_i32), w: [2147483647_i32] }; println!("L75 {} {} {}", s.a, s.w[0], s.z); }
+struct L76 { a: u8, w: [i32; 1], z: i64 }
+fn lit76() ~ Console { let s = L76 { a: 22_u8, w: [2147483647_i32], z: (-9221040506673005725_i64) }; println!("L76 {} {} {}", s.a, s.w[0], s.z); }
+struct L77 { a: i64, z: u16, w: [i32; 1] }
+fn lit77() ~ Console { let s = L77 { a: (-9221532446372086303_i64), z: 50172_u16, w: [2147483647_i32] }; println!("L77 {} {} {}", s.a, s.w[0], s.z); }
+struct L78 { w: [i32; 2], a: u16, z: i32 }
+fn lit78() ~ Console { let s = L78 { w: [2147483647_i32, (-2147483648_i32)], a: 5044_u16, z: 805547340_i32 }; println!("L78 {} {} {} {}", s.a, s.w[0], s.w[1], s.z); }
+struct L79 { a: i32, w: [i32; 2], z: u8 }
+fn lit79() ~ Console { let s = L79 { a: 334781052_i32, w: [2147483647_i32, (-2147483648_i32)], z: 12_u8 }; println!("L79 {} {} {} {}", s.a, s.w[0], s.w[1], s.z); }
+struct L80 { a: u8, z: i64, w: [i32; 2] }
+fn lit80() ~ Console { let s = L80 { w: [2147483647_i32, (-2147483648_i32)], z: (-9214434005132522849_i64), a: 198_u8 }; println!("L80 {} {} {} {}", s.a, s.w[0], s.w[1], s.z); }
+struct L81 { w: [i32; 3], a: i64, z: u16 }
+fn lit81() ~ Console { let s = L81 { w: [2147483647_i32, (-2147483648_i32), 1795243946_i32], a: (-9216015188300964189_i64), z: 42605_u16 }; println!("L81 {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.z); }
+struct L82 { a: u16, w: [i32; 3], z: i32 }
+fn lit82() ~ Console { let s = L82 { a: 10818_u16, w: [2147483647_i32, (-2147483648_i32), 988432427_i32], z: (-410757570_i32) }; println!("L82 {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.z); }
+struct L83 { a: i32, z: u8, w: [i32; 3] }
+fn lit83() ~ Console { let s = L83 { a: (-798876551_i32), z: 123_u8, w: [2147483647_i32, (-2147483648_i32), (-1466118203_i32)] }; println!("L83 {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.z); }
+struct L84 { w: [i32; 5], a: u8, z: i64 }
+fn lit84() ~ Console { let s = L84 { w: [2147483647_i32, (-2147483648_i32), (-1453404769_i32), (-533538787_i32), 1262281705_i32], a: 151_u8, z: (-9216202115209040207_i64) }; println!("L84 {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.z); }
+struct L85 { a: i64, w: [i32; 5], z: u16 }
+fn lit85() ~ Console { let s = L85 { z: 11139_u16, w: [2147483647_i32, (-2147483648_i32), 530134881_i32, (-862757223_i32), (-1549453862_i32)], a: (-9219611359591485929_i64) }; println!("L85 {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.z); }
+struct L86 { a: u16, z: i32, w: [i32; 5] }
+fn lit86() ~ Console { let s = L86 { a: 50769_u16, z: (-1337221022_i32), w: [2147483647_i32, (-2147483648_i32), 1144513828_i32, 126351152_i32, (-2090831848_i32)] }; println!("L86 {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.z); }
+struct L87 { w: [i32; 8], a: i32, z: u8 }
+fn lit87() ~ Console { let s = L87 { w: [2147483647_i32, (-2147483648_i32), 1016336412_i32, (-951358418_i32), (-836183612_i32), (-731674127_i32), 293995311_i32, 659633217_i32], a: 2087860802_i32, z: 251_u8 }; println!("L87 {} {} {} {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.w[5], s.w[6], s.w[7], s.z); }
+struct L88 { a: u8, w: [i32; 8], z: i64 }
+fn lit88() ~ Console { let s = L88 { a: 201_u8, w: [2147483647_i32, (-2147483648_i32), 1456804671_i32, 1880695_i32, (-2097920049_i32), 1726171537_i32, (-319096285_i32), 588090365_i32], z: (-9217019700854785068_i64) }; println!("L88 {} {} {} {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.w[5], s.w[6], s.w[7], s.z); }
+struct L89 { a: i64, z: u16, w: [i32; 8] }
+fn lit89() ~ Console { let s = L89 { a: (-9216255027765776313_i64), z: 48768_u16, w: [2147483647_i32, (-2147483648_i32), (-378144615_i32), 653748476_i32, 160242870_i32, (-2302466_i32), 1571212173_i32, 925689414_i32] }; println!("L89 {} {} {} {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.w[5], s.w[6], s.w[7], s.z); }
+struct L90 { w: [u64; 1], a: u16, z: i32 }
+fn lit90() ~ Console { let s = L90 { z: 939118069_i32, a: 34640_u16, w: [18446744073709551615_u64] }; println!("L90 {} {} {}", s.a, s.w[0], s.z); }
+struct L91 { a: i32, w: [u64; 1], z: u8 }
+fn lit91() ~ Console { let s = L91 { a: 869679342_i32, w: [18446744073709551615_u64], z: 44_u8 }; println!("L91 {} {} {}", s.a, s.w[0], s.z); }
+struct L92 { a: u8, z: i64, w: [u64; 1] }
+fn lit92() ~ Console { let s = L92 { a: 11_u8, z: (-9215066203489125147_i64), w: [18446744073709551615_u64] }; println!("L92 {} {} {}", s.a, s.w[0], s.z); }
+struct L93 { w: [u64; 2], a: i64, z: u16 }
+fn lit93() ~ Console { let s = L93 { w: [18446744073709551615_u64, 0_u64], a: (-9216806482576882063_i64), z: 29719_u16 }; println!("L93 {} {} {} {}", s.a, s.w[0], s.w[1], s.z); }
+struct L94 { a: u16, w: [u64; 2], z: i32 }
+fn lit94() ~ Console { let s = L94 { a: 61467_u16, w: [18446744073709551615_u64, 0_u64], z: (-1451320688_i32) }; println!("L94 {} {} {} {}", s.a, s.w[0], s.w[1], s.z); }
+struct L95 { a: i32, z: u8, w: [u64; 2] }
+fn lit95() ~ Console { let s = L95 { w: [18446744073709551615_u64, 0_u64], z: 45_u8, a: (-387743005_i32) }; println!("L95 {} {} {} {}", s.a, s.w[0], s.w[1], s.z); }
+struct L96 { w: [u64; 3], a: u8, z: i64 }
+fn lit96() ~ Console { let s = L96 { w: [18446744073709551615_u64, 0_u64, 3952402325319104_u64], a: 92_u8, z: (-9221600001616077264_i64) }; println!("L96 {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.z); }
+struct L97 { a: i64, w: [u64; 3], z: u16 }
+fn lit97() ~ Console { let s = L97 { a: (-9218805005842294047_i64), w: [18446744073709551615_u64, 0_u64, 4992378068514987_u64], z: 50852_u16 }; println!("L97 {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.z); }
+struct L98 { a: u16, z: i32, w: [u64; 3] }
+fn lit98() ~ Console { let s = L98 { a: 16189_u16, z: 354154045_i32, w: [18446744073709551615_u64, 0_u64, 7588828644922876_u64] }; println!("L98 {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.z); }
+struct L99 { w: [u64; 5], a: i32, z: u8 }
+fn lit99() ~ Console { let s = L99 { w: [18446744073709551615_u64, 0_u64, 8116620397190101_u64, 8772309124424115_u64, 4325214122609298_u64], a: (-1178886034_i32), z: 145_u8 }; println!("L99 {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.z); }
+struct L100 { a: u8, w: [u64; 5], z: i64 }
+fn lit100() ~ Console { let s = L100 { z: (-9215390774381153212_i64), w: [18446744073709551615_u64, 0_u64, 6868744799639660_u64, 5858109144890786_u64, 6776228609101686_u64], a: 228_u8 }; println!("L100 {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.z); }
+struct L101 { a: i64, z: u16, w: [u64; 5] }
+fn lit101() ~ Console { let s = L101 { a: (-9216604380676977639_i64), z: 2454_u16, w: [18446744073709551615_u64, 0_u64, 6825714176124210_u64, 1465205299659320_u64, 898964835916315_u64] }; println!("L101 {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.z); }
+struct L102 { w: [u64; 8], a: u16, z: i32 }
+fn lit102() ~ Console { let s = L102 { w: [18446744073709551615_u64, 0_u64, 6377827797808452_u64, 6723845642500282_u64, 3693626931123753_u64, 2246739785689699_u64, 3308616080281270_u64, 4316176683909949_u64], a: 39792_u16, z: (-790265042_i32) }; println!("L102 {} {} {} {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.w[5], s.w[6], s.w[7], s.z); }
+struct L103 { a: i32, w: [u64; 8], z: u8 }
+fn lit103() ~ Console { let s = L103 { a: (-1375477631_i32), w: [18446744073709551615_u64, 0_u64, 3783527320318706_u64, 5854719211544609_u64, 2208884318100826_u64, 8853117973736766_u64, 1000015310695439_u64, 6829956842761969_u64], z: 226_u8 }; println!("L103 {} {} {} {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.w[5], s.w[6], s.w[7], s.z); }
+struct L104 { a: u8, z: i64, w: [u64; 8] }
+fn lit104() ~ Console { let s = L104 { a: 200_u8, z: (-9215428856086907530_i64), w: [18446744073709551615_u64, 0_u64, 1748155722731932_u64, 4488791970907732_u64, 5527599956567174_u64, 1682333304273896_u64, 5773801705572474_u64, 5810510112243103_u64] }; println!("L104 {} {} {} {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.w[5], s.w[6], s.w[7], s.z); }
+struct L105 { w: [i64; 1], a: i64, z: u16 }
+fn lit105() ~ Console { let s = L105 { z: 55747_u16, a: (-9219037700320965040_i64), w: [9223372036854775807_i64] }; println!("L105 {} {} {}", s.a, s.w[0], s.z); }
+struct L106 { a: u16, w: [i64; 1], z: i32 }
+fn lit106() ~ Console { let s = L106 { a: 16029_u16, w: [9223372036854775807_i64], z: (-629252386_i32) }; println!("L106 {} {} {}", s.a, s.w[0], s.z); }
+struct L107 { a: i32, z: u8, w: [i64; 1] }
+fn lit107() ~ Console { let s = L107 { a: 767573737_i32, z: 249_u8, w: [9223372036854775807_i64] }; println!("L107 {} {} {}", s.a, s.w[0], s.z); }
+struct L108 { w: [i64; 2], a: u8, z: i64 }
+fn lit108() ~ Console { let s = L108 { w: [9223372036854775807_i64, (-9223372036854775808_i64)], a: 79_u8, z: (-9220704222265419639_i64) }; println!("L108 {} {} {} {}", s.a, s.w[0], s.w[1], s.z); }
+struct L109 { a: i64, w: [i64; 2], z: u16 }
+fn lit109() ~ Console { let s = L109 { a: (-9220443086420435576_i64), w: [9223372036854775807_i64, (-9223372036854775808_i64)], z: 46108_u16 }; println!("L109 {} {} {} {}", s.a, s.w[0], s.w[1], s.z); }
+struct L110 { a: u16, z: i32, w: [i64; 2] }
+fn lit110() ~ Console { let s = L110 { w: [9223372036854775807_i64, (-9223372036854775808_i64)], z: (-819865219_i32), a: 15164_u16 }; println!("L110 {} {} {} {}", s.a, s.w[0], s.w[1], s.z); }
+struct L111 { w: [i64; 3], a: i32, z: u8 }
+fn lit111() ~ Console { let s = L111 { w: [9223372036854775807_i64, (-9223372036854775808_i64), (-9223263716811425012_i64)], a: 1565315207_i32, z: 45_u8 }; println!("L111 {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.z); }
+struct L112 { a: u8, w: [i64; 3], z: i64 }
+fn lit112() ~ Console { let s = L112 { a: 215_u8, w: [9223372036854775807_i64, (-9223372036854775808_i64), (-9220245199625794025_i64)], z: (-9214936278442241640_i64) }; println!("L112 {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.z); }
+struct L113 { a: i64, z: u16, w: [i64; 3] }
+fn lit113() ~ Console { let s = L113 { a: (-9221675418961190922_i64), z: 18847_u16, w: [9223372036854775807_i64, (-9223372036854775808_i64), (-9220843086364834358_i64)] }; println!("L113 {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.z); }
+struct L114 { w: [i64; 5], a: u16, z: i32 }
+fn lit114() ~ Console { let s = L114 { w: [9223372036854775807_i64, (-9223372036854775808_i64), (-9216002882854370253_i64), (-9221031932298562608_i64), (-9216584908373731721_i64)], a: 63602_u16, z: 736671151_i32 }; println!("L114 {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.z); }
+struct L115 { a: i32, w: [i64; 5], z: u8 }
+fn lit115() ~ Console { let s = L115 { z: 252_u8, w: [9223372036854775807_i64, (-9223372036854775808_i64), (-9214390644330864800_i64), (-9218087826492275439_i64), (-9216953814274364354_i64)], a: (-1804193675_i32) }; println!("L115 {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.z); }
+struct L116 { a: u8, z: i64, w: [i64; 5] }
+fn lit116() ~ Console { let s = L116 { a: 85_u8, z: (-9221477154967795629_i64), w: [9223372036854775807_i64, (-9223372036854775808_i64), (-9223058604797413686_i64), (-9219135676422534572_i64), (-9222120962150126692_i64)] }; println!("L116 {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.z); }
+struct L117 { w: [i64; 8], a: i64, z: u16 }
+fn lit117() ~ Console { let s = L117 { w: [9223372036854775807_i64, (-9223372036854775808_i64), (-9214449856591686102_i64), (-9222248949361905809_i64), (-9222922885988336241_i64), (-9220733277865644153_i64), (-9218608721059882010_i64), (-9221833445659776952_i64)], a: (-9221952198959868197_i64), z: 12497_u16 }; println!("L117 {} {} {} {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.w[5], s.w[6], s.w[7], s.z); }
+struct L118 { a: u16, w: [i64; 8], z: i32 }
+fn lit118() ~ Console { let s = L118 { a: 37600_u16, w: [9223372036854775807_i64, (-9223372036854775808_i64), (-9220619640615545707_i64), (-9215541657429449977_i64), (-9223225949369440023_i64), (-9222044265956517698_i64), (-9218979176480790360_i64), (-9215461257781305410_i64)], z: 37304064_i32 }; println!("L118 {} {} {} {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.w[5], s.w[6], s.w[7], s.z); }
+struct L119 { a: i32, z: u8, w: [i64; 8] }
+fn lit119() ~ Console { let s = L119 { a: (-529068182_i32), z: 208_u8, w: [9223372036854775807_i64, (-9223372036854775808_i64), (-9215088067260291568_i64), (-9221358756212798610_i64), (-9218660451564675793_i64), (-9220221082675017065_i64), (-9220393458163794185_i64), (-9218656438044716107_i64)] }; println!("L119 {} {} {} {} {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.w[4], s.w[5], s.w[6], s.w[7], s.z); }
+struct K_u8 { a: u8, w: [u8; 3], z: i64 }
+fn mkw_u8() -> [u8; 3] { [255_u8, 0_u8, 126_u8] }
+fn mks_u8() -> K_u8 { K_u8 { a: 118_u8, w: [255_u8, 0_u8, 126_u8], z: (-9221830220418329953_i64) } }
+fn byval_u8(s: K_u8) ~ Console { println!("byval_u8 {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.z); }
+fn kinds_u8() ~ Console {
+    let w = [255_u8, 0_u8, 126_u8];
+    let named = K_u8 { a: 118_u8, w: w, z: (-9221830220418329953_i64) };
+    let a = 118_u8; let z = (-9221830220418329953_i64);
+    let short = K_u8 { a, w, z };
+    let called = K_u8 { a: a, w: mkw_u8(), z: z };
+    let copied = K_u8 { a: a, w: named.w, z: z };
+    let repeated = K_u8 { a: a, w: [129_u8; 3], z: z };
+    let returned = mks_u8();
+    let moved = returned;
+    println!("named_u8 {} {} {} {} {}", named.a, named.w[0], named.w[1], named.w[2], named.z);
+    println!("short_u8 {} {} {} {} {}", short.a, short.w[0], short.w[1], short.w[2], short.z);
+    println!("called_u8 {} {} {} {} {}", called.a, called.w[0], called.w[1], called.w[2], called.z);
+    println!("copied_u8 {} {} {} {} {}", copied.a, copied.w[0], copied.w[1], copied.w[2], copied.z);
+    println!("repeated_u8 {} {} {} {} {}", repeated.a, repeated.w[0], repeated.w[1], repeated.w[2], repeated.z);
+    println!("returned_u8 {} {} {} {} {}", returned.a, returned.w[0], returned.w[1], returned.w[2], returned.z);
+    println!("moved_u8 {} {} {} {} {}", moved.a, moved.w[0], moved.w[1], moved.w[2], moved.z);
+    byval_u8(named);
+}
+struct K_i8 { a: u8, w: [i8; 3], z: i64 }
+fn mkw_i8() -> [i8; 3] { [127_i8, (-128_i8), (-110_i8)] }
+fn mks_i8() -> K_i8 { K_i8 { a: 75_u8, w: [127_i8, (-128_i8), (-110_i8)], z: (-9221713644799052465_i64) } }
+fn byval_i8(s: K_i8) ~ Console { println!("byval_i8 {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.z); }
+fn kinds_i8() ~ Console {
+    let w = [127_i8, (-128_i8), (-110_i8)];
+    let named = K_i8 { a: 75_u8, w: w, z: (-9221713644799052465_i64) };
+    let a = 75_u8; let z = (-9221713644799052465_i64);
+    let short = K_i8 { a, w, z };
+    let called = K_i8 { a: a, w: mkw_i8(), z: z };
+    let copied = K_i8 { a: a, w: named.w, z: z };
+    let repeated = K_i8 { a: a, w: [(-49_i8); 3], z: z };
+    let returned = mks_i8();
+    let moved = returned;
+    println!("named_i8 {} {} {} {} {}", named.a, named.w[0], named.w[1], named.w[2], named.z);
+    println!("short_i8 {} {} {} {} {}", short.a, short.w[0], short.w[1], short.w[2], short.z);
+    println!("called_i8 {} {} {} {} {}", called.a, called.w[0], called.w[1], called.w[2], called.z);
+    println!("copied_i8 {} {} {} {} {}", copied.a, copied.w[0], copied.w[1], copied.w[2], copied.z);
+    println!("repeated_i8 {} {} {} {} {}", repeated.a, repeated.w[0], repeated.w[1], repeated.w[2], repeated.z);
+    println!("returned_i8 {} {} {} {} {}", returned.a, returned.w[0], returned.w[1], returned.w[2], returned.z);
+    println!("moved_i8 {} {} {} {} {}", moved.a, moved.w[0], moved.w[1], moved.w[2], moved.z);
+    byval_i8(named);
+}
+struct K_u16 { a: u8, w: [u16; 3], z: i64 }
+fn mkw_u16() -> [u16; 3] { [65535_u16, 0_u16, 64949_u16] }
+fn mks_u16() -> K_u16 { K_u16 { a: 101_u8, w: [65535_u16, 0_u16, 64949_u16], z: (-9217058076969203132_i64) } }
+fn byval_u16(s: K_u16) ~ Console { println!("byval_u16 {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.z); }
+fn kinds_u16() ~ Console {
+    let w = [65535_u16, 0_u16, 64949_u16];
+    let named = K_u16 { a: 101_u8, w: w, z: (-9217058076969203132_i64) };
+    let a = 101_u8; let z = (-9217058076969203132_i64);
+    let short = K_u16 { a, w, z };
+    let called = K_u16 { a: a, w: mkw_u16(), z: z };
+    let copied = K_u16 { a: a, w: named.w, z: z };
+    let repeated = K_u16 { a: a, w: [24735_u16; 3], z: z };
+    let returned = mks_u16();
+    let moved = returned;
+    println!("named_u16 {} {} {} {} {}", named.a, named.w[0], named.w[1], named.w[2], named.z);
+    println!("short_u16 {} {} {} {} {}", short.a, short.w[0], short.w[1], short.w[2], short.z);
+    println!("called_u16 {} {} {} {} {}", called.a, called.w[0], called.w[1], called.w[2], called.z);
+    println!("copied_u16 {} {} {} {} {}", copied.a, copied.w[0], copied.w[1], copied.w[2], copied.z);
+    println!("repeated_u16 {} {} {} {} {}", repeated.a, repeated.w[0], repeated.w[1], repeated.w[2], repeated.z);
+    println!("returned_u16 {} {} {} {} {}", returned.a, returned.w[0], returned.w[1], returned.w[2], returned.z);
+    println!("moved_u16 {} {} {} {} {}", moved.a, moved.w[0], moved.w[1], moved.w[2], moved.z);
+    byval_u16(named);
+}
+struct K_i16 { a: u8, w: [i16; 3], z: i64 }
+fn mkw_i16() -> [i16; 3] { [32767_i16, (-32768_i16), (-18448_i16)] }
+fn mks_i16() -> K_i16 { K_i16 { a: 95_u8, w: [32767_i16, (-32768_i16), (-18448_i16)], z: (-9220672512179429722_i64) } }
+fn byval_i16(s: K_i16) ~ Console { println!("byval_i16 {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.z); }
+fn kinds_i16() ~ Console {
+    let w = [32767_i16, (-32768_i16), (-18448_i16)];
+    let named = K_i16 { a: 95_u8, w: w, z: (-9220672512179429722_i64) };
+    let a = 95_u8; let z = (-9220672512179429722_i64);
+    let short = K_i16 { a, w, z };
+    let called = K_i16 { a: a, w: mkw_i16(), z: z };
+    let copied = K_i16 { a: a, w: named.w, z: z };
+    let repeated = K_i16 { a: a, w: [19033_i16; 3], z: z };
+    let returned = mks_i16();
+    let moved = returned;
+    println!("named_i16 {} {} {} {} {}", named.a, named.w[0], named.w[1], named.w[2], named.z);
+    println!("short_i16 {} {} {} {} {}", short.a, short.w[0], short.w[1], short.w[2], short.z);
+    println!("called_i16 {} {} {} {} {}", called.a, called.w[0], called.w[1], called.w[2], called.z);
+    println!("copied_i16 {} {} {} {} {}", copied.a, copied.w[0], copied.w[1], copied.w[2], copied.z);
+    println!("repeated_i16 {} {} {} {} {}", repeated.a, repeated.w[0], repeated.w[1], repeated.w[2], repeated.z);
+    println!("returned_i16 {} {} {} {} {}", returned.a, returned.w[0], returned.w[1], returned.w[2], returned.z);
+    println!("moved_i16 {} {} {} {} {}", moved.a, moved.w[0], moved.w[1], moved.w[2], moved.z);
+    byval_i16(named);
+}
+struct K_u32 { a: u8, w: [u32; 3], z: i64 }
+fn mkw_u32() -> [u32; 3] { [4294967295_u32, 0_u32, 4158459491_u32] }
+fn mks_u32() -> K_u32 { K_u32 { a: 67_u8, w: [4294967295_u32, 0_u32, 4158459491_u32], z: (-9216510175122683844_i64) } }
+fn byval_u32(s: K_u32) ~ Console { println!("byval_u32 {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.z); }
+fn kinds_u32() ~ Console {
+    let w = [4294967295_u32, 0_u32, 4158459491_u32];
+    let named = K_u32 { a: 67_u8, w: w, z: (-9216510175122683844_i64) };
+    let a = 67_u8; let z = (-9216510175122683844_i64);
+    let short = K_u32 { a, w, z };
+    let called = K_u32 { a: a, w: mkw_u32(), z: z };
+    let copied = K_u32 { a: a, w: named.w, z: z };
+    let repeated = K_u32 { a: a, w: [1475368218_u32; 3], z: z };
+    let returned = mks_u32();
+    let moved = returned;
+    println!("named_u32 {} {} {} {} {}", named.a, named.w[0], named.w[1], named.w[2], named.z);
+    println!("short_u32 {} {} {} {} {}", short.a, short.w[0], short.w[1], short.w[2], short.z);
+    println!("called_u32 {} {} {} {} {}", called.a, called.w[0], called.w[1], called.w[2], called.z);
+    println!("copied_u32 {} {} {} {} {}", copied.a, copied.w[0], copied.w[1], copied.w[2], copied.z);
+    println!("repeated_u32 {} {} {} {} {}", repeated.a, repeated.w[0], repeated.w[1], repeated.w[2], repeated.z);
+    println!("returned_u32 {} {} {} {} {}", returned.a, returned.w[0], returned.w[1], returned.w[2], returned.z);
+    println!("moved_u32 {} {} {} {} {}", moved.a, moved.w[0], moved.w[1], moved.w[2], moved.z);
+    byval_u32(named);
+}
+struct K_i32 { a: u8, w: [i32; 3], z: i64 }
+fn mkw_i32() -> [i32; 3] { [2147483647_i32, (-2147483648_i32), 1379150403_i32] }
+fn mks_i32() -> K_i32 { K_i32 { a: 58_u8, w: [2147483647_i32, (-2147483648_i32), 1379150403_i32], z: (-9219262776091857493_i64) } }
+fn byval_i32(s: K_i32) ~ Console { println!("byval_i32 {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.z); }
+fn kinds_i32() ~ Console {
+    let w = [2147483647_i32, (-2147483648_i32), 1379150403_i32];
+    let named = K_i32 { a: 58_u8, w: w, z: (-9219262776091857493_i64) };
+    let a = 58_u8; let z = (-9219262776091857493_i64);
+    let short = K_i32 { a, w, z };
+    let called = K_i32 { a: a, w: mkw_i32(), z: z };
+    let copied = K_i32 { a: a, w: named.w, z: z };
+    let repeated = K_i32 { a: a, w: [332337092_i32; 3], z: z };
+    let returned = mks_i32();
+    let moved = returned;
+    println!("named_i32 {} {} {} {} {}", named.a, named.w[0], named.w[1], named.w[2], named.z);
+    println!("short_i32 {} {} {} {} {}", short.a, short.w[0], short.w[1], short.w[2], short.z);
+    println!("called_i32 {} {} {} {} {}", called.a, called.w[0], called.w[1], called.w[2], called.z);
+    println!("copied_i32 {} {} {} {} {}", copied.a, copied.w[0], copied.w[1], copied.w[2], copied.z);
+    println!("repeated_i32 {} {} {} {} {}", repeated.a, repeated.w[0], repeated.w[1], repeated.w[2], repeated.z);
+    println!("returned_i32 {} {} {} {} {}", returned.a, returned.w[0], returned.w[1], returned.w[2], returned.z);
+    println!("moved_i32 {} {} {} {} {}", moved.a, moved.w[0], moved.w[1], moved.w[2], moved.z);
+    byval_i32(named);
+}
+struct K_u64 { a: u8, w: [u64; 3], z: i64 }
+fn mkw_u64() -> [u64; 3] { [18446744073709551615_u64, 0_u64, 6820399788118005_u64] }
+fn mks_u64() -> K_u64 { K_u64 { a: 217_u8, w: [18446744073709551615_u64, 0_u64, 6820399788118005_u64], z: (-9219566072827854130_i64) } }
+fn byval_u64(s: K_u64) ~ Console { println!("byval_u64 {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.z); }
+fn kinds_u64() ~ Console {
+    let w = [18446744073709551615_u64, 0_u64, 6820399788118005_u64];
+    let named = K_u64 { a: 217_u8, w: w, z: (-9219566072827854130_i64) };
+    let a = 217_u8; let z = (-9219566072827854130_i64);
+    let short = K_u64 { a, w, z };
+    let called = K_u64 { a: a, w: mkw_u64(), z: z };
+    let copied = K_u64 { a: a, w: named.w, z: z };
+    let repeated = K_u64 { a: a, w: [3632763310777255_u64; 3], z: z };
+    let returned = mks_u64();
+    let moved = returned;
+    println!("named_u64 {} {} {} {} {}", named.a, named.w[0], named.w[1], named.w[2], named.z);
+    println!("short_u64 {} {} {} {} {}", short.a, short.w[0], short.w[1], short.w[2], short.z);
+    println!("called_u64 {} {} {} {} {}", called.a, called.w[0], called.w[1], called.w[2], called.z);
+    println!("copied_u64 {} {} {} {} {}", copied.a, copied.w[0], copied.w[1], copied.w[2], copied.z);
+    println!("repeated_u64 {} {} {} {} {}", repeated.a, repeated.w[0], repeated.w[1], repeated.w[2], repeated.z);
+    println!("returned_u64 {} {} {} {} {}", returned.a, returned.w[0], returned.w[1], returned.w[2], returned.z);
+    println!("moved_u64 {} {} {} {} {}", moved.a, moved.w[0], moved.w[1], moved.w[2], moved.z);
+    byval_u64(named);
+}
+struct K_i64 { a: u8, w: [i64; 3], z: i64 }
+fn mkw_i64() -> [i64; 3] { [9223372036854775807_i64, (-9223372036854775808_i64), (-9220244130273805620_i64)] }
+fn mks_i64() -> K_i64 { K_i64 { a: 10_u8, w: [9223372036854775807_i64, (-9223372036854775808_i64), (-9220244130273805620_i64)], z: (-9220096115895244746_i64) } }
+fn byval_i64(s: K_i64) ~ Console { println!("byval_i64 {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.z); }
+fn kinds_i64() ~ Console {
+    let w = [9223372036854775807_i64, (-9223372036854775808_i64), (-9220244130273805620_i64)];
+    let named = K_i64 { a: 10_u8, w: w, z: (-9220096115895244746_i64) };
+    let a = 10_u8; let z = (-9220096115895244746_i64);
+    let short = K_i64 { a, w, z };
+    let called = K_i64 { a: a, w: mkw_i64(), z: z };
+    let copied = K_i64 { a: a, w: named.w, z: z };
+    let repeated = K_i64 { a: a, w: [(-9217175748249362098_i64); 3], z: z };
+    let returned = mks_i64();
+    let moved = returned;
+    println!("named_i64 {} {} {} {} {}", named.a, named.w[0], named.w[1], named.w[2], named.z);
+    println!("short_i64 {} {} {} {} {}", short.a, short.w[0], short.w[1], short.w[2], short.z);
+    println!("called_i64 {} {} {} {} {}", called.a, called.w[0], called.w[1], called.w[2], called.z);
+    println!("copied_i64 {} {} {} {} {}", copied.a, copied.w[0], copied.w[1], copied.w[2], copied.z);
+    println!("repeated_i64 {} {} {} {} {}", repeated.a, repeated.w[0], repeated.w[1], repeated.w[2], repeated.z);
+    println!("returned_i64 {} {} {} {} {}", returned.a, returned.w[0], returned.w[1], returned.w[2], returned.z);
+    println!("moved_i64 {} {} {} {} {}", moved.a, moved.w[0], moved.w[1], moved.w[2], moved.z);
+    byval_i64(named);
+}
+fn main() ~ Console {
+    lit0();
+    lit1();
+    lit2();
+    lit3();
+    lit4();
+    lit5();
+    lit6();
+    lit7();
+    lit8();
+    lit9();
+    lit10();
+    lit11();
+    lit12();
+    lit13();
+    lit14();
+    lit15();
+    lit16();
+    lit17();
+    lit18();
+    lit19();
+    lit20();
+    lit21();
+    lit22();
+    lit23();
+    lit24();
+    lit25();
+    lit26();
+    lit27();
+    lit28();
+    lit29();
+    lit30();
+    lit31();
+    lit32();
+    lit33();
+    lit34();
+    lit35();
+    lit36();
+    lit37();
+    lit38();
+    lit39();
+    lit40();
+    lit41();
+    lit42();
+    lit43();
+    lit44();
+    lit45();
+    lit46();
+    lit47();
+    lit48();
+    lit49();
+    lit50();
+    lit51();
+    lit52();
+    lit53();
+    lit54();
+    lit55();
+    lit56();
+    lit57();
+    lit58();
+    lit59();
+    lit60();
+    lit61();
+    lit62();
+    lit63();
+    lit64();
+    lit65();
+    lit66();
+    lit67();
+    lit68();
+    lit69();
+    lit70();
+    lit71();
+    lit72();
+    lit73();
+    lit74();
+    lit75();
+    lit76();
+    lit77();
+    lit78();
+    lit79();
+    lit80();
+    lit81();
+    lit82();
+    lit83();
+    lit84();
+    lit85();
+    lit86();
+    lit87();
+    lit88();
+    lit89();
+    lit90();
+    lit91();
+    lit92();
+    lit93();
+    lit94();
+    lit95();
+    lit96();
+    lit97();
+    lit98();
+    lit99();
+    lit100();
+    lit101();
+    lit102();
+    lit103();
+    lit104();
+    lit105();
+    lit106();
+    lit107();
+    lit108();
+    lit109();
+    lit110();
+    lit111();
+    lit112();
+    lit113();
+    lit114();
+    lit115();
+    lit116();
+    lit117();
+    lit118();
+    lit119();
+    kinds_u8();
+    kinds_i8();
+    kinds_u16();
+    kinds_i16();
+    kinds_u32();
+    kinds_i32();
+    kinds_u64();
+    kinds_i64();
+}

@@ -1,0 +1,363 @@
+// Written by gen_matrix.py; do not edit. Expected output: slices.expected
+struct Sl_u8 { a: u8, w: [u8; 4], z: i64 }
+struct Two_u8 { g: [[u8; 4]; 2], s: Sl_u8 }
+fn sum_u8(b: &[u8]) -> i64 { let mut s: i64 = 0_i64; let mut i: usize = 0; while i < b.len() { s = s + (i as i64 + 1_i64) * (b[i] as i64); i = i + 1; } s }
+fn bump_u8(b: &mut [u8]) { let mut i: usize = 0; while i < b.len() { b[i] = b[i] + 1_u8; i = i + 1; } }
+fn len_u8(b: &[u8]) -> usize { b.len() }
+fn via_u8(s: &mut Sl_u8) -> i64 { bump_u8(&mut s.w); sum_u8(&s.w) }
+fn fwd_vec_u8(v: &Vec<u8>) -> i64 { sum_u8(v) }
+fn fwd_len_u8(v: &Vec<u8>) -> usize { len_u8(v) }
+fn fwd_mut_vec_u8(v: &mut Vec<u8>) { bump_u8(v); }
+fn reborrow_u8(v: &Vec<u8>) -> i64 { sum_u8(&*v) }
+fn twice_u8(v: &Vec<u8>) -> i64 { fwd_vec_u8(v) }
+fn fwd_arr_u8(a: &[u8; 4]) -> i64 { sum_u8(a) }
+fn fwd_arr_len_u8(a: &[u8; 4]) -> usize { len_u8(a) }
+fn fwd_mut_arr_u8(a: &mut [u8; 4]) { bump_u8(a); }
+fn mk_u8() -> [u8; 4] { [45_u8, 69_u8, 58_u8, 87_u8] }
+fn slices_u8() ~ Console {
+    let mut s = Sl_u8 { a: 48_u8, w: [92_u8, 31_u8, 14_u8, 35_u8], z: (-9214932306304942677_i64) };
+    let mut two = Two_u8 { g: [[67_u8, 65_u8, 22_u8, 37_u8], [56_u8, 30_u8, 1_u8, 14_u8]], s: s };
+    let mut v: Vec<u8> = Vec::new();
+    v.push(54_u8);
+    v.push(99_u8);
+    v.push(65_u8);
+    v.push(58_u8);
+    v.push(91_u8);
+    let mut arr: [u8; 4] = [45_u8, 69_u8, 58_u8, 87_u8];
+    println!("field_u8 {} {}", sum_u8(&s.w), len_u8(&s.w));
+    bump_u8(&mut s.w);
+    println!("bumped_u8 {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.z);
+    println!("via_u8 {} {} {} {} {} {} {}", via_u8(&mut s), s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.z);
+    println!("deep_u8 {} {} {}", sum_u8(&two.s.w), sum_u8(&two.g[1]), len_u8(&two.g[0]));
+    bump_u8(&mut two.g[0]);
+    bump_u8(&mut two.s.w);
+    println!("deepw_u8 {} {} {} {} {} {} {} {} {} {} {} {}", two.g[0][0], two.g[0][1], two.g[0][2], two.g[0][3], two.g[1][0], two.g[1][1], two.g[1][2], two.g[1][3], two.s.w[0], two.s.w[1], two.s.w[2], two.s.w[3]);
+    let sl: &[u8] = &s.w;
+    println!("bound_u8 {} {} {}", sum_u8(sl), sl.len(), sl[3]);
+    println!("vec_u8 {} {} {} {}", fwd_vec_u8(&v), fwd_len_u8(&v), reborrow_u8(&v), twice_u8(&v));
+    fwd_mut_vec_u8(&mut v);
+    println!("vecw_u8 {} {} {} {} {}", v[0], v[1], v[2], v[3], v[4]);
+    println!("arr_u8 {} {} {}", fwd_arr_u8(&arr), fwd_arr_len_u8(&arr), fwd_arr_u8(&s.w));
+    fwd_mut_arr_u8(&mut arr);
+    fwd_mut_arr_u8(&mut s.w);
+    println!("arrw_u8 {} {} {} {} {} {} {} {} {} {}", arr[0], arr[1], arr[2], arr[3], s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.z);
+    println!("temp_u8 {} {}", sum_u8(&mk_u8()), len_u8(&mk_u8()));
+}
+struct Sl_i8 { a: u8, w: [i8; 4], z: i64 }
+struct Two_i8 { g: [[i8; 4]; 2], s: Sl_i8 }
+fn sum_i8(b: &[i8]) -> i64 { let mut s: i64 = 0_i64; let mut i: usize = 0; while i < b.len() { s = s + (i as i64 + 1_i64) * (b[i] as i64); i = i + 1; } s }
+fn bump_i8(b: &mut [i8]) { let mut i: usize = 0; while i < b.len() { b[i] = b[i] + 1_i8; i = i + 1; } }
+fn len_i8(b: &[i8]) -> usize { b.len() }
+fn via_i8(s: &mut Sl_i8) -> i64 { bump_i8(&mut s.w); sum_i8(&s.w) }
+fn fwd_vec_i8(v: &Vec<i8>) -> i64 { sum_i8(v) }
+fn fwd_len_i8(v: &Vec<i8>) -> usize { len_i8(v) }
+fn fwd_mut_vec_i8(v: &mut Vec<i8>) { bump_i8(v); }
+fn reborrow_i8(v: &Vec<i8>) -> i64 { sum_i8(&*v) }
+fn twice_i8(v: &Vec<i8>) -> i64 { fwd_vec_i8(v) }
+fn fwd_arr_i8(a: &[i8; 4]) -> i64 { sum_i8(a) }
+fn fwd_arr_len_i8(a: &[i8; 4]) -> usize { len_i8(a) }
+fn fwd_mut_arr_i8(a: &mut [i8; 4]) { bump_i8(a); }
+fn mk_i8() -> [i8; 4] { [(-82_i8), (-8_i8), (-29_i8), 0_i8] }
+fn slices_i8() ~ Console {
+    let mut s = Sl_i8 { a: 0_u8, w: [(-26_i8), 76_i8, 37_i8, 34_i8], z: (-9222003348690436737_i64) };
+    let mut two = Two_i8 { g: [[27_i8, 83_i8, 59_i8, (-19_i8)], [(-27_i8), 1_i8, 72_i8, 62_i8]], s: s };
+    let mut v: Vec<i8> = Vec::new();
+    v.push((-47_i8));
+    v.push((-50_i8));
+    v.push((-100_i8));
+    v.push((-77_i8));
+    v.push(3_i8);
+    let mut arr: [i8; 4] = [(-82_i8), (-8_i8), (-29_i8), 0_i8];
+    println!("field_i8 {} {}", sum_i8(&s.w), len_i8(&s.w));
+    bump_i8(&mut s.w);
+    println!("bumped_i8 {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.z);
+    println!("via_i8 {} {} {} {} {} {} {}", via_i8(&mut s), s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.z);
+    println!("deep_i8 {} {} {}", sum_i8(&two.s.w), sum_i8(&two.g[1]), len_i8(&two.g[0]));
+    bump_i8(&mut two.g[0]);
+    bump_i8(&mut two.s.w);
+    println!("deepw_i8 {} {} {} {} {} {} {} {} {} {} {} {}", two.g[0][0], two.g[0][1], two.g[0][2], two.g[0][3], two.g[1][0], two.g[1][1], two.g[1][2], two.g[1][3], two.s.w[0], two.s.w[1], two.s.w[2], two.s.w[3]);
+    let sl: &[i8] = &s.w;
+    println!("bound_i8 {} {} {}", sum_i8(sl), sl.len(), sl[3]);
+    println!("vec_i8 {} {} {} {}", fwd_vec_i8(&v), fwd_len_i8(&v), reborrow_i8(&v), twice_i8(&v));
+    fwd_mut_vec_i8(&mut v);
+    println!("vecw_i8 {} {} {} {} {}", v[0], v[1], v[2], v[3], v[4]);
+    println!("arr_i8 {} {} {}", fwd_arr_i8(&arr), fwd_arr_len_i8(&arr), fwd_arr_i8(&s.w));
+    fwd_mut_arr_i8(&mut arr);
+    fwd_mut_arr_i8(&mut s.w);
+    println!("arrw_i8 {} {} {} {} {} {} {} {} {} {}", arr[0], arr[1], arr[2], arr[3], s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.z);
+    println!("temp_i8 {} {}", sum_i8(&mk_i8()), len_i8(&mk_i8()));
+}
+struct Sl_u16 { a: u8, w: [u16; 4], z: i64 }
+struct Two_u16 { g: [[u16; 4]; 2], s: Sl_u16 }
+fn sum_u16(b: &[u16]) -> i64 { let mut s: i64 = 0_i64; let mut i: usize = 0; while i < b.len() { s = s + (i as i64 + 1_i64) * (b[i] as i64); i = i + 1; } s }
+fn bump_u16(b: &mut [u16]) { let mut i: usize = 0; while i < b.len() { b[i] = b[i] + 1_u16; i = i + 1; } }
+fn len_u16(b: &[u16]) -> usize { b.len() }
+fn via_u16(s: &mut Sl_u16) -> i64 { bump_u16(&mut s.w); sum_u16(&s.w) }
+fn fwd_vec_u16(v: &Vec<u16>) -> i64 { sum_u16(v) }
+fn fwd_len_u16(v: &Vec<u16>) -> usize { len_u16(v) }
+fn fwd_mut_vec_u16(v: &mut Vec<u16>) { bump_u16(v); }
+fn reborrow_u16(v: &Vec<u16>) -> i64 { sum_u16(&*v) }
+fn twice_u16(v: &Vec<u16>) -> i64 { fwd_vec_u16(v) }
+fn fwd_arr_u16(a: &[u16; 4]) -> i64 { sum_u16(a) }
+fn fwd_arr_len_u16(a: &[u16; 4]) -> usize { len_u16(a) }
+fn fwd_mut_arr_u16(a: &mut [u16; 4]) { bump_u16(a); }
+fn mk_u16() -> [u16; 4] { [41_u16, 95_u16, 11_u16, 91_u16] }
+fn slices_u16() ~ Console {
+    let mut s = Sl_u16 { a: 121_u8, w: [16_u16, 13_u16, 5_u16, 24_u16], z: (-9216367292217391856_i64) };
+    let mut two = Two_u16 { g: [[65_u16, 41_u16, 84_u16, 25_u16], [97_u16, 61_u16, 11_u16, 71_u16]], s: s };
+    let mut v: Vec<u16> = Vec::new();
+    v.push(85_u16);
+    v.push(78_u16);
+    v.push(94_u16);
+    v.push(16_u16);
+    v.push(53_u16);
+    let mut arr: [u16; 4] = [41_u16, 95_u16, 11_u16, 91_u16];
+    println!("field_u16 {} {}", sum_u16(&s.w), len_u16(&s.w));
+    bump_u16(&mut s.w);
+    println!("bumped_u16 {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.z);
+    println!("via_u16 {} {} {} {} {} {} {}", via_u16(&mut s), s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.z);
+    println!("deep_u16 {} {} {}", sum_u16(&two.s.w), sum_u16(&two.g[1]), len_u16(&two.g[0]));
+    bump_u16(&mut two.g[0]);
+    bump_u16(&mut two.s.w);
+    println!("deepw_u16 {} {} {} {} {} {} {} {} {} {} {} {}", two.g[0][0], two.g[0][1], two.g[0][2], two.g[0][3], two.g[1][0], two.g[1][1], two.g[1][2], two.g[1][3], two.s.w[0], two.s.w[1], two.s.w[2], two.s.w[3]);
+    let sl: &[u16] = &s.w;
+    println!("bound_u16 {} {} {}", sum_u16(sl), sl.len(), sl[3]);
+    println!("vec_u16 {} {} {} {}", fwd_vec_u16(&v), fwd_len_u16(&v), reborrow_u16(&v), twice_u16(&v));
+    fwd_mut_vec_u16(&mut v);
+    println!("vecw_u16 {} {} {} {} {}", v[0], v[1], v[2], v[3], v[4]);
+    println!("arr_u16 {} {} {}", fwd_arr_u16(&arr), fwd_arr_len_u16(&arr), fwd_arr_u16(&s.w));
+    fwd_mut_arr_u16(&mut arr);
+    fwd_mut_arr_u16(&mut s.w);
+    println!("arrw_u16 {} {} {} {} {} {} {} {} {} {}", arr[0], arr[1], arr[2], arr[3], s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.z);
+    println!("temp_u16 {} {}", sum_u16(&mk_u16()), len_u16(&mk_u16()));
+}
+struct Sl_i16 { a: u8, w: [i16; 4], z: i64 }
+struct Two_i16 { g: [[i16; 4]; 2], s: Sl_i16 }
+fn sum_i16(b: &[i16]) -> i64 { let mut s: i64 = 0_i64; let mut i: usize = 0; while i < b.len() { s = s + (i as i64 + 1_i64) * (b[i] as i64); i = i + 1; } s }
+fn bump_i16(b: &mut [i16]) { let mut i: usize = 0; while i < b.len() { b[i] = b[i] + 1_i16; i = i + 1; } }
+fn len_i16(b: &[i16]) -> usize { b.len() }
+fn via_i16(s: &mut Sl_i16) -> i64 { bump_i16(&mut s.w); sum_i16(&s.w) }
+fn fwd_vec_i16(v: &Vec<i16>) -> i64 { sum_i16(v) }
+fn fwd_len_i16(v: &Vec<i16>) -> usize { len_i16(v) }
+fn fwd_mut_vec_i16(v: &mut Vec<i16>) { bump_i16(v); }
+fn reborrow_i16(v: &Vec<i16>) -> i64 { sum_i16(&*v) }
+fn twice_i16(v: &Vec<i16>) -> i64 { fwd_vec_i16(v) }
+fn fwd_arr_i16(a: &[i16; 4]) -> i64 { sum_i16(a) }
+fn fwd_arr_len_i16(a: &[i16; 4]) -> usize { len_i16(a) }
+fn fwd_mut_arr_i16(a: &mut [i16; 4]) { bump_i16(a); }
+fn mk_i16() -> [i16; 4] { [(-36_i16), (-98_i16), 85_i16, 84_i16] }
+fn slices_i16() ~ Console {
+    let mut s = Sl_i16 { a: 190_u8, w: [70_i16, 37_i16, (-45_i16), (-93_i16)], z: (-9218275085592392673_i64) };
+    let mut two = Two_i16 { g: [[(-89_i16), 22_i16, 33_i16, 20_i16], [(-83_i16), (-99_i16), (-47_i16), (-16_i16)]], s: s };
+    let mut v: Vec<i16> = Vec::new();
+    v.push((-40_i16));
+    v.push(87_i16);
+    v.push((-47_i16));
+    v.push(98_i16);
+    v.push((-81_i16));
+    let mut arr: [i16; 4] = [(-36_i16), (-98_i16), 85_i16, 84_i16];
+    println!("field_i16 {} {}", sum_i16(&s.w), len_i16(&s.w));
+    bump_i16(&mut s.w);
+    println!("bumped_i16 {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.z);
+    println!("via_i16 {} {} {} {} {} {} {}", via_i16(&mut s), s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.z);
+    println!("deep_i16 {} {} {}", sum_i16(&two.s.w), sum_i16(&two.g[1]), len_i16(&two.g[0]));
+    bump_i16(&mut two.g[0]);
+    bump_i16(&mut two.s.w);
+    println!("deepw_i16 {} {} {} {} {} {} {} {} {} {} {} {}", two.g[0][0], two.g[0][1], two.g[0][2], two.g[0][3], two.g[1][0], two.g[1][1], two.g[1][2], two.g[1][3], two.s.w[0], two.s.w[1], two.s.w[2], two.s.w[3]);
+    let sl: &[i16] = &s.w;
+    println!("bound_i16 {} {} {}", sum_i16(sl), sl.len(), sl[3]);
+    println!("vec_i16 {} {} {} {}", fwd_vec_i16(&v), fwd_len_i16(&v), reborrow_i16(&v), twice_i16(&v));
+    fwd_mut_vec_i16(&mut v);
+    println!("vecw_i16 {} {} {} {} {}", v[0], v[1], v[2], v[3], v[4]);
+    println!("arr_i16 {} {} {}", fwd_arr_i16(&arr), fwd_arr_len_i16(&arr), fwd_arr_i16(&s.w));
+    fwd_mut_arr_i16(&mut arr);
+    fwd_mut_arr_i16(&mut s.w);
+    println!("arrw_i16 {} {} {} {} {} {} {} {} {} {}", arr[0], arr[1], arr[2], arr[3], s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.z);
+    println!("temp_i16 {} {}", sum_i16(&mk_i16()), len_i16(&mk_i16()));
+}
+struct Sl_u32 { a: u8, w: [u32; 4], z: i64 }
+struct Two_u32 { g: [[u32; 4]; 2], s: Sl_u32 }
+fn sum_u32(b: &[u32]) -> i64 { let mut s: i64 = 0_i64; let mut i: usize = 0; while i < b.len() { s = s + (i as i64 + 1_i64) * (b[i] as i64); i = i + 1; } s }
+fn bump_u32(b: &mut [u32]) { let mut i: usize = 0; while i < b.len() { b[i] = b[i] + 1_u32; i = i + 1; } }
+fn len_u32(b: &[u32]) -> usize { b.len() }
+fn via_u32(s: &mut Sl_u32) -> i64 { bump_u32(&mut s.w); sum_u32(&s.w) }
+fn fwd_vec_u32(v: &Vec<u32>) -> i64 { sum_u32(v) }
+fn fwd_len_u32(v: &Vec<u32>) -> usize { len_u32(v) }
+fn fwd_mut_vec_u32(v: &mut Vec<u32>) { bump_u32(v); }
+fn reborrow_u32(v: &Vec<u32>) -> i64 { sum_u32(&*v) }
+fn twice_u32(v: &Vec<u32>) -> i64 { fwd_vec_u32(v) }
+fn fwd_arr_u32(a: &[u32; 4]) -> i64 { sum_u32(a) }
+fn fwd_arr_len_u32(a: &[u32; 4]) -> usize { len_u32(a) }
+fn fwd_mut_arr_u32(a: &mut [u32; 4]) { bump_u32(a); }
+fn mk_u32() -> [u32; 4] { [85_u32, 16_u32, 96_u32, 81_u32] }
+fn slices_u32() ~ Console {
+    let mut s = Sl_u32 { a: 134_u8, w: [79_u32, 71_u32, 91_u32, 38_u32], z: (-9218337581032946320_i64) };
+    let mut two = Two_u32 { g: [[39_u32, 40_u32, 90_u32, 11_u32], [75_u32, 77_u32, 6_u32, 33_u32]], s: s };
+    let mut v: Vec<u32> = Vec::new();
+    v.push(30_u32);
+    v.push(1_u32);
+    v.push(92_u32);
+    v.push(39_u32);
+    v.push(41_u32);
+    let mut arr: [u32; 4] = [85_u32, 16_u32, 96_u32, 81_u32];
+    println!("field_u32 {} {}", sum_u32(&s.w), len_u32(&s.w));
+    bump_u32(&mut s.w);
+    println!("bumped_u32 {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.z);
+    println!("via_u32 {} {} {} {} {} {} {}", via_u32(&mut s), s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.z);
+    println!("deep_u32 {} {} {}", sum_u32(&two.s.w), sum_u32(&two.g[1]), len_u32(&two.g[0]));
+    bump_u32(&mut two.g[0]);
+    bump_u32(&mut two.s.w);
+    println!("deepw_u32 {} {} {} {} {} {} {} {} {} {} {} {}", two.g[0][0], two.g[0][1], two.g[0][2], two.g[0][3], two.g[1][0], two.g[1][1], two.g[1][2], two.g[1][3], two.s.w[0], two.s.w[1], two.s.w[2], two.s.w[3]);
+    let sl: &[u32] = &s.w;
+    println!("bound_u32 {} {} {}", sum_u32(sl), sl.len(), sl[3]);
+    println!("vec_u32 {} {} {} {}", fwd_vec_u32(&v), fwd_len_u32(&v), reborrow_u32(&v), twice_u32(&v));
+    fwd_mut_vec_u32(&mut v);
+    println!("vecw_u32 {} {} {} {} {}", v[0], v[1], v[2], v[3], v[4]);
+    println!("arr_u32 {} {} {}", fwd_arr_u32(&arr), fwd_arr_len_u32(&arr), fwd_arr_u32(&s.w));
+    fwd_mut_arr_u32(&mut arr);
+    fwd_mut_arr_u32(&mut s.w);
+    println!("arrw_u32 {} {} {} {} {} {} {} {} {} {}", arr[0], arr[1], arr[2], arr[3], s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.z);
+    println!("temp_u32 {} {}", sum_u32(&mk_u32()), len_u32(&mk_u32()));
+}
+struct Sl_i32 { a: u8, w: [i32; 4], z: i64 }
+struct Two_i32 { g: [[i32; 4]; 2], s: Sl_i32 }
+fn sum_i32(b: &[i32]) -> i64 { let mut s: i64 = 0_i64; let mut i: usize = 0; while i < b.len() { s = s + (i as i64 + 1_i64) * (b[i] as i64); i = i + 1; } s }
+fn bump_i32(b: &mut [i32]) { let mut i: usize = 0; while i < b.len() { b[i] = b[i] + 1_i32; i = i + 1; } }
+fn len_i32(b: &[i32]) -> usize { b.len() }
+fn via_i32(s: &mut Sl_i32) -> i64 { bump_i32(&mut s.w); sum_i32(&s.w) }
+fn fwd_vec_i32(v: &Vec<i32>) -> i64 { sum_i32(v) }
+fn fwd_len_i32(v: &Vec<i32>) -> usize { len_i32(v) }
+fn fwd_mut_vec_i32(v: &mut Vec<i32>) { bump_i32(v); }
+fn reborrow_i32(v: &Vec<i32>) -> i64 { sum_i32(&*v) }
+fn twice_i32(v: &Vec<i32>) -> i64 { fwd_vec_i32(v) }
+fn fwd_arr_i32(a: &[i32; 4]) -> i64 { sum_i32(a) }
+fn fwd_arr_len_i32(a: &[i32; 4]) -> usize { len_i32(a) }
+fn fwd_mut_arr_i32(a: &mut [i32; 4]) { bump_i32(a); }
+fn mk_i32() -> [i32; 4] { [21_i32, 22_i32, 80_i32, (-63_i32)] }
+fn slices_i32() ~ Console {
+    let mut s = Sl_i32 { a: 22_u8, w: [(-48_i32), (-1_i32), (-13_i32), 94_i32], z: (-9221735558796702479_i64) };
+    let mut two = Two_i32 { g: [[(-55_i32), 9_i32, (-89_i32), 69_i32], [(-73_i32), (-78_i32), (-100_i32), (-9_i32)]], s: s };
+    let mut v: Vec<i32> = Vec::new();
+    v.push(70_i32);
+    v.push((-35_i32));
+    v.push((-60_i32));
+    v.push(76_i32);
+    v.push(50_i32);
+    let mut arr: [i32; 4] = [21_i32, 22_i32, 80_i32, (-63_i32)];
+    println!("field_i32 {} {}", sum_i32(&s.w), len_i32(&s.w));
+    bump_i32(&mut s.w);
+    println!("bumped_i32 {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.z);
+    println!("via_i32 {} {} {} {} {} {} {}", via_i32(&mut s), s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.z);
+    println!("deep_i32 {} {} {}", sum_i32(&two.s.w), sum_i32(&two.g[1]), len_i32(&two.g[0]));
+    bump_i32(&mut two.g[0]);
+    bump_i32(&mut two.s.w);
+    println!("deepw_i32 {} {} {} {} {} {} {} {} {} {} {} {}", two.g[0][0], two.g[0][1], two.g[0][2], two.g[0][3], two.g[1][0], two.g[1][1], two.g[1][2], two.g[1][3], two.s.w[0], two.s.w[1], two.s.w[2], two.s.w[3]);
+    let sl: &[i32] = &s.w;
+    println!("bound_i32 {} {} {}", sum_i32(sl), sl.len(), sl[3]);
+    println!("vec_i32 {} {} {} {}", fwd_vec_i32(&v), fwd_len_i32(&v), reborrow_i32(&v), twice_i32(&v));
+    fwd_mut_vec_i32(&mut v);
+    println!("vecw_i32 {} {} {} {} {}", v[0], v[1], v[2], v[3], v[4]);
+    println!("arr_i32 {} {} {}", fwd_arr_i32(&arr), fwd_arr_len_i32(&arr), fwd_arr_i32(&s.w));
+    fwd_mut_arr_i32(&mut arr);
+    fwd_mut_arr_i32(&mut s.w);
+    println!("arrw_i32 {} {} {} {} {} {} {} {} {} {}", arr[0], arr[1], arr[2], arr[3], s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.z);
+    println!("temp_i32 {} {}", sum_i32(&mk_i32()), len_i32(&mk_i32()));
+}
+struct Sl_u64 { a: u8, w: [u64; 4], z: i64 }
+struct Two_u64 { g: [[u64; 4]; 2], s: Sl_u64 }
+fn sum_u64(b: &[u64]) -> i64 { let mut s: i64 = 0_i64; let mut i: usize = 0; while i < b.len() { s = s + (i as i64 + 1_i64) * (b[i] as i64); i = i + 1; } s }
+fn bump_u64(b: &mut [u64]) { let mut i: usize = 0; while i < b.len() { b[i] = b[i] + 1_u64; i = i + 1; } }
+fn len_u64(b: &[u64]) -> usize { b.len() }
+fn via_u64(s: &mut Sl_u64) -> i64 { bump_u64(&mut s.w); sum_u64(&s.w) }
+fn fwd_vec_u64(v: &Vec<u64>) -> i64 { sum_u64(v) }
+fn fwd_len_u64(v: &Vec<u64>) -> usize { len_u64(v) }
+fn fwd_mut_vec_u64(v: &mut Vec<u64>) { bump_u64(v); }
+fn reborrow_u64(v: &Vec<u64>) -> i64 { sum_u64(&*v) }
+fn twice_u64(v: &Vec<u64>) -> i64 { fwd_vec_u64(v) }
+fn fwd_arr_u64(a: &[u64; 4]) -> i64 { sum_u64(a) }
+fn fwd_arr_len_u64(a: &[u64; 4]) -> usize { len_u64(a) }
+fn fwd_mut_arr_u64(a: &mut [u64; 4]) { bump_u64(a); }
+fn mk_u64() -> [u64; 4] { [68_u64, 27_u64, 63_u64, 21_u64] }
+fn slices_u64() ~ Console {
+    let mut s = Sl_u64 { a: 227_u8, w: [96_u64, 3_u64, 85_u64, 83_u64], z: (-9215450664689704535_i64) };
+    let mut two = Two_u64 { g: [[13_u64, 32_u64, 0_u64, 62_u64], [30_u64, 61_u64, 73_u64, 38_u64]], s: s };
+    let mut v: Vec<u64> = Vec::new();
+    v.push(41_u64);
+    v.push(94_u64);
+    v.push(6_u64);
+    v.push(63_u64);
+    v.push(14_u64);
+    let mut arr: [u64; 4] = [68_u64, 27_u64, 63_u64, 21_u64];
+    println!("field_u64 {} {}", sum_u64(&s.w), len_u64(&s.w));
+    bump_u64(&mut s.w);
+    println!("bumped_u64 {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.z);
+    println!("via_u64 {} {} {} {} {} {} {}", via_u64(&mut s), s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.z);
+    println!("deep_u64 {} {} {}", sum_u64(&two.s.w), sum_u64(&two.g[1]), len_u64(&two.g[0]));
+    bump_u64(&mut two.g[0]);
+    bump_u64(&mut two.s.w);
+    println!("deepw_u64 {} {} {} {} {} {} {} {} {} {} {} {}", two.g[0][0], two.g[0][1], two.g[0][2], two.g[0][3], two.g[1][0], two.g[1][1], two.g[1][2], two.g[1][3], two.s.w[0], two.s.w[1], two.s.w[2], two.s.w[3]);
+    let sl: &[u64] = &s.w;
+    println!("bound_u64 {} {} {}", sum_u64(sl), sl.len(), sl[3]);
+    println!("vec_u64 {} {} {} {}", fwd_vec_u64(&v), fwd_len_u64(&v), reborrow_u64(&v), twice_u64(&v));
+    fwd_mut_vec_u64(&mut v);
+    println!("vecw_u64 {} {} {} {} {}", v[0], v[1], v[2], v[3], v[4]);
+    println!("arr_u64 {} {} {}", fwd_arr_u64(&arr), fwd_arr_len_u64(&arr), fwd_arr_u64(&s.w));
+    fwd_mut_arr_u64(&mut arr);
+    fwd_mut_arr_u64(&mut s.w);
+    println!("arrw_u64 {} {} {} {} {} {} {} {} {} {}", arr[0], arr[1], arr[2], arr[3], s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.z);
+    println!("temp_u64 {} {}", sum_u64(&mk_u64()), len_u64(&mk_u64()));
+}
+struct Sl_i64 { a: u8, w: [i64; 4], z: i64 }
+struct Two_i64 { g: [[i64; 4]; 2], s: Sl_i64 }
+fn sum_i64(b: &[i64]) -> i64 { let mut s: i64 = 0_i64; let mut i: usize = 0; while i < b.len() { s = s + (i as i64 + 1_i64) * (b[i] as i64); i = i + 1; } s }
+fn bump_i64(b: &mut [i64]) { let mut i: usize = 0; while i < b.len() { b[i] = b[i] + 1_i64; i = i + 1; } }
+fn len_i64(b: &[i64]) -> usize { b.len() }
+fn via_i64(s: &mut Sl_i64) -> i64 { bump_i64(&mut s.w); sum_i64(&s.w) }
+fn fwd_vec_i64(v: &Vec<i64>) -> i64 { sum_i64(v) }
+fn fwd_len_i64(v: &Vec<i64>) -> usize { len_i64(v) }
+fn fwd_mut_vec_i64(v: &mut Vec<i64>) { bump_i64(v); }
+fn reborrow_i64(v: &Vec<i64>) -> i64 { sum_i64(&*v) }
+fn twice_i64(v: &Vec<i64>) -> i64 { fwd_vec_i64(v) }
+fn fwd_arr_i64(a: &[i64; 4]) -> i64 { sum_i64(a) }
+fn fwd_arr_len_i64(a: &[i64; 4]) -> usize { len_i64(a) }
+fn fwd_mut_arr_i64(a: &mut [i64; 4]) { bump_i64(a); }
+fn mk_i64() -> [i64; 4] { [82_i64, (-100_i64), 69_i64, 10_i64] }
+fn slices_i64() ~ Console {
+    let mut s = Sl_i64 { a: 11_u8, w: [(-79_i64), (-89_i64), (-84_i64), (-8_i64)], z: (-9220817687592907279_i64) };
+    let mut two = Two_i64 { g: [[(-34_i64), (-95_i64), 39_i64, 93_i64], [2_i64, 6_i64, (-59_i64), (-9_i64)]], s: s };
+    let mut v: Vec<i64> = Vec::new();
+    v.push(31_i64);
+    v.push(36_i64);
+    v.push((-69_i64));
+    v.push(1_i64);
+    v.push((-68_i64));
+    let mut arr: [i64; 4] = [82_i64, (-100_i64), 69_i64, 10_i64];
+    println!("field_i64 {} {}", sum_i64(&s.w), len_i64(&s.w));
+    bump_i64(&mut s.w);
+    println!("bumped_i64 {} {} {} {} {} {}", s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.z);
+    println!("via_i64 {} {} {} {} {} {} {}", via_i64(&mut s), s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.z);
+    println!("deep_i64 {} {} {}", sum_i64(&two.s.w), sum_i64(&two.g[1]), len_i64(&two.g[0]));
+    bump_i64(&mut two.g[0]);
+    bump_i64(&mut two.s.w);
+    println!("deepw_i64 {} {} {} {} {} {} {} {} {} {} {} {}", two.g[0][0], two.g[0][1], two.g[0][2], two.g[0][3], two.g[1][0], two.g[1][1], two.g[1][2], two.g[1][3], two.s.w[0], two.s.w[1], two.s.w[2], two.s.w[3]);
+    let sl: &[i64] = &s.w;
+    println!("bound_i64 {} {} {}", sum_i64(sl), sl.len(), sl[3]);
+    println!("vec_i64 {} {} {} {}", fwd_vec_i64(&v), fwd_len_i64(&v), reborrow_i64(&v), twice_i64(&v));
+    fwd_mut_vec_i64(&mut v);
+    println!("vecw_i64 {} {} {} {} {}", v[0], v[1], v[2], v[3], v[4]);
+    println!("arr_i64 {} {} {}", fwd_arr_i64(&arr), fwd_arr_len_i64(&arr), fwd_arr_i64(&s.w));
+    fwd_mut_arr_i64(&mut arr);
+    fwd_mut_arr_i64(&mut s.w);
+    println!("arrw_i64 {} {} {} {} {} {} {} {} {} {}", arr[0], arr[1], arr[2], arr[3], s.a, s.w[0], s.w[1], s.w[2], s.w[3], s.z);
+    println!("temp_i64 {} {}", sum_i64(&mk_i64()), len_i64(&mk_i64()));
+}
+fn main() ~ Console {
+    slices_u8();
+    slices_i8();
+    slices_u16();
+    slices_i16();
+    slices_u32();
+    slices_i32();
+    slices_u64();
+    slices_i64();
+}
