@@ -1,0 +1,618 @@
+{
+  "schema": "buildlang.mir/v1",
+  "module": {
+    "name": "main",
+    "functions": [
+      {
+        "name": "show",
+        "sig": {
+          "params": [
+            {
+              "Ptr": {
+                "Struct": "BuildString"
+              }
+            },
+            {
+              "Int": [
+                "I64",
+                false
+              ]
+            }
+          ],
+          "ret": "Void",
+          "is_variadic": false,
+          "calling_conv": "Build"
+        },
+        "blocks": null,
+        "locals": [],
+        "is_public": false,
+        "linkage": "External",
+        "shader_stage": null,
+        "bindings": []
+      },
+      {
+        "name": "run",
+        "sig": {
+          "params": [
+            {
+              "Int": [
+                "I64",
+                false
+              ]
+            }
+          ],
+          "ret": "Void",
+          "is_variadic": false,
+          "calling_conv": "Build"
+        },
+        "blocks": null,
+        "locals": [],
+        "is_public": false,
+        "linkage": "External",
+        "shader_stage": null,
+        "bindings": []
+      },
+      {
+        "name": "show",
+        "sig": {
+          "params": [
+            {
+              "Ptr": {
+                "Struct": "BuildString"
+              }
+            },
+            {
+              "Int": [
+                "I64",
+                false
+              ]
+            }
+          ],
+          "ret": "Void",
+          "is_variadic": false,
+          "calling_conv": "Build"
+        },
+        "blocks": [
+          {
+            "id": 0,
+            "label": null,
+            "stmts": [
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 2,
+                    "value": {
+                      "Deref": {
+                        "ptr": {
+                          "Local": 0
+                        },
+                        "pointee_ty": {
+                          "Struct": "BuildString"
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 3,
+                    "value": {
+                      "FieldAccess": {
+                        "base": {
+                          "Local": 2
+                        },
+                        "field_name": "ptr",
+                        "field_ty": {
+                          "Ptr": {
+                            "Int": [
+                              "I8",
+                              true
+                            ]
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 4,
+                    "value": {
+                      "Use": {
+                        "Const": {
+                          "Str": 0
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            ],
+            "terminator": {
+              "Call": {
+                "func": {
+                  "Function": "printf"
+                },
+                "args": [
+                  {
+                    "Local": 4
+                  },
+                  {
+                    "Local": 3
+                  },
+                  {
+                    "Local": 1
+                  }
+                ],
+                "dest": null,
+                "target": 1,
+                "unwind": null
+              }
+            }
+          },
+          {
+            "id": 1,
+            "label": null,
+            "stmts": [],
+            "terminator": {
+              "Return": null
+            }
+          }
+        ],
+        "locals": [
+          {
+            "id": 0,
+            "name": "label",
+            "ty": {
+              "Ptr": {
+                "Struct": "BuildString"
+              }
+            },
+            "is_mut": false,
+            "is_param": true,
+            "annotations": []
+          },
+          {
+            "id": 1,
+            "name": "v",
+            "ty": {
+              "Int": [
+                "I64",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": true,
+            "annotations": []
+          },
+          {
+            "id": 2,
+            "name": null,
+            "ty": {
+              "Struct": "BuildString"
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 3,
+            "name": null,
+            "ty": {
+              "Ptr": {
+                "Int": [
+                  "I8",
+                  true
+                ]
+              }
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 4,
+            "name": null,
+            "ty": {
+              "Ptr": {
+                "Int": [
+                  "I8",
+                  true
+                ]
+              }
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          }
+        ],
+        "is_public": false,
+        "linkage": "Internal",
+        "shader_stage": null,
+        "bindings": []
+      },
+      {
+        "name": "run",
+        "sig": {
+          "params": [
+            {
+              "Int": [
+                "I64",
+                false
+              ]
+            }
+          ],
+          "ret": "Void",
+          "is_variadic": false,
+          "calling_conv": "Build"
+        },
+        "blocks": [
+          {
+            "id": 0,
+            "label": null,
+            "stmts": [],
+            "terminator": {
+              "Call": {
+                "func": {
+                  "Function": "build_string_new"
+                },
+                "args": [
+                  {
+                    "Const": {
+                      "Str": 1
+                    }
+                  }
+                ],
+                "dest": 1,
+                "target": 1,
+                "unwind": null
+              }
+            }
+          },
+          {
+            "id": 1,
+            "label": null,
+            "stmts": [],
+            "terminator": {
+              "Call": {
+                "func": {
+                  "Global": "show"
+                },
+                "args": [
+                  {
+                    "Local": 1
+                  },
+                  {
+                    "Local": 0
+                  }
+                ],
+                "dest": null,
+                "target": 2,
+                "unwind": null
+              }
+            }
+          },
+          {
+            "id": 2,
+            "label": null,
+            "stmts": [],
+            "terminator": {
+              "Return": null
+            }
+          }
+        ],
+        "locals": [
+          {
+            "id": 0,
+            "name": "k",
+            "ty": {
+              "Int": [
+                "I64",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": true,
+            "annotations": []
+          },
+          {
+            "id": 1,
+            "name": null,
+            "ty": {
+              "Struct": "BuildString"
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          }
+        ],
+        "is_public": false,
+        "linkage": "Internal",
+        "shader_stage": null,
+        "bindings": []
+      },
+      {
+        "name": "main",
+        "sig": {
+          "params": [],
+          "ret": {
+            "Int": [
+              "I32",
+              true
+            ]
+          },
+          "is_variadic": false,
+          "calling_conv": "Build"
+        },
+        "blocks": [
+          {
+            "id": 0,
+            "label": null,
+            "stmts": [],
+            "terminator": {
+              "Call": {
+                "func": {
+                  "Function": "build_args_get"
+                },
+                "args": [
+                  {
+                    "Const": {
+                      "Int": [
+                        1,
+                        {
+                          "Int": [
+                            "I32",
+                            true
+                          ]
+                        }
+                      ]
+                    }
+                  }
+                ],
+                "dest": 1,
+                "target": 1,
+                "unwind": null
+              }
+            }
+          },
+          {
+            "id": 1,
+            "label": null,
+            "stmts": [],
+            "terminator": {
+              "Call": {
+                "func": {
+                  "Function": "build_string_parse_int"
+                },
+                "args": [
+                  {
+                    "Local": 1
+                  }
+                ],
+                "dest": 2,
+                "target": 2,
+                "unwind": null
+              }
+            }
+          },
+          {
+            "id": 2,
+            "label": null,
+            "stmts": [
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 3,
+                    "value": {
+                      "Cast": {
+                        "kind": "IntToInt",
+                        "value": {
+                          "Local": 2
+                        },
+                        "ty": {
+                          "Int": [
+                            "I64",
+                            false
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            ],
+            "terminator": {
+              "Call": {
+                "func": {
+                  "Global": "run"
+                },
+                "args": [
+                  {
+                    "Local": 3
+                  }
+                ],
+                "dest": null,
+                "target": 3,
+                "unwind": null
+              }
+            }
+          },
+          {
+            "id": 3,
+            "label": null,
+            "stmts": [],
+            "terminator": {
+              "Return": {
+                "Const": {
+                  "Int": [
+                    0,
+                    {
+                      "Int": [
+                        "I32",
+                        true
+                      ]
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        ],
+        "locals": [
+          {
+            "id": 0,
+            "name": "_ret",
+            "ty": {
+              "Int": [
+                "I32",
+                true
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 1,
+            "name": null,
+            "ty": {
+              "Struct": "BuildString"
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 2,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I64",
+                true
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 3,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I64",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          }
+        ],
+        "is_public": true,
+        "linkage": "External",
+        "shader_stage": null,
+        "bindings": []
+      }
+    ],
+    "globals": [],
+    "types": [
+      {
+        "name": "build_vec2",
+        "kind": {
+          "Struct": {
+            "fields": [
+              [
+                "x",
+                {
+                  "Float": "F64"
+                }
+              ],
+              [
+                "y",
+                {
+                  "Float": "F64"
+                }
+              ]
+            ],
+            "packed": false
+          }
+        }
+      },
+      {
+        "name": "build_vec3",
+        "kind": {
+          "Struct": {
+            "fields": [
+              [
+                "x",
+                {
+                  "Float": "F64"
+                }
+              ],
+              [
+                "y",
+                {
+                  "Float": "F64"
+                }
+              ],
+              [
+                "z",
+                {
+                  "Float": "F64"
+                }
+              ]
+            ],
+            "packed": false
+          }
+        }
+      },
+      {
+        "name": "build_vec4",
+        "kind": {
+          "Struct": {
+            "fields": [
+              [
+                "x",
+                {
+                  "Float": "F64"
+                }
+              ],
+              [
+                "y",
+                {
+                  "Float": "F64"
+                }
+              ],
+              [
+                "z",
+                {
+                  "Float": "F64"
+                }
+              ],
+              [
+                "w",
+                {
+                  "Float": "F64"
+                }
+              ]
+            ],
+            "packed": false
+          }
+        }
+      }
+    ],
+    "strings": [
+      "%s %llu\n",
+      "value"
+    ],
+    "externals": [],
+    "vtables": [],
+    "trait_methods": {},
+    "uniforms": []
+  }
+}

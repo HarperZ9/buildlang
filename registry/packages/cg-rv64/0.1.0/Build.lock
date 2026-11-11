@@ -9,11 +9,11 @@ requires = ["asm-rv64 =0.4.0"]
 [[package]]
 name = "asm-rv64"
 version = "0.4.0"
-checksum = "sha256:d9204bc2bf31859868974e27731ba0aa3985ca2e547882ff2bb8ff68384fd6ff"
+checksum = "sha256:46783d7b81697b44a81cb3cb1092fc77716b3ca048aab5d426cfedf4c89ed32f"
 dependencies = ["emu-rv64 0.7.0"]
 
 [[package]]
 name = "emu-rv64"
 version = "0.7.0"
-checksum = "sha256:b8c633cf921e334577fc704fab2cb982fc456430d5ae11b61b08c0ee556054f8"
+checksum = "sha256:26cb91693ca0ffbfc87620461efbc2be62c0204bdda320c52c731ffc9425195e"
 dependencies = []

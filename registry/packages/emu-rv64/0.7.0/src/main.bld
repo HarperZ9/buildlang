@@ -156,8 +156,7 @@ fn main() ~ Console + FileSystem + Process + Environment {
     if sc == 0 { return; }
     if sc > 0 { exit(1); }
     let zc = serial_main();
-    if zc == 0 { return; }
-    if zc > 0 { exit(zc as i32); }
+    if zc >= 0 { exit(zc as i32); }
     println!("usage: emu-rv64 cases | controls | fuzz SEED STEPS | props SEED STEPS");
     println!("       emu-rv64 mcases | mcontrols | mfuzz SEED STEPS | mprops SEED STEPS");
     println!("       emu-rv64 icases | icontrols | ifuzz SEED STEPS | iprops SEED STEPS");
@@ -166,6 +165,6 @@ fn main() ~ Console + FileSystem + Process + Environment {
     println!("       emu-rv64 xcases | xcontrols | xfuzz SEED STEPS | xprops SEED STEPS");
     println!("       emu-rv64 scases | scontrols | sfuzz SEED STEPS | sprops SEED STEPS");
     println!("       emu-rv64 srun IMAGE STEPS | sreplay IMAGE STEPS");
-    println!("       emu-rv64 serial IMAGE MAX | serial-check IMAGE MAX");
+    serial_usage();
     exit(2);
 }

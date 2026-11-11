@@ -12,7 +12,7 @@ fn cx_control_name(v: u64) -> str {
     if v == CGC_ADDOVF { return "an add that leaves its type does not trap"; }
     if v == CGC_DIVZERO { return "a zero divisor does not trap"; }
     if v == CGC_SHMASK { return "every shift count is masked with 63"; }
-    if v == CGC_CAST { return "an integer cast keeps the bits above the target width"; }
+    if v == CGC_CAST { return "a cast of a signed value to a wider type fills with zeros"; }
     if v == CGC_STACKARG { return "a stack argument is read one slot too high"; }
     if v == CGC_SUBOVF { return "a subtract that leaves its type does not trap"; }
     if v == CGC_MULOVF { return "a multiply that leaves its type does not trap"; }
@@ -23,7 +23,7 @@ fn cx_control_name(v: u64) -> str {
     if v == CGC_MINUS { return "a negative decimal number is printed with no minus sign"; }
     if v == CGC_LE { return "less-or-equal is compiled as less-than"; }
     if v == CGC_VECOOB { return "a vector index is not checked against the length"; }
-    if v == CGC_WRAP { return "a wrapping operation narrower than 64 bits keeps the bits above its width"; }
+    if v == CGC_WRAP { return "a wrapping subtract takes its operands the wrong way round"; }
     if v == CGC_DIVOVF { return "the smallest signed value divided by -1 does not trap"; }
     if v == CGC_SRA { return "a right shift of a signed value fills with zeros"; }
     "the generator"

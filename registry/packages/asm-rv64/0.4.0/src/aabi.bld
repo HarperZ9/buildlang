@@ -1,9 +1,9 @@
 // asm-rv64: every constant of the package, in one file that sorts first.
 // The sources of the dependency emu-rv64 are joined before this file, so
 // its constants (the OP_ and CL_ numbers, the CSR numbers) are declared
-// already. Every name of this package starts with as_, ad_, ac_, ap_ or
-// ax_, or with AS_, AE_, AK_ or ACTL_, and none of them is a name of
-// emu-rv64.
+// already. Every name of this package starts with as_, ad_, ac_, ap_,
+// ax_, ay_ or yc_, or with AS_, AE_, AK_, ACTL_ or Yc, and none of them
+// is a name of emu-rv64.
 
 // Limits of one assembly: bytes of source text, words of output, labels,
 // and bytes in one label name.
@@ -97,6 +97,10 @@ const ACTL_AMOSWAP: u64 = 11_u64;
 const ACTL_WIDTH: u64 = 12_u64;
 const ACTL_PAREN: u64 = 13_u64;
 const ACTL_COUNT: u64 = 13_u64;
+// Since 0.4.0, two defects of the large limits. The command acontrols
+// stops at ACTL_COUNT; the command ycontrols runs these two.
+const ACTL_YLABEL: u64 = 14_u64;
+const ACTL_YDROP: u64 = 15_u64;
 
 // Text styles of the renderer in adis.bld, one bit each. Style 0 is the
 // canonical text that the command dis prints.

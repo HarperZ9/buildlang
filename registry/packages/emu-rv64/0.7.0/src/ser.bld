@@ -38,7 +38,8 @@ fn ser_copy(m: &Machine, out: &[u8], sink: &mut Vec<u8>) {
 // changes nothing; the bytes go to sink, the buffer is emptied into the
 // tape and the step runs again. Defect 2 empties the buffer without
 // keeping its bytes.
-fn ser_step(v: u64, m: &mut Machine, x: &mut [u64], ram: &mut [u8], out: &mut [u8], t: &mut Tape, sink: &mut Vec<u8>) -> i64 {
+fn ser_step(v: u64, m: &mut Machine, x: &mut [u64], ram: &mut [u8], out: &mut [u8], t: &mut Tape,
+            sink: &mut Vec<u8>) -> i64 {
     let mut rc = emu_step(m, x, ram, out);
     if rc == EMU_SMALL && m.out_len != 0_u64 {
         if v != SER_CTL_DROP { ser_copy(m, out, sink); }
@@ -51,7 +52,8 @@ fn ser_step(v: u64, m: &mut Machine, x: &mut [u64], ram: &mut [u8], out: &mut [u
 // Runs the first n bytes of img in the memory ram for at most max steps
 // and appends the serial bytes to sink. Defect 3 takes the exit code from
 // x11, defect 4 counts the halt as a step, defect 5 leaves the bytes
-// that still wait in the output buffer at the end out of sink.
+// that still wait in the output buffer at the end out of sink, defect 6
+// looks at the step limit before the halt word.
 fn ser_run_v(v: u64, img: &[u8], n: usize, ram: &mut [u8], max: u64, sink: &mut Vec<u8>) -> SerRun {
     let mut m = emu_new_machine();
     let mut x: [u64; 32] = [0_u64; 32];
@@ -62,13 +64,14 @@ fn ser_run_v(v: u64, img: &[u8], n: usize, ram: &mut [u8], max: u64, sink: &mut 
     if r.rc != IMG_OK { return r; }
     let mut live = true;
     while live {
-        if ser_at_halt(v, &m, ram) {
+        let over = r.steps >= max;
+        if ser_at_halt(v, &m, ram) && !(v == SER_CTL_LIMIT && over) {
             r.halted = true;
             r.code = x[10];
             if v == SER_CTL_CODE { r.code = x[11]; }
             if v == SER_CTL_STEP { r.steps = r.steps + 1_u64; }
             live = false;
-        } else if r.steps >= max {
+        } else if over {
             live = false;
         } else {
             let sc = ser_step(v, &mut m, &mut x, ram, &mut out, &mut t, sink);

@@ -62,6 +62,11 @@ fn cs_struct(g: &mut Cg, d: &CjDoc, body: u64, t: u64, off: u64) {
     let mut f = cj_first(d, fl);
     while op != CG_NONE {
         let fd = ct_field(g, d, t, cj_first(d, f));
+        if ct_kind(d, fd.ty) == CT_ARRAY && cj_count(d, fl) > 1_u64 {
+            cg_refuse(g, d,
+                "struct literal with an array field beside other fields (no defined value on the host)");
+            return;
+        }
         cs_elem(g, d, op, fd.ty, off + fd.off);
         f = cj_next(d, f);
         op = cj_next(d, op);

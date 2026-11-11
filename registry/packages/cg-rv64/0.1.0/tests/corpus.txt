@@ -1,0 +1,14 @@
+# program entry from to: run(k) for every k of the range, host against emulator
+structs run 0 3
+calls run 0 13
+vecs run 0 4
+edge_i8 run 0 0
+edge_i16 run 0 0
+edge_i32 run 0 0
+edge_i64 run 0 0
+edge_u8 run 0 0
+edge_u16 run 0 0
+edge_u32 run 0 0
+edge_u64 run 0 0
+traps_s run 0 63
+traps_u run 0 63

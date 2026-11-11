@@ -1,0 +1,251 @@
+// fuzzgen: prints a BuildLang program made from a seed, for the
+// differential fuzz of cg-rv64 (tests/tools/fuzz.sh).
+//
+//   fuzzgen SEED
+//
+// The program has a struct of three integer fields, an array of eight
+// integers passed as a slice, and five functions f0 to f4. Function fI
+// takes (v0: u64, v1, v2, s: &mut S, arr: &mut [E]) and may call any fJ
+// with J < I, so every program ends. Bodies are made of declarations,
+// assignments, field and element stores, if, counted loops, calls and
+// prints. Expressions use every integer width with wrapping, checked,
+// divide, bit, shift and cast operations. A generated program may trap
+// (overflow, a zero divisor, an index of 8 into 8 elements); the fuzz
+// compares the trap as it compares any other output.
+// Same seed, same program: every step is wrapping 64-bit arithmetic.
+
+// s: state. out: the text. vt: the types of the variables in scope.
+// ft: field types. et: element type. sig: v1, v2, result per function.
+struct Fz { s: u64, out: Vec<u8>, vt: Vec<u64>, ft: Vec<u64>, et: u64, sig: Vec<u64>, loops: u64 }
+
+fn fz_next(z: &mut Fz) -> u64 {
+    z.s = z.s.wrapping_add(0x9E3779B97F4A7C15_u64);
+    let mut x: u64 = z.s;
+    x = (x ^ (x >> 30_u64)).wrapping_mul(0xBF58476D1CE4E5B9_u64);
+    x = (x ^ (x >> 27_u64)).wrapping_mul(0x94D049BB133111EB_u64);
+    x ^ (x >> 31_u64)
+}
+
+fn fz_pick(z: &mut Fz, n: u64) -> u64 { fz_next(z) % n }
+
+// Types 0 to 3 are i8, i16, i32, i64; 4 to 7 are u8, u16, u32, u64.
+fn fz_bits(t: u64) -> u64 { 8_u64 << (t % 4_u64) }
+
+fn fz_s(z: &mut Fz, s: str) {
+    let b = s.as_bytes();
+    let mut i: usize = 0;
+    while i < s.len() {
+        z.out.push(b[i]);
+        i = i + 1;
+    }
+}
+
+fn fz_u(z: &mut Fz, v: u64) {
+    let mut div: u64 = 1_u64;
+    while v / div >= 10_u64 { div = div * 10_u64; }
+    while div > 0_u64 {
+        z.out.push((48_u64 + (v / div) % 10_u64) as u8);
+        div = div / 10_u64;
+    }
+}
+
+fn fz_ty(z: &mut Fz, t: u64) {
+    if t < 4_u64 { fz_s(z, "i"); } else { fz_s(z, "u"); }
+    fz_u(z, fz_bits(t));
+}
+
+// A literal of type t: an edge value three times in four, else any value.
+fn fz_lit(z: &mut Fz, t: u64) {
+    let bits = fz_bits(t);
+    let mut top: u64 = 0xFFFFFFFFFFFFFFFF_u64 >> (64_u64 - bits);
+    if t < 4_u64 { top = top >> 1_u64; }
+    let r = fz_pick(z, 8_u64);
+    let mut mag = fz_next(z) & top;
+    if r < 3_u64 { mag = r; }
+    if r == 3_u64 { mag = top; }
+    if r == 4_u64 { mag = top - 1_u64; }
+    if r == 5_u64 { mag = bits + fz_pick(z, 3_u64) - 1_u64; }
+    let neg = t < 4_u64 && fz_pick(z, 2_u64) == 0_u64 && mag != 0_u64;
+    fz_s(z, "(");
+    if neg { fz_s(z, "-"); }
+    fz_u(z, mag);
+    fz_s(z, "_");
+    fz_ty(z, t);
+    if neg && mag == top && fz_pick(z, 2_u64) == 0_u64 {
+        fz_s(z, " - 1_");
+        fz_ty(z, t);
+    }
+    fz_s(z, ")");
+}
+
+// A value of type t with no operation: a variable, a field, an element
+// or a literal.
+fn fz_atom(z: &mut Fz, t: u64) {
+    let r = fz_pick(z, 8_u64);
+    let start = fz_pick(z, z.vt.len() as u64);
+    let mut i: u64 = 0_u64;
+    while r < 5_u64 && i < z.vt.len() as u64 {
+        let k = (start + i) % z.vt.len() as u64;
+        if z.vt[k as usize] == t {
+            fz_s(z, "v");
+            fz_u(z, k);
+            return;
+        }
+        i = i + 1_u64;
+    }
+    let f = fz_pick(z, 3_u64);
+    if r < 7_u64 && z.ft[f as usize] == t {
+        fz_s(z, "s.f");
+        fz_u(z, f);
+    } else if r < 7_u64 && z.et == t {
+        fz_s(z, "arr[(v0 % 8_u64) as usize]");
+    } else {
+        fz_lit(z, t);
+    }
+}
+
+// A checked operation. Its left operand is never a literal: the
+// compiler refuses an overflow it can work out.
+fn fz_checked(z: &mut Fz, t: u64, mid: str) {
+    let start = fz_pick(z, z.vt.len() as u64);
+    let mut found = z.vt.len() as u64;
+    let mut i: u64 = 0_u64;
+    while i < z.vt.len() as u64 {
+        let k = (start + i) % z.vt.len() as u64;
+        if z.vt[k as usize] == t { found = k; }
+        i = i + 1_u64;
+    }
+    fz_s(z, "(");
+    if found < z.vt.len() as u64 {
+        fz_s(z, "v");
+        fz_u(z, found);
+    } else {
+        fz_s(z, "(v0 as ");
+        fz_ty(z, t);
+        fz_s(z, ")");
+    }
+    fz_s(z, mid);
+    if fz_pick(z, 8_u64) == 0_u64 {
+        fz_atom(z, t);
+    } else {
+        fz_u(z, fz_pick(z, 2_u64));
+        fz_s(z, "_");
+        fz_ty(z, t);
+    }
+    fz_s(z, ")");
+}
+
+// A divide or a remainder. For a signed type, one time in eight it is
+// the smallest value divided by -1 or -2, by the low bit of v0. Else,
+// fifteen times in sixteen the divisor is made odd, so it is not zero.
+fn fz_div(z: &mut Fz, t: u64, depth: u64, mid: str) {
+    if t < 4_u64 && fz_pick(z, 8_u64) == 0_u64 {
+        fz_s(z, "((-");
+        fz_u(z, (0xFFFFFFFFFFFFFFFF_u64 >> (64_u64 - fz_bits(t))) >> 1_u64);
+        fz_s(z, "_");
+        fz_ty(z, t);
+        fz_s(z, " - 1_");
+        fz_ty(z, t);
+        fz_s(z, ")");
+        fz_s(z, mid);
+        fz_s(z, "(v0 as ");
+        fz_ty(z, t);
+        fz_s(z, ") | -2_");
+        fz_ty(z, t);
+        fz_s(z, "))");
+        return;
+    }
+    if fz_pick(z, 16_u64) == 0_u64 {
+        fz_two(z, t, depth, "(", mid, "))");
+        return;
+    }
+    fz_two(z, t, depth, "(", mid, " | 1_");
+    fz_ty(z, t);
+    fz_s(z, "))");
+}
+
+fn fz_two(z: &mut Fz, t: u64, depth: u64, open: str, mid: str, close: str) {
+    fz_s(z, open);
+    fz_expr(z, t, depth - 1_u64);
+    fz_s(z, mid);
+    fz_expr(z, t, depth - 1_u64);
+    fz_s(z, close);
+}
+
+// An expression of type t.
+fn fz_expr(z: &mut Fz, t: u64, depth: u64) {
+    let r = fz_pick(z, 24_u64);
+    if depth == 0_u64 || r < 4_u64 {
+        fz_atom(z, t);
+    } else if r == 4_u64 { fz_two(z, t, depth, "(", ").wrapping_add(", ")");
+    } else if r == 5_u64 { fz_two(z, t, depth, "(", ").wrapping_sub(", ")");
+    } else if r == 6_u64 { fz_two(z, t, depth, "(", ").wrapping_mul(", ")");
+    } else if r == 7_u64 && fz_pick(z, 3_u64) == 0_u64 { fz_checked(z, t, " + ");
+    } else if r == 8_u64 && fz_pick(z, 3_u64) == 0_u64 { fz_checked(z, t, " - ");
+    } else if r == 9_u64 && fz_pick(z, 3_u64) == 0_u64 { fz_checked(z, t, " * ");
+    } else if r == 10_u64 { fz_div(z, t, depth, " / (");
+    } else if r == 11_u64 { fz_div(z, t, depth, " % (");
+    } else if r == 12_u64 { fz_two(z, t, depth, "(", " & ", ")");
+    } else if r == 13_u64 { fz_two(z, t, depth, "(", " | ", ")");
+    } else if r == 14_u64 { fz_two(z, t, depth, "(", " ^ ", ")");
+    } else if r == 15_u64 { fz_two(z, t, depth, "(", " << ", ")");
+    } else if r == 16_u64 { fz_two(z, t, depth, "(", " >> ", ")");
+    } else if r == 17_u64 {
+        fz_s(z, "(!");
+        fz_expr(z, t, depth - 1_u64);
+        fz_s(z, ")");
+    } else {
+        let from = fz_pick(z, 8_u64);
+        fz_s(z, "(");
+        fz_expr(z, from, depth - 1_u64);
+        fz_s(z, " as ");
+        fz_ty(z, t);
+        fz_s(z, ")");
+    }
+}
+
+fn fz_cond(z: &mut Fz) {
+    let t = fz_pick(z, 8_u64);
+    let r = fz_pick(z, 6_u64);
+    let mut op = " < ";
+    if r == 1_u64 { op = " <= "; }
+    if r == 2_u64 { op = " > "; }
+    if r == 3_u64 { op = " >= "; }
+    if r == 4_u64 { op = " == "; }
+    if r == 5_u64 { op = " != "; }
+    fz_two(z, t, 2_u64, "", op, "");
+}
+
+// A call of function j, as an expression of its result type.
+fn fz_call(z: &mut Fz, j: u64) {
+    fz_s(z, "f");
+    fz_u(z, j);
+    fz_s(z, "(");
+    fz_expr(z, 7_u64, 1_u64);
+    fz_s(z, ", ");
+    fz_expr(z, z.sig[(3_u64 * j) as usize], 2_u64);
+    fz_s(z, ", ");
+    fz_expr(z, z.sig[(3_u64 * j + 1_u64) as usize], 2_u64);
+    fz_s(z, ", s, arr, ");
+    fz_expr(z, 4_u64, 1_u64);
+    fz_s(z, ", ");
+    fz_expr(z, 1_u64, 1_u64);
+    fz_s(z, ", ");
+    fz_expr(z, 6_u64, 1_u64);
+    fz_s(z, ", ");
+    fz_expr(z, 3_u64, 1_u64);
+    fz_s(z, ", ");
+    fz_expr(z, 5_u64, 1_u64);
+    fz_s(z, ")");
+}
+
+// *s = mk(a, b, c): the struct comes back from a call as a whole.
+fn fz_remake(z: &mut Fz) {
+    fz_s(z, "*s = mk(");
+    fz_expr(z, z.ft[0], 2_u64);
+    fz_s(z, ", ");
+    fz_expr(z, z.ft[1], 2_u64);
+    fz_s(z, ", ");
+    fz_expr(z, z.ft[2], 2_u64);
+    fz_s(z, ");\n");
+}

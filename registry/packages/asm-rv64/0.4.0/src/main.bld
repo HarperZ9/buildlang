@@ -3,6 +3,8 @@
 //   asm-rv64 asm FILE | bytes FILE | dis FILE
 //   asm-rv64 match FILE NAME | same FILE IMAGE | hand FILE GOLDEN
 //   asm-rv64 acases | aprops SEED STEPS | acontrols
+//   asm-rv64 asmx FILE | bytesx FILE | serial FILE MAX | serial-check FILE MAX
+//   asm-rv64 ycases | ycontrols
 //
 // The file commands are in acmd.bld, the checks in acase.bld to acase8.bld,
 // aprop.bld to aprop3.bld and actl.bld.
@@ -12,6 +14,7 @@ fn ax_usage() ~ Console {
     println!("       asm-rv64 match FILE NAME | same FILE IMAGE | hand FILE GOLDEN");
     println!("       asm-rv64 acases | aprops SEED STEPS | acontrols");
     println!("       asm-rv64 asmx FILE | bytesx FILE | serial FILE MAX | serial-check FILE MAX");
+    println!("       asm-rv64 ycases | ycontrols");
 }
 
 // Runs a file command. Returns -1 when the first argument is not one,

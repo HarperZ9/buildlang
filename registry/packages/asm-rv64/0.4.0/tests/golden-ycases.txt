@@ -1,0 +1,21 @@
+ycase 1 1100 labels, large limits, a jump to the last label: words=1101 errors=0 pass=true
+ycase 2 1100 labels, small limits: more than 1024 labels from line 1026: words=0 errors=77 pass=true
+ycase 3 16385 words, large limits: an image of 65540 bytes: words=16385 errors=0 pass=true
+ycase 4 16385 words, small limits: image larger than 65536 bytes on line 16385: words=0 errors=1 pass=true
+ycase 5 16384 words, small limits: exactly the limit: words=16384 errors=0 pass=true
+ycase 6 262144 words, large limits: exactly the limit: words=262144 errors=0 pass=true
+ycase 7 262145 words, large limits: image larger than 1048576 bytes on line 262145: words=0 errors=1 pass=true
+ycase 8 .org 65536, small limits: 16384 zero words: words=16384 errors=0 pass=true
+ycase 9 .org 65540, small limits: image larger than 65536 bytes: words=0 errors=1 pass=true
+ycase 10 .org 65540 and a word, large limits: 16386 words: words=16386 errors=0 pass=true
+ycase 11 .org 1048576, large limits: 262144 zero words: words=262144 errors=0 pass=true
+ycase 12 .org 1048580, large limits: image larger than 1048576 bytes: words=0 errors=1 pass=true
+ycase 13 .org 1048576 and a word, large limits: refused on line 2: words=0 errors=1 pass=true
+ycase 14 a jump over 131072 bytes, large limits: words=32769 errors=0 pass=true
+ycase 15 the same, small limits: refused on line 2: words=0 errors=1 pass=true
+ycase 16 a program of 20 words: large and small limits give the same words: words=20 errors=0 pass=true
+ycase 17 four wrong lines: large and small limits give the same errors: words=0 errors=4 pass=true
+ycase 18 the reasons of the small limits are those of 0.3.0: words=0 errors=0 pass=true
+ycase 19 the reasons of the large limits: words=0 errors=0 pass=true
+ycase 20 65537 labels, large limits: more than 65536 labels on line 65537: words=0 errors=1 pass=true
+ycases: 20 run, 0 failed

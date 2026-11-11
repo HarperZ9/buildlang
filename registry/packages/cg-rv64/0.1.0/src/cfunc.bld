@@ -153,7 +153,8 @@ fn cf_switch(g: &mut Cg, d: &CjDoc, body: u64) {
         let c = cj_first(d, tg);
         let n = cj_first(d, cj_body(d, c));
         let isint = (cj_tag_is(d, c, "Int") || cj_tag_is(d, c, "Uint")) && cj_kind(d, n) == CJ_NUM;
-        if !isint || cv_canon(d, cj_bits(d, n), t) != cj_bits(d, n) || (cj_tag_is(d, c, "Uint") && ct_signed(d, t)) || (cj_neg(d, n) && !ct_signed(d, t)) {
+        let cross = (cj_tag_is(d, c, "Uint") && ct_signed(d, t)) || (cj_neg(d, n) && !ct_signed(d, t));
+        if !isint || cross || cv_canon(d, cj_bits(d, n), t) != cj_bits(d, n) {
             cg_refuse(g, d, "switch target that is not an integer in the range of the switched type");
             return;
         }

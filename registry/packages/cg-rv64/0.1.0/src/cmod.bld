@@ -12,9 +12,11 @@ fn cm_function(g: &mut Cg, d: &CjDoc, fid: u64) {
     g.ret = cj_get(d, sig, "ret");
     g.hid = 0_u64;
     if ct_agg(d, g.ret) { g.hid = 1_u64; }
-    let plain = cj_kind(d, cj_get(d, sig, "is_variadic")) == CJ_FALSE && cj_str_is(d, cj_get(d, sig, "calling_conv"), "Build");
+    let fixed = cj_kind(d, cj_get(d, sig, "is_variadic")) == CJ_FALSE;
+    let plain = fixed && cj_str_is(d, cj_get(d, sig, "calling_conv"), "Build");
     if !plain || !ct_known(g, d, g.ret) {
-        cg_refuse(g, d, "signature that is variadic, has a foreign calling convention or a result type the generator does not cover");
+        cg_refuse(g, d,
+            "variadic function, foreign calling convention or a result type the generator does not cover");
         return;
     }
     cf_layout(g, d, f);
@@ -80,7 +82,8 @@ fn cm_entry(g: &mut Cg, d: &CjDoc, def: u64, args: &Vec<u64>) {
     let n = cj_count(d, params);
     g.name = cj_get(d, def, "name");
     if n > CG_ARG_REGS || (n as usize) * 2 != args.len() || ct_agg(d, cj_get(d, sig, "ret")) {
-        cg_refuse(g, d, "entry function that does not take the given number of arguments, takes more than 8, or returns an aggregate");
+        cg_refuse(g, d,
+            "entry function with a wrong argument count, more than 8 parameters or an aggregate result");
         return;
     }
     let mut pt = cj_first(d, params);
@@ -89,7 +92,8 @@ fn cm_entry(g: &mut Cg, d: &CjDoc, def: u64, args: &Vec<u64>) {
         let mag = args[(2_u64 * k) as usize];
         let neg = args[(2_u64 * k + 1_u64) as usize] == 1_u64;
         if !cm_arg_fits(d, pt, mag, neg) {
-            cg_refuse(g, d, "entry argument outside the range of its parameter type, or a parameter that is not a Bool or an integer");
+            cg_refuse(g, d,
+                "entry argument outside the range of its parameter, or a parameter that is no Bool or integer");
             return;
         }
         let mut bits = mag;

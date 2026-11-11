@@ -1,0 +1,100 @@
+// The check commands of the serial run of emu-rv64, since 0.7.0:
+//
+//   emu-rv64 zcases              hand cases, in zcheck.bld and zcheck2.bld
+//   emu-rv64 zprops SEED STEPS   property run on seeded programs, no model
+//   emu-rv64 zcontrols           shows that every planted defect is refused
+//
+// A planted defect is the serial run with one fault put in on purpose.
+// The number is passed down to ser_run_v; there is no second copy of the
+// run, and number 0 is the run the commands use. The hand cases must
+// refuse every defect, and the property rules, run without the cases,
+// must refuse every defect.
+
+fn zctl_name(v: u64) -> str {
+    if v == SER_CTL_LATE { return "the halt word is looked for one word after pc"; }
+    if v == SER_CTL_DROP { return "a full output buffer is emptied without keeping its bytes"; }
+    if v == SER_CTL_CODE { return "the exit code is taken from x11"; }
+    if v == SER_CTL_STEP { return "the halt word is counted as a step"; }
+    if v == SER_CTL_TAIL { return "the bytes that wait in the output buffer at the end are left out"; }
+    "the step limit is looked at before the halt word"
+}
+
+// Runs the property rules for defect v. Returns 1 when they refuse it.
+fn zprops_one(v: u64, seed: u64, steps: u64) -> i64 ~ Console {
+    let mut ct: [u64; 8] = [0_u64; 8];
+    let f = zprop_run(v, seed, steps, &mut ct);
+    if f.kind != 0 {
+        show_refusal(&f);
+        return 1;
+    }
+    println!("  accepted, {} programs, {} steps, {} bytes sent, {} arithmetic instructions",
+             ct[0], ct[1], ct[2], ct[5]);
+    println!("  programs: {} of more than 128 bytes, {} of no byte, {} with a code above 255",
+             ct[3], ct[4], ct[6]);
+    0
+}
+
+// Runs the hand cases against defect v and prints which fail. Returns 1
+// when at least one fails.
+fn zctl_cases(v: u64) -> i64 ~ Console {
+    let st = zcases_run(v, false);
+    if st.bad == 0_u64 {
+        println!("  accepted, {} cases", st.count);
+        return 0;
+    }
+    let mut k: u64 = 1_u64;
+    while k < 64_u64 {
+        if ((st.bad >> k) & 1_u64) == 1_u64 { println!("  hand case {} fails", k); }
+        k = k + 1_u64;
+    }
+    1
+}
+
+// Every defect must be refused by the cases and by the property rules,
+// and the run itself must pass both.
+fn zcontrols() -> i64 ~ Console {
+    let mut bad: i64 = 0;
+    let mut v: u64 = 0_u64;
+    while v <= SER_CTL_COUNT {
+        if v == 0_u64 { println!("variant 0: the serial run"); } else { println!("control {}: {}", v, zctl_name(v)); }
+        println!(" cases:");
+        let c = zctl_cases(v);
+        println!(" properties:");
+        let q = zprops_one(v, 1_u64, 20000_u64);
+        if v == 0_u64 && (c + q) != 0 { bad = bad + 1; }
+        if v != 0_u64 && (c == 0 || q == 0) {
+            println!("  ACCEPTED A PLANTED DEFECT");
+            bad = bad + 1;
+        }
+        v = v + 1_u64;
+    }
+    if bad == 0 {
+        println!("result: the serial run accepted, {} of {} planted defects refused by the cases and by the properties",
+                 SER_CTL_COUNT, SER_CTL_COUNT);
+    } else {
+        println!("result: FAILED, {} variants judged wrongly", bad);
+    }
+    bad
+}
+
+// Runs a check command of the serial run. Returns -1 when the first
+// argument is not one, else the exit status.
+fn zcheck_main() -> i64 ~ Console + Process + Environment {
+    let cmd = args_get(1);
+    if cmd == "zcases" {
+        let st = zcases_run(0_u64, true);
+        if st.bad != 0_u64 { return 1; }
+        return 0;
+    }
+    if cmd == "zcontrols" {
+        if zcontrols() != 0 { return 1; }
+        return 0;
+    }
+    if cmd == "zprops" && args_count() >= 4 {
+        let seed = args_get(2).parse_int() as u64;
+        let steps = args_get(3).parse_int() as u64;
+        println!("zprops seed={} steps={}", seed, steps);
+        return zprops_one(0_u64, seed, steps);
+    }
+    -1
+}

@@ -1,0 +1,1 @@
+refused: function (none): the entry function is not in the MIR with a body

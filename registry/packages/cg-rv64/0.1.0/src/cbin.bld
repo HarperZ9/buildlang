@@ -142,7 +142,8 @@ fn cb_divide(g: &mut Cg, d: &CjDoc, op: u64, t: u64) {
 
 // Add, subtract, multiply, divide and remainder, and the wrapping forms.
 // Both operands are converted to the type of the operation, as the
-// arguments of the C helper are; the result has that type.
+// arguments of the C helper are; the result has that type. Defect 20
+// takes a wrapping subtract the wrong way round.
 fn cb_arith(g: &mut Cg, d: &CjDoc, op: u64, l: u64, r: u64, dty: u64) {
     let t = cb_pref(g, d, l, r);
     if ct_kind(d, t) != CT_INT || !ct_same(d, t, dty) {
@@ -162,8 +163,14 @@ fn cb_arith(g: &mut Cg, d: &CjDoc, op: u64, l: u64, r: u64, dty: u64) {
     let mut ins = "add";
     if op == CB_SUBW { ins = "sub"; }
     if op == CB_MULW { ins = "mul"; }
-    ci_r(g, ins, 5_u64, 5_u64, 6_u64);
-    if g.v != CGC_WRAP { ci_norm(g, d, 5_u64, t); }
+    let mut a: u64 = 5_u64;
+    let mut b: u64 = 6_u64;
+    if g.v == CGC_WRAP && op == CB_SUBW {
+        a = 6_u64;
+        b = 5_u64;
+    }
+    ci_r(g, ins, 5_u64, a, b);
+    ci_norm(g, d, 5_u64, t);
 }
 
 // Comparisons. The C backend writes the C operator on the two operands.
@@ -239,7 +246,9 @@ fn cb_shift(g: &mut Cg, d: &CjDoc, op: u64, l: u64, r: u64, dty: u64) {
         ci_norm(g, d, 5_u64, t);
         return;
     }
-    if ct_signed(d, t) && g.v != CGC_SRA { ci_r(g, "sra", 5_u64, 5_u64, 6_u64); } else { ci_r(g, "srl", 5_u64, 5_u64, 6_u64); }
+    let mut ins = "srl";
+    if ct_signed(d, t) && g.v != CGC_SRA { ins = "sra"; }
+    ci_r(g, ins, 5_u64, 5_u64, 6_u64);
 }
 
 // x5 = l op r, as a value of type dty.

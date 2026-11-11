@@ -5,7 +5,7 @@
 //                                    serial device, and nothing else
 //   emu-rv64 serial-check IMAGE MAX  run it twice from scratch, print a
 //                                    summary and compare the two runs
-//   emu-rv64 zcases | zprops SEED STEPS | zcontrols   the checks, in zcheck.bld
+//   emu-rv64 zcases | zprops SEED STEPS | zcontrols   the checks, in zctl.bld
 
 // Reads a file into a vector, at most one byte more than the largest
 // image. Returns the length of the file.
@@ -87,5 +87,11 @@ fn serial_main() -> i64 ~ Console + FileSystem + Process + Environment {
         if cmd == "serial" { return ser_cmd_serial(args_get(2), max); }
         return ser_cmd_check(args_get(2), max);
     }
-    -1
+    zcheck_main()
+}
+
+// The lines of the usage text for the commands of this file.
+fn serial_usage() ~ Console {
+    println!("       emu-rv64 serial IMAGE MAX | serial-check IMAGE MAX");
+    println!("       emu-rv64 zcases | zcontrols | zprops SEED STEPS");
 }

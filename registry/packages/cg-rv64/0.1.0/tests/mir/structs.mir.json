@@ -1,0 +1,6201 @@
+{
+  "schema": "buildlang.mir/v1",
+  "module": {
+    "name": "main",
+    "functions": [
+      {
+        "name": "mix",
+        "sig": {
+          "params": [
+            {
+              "Int": [
+                "I64",
+                false
+              ]
+            }
+          ],
+          "ret": {
+            "Struct": "Mix"
+          },
+          "is_variadic": false,
+          "calling_conv": "Build"
+        },
+        "blocks": null,
+        "locals": [],
+        "is_public": false,
+        "linkage": "External",
+        "shader_stage": null,
+        "bindings": []
+      },
+      {
+        "name": "show_mix",
+        "sig": {
+          "params": [
+            {
+              "Ptr": {
+                "Struct": "Mix"
+              }
+            }
+          ],
+          "ret": "Void",
+          "is_variadic": false,
+          "calling_conv": "Build"
+        },
+        "blocks": null,
+        "locals": [],
+        "is_public": false,
+        "linkage": "External",
+        "shader_stage": null,
+        "bindings": []
+      },
+      {
+        "name": "swap_ends",
+        "sig": {
+          "params": [
+            {
+              "Struct": "Mix"
+            }
+          ],
+          "ret": {
+            "Struct": "Mix"
+          },
+          "is_variadic": false,
+          "calling_conv": "Build"
+        },
+        "blocks": null,
+        "locals": [],
+        "is_public": false,
+        "linkage": "External",
+        "shader_stage": null,
+        "bindings": []
+      },
+      {
+        "name": "touch",
+        "sig": {
+          "params": [
+            {
+              "Ptr": {
+                "Struct": "Mix"
+              }
+            }
+          ],
+          "ret": "Void",
+          "is_variadic": false,
+          "calling_conv": "Build"
+        },
+        "blocks": null,
+        "locals": [],
+        "is_public": false,
+        "linkage": "External",
+        "shader_stage": null,
+        "bindings": []
+      },
+      {
+        "name": "mk",
+        "sig": {
+          "params": [
+            {
+              "Int": [
+                "I64",
+                false
+              ]
+            }
+          ],
+          "ret": {
+            "Struct": "Out"
+          },
+          "is_variadic": false,
+          "calling_conv": "Build"
+        },
+        "blocks": null,
+        "locals": [],
+        "is_public": false,
+        "linkage": "External",
+        "shader_stage": null,
+        "bindings": []
+      },
+      {
+        "name": "sum_in",
+        "sig": {
+          "params": [
+            {
+              "Struct": "In"
+            },
+            {
+              "Struct": "In"
+            }
+          ],
+          "ret": {
+            "Int": [
+              "I64",
+              true
+            ]
+          },
+          "is_variadic": false,
+          "calling_conv": "Build"
+        },
+        "blocks": null,
+        "locals": [],
+        "is_public": false,
+        "linkage": "External",
+        "shader_stage": null,
+        "bindings": []
+      },
+      {
+        "name": "grid",
+        "sig": {
+          "params": [
+            {
+              "Int": [
+                "I64",
+                false
+              ]
+            }
+          ],
+          "ret": "Void",
+          "is_variadic": false,
+          "calling_conv": "Build"
+        },
+        "blocks": null,
+        "locals": [],
+        "is_public": false,
+        "linkage": "External",
+        "shader_stage": null,
+        "bindings": []
+      },
+      {
+        "name": "run",
+        "sig": {
+          "params": [
+            {
+              "Int": [
+                "I64",
+                false
+              ]
+            }
+          ],
+          "ret": "Void",
+          "is_variadic": false,
+          "calling_conv": "Build"
+        },
+        "blocks": null,
+        "locals": [],
+        "is_public": false,
+        "linkage": "External",
+        "shader_stage": null,
+        "bindings": []
+      },
+      {
+        "name": "mix",
+        "sig": {
+          "params": [
+            {
+              "Int": [
+                "I64",
+                false
+              ]
+            }
+          ],
+          "ret": {
+            "Struct": "Mix"
+          },
+          "is_variadic": false,
+          "calling_conv": "Build"
+        },
+        "blocks": [
+          {
+            "id": 0,
+            "label": null,
+            "stmts": [
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 2,
+                    "value": {
+                      "Cast": {
+                        "kind": "IntToInt",
+                        "value": {
+                          "Local": 0
+                        },
+                        "ty": {
+                          "Int": [
+                            "I64",
+                            true
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 3,
+                    "value": {
+                      "BinaryOp": {
+                        "op": "Sub",
+                        "left": {
+                          "Const": {
+                            "Int": [
+                              -5,
+                              {
+                                "Int": [
+                                  "I64",
+                                  true
+                                ]
+                              }
+                            ]
+                          }
+                        },
+                        "right": {
+                          "Local": 2
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 4,
+                    "value": {
+                      "Aggregate": {
+                        "kind": {
+                          "Struct": "Mix"
+                        },
+                        "operands": [
+                          {
+                            "Const": {
+                              "Uint": [
+                                200,
+                                {
+                                  "Int": [
+                                    "I8",
+                                    false
+                                  ]
+                                }
+                              ]
+                            }
+                          },
+                          {
+                            "Local": 3
+                          },
+                          {
+                            "Const": {
+                              "Uint": [
+                                65535,
+                                {
+                                  "Int": [
+                                    "I16",
+                                    false
+                                  ]
+                                }
+                              ]
+                            }
+                          },
+                          {
+                            "Const": {
+                              "Int": [
+                                -2147483647,
+                                {
+                                  "Int": [
+                                    "I32",
+                                    true
+                                  ]
+                                }
+                              ]
+                            }
+                          },
+                          {
+                            "Const": {
+                              "Uint": [
+                                1,
+                                {
+                                  "Int": [
+                                    "I8",
+                                    false
+                                  ]
+                                }
+                              ]
+                            }
+                          },
+                          {
+                            "Const": {
+                              "Uint": [
+                                18446744073709551615,
+                                {
+                                  "Int": [
+                                    "I64",
+                                    false
+                                  ]
+                                }
+                              ]
+                            }
+                          }
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            ],
+            "terminator": {
+              "Return": {
+                "Local": 4
+              }
+            }
+          }
+        ],
+        "locals": [
+          {
+            "id": 0,
+            "name": "k",
+            "ty": {
+              "Int": [
+                "I64",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": true,
+            "annotations": []
+          },
+          {
+            "id": 1,
+            "name": "_ret",
+            "ty": {
+              "Struct": "Mix"
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 2,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I64",
+                true
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 3,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I64",
+                true
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 4,
+            "name": null,
+            "ty": {
+              "Struct": "Mix"
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          }
+        ],
+        "is_public": false,
+        "linkage": "Internal",
+        "shader_stage": null,
+        "bindings": []
+      },
+      {
+        "name": "show_mix",
+        "sig": {
+          "params": [
+            {
+              "Ptr": {
+                "Struct": "Mix"
+              }
+            }
+          ],
+          "ret": "Void",
+          "is_variadic": false,
+          "calling_conv": "Build"
+        },
+        "blocks": [
+          {
+            "id": 0,
+            "label": null,
+            "stmts": [
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 1,
+                    "value": {
+                      "FieldAccess": {
+                        "base": {
+                          "Local": 0
+                        },
+                        "field_name": "a",
+                        "field_ty": {
+                          "Int": [
+                            "I8",
+                            false
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 2,
+                    "value": {
+                      "FieldAccess": {
+                        "base": {
+                          "Local": 0
+                        },
+                        "field_name": "b",
+                        "field_ty": {
+                          "Int": [
+                            "I64",
+                            true
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 3,
+                    "value": {
+                      "FieldAccess": {
+                        "base": {
+                          "Local": 0
+                        },
+                        "field_name": "c",
+                        "field_ty": {
+                          "Int": [
+                            "I16",
+                            false
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 4,
+                    "value": {
+                      "FieldAccess": {
+                        "base": {
+                          "Local": 0
+                        },
+                        "field_name": "d",
+                        "field_ty": {
+                          "Int": [
+                            "I32",
+                            true
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 5,
+                    "value": {
+                      "FieldAccess": {
+                        "base": {
+                          "Local": 0
+                        },
+                        "field_name": "e",
+                        "field_ty": {
+                          "Int": [
+                            "I8",
+                            false
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 6,
+                    "value": {
+                      "FieldAccess": {
+                        "base": {
+                          "Local": 0
+                        },
+                        "field_name": "f",
+                        "field_ty": {
+                          "Int": [
+                            "I64",
+                            false
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 7,
+                    "value": {
+                      "Use": {
+                        "Const": {
+                          "Str": 0
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            ],
+            "terminator": {
+              "Call": {
+                "func": {
+                  "Function": "printf"
+                },
+                "args": [
+                  {
+                    "Local": 7
+                  },
+                  {
+                    "Local": 1
+                  },
+                  {
+                    "Local": 2
+                  },
+                  {
+                    "Local": 3
+                  },
+                  {
+                    "Local": 4
+                  },
+                  {
+                    "Local": 5
+                  },
+                  {
+                    "Local": 6
+                  }
+                ],
+                "dest": null,
+                "target": 1,
+                "unwind": null
+              }
+            }
+          },
+          {
+            "id": 1,
+            "label": null,
+            "stmts": [],
+            "terminator": {
+              "Return": null
+            }
+          }
+        ],
+        "locals": [
+          {
+            "id": 0,
+            "name": "m",
+            "ty": {
+              "Ptr": {
+                "Struct": "Mix"
+              }
+            },
+            "is_mut": false,
+            "is_param": true,
+            "annotations": []
+          },
+          {
+            "id": 1,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I8",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 2,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I64",
+                true
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 3,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I16",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 4,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I32",
+                true
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 5,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I8",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 6,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I64",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 7,
+            "name": null,
+            "ty": {
+              "Ptr": {
+                "Int": [
+                  "I8",
+                  true
+                ]
+              }
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          }
+        ],
+        "is_public": false,
+        "linkage": "Internal",
+        "shader_stage": null,
+        "bindings": []
+      },
+      {
+        "name": "swap_ends",
+        "sig": {
+          "params": [
+            {
+              "Struct": "Mix"
+            }
+          ],
+          "ret": {
+            "Struct": "Mix"
+          },
+          "is_variadic": false,
+          "calling_conv": "Build"
+        },
+        "blocks": [
+          {
+            "id": 0,
+            "label": null,
+            "stmts": [
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 2,
+                    "value": {
+                      "FieldAccess": {
+                        "base": {
+                          "Local": 0
+                        },
+                        "field_name": "e",
+                        "field_ty": {
+                          "Int": [
+                            "I8",
+                            false
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 3,
+                    "value": {
+                      "FieldAccess": {
+                        "base": {
+                          "Local": 0
+                        },
+                        "field_name": "b",
+                        "field_ty": {
+                          "Int": [
+                            "I64",
+                            true
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 4,
+                    "value": {
+                      "FieldAccess": {
+                        "base": {
+                          "Local": 0
+                        },
+                        "field_name": "c",
+                        "field_ty": {
+                          "Int": [
+                            "I16",
+                            false
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 5,
+                    "value": {
+                      "FieldAccess": {
+                        "base": {
+                          "Local": 0
+                        },
+                        "field_name": "d",
+                        "field_ty": {
+                          "Int": [
+                            "I32",
+                            true
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 6,
+                    "value": {
+                      "FieldAccess": {
+                        "base": {
+                          "Local": 0
+                        },
+                        "field_name": "a",
+                        "field_ty": {
+                          "Int": [
+                            "I8",
+                            false
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 7,
+                    "value": {
+                      "FieldAccess": {
+                        "base": {
+                          "Local": 0
+                        },
+                        "field_name": "f",
+                        "field_ty": {
+                          "Int": [
+                            "I64",
+                            false
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 8,
+                    "value": {
+                      "Aggregate": {
+                        "kind": {
+                          "Struct": "Mix"
+                        },
+                        "operands": [
+                          {
+                            "Local": 2
+                          },
+                          {
+                            "Local": 3
+                          },
+                          {
+                            "Local": 4
+                          },
+                          {
+                            "Local": 5
+                          },
+                          {
+                            "Local": 6
+                          },
+                          {
+                            "Local": 7
+                          }
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            ],
+            "terminator": {
+              "Return": {
+                "Local": 8
+              }
+            }
+          }
+        ],
+        "locals": [
+          {
+            "id": 0,
+            "name": "m",
+            "ty": {
+              "Struct": "Mix"
+            },
+            "is_mut": false,
+            "is_param": true,
+            "annotations": []
+          },
+          {
+            "id": 1,
+            "name": "_ret",
+            "ty": {
+              "Struct": "Mix"
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 2,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I8",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 3,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I64",
+                true
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 4,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I16",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 5,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I32",
+                true
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 6,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I8",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 7,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I64",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 8,
+            "name": null,
+            "ty": {
+              "Struct": "Mix"
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          }
+        ],
+        "is_public": false,
+        "linkage": "Internal",
+        "shader_stage": null,
+        "bindings": []
+      },
+      {
+        "name": "touch",
+        "sig": {
+          "params": [
+            {
+              "Ptr": {
+                "Struct": "Mix"
+              }
+            }
+          ],
+          "ret": "Void",
+          "is_variadic": false,
+          "calling_conv": "Build"
+        },
+        "blocks": [
+          {
+            "id": 0,
+            "label": null,
+            "stmts": [
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 1,
+                    "value": {
+                      "FieldAccess": {
+                        "base": {
+                          "Local": 0
+                        },
+                        "field_name": "a",
+                        "field_ty": {
+                          "Int": [
+                            "I8",
+                            false
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 2,
+                    "value": {
+                      "BinaryOp": {
+                        "op": "Sub",
+                        "left": {
+                          "Local": 1
+                        },
+                        "right": {
+                          "Const": {
+                            "Uint": [
+                              100,
+                              {
+                                "Int": [
+                                  "I8",
+                                  false
+                                ]
+                              }
+                            ]
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "FieldDerefAssign": {
+                    "ptr": 0,
+                    "field_name": "a",
+                    "value": {
+                      "Use": {
+                        "Local": 2
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 3,
+                    "value": {
+                      "FieldAccess": {
+                        "base": {
+                          "Local": 0
+                        },
+                        "field_name": "c",
+                        "field_ty": {
+                          "Int": [
+                            "I16",
+                            false
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 4,
+                    "value": {
+                      "BinaryOp": {
+                        "op": "Sub",
+                        "left": {
+                          "Local": 3
+                        },
+                        "right": {
+                          "Const": {
+                            "Uint": [
+                              1,
+                              {
+                                "Int": [
+                                  "I16",
+                                  false
+                                ]
+                              }
+                            ]
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "FieldDerefAssign": {
+                    "ptr": 0,
+                    "field_name": "c",
+                    "value": {
+                      "Use": {
+                        "Local": 4
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 5,
+                    "value": {
+                      "FieldAccess": {
+                        "base": {
+                          "Local": 0
+                        },
+                        "field_name": "d",
+                        "field_ty": {
+                          "Int": [
+                            "I32",
+                            true
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 6,
+                    "value": {
+                      "BinaryOp": {
+                        "op": "Add",
+                        "left": {
+                          "Local": 5
+                        },
+                        "right": {
+                          "Const": {
+                            "Int": [
+                              7,
+                              {
+                                "Int": [
+                                  "I32",
+                                  true
+                                ]
+                              }
+                            ]
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "FieldDerefAssign": {
+                    "ptr": 0,
+                    "field_name": "d",
+                    "value": {
+                      "Use": {
+                        "Local": 6
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 7,
+                    "value": {
+                      "FieldAccess": {
+                        "base": {
+                          "Local": 0
+                        },
+                        "field_name": "f",
+                        "field_ty": {
+                          "Int": [
+                            "I64",
+                            false
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 8,
+                    "value": {
+                      "BinaryOp": {
+                        "op": "Sub",
+                        "left": {
+                          "Local": 7
+                        },
+                        "right": {
+                          "Const": {
+                            "Uint": [
+                              1,
+                              {
+                                "Int": [
+                                  "I64",
+                                  false
+                                ]
+                              }
+                            ]
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "FieldDerefAssign": {
+                    "ptr": 0,
+                    "field_name": "f",
+                    "value": {
+                      "Use": {
+                        "Local": 8
+                      }
+                    }
+                  }
+                }
+              }
+            ],
+            "terminator": {
+              "Return": null
+            }
+          }
+        ],
+        "locals": [
+          {
+            "id": 0,
+            "name": "m",
+            "ty": {
+              "Ptr": {
+                "Struct": "Mix"
+              }
+            },
+            "is_mut": true,
+            "is_param": true,
+            "annotations": []
+          },
+          {
+            "id": 1,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I8",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 2,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I8",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 3,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I16",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 4,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I16",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 5,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I32",
+                true
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 6,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I32",
+                true
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 7,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I64",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 8,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I64",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          }
+        ],
+        "is_public": false,
+        "linkage": "Internal",
+        "shader_stage": null,
+        "bindings": []
+      },
+      {
+        "name": "mk",
+        "sig": {
+          "params": [
+            {
+              "Int": [
+                "I64",
+                false
+              ]
+            }
+          ],
+          "ret": {
+            "Struct": "Out"
+          },
+          "is_variadic": false,
+          "calling_conv": "Build"
+        },
+        "blocks": [
+          {
+            "id": 0,
+            "label": null,
+            "stmts": [
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 2,
+                    "value": {
+                      "Aggregate": {
+                        "kind": {
+                          "Struct": "In"
+                        },
+                        "operands": [
+                          {
+                            "Const": {
+                              "Uint": [
+                                65000,
+                                {
+                                  "Int": [
+                                    "I16",
+                                    false
+                                  ]
+                                }
+                              ]
+                            }
+                          },
+                          {
+                            "Const": {
+                              "Int": [
+                                -3,
+                                {
+                                  "Int": [
+                                    "I8",
+                                    true
+                                  ]
+                                }
+                              ]
+                            }
+                          }
+                        ]
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 3,
+                    "value": {
+                      "Cast": {
+                        "kind": "IntToInt",
+                        "value": {
+                          "Local": 0
+                        },
+                        "ty": {
+                          "Int": [
+                            "I64",
+                            true
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 4,
+                    "value": {
+                      "BinaryOp": {
+                        "op": "Sub",
+                        "left": {
+                          "Const": {
+                            "Int": [
+                              -9,
+                              {
+                                "Int": [
+                                  "I64",
+                                  true
+                                ]
+                              }
+                            ]
+                          }
+                        },
+                        "right": {
+                          "Local": 3
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 5,
+                    "value": {
+                      "Aggregate": {
+                        "kind": {
+                          "Struct": "Out"
+                        },
+                        "operands": [
+                          {
+                            "Const": {
+                              "Uint": [
+                                7,
+                                {
+                                  "Int": [
+                                    "I8",
+                                    false
+                                  ]
+                                }
+                              ]
+                            }
+                          },
+                          {
+                            "Local": 2
+                          },
+                          {
+                            "Const": {
+                              "Uint": [
+                                2,
+                                {
+                                  "Int": [
+                                    "I32",
+                                    false
+                                  ]
+                                }
+                              ]
+                            }
+                          },
+                          {
+                            "Local": 4
+                          }
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            ],
+            "terminator": {
+              "Return": {
+                "Local": 5
+              }
+            }
+          }
+        ],
+        "locals": [
+          {
+            "id": 0,
+            "name": "k",
+            "ty": {
+              "Int": [
+                "I64",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": true,
+            "annotations": []
+          },
+          {
+            "id": 1,
+            "name": "_ret",
+            "ty": {
+              "Struct": "Out"
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 2,
+            "name": null,
+            "ty": {
+              "Struct": "In"
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 3,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I64",
+                true
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 4,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I64",
+                true
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 5,
+            "name": null,
+            "ty": {
+              "Struct": "Out"
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          }
+        ],
+        "is_public": false,
+        "linkage": "Internal",
+        "shader_stage": null,
+        "bindings": []
+      },
+      {
+        "name": "sum_in",
+        "sig": {
+          "params": [
+            {
+              "Struct": "In"
+            },
+            {
+              "Struct": "In"
+            }
+          ],
+          "ret": {
+            "Int": [
+              "I64",
+              true
+            ]
+          },
+          "is_variadic": false,
+          "calling_conv": "Build"
+        },
+        "blocks": [
+          {
+            "id": 0,
+            "label": null,
+            "stmts": [
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 3,
+                    "value": {
+                      "FieldAccess": {
+                        "base": {
+                          "Local": 0
+                        },
+                        "field_name": "x",
+                        "field_ty": {
+                          "Int": [
+                            "I16",
+                            false
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 4,
+                    "value": {
+                      "Cast": {
+                        "kind": "IntToInt",
+                        "value": {
+                          "Local": 3
+                        },
+                        "ty": {
+                          "Int": [
+                            "I64",
+                            true
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 5,
+                    "value": {
+                      "FieldAccess": {
+                        "base": {
+                          "Local": 0
+                        },
+                        "field_name": "y",
+                        "field_ty": {
+                          "Int": [
+                            "I8",
+                            true
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 6,
+                    "value": {
+                      "Cast": {
+                        "kind": "IntToInt",
+                        "value": {
+                          "Local": 5
+                        },
+                        "ty": {
+                          "Int": [
+                            "I64",
+                            true
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 7,
+                    "value": {
+                      "BinaryOp": {
+                        "op": "Add",
+                        "left": {
+                          "Local": 4
+                        },
+                        "right": {
+                          "Local": 6
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 8,
+                    "value": {
+                      "FieldAccess": {
+                        "base": {
+                          "Local": 1
+                        },
+                        "field_name": "x",
+                        "field_ty": {
+                          "Int": [
+                            "I16",
+                            false
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 9,
+                    "value": {
+                      "Cast": {
+                        "kind": "IntToInt",
+                        "value": {
+                          "Local": 8
+                        },
+                        "ty": {
+                          "Int": [
+                            "I64",
+                            true
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 10,
+                    "value": {
+                      "BinaryOp": {
+                        "op": "Add",
+                        "left": {
+                          "Local": 7
+                        },
+                        "right": {
+                          "Local": 9
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 11,
+                    "value": {
+                      "FieldAccess": {
+                        "base": {
+                          "Local": 1
+                        },
+                        "field_name": "y",
+                        "field_ty": {
+                          "Int": [
+                            "I8",
+                            true
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 12,
+                    "value": {
+                      "Cast": {
+                        "kind": "IntToInt",
+                        "value": {
+                          "Local": 11
+                        },
+                        "ty": {
+                          "Int": [
+                            "I64",
+                            true
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 13,
+                    "value": {
+                      "BinaryOp": {
+                        "op": "Add",
+                        "left": {
+                          "Local": 10
+                        },
+                        "right": {
+                          "Local": 12
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            ],
+            "terminator": {
+              "Return": {
+                "Local": 13
+              }
+            }
+          }
+        ],
+        "locals": [
+          {
+            "id": 0,
+            "name": "a",
+            "ty": {
+              "Struct": "In"
+            },
+            "is_mut": false,
+            "is_param": true,
+            "annotations": []
+          },
+          {
+            "id": 1,
+            "name": "b",
+            "ty": {
+              "Struct": "In"
+            },
+            "is_mut": false,
+            "is_param": true,
+            "annotations": []
+          },
+          {
+            "id": 2,
+            "name": "_ret",
+            "ty": {
+              "Int": [
+                "I64",
+                true
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 3,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I16",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 4,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I64",
+                true
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 5,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I8",
+                true
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 6,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I64",
+                true
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 7,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I64",
+                true
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 8,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I16",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 9,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I64",
+                true
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 10,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I64",
+                true
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 11,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I8",
+                true
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 12,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I64",
+                true
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 13,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I64",
+                true
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          }
+        ],
+        "is_public": false,
+        "linkage": "Internal",
+        "shader_stage": null,
+        "bindings": []
+      },
+      {
+        "name": "grid",
+        "sig": {
+          "params": [
+            {
+              "Int": [
+                "I64",
+                false
+              ]
+            }
+          ],
+          "ret": "Void",
+          "is_variadic": false,
+          "calling_conv": "Build"
+        },
+        "blocks": [
+          {
+            "id": 0,
+            "label": null,
+            "stmts": [
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 1,
+                    "value": {
+                      "Aggregate": {
+                        "kind": {
+                          "Array": {
+                            "Int": [
+                              "I16",
+                              false
+                            ]
+                          }
+                        },
+                        "operands": [
+                          {
+                            "Const": {
+                              "Uint": [
+                                1,
+                                {
+                                  "Int": [
+                                    "I16",
+                                    false
+                                  ]
+                                }
+                              ]
+                            }
+                          },
+                          {
+                            "Const": {
+                              "Uint": [
+                                2,
+                                {
+                                  "Int": [
+                                    "I16",
+                                    false
+                                  ]
+                                }
+                              ]
+                            }
+                          },
+                          {
+                            "Const": {
+                              "Uint": [
+                                3,
+                                {
+                                  "Int": [
+                                    "I16",
+                                    false
+                                  ]
+                                }
+                              ]
+                            }
+                          }
+                        ]
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 2,
+                    "value": {
+                      "Aggregate": {
+                        "kind": {
+                          "Array": {
+                            "Int": [
+                              "I16",
+                              false
+                            ]
+                          }
+                        },
+                        "operands": [
+                          {
+                            "Const": {
+                              "Uint": [
+                                4,
+                                {
+                                  "Int": [
+                                    "I16",
+                                    false
+                                  ]
+                                }
+                              ]
+                            }
+                          },
+                          {
+                            "Const": {
+                              "Uint": [
+                                5,
+                                {
+                                  "Int": [
+                                    "I16",
+                                    false
+                                  ]
+                                }
+                              ]
+                            }
+                          },
+                          {
+                            "Const": {
+                              "Uint": [
+                                6,
+                                {
+                                  "Int": [
+                                    "I16",
+                                    false
+                                  ]
+                                }
+                              ]
+                            }
+                          }
+                        ]
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 3,
+                    "value": {
+                      "Aggregate": {
+                        "kind": {
+                          "Array": {
+                            "Array": [
+                              {
+                                "Int": [
+                                  "I16",
+                                  false
+                                ]
+                              },
+                              3
+                            ]
+                          }
+                        },
+                        "operands": [
+                          {
+                            "Local": 1
+                          },
+                          {
+                            "Local": 2
+                          }
+                        ]
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 4,
+                    "value": {
+                      "Use": {
+                        "Local": 3
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 5,
+                    "value": {
+                      "IndexAccess": {
+                        "base": {
+                          "Local": 4
+                        },
+                        "index": {
+                          "Const": {
+                            "Int": [
+                              1,
+                              {
+                                "Int": [
+                                  "I32",
+                                  true
+                                ]
+                              }
+                            ]
+                          }
+                        },
+                        "elem_ty": {
+                          "Array": [
+                            {
+                              "Int": [
+                                "I16",
+                                false
+                              ]
+                            },
+                            3
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 6,
+                    "value": {
+                      "Use": {
+                        "Local": 5
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 7,
+                    "value": {
+                      "IndexAccess": {
+                        "base": {
+                          "Local": 4
+                        },
+                        "index": {
+                          "Const": {
+                            "Int": [
+                              0,
+                              {
+                                "Int": [
+                                  "I32",
+                                  true
+                                ]
+                              }
+                            ]
+                          }
+                        },
+                        "elem_ty": {
+                          "Array": [
+                            {
+                              "Int": [
+                                "I16",
+                                false
+                              ]
+                            },
+                            3
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 8,
+                    "value": {
+                      "IndexAccess": {
+                        "base": {
+                          "Local": 7
+                        },
+                        "index": {
+                          "Const": {
+                            "Int": [
+                              2,
+                              {
+                                "Int": [
+                                  "I32",
+                                  true
+                                ]
+                              }
+                            ]
+                          }
+                        },
+                        "elem_ty": {
+                          "Int": [
+                            "I16",
+                            false
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 9,
+                    "value": {
+                      "IndexAccess": {
+                        "base": {
+                          "Local": 6
+                        },
+                        "index": {
+                          "Const": {
+                            "Int": [
+                              0,
+                              {
+                                "Int": [
+                                  "I32",
+                                  true
+                                ]
+                              }
+                            ]
+                          }
+                        },
+                        "elem_ty": {
+                          "Int": [
+                            "I16",
+                            false
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 10,
+                    "value": {
+                      "IndexAccess": {
+                        "base": {
+                          "Local": 6
+                        },
+                        "index": {
+                          "Const": {
+                            "Int": [
+                              2,
+                              {
+                                "Int": [
+                                  "I32",
+                                  true
+                                ]
+                              }
+                            ]
+                          }
+                        },
+                        "elem_ty": {
+                          "Int": [
+                            "I16",
+                            false
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 11,
+                    "value": {
+                      "Use": {
+                        "Const": {
+                          "Str": 1
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            ],
+            "terminator": {
+              "Call": {
+                "func": {
+                  "Function": "printf"
+                },
+                "args": [
+                  {
+                    "Local": 11
+                  },
+                  {
+                    "Local": 8
+                  },
+                  {
+                    "Local": 9
+                  },
+                  {
+                    "Local": 10
+                  }
+                ],
+                "dest": null,
+                "target": 1,
+                "unwind": null
+              }
+            }
+          },
+          {
+            "id": 1,
+            "label": null,
+            "stmts": [
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 12,
+                    "value": {
+                      "Use": {
+                        "Const": {
+                          "Uint": [
+                            0,
+                            {
+                              "Int": [
+                                "ISize",
+                                false
+                              ]
+                            }
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 13,
+                    "value": {
+                      "Use": {
+                        "Local": 0
+                      }
+                    }
+                  }
+                }
+              }
+            ],
+            "terminator": {
+              "Goto": 2
+            }
+          },
+          {
+            "id": 2,
+            "label": null,
+            "stmts": [
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 14,
+                    "value": {
+                      "BinaryOp": {
+                        "op": "Lt",
+                        "left": {
+                          "Local": 12
+                        },
+                        "right": {
+                          "Const": {
+                            "Int": [
+                              2,
+                              {
+                                "Int": [
+                                  "I32",
+                                  true
+                                ]
+                              }
+                            ]
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            ],
+            "terminator": {
+              "If": {
+                "cond": {
+                  "Local": 14
+                },
+                "then_block": 3,
+                "else_block": 4
+              }
+            }
+          },
+          {
+            "id": 3,
+            "label": null,
+            "stmts": [
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 15,
+                    "value": {
+                      "IndexAccess": {
+                        "base": {
+                          "Local": 4
+                        },
+                        "index": {
+                          "Local": 12
+                        },
+                        "elem_ty": {
+                          "Array": [
+                            {
+                              "Int": [
+                                "I16",
+                                false
+                              ]
+                            },
+                            3
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 16,
+                    "value": {
+                      "Use": {
+                        "Local": 15
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 17,
+                    "value": {
+                      "Use": {
+                        "Const": {
+                          "Uint": [
+                            0,
+                            {
+                              "Int": [
+                                "ISize",
+                                false
+                              ]
+                            }
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            ],
+            "terminator": {
+              "Goto": 5
+            }
+          },
+          {
+            "id": 4,
+            "label": null,
+            "stmts": [
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 24,
+                    "value": {
+                      "Use": {
+                        "Const": {
+                          "Str": 2
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            ],
+            "terminator": {
+              "Call": {
+                "func": {
+                  "Function": "printf"
+                },
+                "args": [
+                  {
+                    "Local": 24
+                  },
+                  {
+                    "Local": 13
+                  }
+                ],
+                "dest": null,
+                "target": 8,
+                "unwind": null
+              }
+            }
+          },
+          {
+            "id": 5,
+            "label": null,
+            "stmts": [
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 18,
+                    "value": {
+                      "BinaryOp": {
+                        "op": "Lt",
+                        "left": {
+                          "Local": 17
+                        },
+                        "right": {
+                          "Const": {
+                            "Int": [
+                              3,
+                              {
+                                "Int": [
+                                  "I32",
+                                  true
+                                ]
+                              }
+                            ]
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            ],
+            "terminator": {
+              "If": {
+                "cond": {
+                  "Local": 18
+                },
+                "then_block": 6,
+                "else_block": 7
+              }
+            }
+          },
+          {
+            "id": 6,
+            "label": null,
+            "stmts": [
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 19,
+                    "value": {
+                      "IndexAccess": {
+                        "base": {
+                          "Local": 16
+                        },
+                        "index": {
+                          "Local": 17
+                        },
+                        "elem_ty": {
+                          "Int": [
+                            "I16",
+                            false
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 20,
+                    "value": {
+                      "Cast": {
+                        "kind": "IntToInt",
+                        "value": {
+                          "Local": 19
+                        },
+                        "ty": {
+                          "Int": [
+                            "I64",
+                            false
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 21,
+                    "value": {
+                      "BinaryOp": {
+                        "op": "Add",
+                        "left": {
+                          "Local": 13
+                        },
+                        "right": {
+                          "Local": 20
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 13,
+                    "value": {
+                      "Use": {
+                        "Local": 21
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 22,
+                    "value": {
+                      "BinaryOp": {
+                        "op": "Add",
+                        "left": {
+                          "Local": 17
+                        },
+                        "right": {
+                          "Const": {
+                            "Uint": [
+                              1,
+                              {
+                                "Int": [
+                                  "ISize",
+                                  false
+                                ]
+                              }
+                            ]
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 17,
+                    "value": {
+                      "Use": {
+                        "Local": 22
+                      }
+                    }
+                  }
+                }
+              }
+            ],
+            "terminator": {
+              "Goto": 5
+            }
+          },
+          {
+            "id": 7,
+            "label": null,
+            "stmts": [
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 23,
+                    "value": {
+                      "BinaryOp": {
+                        "op": "Add",
+                        "left": {
+                          "Local": 12
+                        },
+                        "right": {
+                          "Const": {
+                            "Uint": [
+                              1,
+                              {
+                                "Int": [
+                                  "ISize",
+                                  false
+                                ]
+                              }
+                            ]
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 12,
+                    "value": {
+                      "Use": {
+                        "Local": 23
+                      }
+                    }
+                  }
+                }
+              }
+            ],
+            "terminator": {
+              "Goto": 2
+            }
+          },
+          {
+            "id": 8,
+            "label": null,
+            "stmts": [],
+            "terminator": {
+              "Return": null
+            }
+          }
+        ],
+        "locals": [
+          {
+            "id": 0,
+            "name": "k",
+            "ty": {
+              "Int": [
+                "I64",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": true,
+            "annotations": []
+          },
+          {
+            "id": 1,
+            "name": null,
+            "ty": {
+              "Array": [
+                {
+                  "Int": [
+                    "I16",
+                    false
+                  ]
+                },
+                3
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 2,
+            "name": null,
+            "ty": {
+              "Array": [
+                {
+                  "Int": [
+                    "I16",
+                    false
+                  ]
+                },
+                3
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 3,
+            "name": null,
+            "ty": {
+              "Array": [
+                {
+                  "Array": [
+                    {
+                      "Int": [
+                        "I16",
+                        false
+                      ]
+                    },
+                    3
+                  ]
+                },
+                2
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 4,
+            "name": "g",
+            "ty": {
+              "Array": [
+                {
+                  "Array": [
+                    {
+                      "Int": [
+                        "I16",
+                        false
+                      ]
+                    },
+                    3
+                  ]
+                },
+                2
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 5,
+            "name": null,
+            "ty": {
+              "Array": [
+                {
+                  "Int": [
+                    "I16",
+                    false
+                  ]
+                },
+                3
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 6,
+            "name": "row",
+            "ty": {
+              "Array": [
+                {
+                  "Int": [
+                    "I16",
+                    false
+                  ]
+                },
+                3
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 7,
+            "name": null,
+            "ty": {
+              "Array": [
+                {
+                  "Int": [
+                    "I16",
+                    false
+                  ]
+                },
+                3
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 8,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I16",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 9,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I16",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 10,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I16",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 11,
+            "name": null,
+            "ty": {
+              "Ptr": {
+                "Int": [
+                  "I8",
+                  true
+                ]
+              }
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 12,
+            "name": "i",
+            "ty": {
+              "Int": [
+                "ISize",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 13,
+            "name": "t",
+            "ty": {
+              "Int": [
+                "I64",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 14,
+            "name": null,
+            "ty": "Bool",
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 15,
+            "name": null,
+            "ty": {
+              "Array": [
+                {
+                  "Int": [
+                    "I16",
+                    false
+                  ]
+                },
+                3
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 16,
+            "name": "r",
+            "ty": {
+              "Array": [
+                {
+                  "Int": [
+                    "I16",
+                    false
+                  ]
+                },
+                3
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 17,
+            "name": "j",
+            "ty": {
+              "Int": [
+                "ISize",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 18,
+            "name": null,
+            "ty": "Bool",
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 19,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I16",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 20,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I64",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 21,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I64",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 22,
+            "name": null,
+            "ty": {
+              "Int": [
+                "ISize",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 23,
+            "name": null,
+            "ty": {
+              "Int": [
+                "ISize",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 24,
+            "name": null,
+            "ty": {
+              "Ptr": {
+                "Int": [
+                  "I8",
+                  true
+                ]
+              }
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          }
+        ],
+        "is_public": false,
+        "linkage": "Internal",
+        "shader_stage": null,
+        "bindings": []
+      },
+      {
+        "name": "run",
+        "sig": {
+          "params": [
+            {
+              "Int": [
+                "I64",
+                false
+              ]
+            }
+          ],
+          "ret": "Void",
+          "is_variadic": false,
+          "calling_conv": "Build"
+        },
+        "blocks": [
+          {
+            "id": 0,
+            "label": null,
+            "stmts": [],
+            "terminator": {
+              "Call": {
+                "func": {
+                  "Global": "mix"
+                },
+                "args": [
+                  {
+                    "Local": 0
+                  }
+                ],
+                "dest": 1,
+                "target": 1,
+                "unwind": null
+              }
+            }
+          },
+          {
+            "id": 1,
+            "label": null,
+            "stmts": [
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 2,
+                    "value": {
+                      "Use": {
+                        "Local": 1
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 3,
+                    "value": {
+                      "Ref": {
+                        "is_mut": false,
+                        "place": {
+                          "local": 2,
+                          "projections": []
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            ],
+            "terminator": {
+              "Call": {
+                "func": {
+                  "Global": "show_mix"
+                },
+                "args": [
+                  {
+                    "Local": 3
+                  }
+                ],
+                "dest": null,
+                "target": 2,
+                "unwind": null
+              }
+            }
+          },
+          {
+            "id": 2,
+            "label": null,
+            "stmts": [
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 4,
+                    "value": {
+                      "Ref": {
+                        "is_mut": true,
+                        "place": {
+                          "local": 2,
+                          "projections": []
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            ],
+            "terminator": {
+              "Call": {
+                "func": {
+                  "Global": "touch"
+                },
+                "args": [
+                  {
+                    "Local": 4
+                  }
+                ],
+                "dest": null,
+                "target": 3,
+                "unwind": null
+              }
+            }
+          },
+          {
+            "id": 3,
+            "label": null,
+            "stmts": [
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 5,
+                    "value": {
+                      "Ref": {
+                        "is_mut": false,
+                        "place": {
+                          "local": 2,
+                          "projections": []
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            ],
+            "terminator": {
+              "Call": {
+                "func": {
+                  "Global": "show_mix"
+                },
+                "args": [
+                  {
+                    "Local": 5
+                  }
+                ],
+                "dest": null,
+                "target": 4,
+                "unwind": null
+              }
+            }
+          },
+          {
+            "id": 4,
+            "label": null,
+            "stmts": [],
+            "terminator": {
+              "Call": {
+                "func": {
+                  "Global": "swap_ends"
+                },
+                "args": [
+                  {
+                    "Local": 2
+                  }
+                ],
+                "dest": 6,
+                "target": 5,
+                "unwind": null
+              }
+            }
+          },
+          {
+            "id": 5,
+            "label": null,
+            "stmts": [
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 7,
+                    "value": {
+                      "Use": {
+                        "Local": 6
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 8,
+                    "value": {
+                      "Ref": {
+                        "is_mut": false,
+                        "place": {
+                          "local": 7,
+                          "projections": []
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            ],
+            "terminator": {
+              "Call": {
+                "func": {
+                  "Global": "show_mix"
+                },
+                "args": [
+                  {
+                    "Local": 8
+                  }
+                ],
+                "dest": null,
+                "target": 6,
+                "unwind": null
+              }
+            }
+          },
+          {
+            "id": 6,
+            "label": null,
+            "stmts": [
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 9,
+                    "value": {
+                      "Ref": {
+                        "is_mut": false,
+                        "place": {
+                          "local": 2,
+                          "projections": []
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            ],
+            "terminator": {
+              "Call": {
+                "func": {
+                  "Global": "show_mix"
+                },
+                "args": [
+                  {
+                    "Local": 9
+                  }
+                ],
+                "dest": null,
+                "target": 7,
+                "unwind": null
+              }
+            }
+          },
+          {
+            "id": 7,
+            "label": null,
+            "stmts": [],
+            "terminator": {
+              "Call": {
+                "func": {
+                  "Global": "mk"
+                },
+                "args": [
+                  {
+                    "Local": 0
+                  }
+                ],
+                "dest": 10,
+                "target": 8,
+                "unwind": null
+              }
+            }
+          },
+          {
+            "id": 8,
+            "label": null,
+            "stmts": [
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 11,
+                    "value": {
+                      "Use": {
+                        "Local": 10
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 12,
+                    "value": {
+                      "FieldAccess": {
+                        "base": {
+                          "Local": 11
+                        },
+                        "field_name": "v",
+                        "field_ty": {
+                          "Struct": "In"
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 13,
+                    "value": {
+                      "FieldAccess": {
+                        "base": {
+                          "Local": 12
+                        },
+                        "field_name": "x",
+                        "field_ty": {
+                          "Int": [
+                            "I16",
+                            false
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 14,
+                    "value": {
+                      "BinaryOp": {
+                        "op": "Sub",
+                        "left": {
+                          "Local": 13
+                        },
+                        "right": {
+                          "Const": {
+                            "Uint": [
+                              1,
+                              {
+                                "Int": [
+                                  "I16",
+                                  false
+                                ]
+                              }
+                            ]
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 15,
+                    "value": {
+                      "AddressOf": {
+                        "is_mut": true,
+                        "place": {
+                          "local": 11,
+                          "projections": [
+                            {
+                              "Field": [
+                                1,
+                                "v",
+                                {
+                                  "Struct": "In"
+                                }
+                              ]
+                            },
+                            {
+                              "Field": [
+                                0,
+                                "x",
+                                {
+                                  "Int": [
+                                    "I16",
+                                    false
+                                  ]
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "DerefAssign": {
+                    "ptr": 15,
+                    "value": {
+                      "Use": {
+                        "Local": 14
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 16,
+                    "value": {
+                      "FieldAccess": {
+                        "base": {
+                          "Local": 11
+                        },
+                        "field_name": "v",
+                        "field_ty": {
+                          "Struct": "In"
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 17,
+                    "value": {
+                      "FieldAccess": {
+                        "base": {
+                          "Local": 16
+                        },
+                        "field_name": "y",
+                        "field_ty": {
+                          "Int": [
+                            "I8",
+                            true
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 18,
+                    "value": {
+                      "BinaryOp": {
+                        "op": "Sub",
+                        "left": {
+                          "Local": 17
+                        },
+                        "right": {
+                          "Const": {
+                            "Int": [
+                              100,
+                              {
+                                "Int": [
+                                  "I8",
+                                  true
+                                ]
+                              }
+                            ]
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 19,
+                    "value": {
+                      "AddressOf": {
+                        "is_mut": true,
+                        "place": {
+                          "local": 11,
+                          "projections": [
+                            {
+                              "Field": [
+                                1,
+                                "v",
+                                {
+                                  "Struct": "In"
+                                }
+                              ]
+                            },
+                            {
+                              "Field": [
+                                1,
+                                "y",
+                                {
+                                  "Int": [
+                                    "I8",
+                                    true
+                                  ]
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "DerefAssign": {
+                    "ptr": 19,
+                    "value": {
+                      "Use": {
+                        "Local": 18
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 20,
+                    "value": {
+                      "FieldAccess": {
+                        "base": {
+                          "Local": 11
+                        },
+                        "field_name": "w",
+                        "field_ty": {
+                          "Int": [
+                            "I32",
+                            false
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 21,
+                    "value": {
+                      "BinaryOp": {
+                        "op": "Add",
+                        "left": {
+                          "Local": 20
+                        },
+                        "right": {
+                          "Const": {
+                            "Uint": [
+                              40,
+                              {
+                                "Int": [
+                                  "I32",
+                                  false
+                                ]
+                              }
+                            ]
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "FieldAssign": {
+                    "base": 11,
+                    "field_name": "w",
+                    "value": {
+                      "Use": {
+                        "Local": 21
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 22,
+                    "value": {
+                      "FieldAccess": {
+                        "base": {
+                          "Local": 11
+                        },
+                        "field_name": "v",
+                        "field_ty": {
+                          "Struct": "In"
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 23,
+                    "value": {
+                      "Use": {
+                        "Local": 22
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 24,
+                    "value": {
+                      "FieldAccess": {
+                        "base": {
+                          "Local": 11
+                        },
+                        "field_name": "tag",
+                        "field_ty": {
+                          "Int": [
+                            "I8",
+                            false
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 25,
+                    "value": {
+                      "FieldAccess": {
+                        "base": {
+                          "Local": 11
+                        },
+                        "field_name": "v",
+                        "field_ty": {
+                          "Struct": "In"
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 26,
+                    "value": {
+                      "FieldAccess": {
+                        "base": {
+                          "Local": 25
+                        },
+                        "field_name": "x",
+                        "field_ty": {
+                          "Int": [
+                            "I16",
+                            false
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 27,
+                    "value": {
+                      "FieldAccess": {
+                        "base": {
+                          "Local": 11
+                        },
+                        "field_name": "v",
+                        "field_ty": {
+                          "Struct": "In"
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 28,
+                    "value": {
+                      "FieldAccess": {
+                        "base": {
+                          "Local": 27
+                        },
+                        "field_name": "y",
+                        "field_ty": {
+                          "Int": [
+                            "I8",
+                            true
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 29,
+                    "value": {
+                      "FieldAccess": {
+                        "base": {
+                          "Local": 11
+                        },
+                        "field_name": "w",
+                        "field_ty": {
+                          "Int": [
+                            "I32",
+                            false
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 30,
+                    "value": {
+                      "FieldAccess": {
+                        "base": {
+                          "Local": 11
+                        },
+                        "field_name": "z",
+                        "field_ty": {
+                          "Int": [
+                            "I64",
+                            true
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 31,
+                    "value": {
+                      "FieldAccess": {
+                        "base": {
+                          "Local": 23
+                        },
+                        "field_name": "y",
+                        "field_ty": {
+                          "Int": [
+                            "I8",
+                            true
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 32,
+                    "value": {
+                      "Use": {
+                        "Const": {
+                          "Str": 3
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            ],
+            "terminator": {
+              "Call": {
+                "func": {
+                  "Function": "printf"
+                },
+                "args": [
+                  {
+                    "Local": 32
+                  },
+                  {
+                    "Local": 24
+                  },
+                  {
+                    "Local": 26
+                  },
+                  {
+                    "Local": 28
+                  },
+                  {
+                    "Local": 29
+                  },
+                  {
+                    "Local": 30
+                  },
+                  {
+                    "Local": 31
+                  }
+                ],
+                "dest": null,
+                "target": 9,
+                "unwind": null
+              }
+            }
+          },
+          {
+            "id": 9,
+            "label": null,
+            "stmts": [
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 33,
+                    "value": {
+                      "Aggregate": {
+                        "kind": {
+                          "Struct": "In"
+                        },
+                        "operands": [
+                          {
+                            "Const": {
+                              "Uint": [
+                                1,
+                                {
+                                  "Int": [
+                                    "I16",
+                                    false
+                                  ]
+                                }
+                              ]
+                            }
+                          },
+                          {
+                            "Const": {
+                              "Int": [
+                                2,
+                                {
+                                  "Int": [
+                                    "I8",
+                                    true
+                                  ]
+                                }
+                              ]
+                            }
+                          }
+                        ]
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 34,
+                    "value": {
+                      "Aggregate": {
+                        "kind": {
+                          "Struct": "In"
+                        },
+                        "operands": [
+                          {
+                            "Const": {
+                              "Uint": [
+                                3,
+                                {
+                                  "Int": [
+                                    "I16",
+                                    false
+                                  ]
+                                }
+                              ]
+                            }
+                          },
+                          {
+                            "Const": {
+                              "Int": [
+                                4,
+                                {
+                                  "Int": [
+                                    "I8",
+                                    true
+                                  ]
+                                }
+                              ]
+                            }
+                          }
+                        ]
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 35,
+                    "value": {
+                      "Aggregate": {
+                        "kind": {
+                          "Struct": "In"
+                        },
+                        "operands": [
+                          {
+                            "Const": {
+                              "Uint": [
+                                5,
+                                {
+                                  "Int": [
+                                    "I16",
+                                    false
+                                  ]
+                                }
+                              ]
+                            }
+                          },
+                          {
+                            "Const": {
+                              "Int": [
+                                -6,
+                                {
+                                  "Int": [
+                                    "I8",
+                                    true
+                                  ]
+                                }
+                              ]
+                            }
+                          }
+                        ]
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 36,
+                    "value": {
+                      "Aggregate": {
+                        "kind": {
+                          "Array": {
+                            "Struct": "In"
+                          }
+                        },
+                        "operands": [
+                          {
+                            "Local": 33
+                          },
+                          {
+                            "Local": 34
+                          },
+                          {
+                            "Local": 35
+                          }
+                        ]
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 37,
+                    "value": {
+                      "Use": {
+                        "Local": 36
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 38,
+                    "value": {
+                      "Use": {
+                        "Const": {
+                          "Int": [
+                            1,
+                            {
+                              "Int": [
+                                "I32",
+                                true
+                              ]
+                            }
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 39,
+                    "value": {
+                      "AddressOf": {
+                        "is_mut": true,
+                        "place": {
+                          "local": 37,
+                          "projections": [
+                            {
+                              "Index": 38
+                            },
+                            {
+                              "Field": [
+                                1,
+                                "y",
+                                {
+                                  "Int": [
+                                    "I8",
+                                    true
+                                  ]
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "DerefAssign": {
+                    "ptr": 39,
+                    "value": {
+                      "Use": {
+                        "Const": {
+                          "Int": [
+                            -7,
+                            {
+                              "Int": [
+                                "I8",
+                                true
+                              ]
+                            }
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 40,
+                    "value": {
+                      "IndexAccess": {
+                        "base": {
+                          "Local": 37
+                        },
+                        "index": {
+                          "Const": {
+                            "Uint": [
+                              0,
+                              {
+                                "Int": [
+                                  "I16",
+                                  false
+                                ]
+                              }
+                            ]
+                          }
+                        },
+                        "elem_ty": {
+                          "Struct": "In"
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 41,
+                    "value": {
+                      "FieldAccess": {
+                        "base": {
+                          "Local": 40
+                        },
+                        "field_name": "x",
+                        "field_ty": {
+                          "Int": [
+                            "I16",
+                            false
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 42,
+                    "value": {
+                      "BinaryOp": {
+                        "op": "Add",
+                        "left": {
+                          "Local": 41
+                        },
+                        "right": {
+                          "Const": {
+                            "Uint": [
+                              9,
+                              {
+                                "Int": [
+                                  "I16",
+                                  false
+                                ]
+                              }
+                            ]
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 43,
+                    "value": {
+                      "Use": {
+                        "Const": {
+                          "Int": [
+                            2,
+                            {
+                              "Int": [
+                                "I32",
+                                true
+                              ]
+                            }
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 44,
+                    "value": {
+                      "AddressOf": {
+                        "is_mut": true,
+                        "place": {
+                          "local": 37,
+                          "projections": [
+                            {
+                              "Index": 43
+                            },
+                            {
+                              "Field": [
+                                0,
+                                "x",
+                                {
+                                  "Int": [
+                                    "I16",
+                                    false
+                                  ]
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "DerefAssign": {
+                    "ptr": 44,
+                    "value": {
+                      "Use": {
+                        "Local": 42
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 45,
+                    "value": {
+                      "BinaryOp": {
+                        "op": "Rem",
+                        "left": {
+                          "Local": 0
+                        },
+                        "right": {
+                          "Const": {
+                            "Uint": [
+                              3,
+                              {
+                                "Int": [
+                                  "I64",
+                                  false
+                                ]
+                              }
+                            ]
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 46,
+                    "value": {
+                      "Cast": {
+                        "kind": "IntToInt",
+                        "value": {
+                          "Local": 45
+                        },
+                        "ty": {
+                          "Int": [
+                            "ISize",
+                            false
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 47,
+                    "value": {
+                      "IndexAccess": {
+                        "base": {
+                          "Local": 37
+                        },
+                        "index": {
+                          "Local": 46
+                        },
+                        "elem_ty": {
+                          "Struct": "In"
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 48,
+                    "value": {
+                      "Use": {
+                        "Local": 47
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 49,
+                    "value": {
+                      "IndexAccess": {
+                        "base": {
+                          "Local": 37
+                        },
+                        "index": {
+                          "Const": {
+                            "Int": [
+                              1,
+                              {
+                                "Int": [
+                                  "I32",
+                                  true
+                                ]
+                              }
+                            ]
+                          }
+                        },
+                        "elem_ty": {
+                          "Struct": "In"
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 50,
+                    "value": {
+                      "FieldAccess": {
+                        "base": {
+                          "Local": 49
+                        },
+                        "field_name": "y",
+                        "field_ty": {
+                          "Int": [
+                            "I8",
+                            true
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 51,
+                    "value": {
+                      "IndexAccess": {
+                        "base": {
+                          "Local": 37
+                        },
+                        "index": {
+                          "Const": {
+                            "Int": [
+                              0,
+                              {
+                                "Int": [
+                                  "I32",
+                                  true
+                                ]
+                              }
+                            ]
+                          }
+                        },
+                        "elem_ty": {
+                          "Struct": "In"
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 52,
+                    "value": {
+                      "FieldAccess": {
+                        "base": {
+                          "Local": 51
+                        },
+                        "field_name": "x",
+                        "field_ty": {
+                          "Int": [
+                            "I16",
+                            false
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 53,
+                    "value": {
+                      "IndexAccess": {
+                        "base": {
+                          "Local": 37
+                        },
+                        "index": {
+                          "Const": {
+                            "Int": [
+                              2,
+                              {
+                                "Int": [
+                                  "I32",
+                                  true
+                                ]
+                              }
+                            ]
+                          }
+                        },
+                        "elem_ty": {
+                          "Struct": "In"
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 54,
+                    "value": {
+                      "FieldAccess": {
+                        "base": {
+                          "Local": 53
+                        },
+                        "field_name": "x",
+                        "field_ty": {
+                          "Int": [
+                            "I16",
+                            false
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 55,
+                    "value": {
+                      "FieldAccess": {
+                        "base": {
+                          "Local": 48
+                        },
+                        "field_name": "x",
+                        "field_ty": {
+                          "Int": [
+                            "I16",
+                            false
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 56,
+                    "value": {
+                      "FieldAccess": {
+                        "base": {
+                          "Local": 48
+                        },
+                        "field_name": "y",
+                        "field_ty": {
+                          "Int": [
+                            "I8",
+                            true
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 57,
+                    "value": {
+                      "Use": {
+                        "Const": {
+                          "Str": 4
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            ],
+            "terminator": {
+              "Call": {
+                "func": {
+                  "Function": "printf"
+                },
+                "args": [
+                  {
+                    "Local": 57
+                  },
+                  {
+                    "Local": 50
+                  },
+                  {
+                    "Local": 52
+                  },
+                  {
+                    "Local": 54
+                  },
+                  {
+                    "Local": 55
+                  },
+                  {
+                    "Local": 56
+                  }
+                ],
+                "dest": null,
+                "target": 10,
+                "unwind": null
+              }
+            }
+          },
+          {
+            "id": 10,
+            "label": null,
+            "stmts": [
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 58,
+                    "value": {
+                      "IndexAccess": {
+                        "base": {
+                          "Local": 37
+                        },
+                        "index": {
+                          "Const": {
+                            "Int": [
+                              0,
+                              {
+                                "Int": [
+                                  "I32",
+                                  true
+                                ]
+                              }
+                            ]
+                          }
+                        },
+                        "elem_ty": {
+                          "Struct": "In"
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 59,
+                    "value": {
+                      "IndexAccess": {
+                        "base": {
+                          "Local": 37
+                        },
+                        "index": {
+                          "Const": {
+                            "Int": [
+                              2,
+                              {
+                                "Int": [
+                                  "I32",
+                                  true
+                                ]
+                              }
+                            ]
+                          }
+                        },
+                        "elem_ty": {
+                          "Struct": "In"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            ],
+            "terminator": {
+              "Call": {
+                "func": {
+                  "Global": "sum_in"
+                },
+                "args": [
+                  {
+                    "Local": 58
+                  },
+                  {
+                    "Local": 59
+                  }
+                ],
+                "dest": 60,
+                "target": 11,
+                "unwind": null
+              }
+            }
+          },
+          {
+            "id": 11,
+            "label": null,
+            "stmts": [
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 61,
+                    "value": {
+                      "Use": {
+                        "Const": {
+                          "Str": 5
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            ],
+            "terminator": {
+              "Call": {
+                "func": {
+                  "Function": "printf"
+                },
+                "args": [
+                  {
+                    "Local": 61
+                  },
+                  {
+                    "Local": 60
+                  }
+                ],
+                "dest": null,
+                "target": 12,
+                "unwind": null
+              }
+            }
+          },
+          {
+            "id": 12,
+            "label": null,
+            "stmts": [],
+            "terminator": {
+              "Call": {
+                "func": {
+                  "Global": "grid"
+                },
+                "args": [
+                  {
+                    "Local": 0
+                  }
+                ],
+                "dest": null,
+                "target": 13,
+                "unwind": null
+              }
+            }
+          },
+          {
+            "id": 13,
+            "label": null,
+            "stmts": [],
+            "terminator": {
+              "Return": null
+            }
+          }
+        ],
+        "locals": [
+          {
+            "id": 0,
+            "name": "k",
+            "ty": {
+              "Int": [
+                "I64",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": true,
+            "annotations": []
+          },
+          {
+            "id": 1,
+            "name": null,
+            "ty": {
+              "Struct": "Mix"
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 2,
+            "name": "m",
+            "ty": {
+              "Struct": "Mix"
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 3,
+            "name": null,
+            "ty": {
+              "Ptr": {
+                "Struct": "Mix"
+              }
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 4,
+            "name": null,
+            "ty": {
+              "Ptr": {
+                "Struct": "Mix"
+              }
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 5,
+            "name": null,
+            "ty": {
+              "Ptr": {
+                "Struct": "Mix"
+              }
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 6,
+            "name": null,
+            "ty": {
+              "Struct": "Mix"
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 7,
+            "name": "s",
+            "ty": {
+              "Struct": "Mix"
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 8,
+            "name": null,
+            "ty": {
+              "Ptr": {
+                "Struct": "Mix"
+              }
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 9,
+            "name": null,
+            "ty": {
+              "Ptr": {
+                "Struct": "Mix"
+              }
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 10,
+            "name": null,
+            "ty": {
+              "Struct": "Out"
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 11,
+            "name": "o",
+            "ty": {
+              "Struct": "Out"
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 12,
+            "name": null,
+            "ty": {
+              "Struct": "In"
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 13,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I16",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 14,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I16",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 15,
+            "name": null,
+            "ty": {
+              "Ptr": {
+                "Int": [
+                  "I16",
+                  false
+                ]
+              }
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 16,
+            "name": null,
+            "ty": {
+              "Struct": "In"
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 17,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I8",
+                true
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 18,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I8",
+                true
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 19,
+            "name": null,
+            "ty": {
+              "Ptr": {
+                "Int": [
+                  "I8",
+                  true
+                ]
+              }
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 20,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I32",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 21,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I32",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 22,
+            "name": null,
+            "ty": {
+              "Struct": "In"
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 23,
+            "name": "inner",
+            "ty": {
+              "Struct": "In"
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 24,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I8",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 25,
+            "name": null,
+            "ty": {
+              "Struct": "In"
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 26,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I16",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 27,
+            "name": null,
+            "ty": {
+              "Struct": "In"
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 28,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I8",
+                true
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 29,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I32",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 30,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I64",
+                true
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 31,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I8",
+                true
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 32,
+            "name": null,
+            "ty": {
+              "Ptr": {
+                "Int": [
+                  "I8",
+                  true
+                ]
+              }
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 33,
+            "name": null,
+            "ty": {
+              "Struct": "In"
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 34,
+            "name": null,
+            "ty": {
+              "Struct": "In"
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 35,
+            "name": null,
+            "ty": {
+              "Struct": "In"
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 36,
+            "name": null,
+            "ty": {
+              "Array": [
+                {
+                  "Struct": "In"
+                },
+                3
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 37,
+            "name": "arr",
+            "ty": {
+              "Array": [
+                {
+                  "Struct": "In"
+                },
+                3
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 38,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I32",
+                true
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 39,
+            "name": null,
+            "ty": {
+              "Ptr": {
+                "Int": [
+                  "I8",
+                  true
+                ]
+              }
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 40,
+            "name": null,
+            "ty": {
+              "Struct": "In"
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 41,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I16",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 42,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I16",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 43,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I32",
+                true
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 44,
+            "name": null,
+            "ty": {
+              "Ptr": {
+                "Int": [
+                  "I16",
+                  false
+                ]
+              }
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 45,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I64",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 46,
+            "name": null,
+            "ty": {
+              "Int": [
+                "ISize",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 47,
+            "name": null,
+            "ty": {
+              "Struct": "In"
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 48,
+            "name": "pick",
+            "ty": {
+              "Struct": "In"
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 49,
+            "name": null,
+            "ty": {
+              "Struct": "In"
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 50,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I8",
+                true
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 51,
+            "name": null,
+            "ty": {
+              "Struct": "In"
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 52,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I16",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 53,
+            "name": null,
+            "ty": {
+              "Struct": "In"
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 54,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I16",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 55,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I16",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 56,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I8",
+                true
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 57,
+            "name": null,
+            "ty": {
+              "Ptr": {
+                "Int": [
+                  "I8",
+                  true
+                ]
+              }
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 58,
+            "name": null,
+            "ty": {
+              "Struct": "In"
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 59,
+            "name": null,
+            "ty": {
+              "Struct": "In"
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 60,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I64",
+                true
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 61,
+            "name": null,
+            "ty": {
+              "Ptr": {
+                "Int": [
+                  "I8",
+                  true
+                ]
+              }
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          }
+        ],
+        "is_public": false,
+        "linkage": "Internal",
+        "shader_stage": null,
+        "bindings": []
+      },
+      {
+        "name": "main",
+        "sig": {
+          "params": [],
+          "ret": {
+            "Int": [
+              "I32",
+              true
+            ]
+          },
+          "is_variadic": false,
+          "calling_conv": "Build"
+        },
+        "blocks": [
+          {
+            "id": 0,
+            "label": null,
+            "stmts": [],
+            "terminator": {
+              "Call": {
+                "func": {
+                  "Function": "build_args_get"
+                },
+                "args": [
+                  {
+                    "Const": {
+                      "Int": [
+                        1,
+                        {
+                          "Int": [
+                            "I32",
+                            true
+                          ]
+                        }
+                      ]
+                    }
+                  }
+                ],
+                "dest": 1,
+                "target": 1,
+                "unwind": null
+              }
+            }
+          },
+          {
+            "id": 1,
+            "label": null,
+            "stmts": [],
+            "terminator": {
+              "Call": {
+                "func": {
+                  "Function": "build_string_parse_int"
+                },
+                "args": [
+                  {
+                    "Local": 1
+                  }
+                ],
+                "dest": 2,
+                "target": 2,
+                "unwind": null
+              }
+            }
+          },
+          {
+            "id": 2,
+            "label": null,
+            "stmts": [
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 3,
+                    "value": {
+                      "Cast": {
+                        "kind": "IntToInt",
+                        "value": {
+                          "Local": 2
+                        },
+                        "ty": {
+                          "Int": [
+                            "I64",
+                            false
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            ],
+            "terminator": {
+              "Call": {
+                "func": {
+                  "Global": "run"
+                },
+                "args": [
+                  {
+                    "Local": 3
+                  }
+                ],
+                "dest": null,
+                "target": 3,
+                "unwind": null
+              }
+            }
+          },
+          {
+            "id": 3,
+            "label": null,
+            "stmts": [],
+            "terminator": {
+              "Return": {
+                "Const": {
+                  "Int": [
+                    0,
+                    {
+                      "Int": [
+                        "I32",
+                        true
+                      ]
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        ],
+        "locals": [
+          {
+            "id": 0,
+            "name": "_ret",
+            "ty": {
+              "Int": [
+                "I32",
+                true
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 1,
+            "name": null,
+            "ty": {
+              "Struct": "BuildString"
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 2,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I64",
+                true
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 3,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I64",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          }
+        ],
+        "is_public": true,
+        "linkage": "External",
+        "shader_stage": null,
+        "bindings": []
+      }
+    ],
+    "globals": [],
+    "types": [
+      {
+        "name": "build_vec2",
+        "kind": {
+          "Struct": {
+            "fields": [
+              [
+                "x",
+                {
+                  "Float": "F64"
+                }
+              ],
+              [
+                "y",
+                {
+                  "Float": "F64"
+                }
+              ]
+            ],
+            "packed": false
+          }
+        }
+      },
+      {
+        "name": "build_vec3",
+        "kind": {
+          "Struct": {
+            "fields": [
+              [
+                "x",
+                {
+                  "Float": "F64"
+                }
+              ],
+              [
+                "y",
+                {
+                  "Float": "F64"
+                }
+              ],
+              [
+                "z",
+                {
+                  "Float": "F64"
+                }
+              ]
+            ],
+            "packed": false
+          }
+        }
+      },
+      {
+        "name": "build_vec4",
+        "kind": {
+          "Struct": {
+            "fields": [
+              [
+                "x",
+                {
+                  "Float": "F64"
+                }
+              ],
+              [
+                "y",
+                {
+                  "Float": "F64"
+                }
+              ],
+              [
+                "z",
+                {
+                  "Float": "F64"
+                }
+              ],
+              [
+                "w",
+                {
+                  "Float": "F64"
+                }
+              ]
+            ],
+            "packed": false
+          }
+        }
+      },
+      {
+        "name": "In",
+        "kind": {
+          "Struct": {
+            "fields": [
+              [
+                "x",
+                {
+                  "Int": [
+                    "I16",
+                    false
+                  ]
+                }
+              ],
+              [
+                "y",
+                {
+                  "Int": [
+                    "I8",
+                    true
+                  ]
+                }
+              ]
+            ],
+            "packed": false
+          }
+        }
+      },
+      {
+        "name": "Mix",
+        "kind": {
+          "Struct": {
+            "fields": [
+              [
+                "a",
+                {
+                  "Int": [
+                    "I8",
+                    false
+                  ]
+                }
+              ],
+              [
+                "b",
+                {
+                  "Int": [
+                    "I64",
+                    true
+                  ]
+                }
+              ],
+              [
+                "c",
+                {
+                  "Int": [
+                    "I16",
+                    false
+                  ]
+                }
+              ],
+              [
+                "d",
+                {
+                  "Int": [
+                    "I32",
+                    true
+                  ]
+                }
+              ],
+              [
+                "e",
+                {
+                  "Int": [
+                    "I8",
+                    false
+                  ]
+                }
+              ],
+              [
+                "f",
+                {
+                  "Int": [
+                    "I64",
+                    false
+                  ]
+                }
+              ]
+            ],
+            "packed": false
+          }
+        }
+      },
+      {
+        "name": "Out",
+        "kind": {
+          "Struct": {
+            "fields": [
+              [
+                "tag",
+                {
+                  "Int": [
+                    "I8",
+                    false
+                  ]
+                }
+              ],
+              [
+                "v",
+                {
+                  "Struct": "In"
+                }
+              ],
+              [
+                "w",
+                {
+                  "Int": [
+                    "I32",
+                    false
+                  ]
+                }
+              ],
+              [
+                "z",
+                {
+                  "Int": [
+                    "I64",
+                    true
+                  ]
+                }
+              ]
+            ],
+            "packed": false
+          }
+        }
+      }
+    ],
+    "strings": [
+      "mix %u %lld %u %d %u %llu\n",
+      "grid %u %u %u\n",
+      "grid sum %llu\n",
+      "out %u %u %d %u %lld %d\n",
+      "arr %d %u %u %u %d\n",
+      "sum %lld\n"
+    ],
+    "externals": [],
+    "vtables": [],
+    "trait_methods": {},
+    "uniforms": []
+  }
+}

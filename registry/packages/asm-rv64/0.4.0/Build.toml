@@ -2,7 +2,7 @@
 name = "asm-rv64"
 version = "0.4.0"
 edition = "2026"
-description = "RV64IMA text assembler grown from the encoder of emu-rv64: one instruction per line, labels, .word and .org, the RV64I user set, Zicsr, MRET, WFI, the M and A extensions and, since 0.3.0, SRET, SFENCE.VMA and the names of the supervisor CSRs, with a renderer for the reverse direction; it holds no bit layout of its own and is checked by hand cases, the hand-assembled words and images of emu-rv64, property rules against that encoder and decoder, and planted controls"
+description = "RV64IMA text assembler grown from the encoder of emu-rv64: one instruction per line, labels, .word and .org, the RV64I user set, Zicsr, MRET, WFI, the M and A extensions and, since 0.3.0, SRET, SFENCE.VMA and the names of the supervisor CSRs, with a renderer for the reverse direction; it holds no bit layout of its own and is checked by hand cases, the hand-assembled words and images of emu-rv64, property rules against that encoder and decoder, and planted controls, and since 0.4.0 large assemblies of up to 1048576 bytes with a command that runs the image on the serial run of emu-rv64"
 author = "Zain Dana Harper"
 license = "AGPL-3.0-only"
 

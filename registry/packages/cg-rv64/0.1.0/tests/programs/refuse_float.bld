@@ -1,0 +1,11 @@
+// Refusal fixture: floating point is outside the covered set.
+
+fn half(x: f64) -> f64 { x / 2.0 }
+
+fn run(k: u64) ~ Console {
+    println!("{}", half(k as f64));
+}
+
+fn main() ~ Console + Process + Environment {
+    run(args_get(1).parse_int() as u64);
+}

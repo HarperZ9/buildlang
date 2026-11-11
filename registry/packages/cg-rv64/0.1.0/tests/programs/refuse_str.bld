@@ -1,0 +1,14 @@
+// Refusal fixture: a string that is not a constant of a printf is
+// outside the covered set.
+
+fn show(label: &str, v: u64) ~ Console {
+    println!("{} {}", label, v);
+}
+
+fn run(k: u64) ~ Console {
+    show("value", k);
+}
+
+fn main() ~ Console + Process + Environment {
+    run(args_get(1).parse_int() as u64);
+}

@@ -156,25 +156,33 @@ fn cv_text(g: &mut Cg, reg: u64, s: str) {
     cv_bytes(g, reg, n, true);
 }
 
-// reg = the value v as type t. A local or a global must have exactly the
-// type t. An integer constant is converted to t as C converts it.
+// reg = the value v as type t. A local or a global of type t is loaded
+// as it is. A local or a global of another integer type is converted to
+// t as C converts it in an assignment, an argument or a return: cut to
+// the width of t and extended by its sign. The MIR needs this for the
+// result of a `match`, which it types as the matched value. An integer
+// constant is converted the same way.
 fn cv_load(g: &mut Cg, d: &CjDoc, reg: u64, v: u64, t: u64) {
     if cv_is_local(d, v) {
         let id = cv_local(d, v);
-        if !ct_same(d, cv_lty(g, id), t) || !ct_scalar(d, t) {
-            cg_refuse(g, d, "a local is used as a type that is not its own");
+        let lt = cv_lty(g, id);
+        let ints = ct_kind(d, lt) == CT_INT && ct_kind(d, t) == CT_INT;
+        if !ct_scalar(d, t) || (!ct_same(d, lt, t) && !ints) {
+            cg_refuse(g, d, "a local is used as a type that is neither its own nor another integer type");
             return;
         }
-        ci_load(g, d, reg, 2_u64, cv_loff(g, id), t);
+        ci_load(g, d, reg, 2_u64, cv_loff(g, id), lt);
+        if !ct_same(d, lt, t) { ci_norm(g, d, reg, t); }
         return;
     }
     let gl = cv_global(g, d, v);
     if gl != CG_NONE {
-        if !ct_same(d, cj_get(d, gl, "ty"), t) || ct_kind(d, t) != CT_INT {
-            cg_refuse(g, d, "a global is used as a type that is not its own");
+        if ct_kind(d, cj_get(d, gl, "ty")) != CT_INT || ct_kind(d, t) != CT_INT {
+            cg_refuse(g, d, "a global is used as a type that is not an integer type");
             return;
         }
-        ci_li(g, reg, cv_canon(d, cj_bits(d, cj_first(d, cj_body(d, cj_get(d, gl, "init")))), t));
+        let own = cv_canon(d, cj_bits(d, cj_first(d, cj_body(d, cj_get(d, gl, "init")))), cj_get(d, gl, "ty"));
+        ci_li(g, reg, cv_canon(d, own, t));
         return;
     }
     cv_load_const(g, d, reg, v, t);

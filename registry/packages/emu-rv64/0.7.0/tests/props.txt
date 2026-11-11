@@ -84,3 +84,13 @@
 100 | property: causes 4, 5 and 13 are taken only by a load or LR, causes 6, 7 and 15 only by a store, SC or AMO
 103 | property: in M-mode no fetch takes a page fault, whatever MPRV holds
 104 | property: a load in S-mode from a drawn execute-only page faults with cause 13 while MXR is clear and reads the data while it is set, and from a drawn user page faults while SUM is clear and reads while it is set
+# serial run (commands zprops, zcontrols). step is the round, one generated program per round. The program has no branch, so its bytes, exit code and step count are known from its layout before it runs.
+110 | property: the run of a generated program is loaded (got is the loader code) and halts
+111 | property: the run takes exactly the steps of the layout: 1, then 2 for each byte, 1, 1 for each arithmetic instruction, and 1 or 2 to load the exit code
+112 | property: the exit code is the code the generator drew
+113 | property: the sink holds as many bytes as the program sends
+114 | property: the sink holds the bytes the generator drew, in order (got is the first wrong index)
+115 | property: a second run in the same memory gives the same state hash, steps, exit code and bytes (got and want are the two hashes)
+116 | property: a run with a limit one below the steps of the program does not halt, takes that many steps, reports exit code 0 and its sink is the bytes of the stores it reached, a prefix of the expected bytes
+117 | property: the same for a limit drawn from 0 to the steps of the program less one; after s steps the program has sent (s - 1) / 2 bytes, at most all of them
+118 | property: a run with a limit equal to the steps of the program halts (got 0 when it did not) with the state hash of the unlimited run (got and want are the two hashes)

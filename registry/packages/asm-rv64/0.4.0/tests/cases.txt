@@ -50,3 +50,19 @@ exact tests/golden-bytes-sv39.txt bytes tests/sv39.s
 exact tests/golden-same-sv39.txt same tests/sv39.s tests/emu-sv39.img
 exact tests/golden-dis-sv39.txt dis tests/golden-asm-sv39.txt
 exact tests/golden-asm-sv39.txt asm tests/golden-dis-sv39.txt
+# large limits, since 0.4.0: hand cases of as_assemble_big against as_assemble at both image limits and both label limits; the last case takes about a minute
+exact tests/golden-ycases.txt ycases
+# large limits: both planted defects must be refused by the hand cases
+exact tests/golden-ycontrols.txt ycontrols
+# a program for the serial run of emu-rv64: the words from asmx and from asm, the bytes, the text it sends, and two runs compared
+exact tests/golden-asmx-hello.txt asmx tests/hello.s
+exact tests/golden-asmx-hello.txt asm tests/hello.s
+exact tests/golden-bytesx-hello.txt bytesx tests/hello.s
+exact tests/golden-serial-hello.txt serial tests/hello.s 1000
+exact tests/golden-serial-check-hello.txt serial-check tests/hello.s 1000
+# a program of 65580 bytes that jumps over 65536 bytes: asm refuses it with the reason of 0.3.0, serial runs it (exit code 3)
+exact tests/golden-asm-far.txt asm tests/far.s
+exact tests/golden-serial-far.txt serial tests/far.s 100
+exact tests/golden-serial-check-far.txt serial-check tests/far.s 100
+# a missing file is refused by a large command as by asm
+exact tests/golden-asmx-missing.txt asmx tests/no-such.s

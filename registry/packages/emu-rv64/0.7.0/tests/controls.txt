@@ -65,3 +65,11 @@
 55 | sys1.bld to sys5.bld, variant 55 | sstatus reads all of mstatus | differential 3 at step 422, property 96 at step 3, 17 hand cases from case 27
 56 | sys1.bld to sys5.bld, variant 56 | satp accepts a write with an unsupported MODE | differential 37 at step 14376, property 99 at step 4907, 9 hand cases from case 47
 57 | sys1.bld to sys5.bld, variant 57 | a store page fault is reported with cause 13 | differential 2 at step 21, property 100 at step 259, 789 hand cases from case 395
+# serial run (command zcontrols). The defect numbers 1 to 6 are those of ser_run_v, the constants SER_CTL_ in src/abi3.bld; the ids go on from 57.
+# The hand case is the first that fails; the command prints every failing case. The property kind and round are those of seed 1, 20000 steps.
+58 | ser_at_halt, defect 1 | the halt word is looked for one word after pc, so the run stops one instruction early | hand case 1, property 111 at round 0
+59 | ser_step, defect 2 | a full output buffer is emptied without keeping its bytes | hand case 13, property 113 at round 1
+60 | ser_run_v, defect 3 | the exit code is taken from x11 | hand case 2, property 112 at round 0
+61 | ser_run_v, defect 4 | the halt word is counted as a step | hand case 1, property 111 at round 0
+62 | ser_run_v, defect 5 | the bytes that wait in the output buffer at the end are left out of the sink | hand case 3, property 113 at round 0
+63 | ser_run_v, defect 6 | the step limit is looked at before the halt word, so a limit equal to the steps of the program is no halt | hand case 14, property 118 at round 0

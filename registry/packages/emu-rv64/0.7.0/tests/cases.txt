@@ -72,3 +72,21 @@ exact tests/golden-sreplay-sv39.txt sreplay tests/sv39.img 200
 exact tests/golden-sreplay-sv39-5000.txt sreplay tests/sv39.img 5000
 # the same image in the trap profile, which has no medeleg: the write traps to mtvec = 0 and every later step traps too
 exact tests/golden-run-sv39-trap.txt run tests/sv39.img 200 65536
+# serial run: hand cases; every expected step count, byte and exit code is worked out in the comments of src/zcheck.bld and src/zcheck2.bld
+exact tests/golden-zcases.txt zcases
+# serial run: seeded property runs on programs whose bytes, exit code and step count are known from their layout, no model
+exact tests/golden-zprops-1.txt zprops 1 2000
+exact tests/golden-zprops-7.txt zprops 7 20000
+# serial run: every planted defect must be refused by the cases and by the property rules
+exact tests/golden-zcontrols.txt zcontrols
+# serial run: tests/hello.img, made from tests/hello.s with asm-rv64 0.4.0; the text it sends, and two runs compared, with a limit above and one step below its 76 steps
+exact tests/golden-serial-hello.txt serial tests/hello.img 1000
+exact tests/golden-serial-check-hello.txt serial-check tests/hello.img 1000
+exact tests/golden-serial-check-hello-75.txt serial-check tests/hello.img 75
+# serial run: tests/loop300.img, the program of hand case 13 assembled from text: 1204 steps, 300 bytes, exit code 9
+exact tests/golden-serial-check-loop300.txt serial-check tests/loop300.img 5000
+# serial run: tests/odd.img sends a byte above 127 and a zero byte, which the command prints as question marks
+exact tests/golden-serial-odd.txt serial tests/odd.img 100
+# serial run: a missing file and an empty file are refused
+exact tests/golden-serial-missing.txt serial tests/no-such.img 10
+exact tests/golden-serial-empty.txt serial tests/empty.img 10

@@ -1,4 +1,4 @@
-# emu-rv64 0.6.0: RV64IMA machine emulator core with supervisor and user modes, Sv39 virtual memory, a timer, interrupts, flat images and replay
+# emu-rv64 0.7.0: RV64IMA machine emulator core with supervisor and user modes, Sv39 virtual memory, a timer, interrupts, flat images, replay and a serial run
 
 An emulator is a program that behaves like a computer: it reads the machine
 code of that computer and carries out each instruction. This package is the
@@ -65,6 +65,10 @@ The package holds a decoder (word to operation and fields), an encoder (the
 reverse, which the assembler `asm-rv64` uses), a step function that executes
 one instruction against registers, memory, one serial device and the timer,
 and a loader and a replay check for flat images.
+
+Version 0.7.0 adds a serial run: a run of an image that keeps the bytes
+the program sends to the serial device and stops when the program
+reaches a halt word. The section "Serial run" describes it.
 
 The core owns no memory and reads no clock. The caller passes registers,
 memory and the serial output buffer in as slices. Time is a count of steps,
@@ -992,6 +996,76 @@ and `emu-rv64 image timer tests/timer.img` confirms that the file holds the
 built-in bytes. Reading is exact: `read_bytes` returns every byte of the
 file, zero bytes included.
 
+## Serial run
+
+Since 0.7.0. A serial run loads a flat image, steps the machine and keeps
+every byte the program stores to the serial device. It lets a program
+end by itself and hand back a result, which `run` and `replay` cannot do:
+they stop only at their step count.
+
+The run starts as `run` does: the image at `0x80000000`, the rest of
+memory zero, the machine in the reset state of the trap profile. The
+loader refuses an image of 0 bytes with code 1 and an image larger than
+memory with code 2, and then nothing runs.
+
+**Halt word.** The halt word is `0x0000006F`, the instruction
+`jal x0, 0`, a jump to itself. Before every step the run looks at `pc`.
+When `pc` is a multiple of 4, the four bytes there lie in memory and
+they hold the halt word, the program has halted. The halt word is not
+executed and is not a step.
+
+**Exit code.** The exit code is the value of register `x10` at the halt,
+all 64 bits. A run that did not halt reports exit code 0.
+
+**Step limit.** The caller gives a limit, `max`. A step is one
+instruction executed or one trap taken. The run looks for the halt word
+first and at the limit second, so a program that needs exactly `max`
+steps halts, and a limit of 0 on an image that starts with the halt word
+is a halt after 0 steps. When the limit ends the run, it took exactly
+`max` steps. The run also ends, without a halt, if a step returns a code
+other than "executed" or "trap"; no check here reaches that branch.
+
+**The sink.** The sink is the list that receives the serial bytes. The
+output buffer of the run holds 128 bytes. When the program sends a byte
+and the buffer is full, the run appends the 128 bytes to the sink,
+empties the buffer into the record of emptied bytes that the state hash
+covers, and runs the step again. When the run ends, it appends the bytes
+that still wait in the buffer. So the sink receives every byte the
+program sent, in the order sent, whether or not the run halted. The run
+appends to the sink and never clears it. A store to another register of
+the serial device, such as the line status register at `0x10000005`,
+sends nothing.
+
+**State hash.** The run reports the state hash of its end state, as the
+section "State hash" defines it for a run: registers, machine fields,
+all of memory, the output buffer, and the count and hash of the emptied
+bytes. The hash depends on the size of memory.
+
+`ser_run(img, n, ram, max, sink)` returns a record with `rc` (the loader
+code), `halted`, `code`, `steps` and `hash`. `ser_run_v` takes one more
+number first, the planted defect, 0 for none.
+
+### Serial commands
+
+Both commands give the machine 4194304 bytes of memory and load an image
+of at most 1048576 bytes.
+
+| Command | What it does | Exit status |
+|---|---|---|
+| `emu-rv64 serial IMAGE MAX` | Runs the image for at most `MAX` steps. Prints the serial bytes to standard output and nothing else there. Prints one summary line to standard error: `halted`, `code`, `steps`, the number of serial bytes, their FNV-1a hash and the state hash. | The low 8 bits of the exit code when the program halted. 124 when it did not halt. 125 when it halted and at least one byte could not be printed. |
+| `emu-rv64 serial-check IMAGE MAX` | Runs the image twice from scratch in the same memory. Prints the summary of the first run to standard output and whether the second run gave the same state hash, steps, exit code, halt and serial bytes. | 0 when the runs are equal and the program halted, else 1. |
+
+A byte from 1 to 127 is printed as it is. Any other byte, 0 or 128 to
+255, is printed as `?`, because a string of this language cannot hold
+it. The summary counts such bytes in a second line on standard error.
+The sink and the hash of the serial bytes hold the true bytes.
+
+A file that cannot be read gives status 3, an empty file 4 and a file of
+more than 1048576 bytes 5, with the messages of `run`. In the last
+message the word "memory" stands for the image limit. An exit code of 3,
+4, 5, 124 or 125 from a program cannot be told from these statuses; the
+summary line can.
+
 ## How the contract is checked
 
 No other emulator, no assembler of another project and no test suite was
@@ -1225,7 +1299,67 @@ after the program, the same reset state, the same 128-byte output buffer,
 and fewer than 129 bytes sent. In 65536 bytes of memory the same run ends
 with the hash `97c89756f2969aae`.
 
+### Serial run checks
+
+| Check | Command | What it does |
+|---|---|---|
+| Hand cases | `emu-rv64 zcases` | 24 cases. The steps, bytes and exit code of each were worked out by hand before the run, and the working is in the comments of `src/zcheck.bld` and `src/zcheck2.bld`. Case 3 is nine literal words with the encoding shown; every other image is built with `emu_encode`. The cases: the halt word alone; one instruction and a halt; three bytes and exit code 7; a sink that held bytes before the run; `x10` against `x11`; an exit code above 255 and its exit status; a halt word that is data and never reached; a halt word reached by a jump back; a store to the line status register; a loop with no halt word; the three exit statuses; 300 bytes through the buffer of 128, with every byte compared; limits of exactly the step count, one below it, and at both sides of the first emptying of the buffer; an empty image and one larger than memory; a limit of 0; an image that only traps; a run in memory another run used; and the state hash of equal and unequal runs. |
+| Properties | `emu-rv64 zprops SEED STEPS` | Nine rules, kinds 110 to 118 in `tests/props.txt`, on generated programs with no model. A program has no branch: it sends K drawn bytes, each from 1 to 127, runs 0 to 6 arithmetic instructions on other registers, loads a drawn exit code below `0x7FFFF000` into `x10` and halts. K is 0 to 400, and one program in eight has 0 to 2 bytes. The generator knows the bytes, the exit code and the exact step count from the layout before the run. Each round requires them, requires a second run in the same memory to give the same state hash and bytes, and runs the program with three limits: its step count, one below it, and a drawn lower one. A cut run must not halt and must hold exactly the bytes of the stores it reached. The run stops when the first runs of the rounds add up to `STEPS` steps. |
+| Controls | `emu-rv64 zcontrols` | Six planted defects, numbers 1 to 6 of `ser_run_v`. The hand cases must refuse each, and the property rules, run alone at seed 1 with 20000 steps, must refuse each. Number 0, the run itself, must pass both. |
+| Images | `emu-rv64 serial`, `emu-rv64 serial-check` | Three images assembled from text by `asm-rv64` 0.4.0, each with its source beside it in `tests/`. `hello` sends a line of text in 76 steps. `loop300` is the program of hand case 13 written as text: 1204 steps, 300 bytes, exit code 9, the numbers the case worked out for the image built with `emu_encode`. `odd` sends a byte above 127 and a zero byte, which the command prints as `?`. The step counts are worked out in the comments of the three source files. |
+
+| Defect | Planted in the serial run |
+|---|---|
+| 1 | The halt word is looked for one word after `pc`, so the run stops one instruction early. |
+| 2 | A full output buffer is emptied without keeping its bytes. |
+| 3 | The exit code is taken from `x11`. |
+| 4 | The halt word is counted as a step. |
+| 5 | The bytes that wait in the output buffer at the end are left out of the sink. |
+| 6 | The step limit is looked at before the halt word. |
+
+Defect 6 was added while the checks were written: none of the first five
+changes what a run does when its limit equals the step count of the
+program.
+
 ## Limits
+
+Limits of the serial run, added in 0.7.0:
+
+- The halt word is recognised by its bits. A program cannot use
+  `jal x0, 0` as an idle loop under a serial run, for example to wait for
+  an interrupt: the run ends there. A data word `0x0000006F` ends the run
+  too if `pc` reaches it.
+- The halt convention belongs to this package. It is no standard, and
+  `run`, `replay`, `srun` and `sreplay` do not know it.
+- The command `serial` cannot print a byte 0 or a byte above 127. It
+  prints `?` and exits with status 125. The sink of `ser_run` holds the
+  true bytes.
+- The exit status holds 8 bits of the exit code, and the statuses 3, 4,
+  5, 124 and 125 also have meanings of the command.
+- The serial run uses the trap profile. There is no serial run in the
+  system profile.
+- A step count is the only clock. A program that never halts is stopped
+  by the limit and by nothing else.
+- Two runs with equal hashes were made on this host, by this build, in
+  one process. That shows the run repeats here. It was not run on a
+  second host or with a second C compiler.
+- The generated programs of `zprops` have no branch, no load and no
+  trap. Loops, the edges of the buffer and traps are covered by the hand
+  cases only.
+- The exit code of a generated program is below `0x7FFFF000`. An exit
+  code with bit 31 or a higher bit set was not run.
+- The expected numbers of the hand cases were worked out by the author of
+  the run. One author wrote the run, its checks and its planted defects.
+- All images of the hand cases but one are built with `emu_encode`. An
+  error in the encoder that the earlier hand cases miss would be in those
+  images. The three images in `tests/` come from `asm-rv64`, which uses
+  the same encoder.
+- The branch of the run that ends on an unexpected step code, and the
+  message for an image file above the limit, have no golden file. The
+  message was seen once, by hand, with a file of 1048577 zero bytes.
+- The largest image a check ran is 1048576 zero bytes for 10 steps, by
+  hand. The largest image with a golden file is 56 bytes; `asm-rv64`
+  0.4.0 runs one of 65580 bytes.
 
 Limits of the system profile, added in 0.6.0:
 
@@ -1455,11 +1589,56 @@ Limits carried over from 0.3.0:
 
 ## Verified
 
-Every line of the first two lists below was run on the 0.6.0 build, on
+The first list below was run on the 0.7.0 build. Every line of the two
+lists after it was run on the 0.6.0 build, on
 one Windows x86-64 host. "Accepted" means the run ended with no
 difference from the model, or with no rule broken. The limit beside all
 of it: these runs check the core against this document, with checks
 written by the author of the core.
+
+Checks added in 0.7.0, run on the 0.7.0 build on the same host:
+
+- `zcases`: 24 of 24 cases pass.
+- `zprops`: accepted at every seed run.
+
+  | Seed | Steps asked | Programs | Steps run | Bytes sent | Programs of more than 128 bytes | Programs of no byte | Codes above 255 |
+  |---|---|---|---|---|---|---|---|
+  | 1 | 2000 | 7 | 2242 | 1099 | 4 | 0 | 5 |
+  | 7 | 20000 | 52 | 20383 | 10021 | 35 | 2 | 39 |
+  | 2 | 2000000 | 5580 | 2000666 | 981413 | 3334 | 233 | 4219 |
+  | 3 | 2000000 | 5557 | 2000019 | 981352 | 3339 | 258 | 4141 |
+  | 11 | 2000000 | 5567 | 2000373 | 981425 | 3327 | 239 | 4185 |
+
+- `zcontrols`: the run itself is accepted by both checks, and 6 of 6
+  planted defects are refused by the hand cases and by the property
+  rules. `tests/controls.txt` records the first failing case and the
+  rule and round for each.
+- `serial tests/hello.img 1000` prints `hello, serial` and a line feed
+  and exits with status 0. Its summary gives 76 steps and 14 bytes, the
+  numbers worked out in `tests/hello.s`. The hash of the serial bytes it
+  prints, `549c7564fcdf760b`, is the FNV-1a hash of that text computed
+  apart from the package by a four-line Python script.
+- `serial-check tests/hello.img 1000`: second run equal, status 0. With
+  a limit of 75 steps: not halted, 75 steps, all 14 bytes, status 1; and
+  `serial` with that limit exits with status 124.
+- `serial-check tests/loop300.img 5000`: halted, exit code 9, 1204 steps,
+  300 bytes, second run equal. These are the numbers of hand case 13.
+- `serial tests/odd.img 100` prints `A??B` and a line feed and exits
+  with status 125; the summary gives 11 steps and 5 bytes.
+- A missing file gives status 3 and an empty file status 4. By hand, with
+  no golden file: a file of 1048577 bytes gives status 5, and one of
+  1048576 zero bytes is loaded and runs.
+- The three image files were made with
+  `asm-rv64 bytesx tests/NAME.s | xxd -r -p > tests/NAME.img`. Their
+  SHA-256 sums: `hello.img`
+  `ba9c10f4df94d30ce90c1c106a74ccecfdf5ce1e8df409566d24c82bdb301f76`,
+  `loop300.img`
+  `90f415de195a87288f8c3d5c6a08f7485b7da4d903df1359308ac82103580925`,
+  `odd.img`
+  `c35fb521a30a689826af17fd54f1caf212f81a7a5c7e4e02bb0d726b7f69576e`.
+- Every command of `tests/cases.txt` was run on the 0.7.0 build and its
+  standard output compared with the golden file: 54 of 54 equal. 41 of
+  those lines and their golden files are those of 0.6.0, unchanged.
 
 Checks added in 0.6.0:
 
@@ -1666,6 +1845,10 @@ Checks of 0.1.0 to 0.4.0, as recorded for 0.5.0:
   | 4 | 2000315 | 6183 | 947695 | 1052620 | 4285 | 560309 | 0 |
   | 5 | 2000000 | 6000 | 974409 | 1025591 | 4412 | 600972 | 0 |
   | 11 | 20000127 | 60326 | 9473717 | 10526410 | 42200 | 5865324 | 1 |
+
+Not verified for the serial run: an image with a loop or a trap under
+the property rules, an exit code with bit 31 set, and the same run on a
+second host.
 
 Not verified: the package was not built or run on a second host or with a
 second C compiler, so the claim that results are the same on every host

@@ -19,4 +19,18 @@ const SER_CTL_DROP: u64 = 2_u64;
 const SER_CTL_CODE: u64 = 3_u64;
 const SER_CTL_STEP: u64 = 4_u64;
 const SER_CTL_TAIL: u64 = 5_u64;
-const SER_CTL_COUNT: u64 = 5_u64;
+const SER_CTL_LIMIT: u64 = 6_u64;
+const SER_CTL_COUNT: u64 = 6_u64;
+
+// Property kinds of zprops. tests/props.txt describes each one.
+const ZP_HALT: i64 = 110;
+const ZP_STEPS: i64 = 111;
+const ZP_CODE: i64 = 112;
+const ZP_LEN: i64 = 113;
+const ZP_BYTES: i64 = 114;
+const ZP_AGAIN: i64 = 115;
+const ZP_SHORT: i64 = 116;
+const ZP_CUT: i64 = 117;
+const ZP_EXACT: i64 = 118;
+// The memory the checks zcases and zprops give a serial run.
+const ZC_RAM: usize = 8192;

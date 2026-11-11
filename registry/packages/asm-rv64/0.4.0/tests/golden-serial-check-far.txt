@@ -1,0 +1,4 @@
+serial-check source=tests/far.s bytes=65580 ram=4194304 max=100
+  halted=true code=3 steps=11 serial_len=4 serial_fnv=ef56a67916c2a5ec
+  hash=2fca28ac35ec7ca8
+  second run: equal

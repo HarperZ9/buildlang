@@ -1,0 +1,4 @@
+serial-check image=tests/loop300.img bytes=36 ram=4194304 max=5000
+  halted=true code=9 steps=1204 serial_len=300 serial_fnv=7cd4c1150a840155
+  hash=2f12e274c17b5b51
+  second run: equal

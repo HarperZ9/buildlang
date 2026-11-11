@@ -37,7 +37,7 @@ fn cr_unary(g: &mut Cg, d: &CjDoc, body: u64, dty: u64) {
 
 // An integer cast: the C conversion, which cuts the value to the width
 // of the target and extends it by the sign of the target. The source is
-// an integer or a Bool. Defect 9 leaves the value as it was.
+// an integer or a Bool. Defect 9 widens a signed value with zeros.
 fn cr_cast(g: &mut Cg, d: &CjDoc, body: u64, dty: u64) {
     let kind = cj_get(d, body, "kind");
     let to = cj_get(d, body, "ty");
@@ -54,7 +54,11 @@ fn cr_cast(g: &mut Cg, d: &CjDoc, body: u64, dty: u64) {
         return;
     }
     cv_load(g, d, 5_u64, v, from);
-    if g.v != CGC_CAST { ci_norm(g, d, 5_u64, to); }
+    if g.v == CGC_CAST && ct_signed(d, from) && ct_bits(d, from) < ct_bits(d, to) {
+        ci_i(g, "slli", 5_u64, 5_u64, 64_u64 - ct_bits(d, from));
+        ci_i(g, "srli", 5_u64, 5_u64, 64_u64 - ct_bits(d, from));
+    }
+    ci_norm(g, d, 5_u64, to);
 }
 
 // x7 = base + off for a field offset.
@@ -76,7 +80,8 @@ fn cr_field(g: &mut Cg, d: &CjDoc, body: u64) -> u64 {
     if !cv_is_local(d, base) { return cr_no_field(g, d); }
     if ct_kind(d, bt) == CT_SLICE || (ptr && ct_kind(d, inner) == CT_SLICE) {
         let lt = cj_get(d, body, "field_ty");
-        if !cj_str_is(d, name, "len") || ct_kind(d, lt) != CT_INT || ct_bits(d, lt) != 64_u64 { return cr_no_field(g, d); }
+        let word = ct_kind(d, lt) == CT_INT && ct_bits(d, lt) == 64_u64;
+        if !cj_str_is(d, name, "len") || !word { return cr_no_field(g, d); }
         if ptr { ci_load(g, d, 7_u64, 2_u64, off, bt); } else { ci_add(g, 7_u64, 2_u64, off); }
         cr_bump(g, 8_u64);
         return lt;
@@ -157,10 +162,16 @@ fn cr_index(g: &mut Cg, d: &CjDoc, base: u64, index: u64, ety: u64, store: bool)
         return CG_NONE;
     }
     cr_bounds(g, ct_kind(d, cv_lty(g, cv_local(d, base))) == CT_VEC, store);
+    cr_elem(g, d, e);
+    e
+}
+
+// x7 = x6 + x28 * the size of element type e.
+fn cr_elem(g: &mut Cg, d: &CjDoc, e: u64) {
     let es = ct_size(g, d, e);
     if es == 1_u64 {
         ci_r(g, "add", 7_u64, 6_u64, 28_u64);
-        return e;
+        return;
     }
     if es == 2_u64 || es == 4_u64 || es == 8_u64 {
         let mut sh: u64 = 1_u64;
@@ -172,7 +183,6 @@ fn cr_index(g: &mut Cg, d: &CjDoc, base: u64, index: u64, ety: u64, store: bool)
         ci_r(g, "mul", 29_u64, 28_u64, 29_u64);
     }
     ci_r(g, "add", 7_u64, 6_u64, 29_u64);
-    e
 }
 
 // The pointer of a Deref into x7. Returns the type it points to.
@@ -180,7 +190,8 @@ fn cr_deref(g: &mut Cg, d: &CjDoc, body: u64) -> u64 {
     let p = cj_get(d, body, "ptr");
     let pt = cv_lty(g, cv_local(d, p));
     let to = ct_elem(d, pt);
-    if !cv_is_local(d, p) || ct_kind(d, pt) != CT_PTR || !ct_same(d, to, cj_get(d, body, "pointee_ty")) || !ct_known(g, d, to) {
+    let typed = ct_kind(d, pt) == CT_PTR && ct_same(d, to, cj_get(d, body, "pointee_ty"));
+    if !cv_is_local(d, p) || !typed || !ct_known(g, d, to) {
         cg_refuse(g, d, "dereference of a value that is not a pointer local of the stated type");
         return CG_NONE;
     }
@@ -201,17 +212,63 @@ fn cr_place(g: &mut Cg, d: &CjDoc, rv: u64) -> u64 {
     CG_NONE
 }
 
-// A reference: the address of a whole local. dty is a pointer to the
-// type of that local.
+// One step of a place: x7 holds the address of a value of type t and
+// is moved to the part the projection p names. Returns the type of that
+// part, or CG_NONE after a refusal.
+//   "Deref"                    t is a pointer; the value it points to
+//   {"Field": [i, name, type]} a field of a struct, or of the struct a
+//                              pointer points to
+//   {"Index": local}           an element of an array, with the bounds
+//                              check. The hosted program does not check
+//                              this index; see SPEC.md, "Differences".
+fn cr_project(g: &mut Cg, d: &CjDoc, p: u64, t: u64) -> u64 {
+    let body = cj_body(d, p);
+    let mut cur = t;
+    if cj_tag_is(d, p, "Deref") || (cj_tag_is(d, p, "Field") && ct_kind(d, t) == CT_PTR) {
+        ci_m(g, "ld", 7_u64, 0_u64, 7_u64);
+        cur = ct_elem(d, t);
+        if ct_kind(d, t) != CT_PTR || !ct_known(g, d, cur) { cur = CG_NONE; }
+        if cj_tag_is(d, p, "Deref") && cur != CG_NONE { return cur; }
+    }
+    if cj_tag_is(d, p, "Field") {
+        let name = cj_next(d, cj_first(d, body));
+        let f = ct_field(g, d, cur, name);
+        if f.ok && ct_same(d, f.ty, cj_next(d, name)) {
+            ci_add(g, 7_u64, 7_u64, f.off);
+            return f.ty;
+        }
+    }
+    let it = cv_lty(g, cj_mag(d, body));
+    if cj_tag_is(d, p, "Index") && cj_kind(d, body) == CJ_NUM && ct_kind(d, t) == CT_ARRAY && ct_kind(d, it) == CT_INT {
+        ci_load(g, d, 28_u64, 2_u64, cv_loff(g, cj_mag(d, body)), it);
+        ci_i(g, "addi", 6_u64, 7_u64, 0_u64);
+        ci_li(g, 7_u64, ct_alen(d, t));
+        cr_bounds(g, false, false);
+        cr_elem(g, d, ct_elem(d, t));
+        return ct_elem(d, t);
+    }
+    cg_refuse_tag(g, d, "place projection the generator does not cover:", p);
+    CG_NONE
+}
+
+// A reference: the address of a local, or of a part of it that a list of
+// projections names. dty is a pointer to the type of that part.
 fn cr_ref(g: &mut Cg, d: &CjDoc, body: u64, dty: u64) {
     let place = cj_get(d, body, "place");
     let id = cj_mag(d, cj_get(d, place, "local"));
-    let plain = cj_first(d, cj_get(d, place, "projections")) == CG_NONE;
-    if !plain || ct_kind(d, dty) != CT_PTR || !ct_same(d, ct_elem(d, dty), cv_lty(g, id)) {
-        cg_refuse(g, d, "reference that is not the address of a whole local of the pointed-to type");
+    let mut t = cv_lty(g, id);
+    ci_add(g, 7_u64, 2_u64, cv_loff(g, id));
+    let mut p = cj_first(d, cj_get(d, place, "projections"));
+    while p != CG_NONE && t != CG_NONE {
+        t = cr_project(g, d, p, t);
+        p = cj_next(d, p);
+    }
+    if t == CG_NONE { return; }
+    if ct_kind(d, dty) != CT_PTR || !ct_same(d, ct_elem(d, dty), t) {
+        cg_refuse(g, d, "reference whose place does not have the pointed-to type");
         return;
     }
-    ci_add(g, 5_u64, 2_u64, cv_loff(g, id));
+    ci_i(g, "addi", 5_u64, 7_u64, 0_u64);
 }
 
 // x5 = the scalar value of the right-hand side rv, as type dty.

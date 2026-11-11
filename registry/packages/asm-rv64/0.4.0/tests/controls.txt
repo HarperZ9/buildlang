@@ -14,3 +14,6 @@
 11 | as_atomic | sc and the AMOs take rs1 and rs2 in each other's place | hand case 379, property 66 at round 0
 12 | as_op_atomic | a .w atomic mnemonic is assembled as the .d one | hand case 378, property 66 at round 0
 13 | as_f_addr | the register in brackets is taken for an offset and the address register is left x0 | hand case 378, property 66 at round 0
+# The large limits, since 0.4.0. Command ycontrols; acontrols does not run these two. The hand cases are those of ycases, 1 to 19; every failing case is listed.
+14 | as_lab_loc | in a large assembly a label past the 1024th takes the offset of label 1024 | large hand case 1
+15 | as_cut, as_emit | a large assembly drops every word past 65536 bytes | large hand cases 3, 6, 10, 11, 14

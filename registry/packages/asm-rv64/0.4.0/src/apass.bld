@@ -63,8 +63,22 @@ fn as_emit(st: &mut AsSt, o: &mut AsOut, w: u64) {
         as_fail(st, as_big_code(st));
         return;
     }
-    if st.pass == 2_u64 { o.words.push(w); }
+    if st.pass == 2_u64 && !as_cut(st) { o.words.push(w); }
     st.loc = st.loc + 4_u64;
+}
+
+// Defect 15: a large assembly drops every word past 65536 bytes.
+fn as_cut(st: &AsSt) -> bool {
+    st.v == ACTL_YDROP && st.big && st.loc >= 4_u64 * AS_WORDS_MAX
+}
+
+// The offset a new label takes: the location counter. Defect 14: in a
+// large assembly a label past the 1024th takes the offset of label 1024.
+fn as_lab_loc(st: &AsSt, labs: &Vec<u64>) -> u64 {
+    if st.v == ACTL_YLABEL && st.big && labs.len() >= 3 * AS_LABELS_MAX {
+        return labs[3 * AS_LABELS_MAX - 1];
+    }
+    st.loc
 }
 
 // A label definition. Only pass 1 records it. Defect 9 accepts a second
@@ -86,9 +100,10 @@ fn as_label(st: &mut AsSt, src: &[u8], lo: usize, hi: usize, o: &mut AsOut) {
         o.errs1.push(code);
         return;
     }
+    let at = as_lab_loc(st, &o.labs);
     o.labs.push(lo as u64);
     o.labs.push((hi - lo) as u64);
-    o.labs.push(st.loc);
+    o.labs.push(at);
 }
 
 // .word VALUE places one word, 0 to 0xFFFFFFFF. Defect 5 does not count

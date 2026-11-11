@@ -1,0 +1,88 @@
+variant 0: the serial run
+ cases:
+  accepted, 24 cases
+ properties:
+  accepted, 56 programs, 20129 steps, 9878 bytes sent, 164 arithmetic instructions
+  programs: 34 of more than 128 bytes, 1 of no byte, 41 with a code above 255
+control 1: the halt word is looked for one word after pc
+ cases:
+  hand case 1 fails
+  hand case 2 fails
+  hand case 3 fails
+  hand case 4 fails
+  hand case 5 fails
+  hand case 6 fails
+  hand case 7 fails
+  hand case 8 fails
+  hand case 9 fails
+  hand case 10 fails
+  hand case 13 fails
+  hand case 14 fails
+  hand case 15 fails
+  hand case 20 fails
+  hand case 21 fails
+  hand case 23 fails
+  hand case 24 fails
+ properties:
+  REFUSED kind=111 step=0 got=b want=c
+control 2: a full output buffer is emptied without keeping its bytes
+ cases:
+  hand case 13 fails
+  hand case 14 fails
+  hand case 15 fails
+  hand case 17 fails
+ properties:
+  REFUSED kind=113 step=1 got=59 want=d9
+control 3: the exit code is taken from x11
+ cases:
+  hand case 2 fails
+  hand case 3 fails
+  hand case 4 fails
+  hand case 5 fails
+  hand case 6 fails
+  hand case 7 fails
+  hand case 8 fails
+  hand case 9 fails
+  hand case 10 fails
+  hand case 13 fails
+  hand case 14 fails
+  hand case 23 fails
+ properties:
+  REFUSED kind=112 step=0 got=68 want=5a3ebc67
+control 4: the halt word is counted as a step
+ cases:
+  hand case 1 fails
+  hand case 2 fails
+  hand case 3 fails
+  hand case 4 fails
+  hand case 5 fails
+  hand case 6 fails
+  hand case 8 fails
+  hand case 9 fails
+  hand case 10 fails
+  hand case 13 fails
+  hand case 14 fails
+  hand case 21 fails
+  hand case 23 fails
+ properties:
+  REFUSED kind=111 step=0 got=d want=c
+control 5: the bytes that wait in the output buffer at the end are left out
+ cases:
+  hand case 3 fails
+  hand case 4 fails
+  hand case 10 fails
+  hand case 11 fails
+  hand case 13 fails
+  hand case 14 fails
+  hand case 15 fails
+  hand case 16 fails
+  hand case 17 fails
+ properties:
+  REFUSED kind=113 step=0 got=0 want=2
+control 6: the step limit is looked at before the halt word
+ cases:
+  hand case 14 fails
+  hand case 21 fails
+ properties:
+  REFUSED kind=118 step=0 got=0 want=1
+result: the serial run accepted, 6 of 6 planted defects refused by the cases and by the properties

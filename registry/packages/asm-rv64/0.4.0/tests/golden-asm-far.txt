@@ -1,0 +1,12 @@
+tests/far.s:12: error: image larger than 65536 bytes
+tests/far.s:13: error: image larger than 65536 bytes
+tests/far.s:14: error: image larger than 65536 bytes
+tests/far.s:15: error: image larger than 65536 bytes
+tests/far.s:16: error: image larger than 65536 bytes
+tests/far.s:17: error: image larger than 65536 bytes
+tests/far.s:18: error: image larger than 65536 bytes
+tests/far.s:19: error: image larger than 65536 bytes
+tests/far.s:20: error: image larger than 65536 bytes
+tests/far.s:21: error: image larger than 65536 bytes
+tests/far.s:22: error: image larger than 65536 bytes
+errors: 11, no output

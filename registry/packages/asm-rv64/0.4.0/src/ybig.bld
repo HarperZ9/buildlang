@@ -6,6 +6,8 @@
 //                               run of emu-rv64 for at most MAX steps and
 //                               print the bytes it sent, and nothing else
 //   asm-rv64 serial-check FILE MAX   assemble, run twice, print a summary
+//   asm-rv64 ycases | ycontrols      the checks of the large limits, in
+//                               ycase.bld, ycase2.bld and yctl.bld
 //
 // The large limits: a source of at most 8388608 bytes, an image of at most
 // 1048576 bytes, at most 65536 labels. ser_run, ser_print, ser_ram,
@@ -112,5 +114,5 @@ fn ay_main() -> i64 ~ Console + FileSystem + Process + Environment {
         let max = args_get(3).parse_int() as u64;
         return ay_cmd_serial(args_get(2), max, cmd == "serial-check");
     }
-    -1
+    yc_main()
 }

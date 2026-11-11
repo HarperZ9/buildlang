@@ -1,4 +1,4 @@
-# asm-rv64 0.3.0: RV64IMA text assembler with the supervisor statements
+# asm-rv64 0.4.0: RV64IMA text assembler with the supervisor statements and large assemblies
 
 An assembler turns a program written as text, one instruction to a line,
 into the machine code a processor runs. This package is one for RISC-V, an
@@ -23,6 +23,10 @@ stored least significant byte first.
 
 The package also holds a renderer, the reverse direction: it writes the
 text of an instruction word. The command `dis` prints it.
+
+Since 0.4.0 the package also assembles large programs, up to 1048576
+bytes of image, and can run an image on the serial run of `emu-rv64`
+0.7.0. The section "Large assemblies" describes both.
 
 Exactness class: `exact-int`. The same text gives the same words on every
 host. The package reads no clock and draws no random number; the seed of a
@@ -195,6 +199,8 @@ gives no word and exit status 1. No value is ever cut to fit a field.
 | `empty operand` | Nothing stands between two commas, or after the last one. |
 | `more than 1024 labels` | |
 | `expected (rs1)` | The address operand of an atomic instruction is not a register in brackets with nothing before it. Since 0.2.0. |
+| `image larger than 1048576 bytes` | In a large assembly, a statement or `.org` would pass the limit. Since 0.4.0. |
+| `more than 65536 labels` | In a large assembly. Since 0.4.0. |
 
 One statement gives at most one error, the first found. A line with a bad
 label definition and a bad statement gives two.
@@ -241,6 +247,49 @@ branch or jump target as a numeric offset. It has no labels and no
 comments. A data word that happens to be an instruction word prints as
 that instruction: `0xDEADBEEF` prints as `jal x29, -150038`. Assembling the
 printed text gives the words back.
+
+## Large assemblies
+
+Since 0.4.0. A large assembly is an assembly with higher limits. It is
+for programs that do not fit the 65536 bytes of 0.3.0, and for running a
+program on the serial run of `emu-rv64` 0.7.0. A serial run is a run of
+an image that keeps the bytes the program sends to the serial device and
+stops when the program reaches the halt word `jal x0, 0`; the
+specification of `emu-rv64` describes it.
+
+| Limit | 0.3.0 commands and `as_assemble` | Large commands and `as_assemble_big` |
+|---|---|---|
+| Image | 65536 bytes, 16384 words | 1048576 bytes, 262144 words |
+| Labels | 1024 | 65536 |
+| Source file | 65536 bytes | 8388608 bytes |
+
+The large image limit is the largest image a serial run loads. A label
+name is at most 31 characters under both sets of limits.
+
+The two assemblies are one piece of code. A flag selects the limits and
+the reason printed when one is passed. Statements, operands, labels and
+every other error are the same. `.org` may name an offset equal to the
+image limit and not one past it, under both sets of limits.
+
+`as_assemble`, and every command of 0.3.0, keep the limits and the error
+texts of 0.3.0. A file that `asm` took in 0.3.0 gives the same words,
+and a file it refused gives the same errors.
+
+| Command | What it does | Exit status |
+|---|---|---|
+| `asm-rv64 asmx FILE` | As `asm`, with the large limits. | 0, or 1 with errors |
+| `asm-rv64 bytesx FILE` | As `bytes`, with the large limits. | 0, or 1 |
+| `asm-rv64 serial FILE MAX` | Assembles `FILE` with the large limits and runs the image on the serial run of `emu-rv64` for at most `MAX` steps, in 4194304 bytes of memory. Prints the serial bytes to standard output and nothing else there, and one summary line to standard error. | The low 8 bits of the exit code of the program, the value of `x10` at the halt. 124 when the program did not halt. 125 when it halted and a byte could not be printed. 1 with errors of the assembly. |
+| `asm-rv64 serial-check FILE MAX` | Assembles, runs the image twice from scratch in the same memory, and prints the summary of the first run and whether the second gave the same state hash, steps, exit code and bytes. | 0 when the runs are equal and the program halted, else 1 |
+| `asm-rv64 ycases` | Runs the hand cases of the large limits. | 0 when all pass |
+| `asm-rv64 ycontrols` | Runs hand cases 1 to 19 against the two planted defects of the large limits. | 0 when both are refused |
+
+A file that cannot be read gives status 3 and a file longer than 8388608
+bytes status 5. `serial` prints a byte from 1 to 127 as it is and any
+other byte as `?`. When the assembly has errors, `serial` prints them to
+standard output as `asm` does and runs nothing. A file with no
+statement gives an image of 0 bytes, which the serial run refuses:
+`serial` then exits with status 124 and `serial-check` with status 1.
 
 ## How it is checked
 
@@ -328,6 +377,21 @@ assembler the commands use, and there is no second copy of its code.
 | 12 | A `.w` atomic mnemonic is assembled as the `.d` one. |
 | 13 | The register in brackets is taken for an offset, and the address register is left `x0`. |
 
+### Checks of the large limits
+
+| Check | Command | What it does |
+|---|---|---|
+| Hand cases | `ycases` | 20 cases on sources built in memory. The expected line numbers, counts and words are worked out in the comments of `src/ycase.bld` and `src/ycase2.bld`. 1100 labels and a jump to the last one: 1101 words with the large limits, and 77 errors with the small ones, the first `more than 1024 labels` on line 1026. 16385 words: an image of 65540 bytes with the large limits, every word compared, and one error on line 16385 with the small ones; 16384 words pass the small limits. 262144 words pass the large limits, every word compared, and 262145 give one error on line 262145. `.org` at and past each image limit. A jump over 131072 bytes. A program of 20 words and a file of four wrong lines give the same words and the same errors under both sets of limits. The four reasons as printed. Case 20: 65537 labels give one error, `more than 65536 labels`, on line 65537. |
+| Controls | `ycontrols` | The assembler with one of two planted defects in the large path. Hand cases 1 to 19 must refuse each, and must accept number 0. |
+| Programs | `asmx`, `bytesx`, `serial`, `serial-check`, `asm` | `tests/hello.s` sends a line of text and halts with exit code 0. `asmx` and `asm` must print the same words for it. `tests/far.s` is 65580 bytes of image with a jump over 65536 bytes; `asm` must refuse it with the reason of 0.3.0 and `serial` must run it. The step counts of both programs are worked out in their comments. |
+
+| Control | Planted defect |
+|---|---|
+| 14 | In a large assembly a label past the 1024th takes the offset of label 1024. |
+| 15 | A large assembly drops every word past 65536 bytes. |
+
+`acontrols` runs controls 1 to 13 and prints what it printed in 0.3.0.
+
 ## Limits
 
 - One author wrote the assembler, the renderer, the hand cases, the
@@ -380,7 +444,29 @@ assembler the commands use, and there is no second copy of its code.
 - The assembler encodes a Zicsr instruction for any CSR number. Whether
   the core implements the CSR, or lets it be written, is decided when the
   instruction runs.
-- A source file is at most 65536 bytes and an image at most 65536 bytes.
+- For the commands of 0.3.0 a source file is at most 65536 bytes and an
+  image at most 65536 bytes. "Large assemblies" gives the higher limits.
+- Added in 0.4.0: the large limits are checked by hand cases only. No
+  property rule draws a program above the small limits; `aprops` uses
+  `as_assemble`.
+- Control 14 fails one hand case, case 1. That defect rests on one case.
+- `ycontrols` does not run case 20, the limit of 65536 labels. The case
+  holds no word and no label offset that either planted defect changes.
+  No planted defect moves the label limit itself.
+- The search for a label is a linear one. On the host of "Verified" the
+  case with 65537 labels takes about 58 seconds of the 59 that `ycases`
+  takes. A program with tens of thousands of labels assembles slowly.
+- The images above 131076 bytes that were assembled hold `.word` values
+  and `.org` gaps, no instruction. The largest program that was run is
+  `tests/far.s`, 65580 bytes.
+- `serial` reports an assembly with errors with exit status 1, which a
+  program that halts with exit code 1 also gives. The statuses 3, 5, 124
+  and 125 have meanings of the command too. The summary line on standard
+  error tells the cases apart.
+- The halt word and the exit code are conventions of the serial run of
+  `emu-rv64`. Its specification lists the limits of that run.
+- The limit of 8388608 bytes for a source file was tried by hand, with a
+  file of line feeds, and has no golden file.
 - The package cannot write an image file, as "Commands" says.
 - For the forms of 0.1.0, field layouts were not read from the manual: the
   text confirms what "Sources" lists. For the M and A extensions the
@@ -398,8 +484,36 @@ assembler the commands use, and there is no second copy of its code.
 
 ## Verified
 
-Every line of the first list below was run on the 0.3.0 build, on one
+The first list below was run on the 0.4.0 build. Every line of the
+list after it was run on the 0.3.0 build, on one
 Windows x86-64 host.
+
+Checks of 0.4.0, run on the 0.4.0 build with `emu-rv64` 0.7.0 on the
+same host:
+
+- `ycases`: 20 of 20 cases pass, in about 59 seconds.
+- `ycontrols`: number 0 passes cases 1 to 19. Control 14 fails 1 of 19,
+  case 1. Control 15 fails 5 of 19: cases 3, 6, 10, 11 and 14.
+- `asmx tests/hello.s` and `asm tests/hello.s` print the same 14 words.
+  `bytesx tests/hello.s` prints 56 bytes; turned into a file with
+  `xxd -r -p` they are byte for byte `tests/hello.img` of `emu-rv64`
+  0.7.0.
+- `serial tests/hello.s 1000` prints `hello, serial` and a line feed and
+  exits with status 0. The summary gives 76 steps and 14 bytes, the
+  numbers worked out in the file. `serial-check`: second run equal.
+- `asm tests/far.s` prints 11 errors, `image larger than 65536 bytes` on
+  lines 12 to 22. `serial tests/far.s 100` prints `far` and a line feed
+  and exits with status 3; the summary gives 11 steps. `serial-check`
+  reports an image of 65580 bytes and a second run that is equal.
+- By hand, with no golden file: a file of 8388609 bytes gives status 5
+  from `asmx` with the limit 8388608 in the message and status 5 from
+  `asm` with the limit 65536; a file of 8388608 line feeds is read and
+  gives no word; a file with only a comment gives status 124 from
+  `serial` and 1 from `serial-check`.
+- Every command of `tests/cases.txt` was run and its standard output
+  compared with the golden file: 51 of 51 equal. 39 of those lines and
+  their golden files are those of 0.3.0, unchanged, `acases`, both
+  `aprops` runs and `acontrols` among them.
 
 Checks of 0.3.0:
 
