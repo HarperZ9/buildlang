@@ -1,7 +1,7 @@
 // Planted controls for the system profile of emu-rv64, variants 38 to 57.
 // Each is the core with one defect put in on purpose. The defects live in
-// the core itself, behind the variant number every function of the system
-// profile takes: variant 0, which emu_step passes, has none. The checks
+// the core itself, behind the variant number the functions of the system
+// profile pass down: variant 0, which emu_step passes, has none. The checks
 // must refuse every one; the command scontrols shows which check refuses
 // which. Nothing outside the checks passes a variant other than 0.
 //

@@ -1,72 +1,72 @@
 variant 0: the assembler
  cases:
-  accepted, 459 cases
+  accepted, 493 cases
  properties:
-  accepted, 20000 instructions, 60000 raw words of which 20975 decoded, 6690 edge values, 13310 refusals
-  2500 programs, 35077 statements, 2348 with a used label left out
+  accepted, 20000 instructions, 60000 raw words of which 20809 decoded, 6652 edge values, 13348 refusals
+  2500 programs, 35038 statements, 2358 with a used label left out
 control 1: a label offset is measured from the next instruction
  cases:
-  REFUSED, 10 of 459 hand cases fail: 139 150 343 344 346 347 348 349 ...
+  REFUSED, 10 of 493 hand cases fail: 139 150 343 344 346 347 348 349 ...
  properties:
-  REFUSED kind=66 step=0 got=3 want=13
+  REFUSED kind=66 step=0 got=2 want=16
 control 2: store offset bits 4 to 0 and 9 to 5 change places
  cases:
-  REFUSED, 5 of 459 hand cases fail: 106 107 108 109 110
+  REFUSED, 5 of 493 hand cases fail: 106 107 108 109 110
  properties:
-  REFUSED kind=61 step=16 got=2c242323 want=c242b23
+  REFUSED kind=61 step=0 got=732aa6a3 want=5b2aaca3
 control 3: the minus sign of a number is dropped
  cases:
-  REFUSED, 61 of 459 hand cases fail: 20 21 24 25 28 29 32 33 ...
+  REFUSED, 61 of 493 hand cases fail: 20 21 24 25 28 29 32 33 ...
  properties:
-  REFUSED kind=65 step=0 got=0 want=3
+  REFUSED kind=65 step=3 got=0 want=3
 control 4: every range check accepts one value past the top
  cases:
-  REFUSED, 15 of 459 hand cases fail: 246 251 252 254 255 256 258 259 ...
+  REFUSED, 15 of 493 hand cases fail: 246 251 252 254 255 256 258 259 ...
  properties:
-  REFUSED kind=65 step=2 got=0 want=3
+  REFUSED kind=65 step=22 got=0 want=3
 control 5: label offsets do not count .word
  cases:
-  REFUSED, 1 of 459 hand cases fail: 347
+  REFUSED, 1 of 493 hand cases fail: 347
  properties:
-  REFUSED kind=66 step=48 got=6 want=8
+  REFUSED kind=66 step=0 got=2 want=16
 control 6: a store takes rs1 and rs2 in each other's place
  cases:
-  REFUSED, 25 of 459 hand cases fail: 90 91 92 93 94 95 96 97 ...
+  REFUSED, 25 of 493 hand cases fail: 90 91 92 93 94 95 96 97 ...
  properties:
-  REFUSED kind=61 step=16 got=c812b23 want=c242b23
+  REFUSED kind=61 step=0 got=5b592ca3 want=5b2aaca3
 control 7: the digits after 0x are read in base 10
  cases:
-  REFUSED, 36 of 459 hand cases fail: 107 148 153 154 158 159 161 162 ...
+  REFUSED, 36 of 493 hand cases fail: 107 148 153 154 158 159 161 162 ...
  properties:
-  REFUSED kind=66 step=0 got=f want=13
+  REFUSED kind=66 step=0 got=c want=16
 control 8: the text after # is assembled as one more line
  cases:
-  REFUSED, 8 of 459 hand cases fail: 215 216 230 231 349 351 355 421
+  REFUSED, 8 of 493 hand cases fail: 215 216 230 231 349 351 355 421
  properties:
-  REFUSED kind=69 step=0 got=0 want=13
+  REFUSED kind=69 step=0 got=0 want=16
 control 9: a second definition of a label is accepted
  cases:
-  REFUSED, 2 of 459 hand cases fail: 352 354
+  REFUSED, 2 of 493 hand cases fail: 352 354
  properties:
-  REFUSED kind=68 step=0 got=0 want=18
+  REFUSED kind=68 step=0 got=0 want=17
 control 10: an undefined label reads as offset 0
  cases:
-  REFUSED, 4 of 459 hand cases fail: 280 281 282 352
+  REFUSED, 4 of 493 hand cases fail: 280 281 282 352
  properties:
-  REFUSED kind=67 step=0 got=0 want=c
+  REFUSED kind=67 step=0 got=0 want=4
 control 11: an atomic form takes rs1 and rs2 in each other's place
  cases:
-  REFUSED, 34 of 459 hand cases fail: 379 380 381 382 383 384 385 386 ...
+  REFUSED, 34 of 493 hand cases fail: 379 380 381 382 383 384 385 386 ...
  properties:
-  REFUSED kind=61 step=0 got=1ae2a62f want=1a57262f
+  REFUSED kind=66 step=0 got=4 want=16
 control 12: a .w atomic mnemonic is assembled as .d
  cases:
-  REFUSED, 23 of 459 hand cases fail: 378 379 380 381 382 383 384 385 ...
+  REFUSED, 23 of 493 hand cases fail: 378 379 380 381 382 383 384 385 ...
  properties:
-  REFUSED kind=61 step=0 got=1a57362f want=1a57262f
+  REFUSED kind=66 step=0 got=0 want=16
 control 13: the register in brackets is taken for an offset and the address register is x0
  cases:
-  REFUSED, 44 of 459 hand cases fail: 378 379 380 381 382 383 384 385 ...
+  REFUSED, 44 of 493 hand cases fail: 378 379 380 381 382 383 384 385 ...
  properties:
-  REFUSED kind=61 step=0 got=1a50262f want=1a57262f
+  REFUSED kind=66 step=0 got=0 want=16
 result: the assembler accepted, 13 of 13 planted defects refused by the cases and by the properties

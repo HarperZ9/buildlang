@@ -329,7 +329,7 @@ acase 328 `sb x1, 0 x2)` words=0 errors=1 refused: expected imm(rs1) pass=true
 acase 329 `jalr x1, x2` words=0 errors=1 refused: expected imm(rs1) pass=true
 acase 330 `csrrw x1, mfoo, x2` words=0 errors=1 refused: unknown CSR name pass=true
 acase 331 `csrrw x1, MSTATUS, x2` words=0 errors=1 refused: unknown CSR name pass=true
-acase 332 `csrrs x1, sstatus, x0` words=0 errors=1 refused: unknown CSR name pass=true
+acase 332 `csrrs x1, hstatus, x0` words=0 errors=1 refused: unknown CSR name pass=true
 acase 333 `.byte 1` words=0 errors=1 refused: unknown directive pass=true
 acase 334 `.zero 4` words=0 errors=1 refused: unknown directive pass=true
 acase 335 `.` words=0 errors=1 refused: unknown directive pass=true
@@ -465,4 +465,38 @@ acase 456 `divw x1, x2, 3` words=0 errors=1 refused: bad register, expected x0 t
 acase 457 `rem x1, x2, x3, x4` words=0 errors=1 refused: wrong operand count pass=true
 acase 458 `mulh x1, x2, (x3)` words=0 errors=1 refused: bad register, expected x0 to x31 pass=true
 acase 459 program mulatomic: words=50 errors=0 retired=100 traps=0 pc=80000078 cell=1052 failed_sc=1 pass=true
-acases: 459 run, 0 failed
+acase 460 `sret` words=1 errors=0 word=10200073 pass=true
+acase 461 `sfence.vma x0, x0` words=1 errors=0 word=12000073 pass=true
+acase 462 `sfence.vma x1, x2` words=1 errors=0 word=12208073 pass=true
+acase 463 `sfence.vma x31, x31` words=1 errors=0 word=13ff8073 pass=true
+acase 464 `sfence.vma x5, x0` words=1 errors=0 word=12028073 pass=true
+acase 465 `sfence.vma x0, x7` words=1 errors=0 word=12700073 pass=true
+acase 466 `sfence.vma x10, x11` words=1 errors=0 word=12b50073 pass=true
+acase 467 `csrrs x1, sstatus, x2` words=1 errors=0 word=100120f3 pass=true
+acase 468 `csrrs x1, sie, x2` words=1 errors=0 word=104120f3 pass=true
+acase 469 `csrrs x1, stvec, x2` words=1 errors=0 word=105120f3 pass=true
+acase 470 `csrrs x1, scounteren, x2` words=1 errors=0 word=106120f3 pass=true
+acase 471 `csrrs x1, senvcfg, x2` words=1 errors=0 word=10a120f3 pass=true
+acase 472 `csrrs x1, sscratch, x2` words=1 errors=0 word=140120f3 pass=true
+acase 473 `csrrs x1, sepc, x2` words=1 errors=0 word=141120f3 pass=true
+acase 474 `csrrs x1, scause, x2` words=1 errors=0 word=142120f3 pass=true
+acase 475 `csrrs x1, stval, x2` words=1 errors=0 word=143120f3 pass=true
+acase 476 `csrrs x1, sip, x2` words=1 errors=0 word=144120f3 pass=true
+acase 477 `csrrs x1, satp, x2` words=1 errors=0 word=180120f3 pass=true
+acase 478 `csrrs x1, medeleg, x2` words=1 errors=0 word=302120f3 pass=true
+acase 479 `csrrs x1, mideleg, x2` words=1 errors=0 word=303120f3 pass=true
+acase 480 `csrrs x1, mcounteren, x2` words=1 errors=0 word=306120f3 pass=true
+acase 481 `csrrs x1, menvcfg, x2` words=1 errors=0 word=30a120f3 pass=true
+acase 482 `csrrw x0, satp, x6` words=1 errors=0 word=18031073 pass=true
+acase 483 `csrrc x0, sstatus, x6` words=1 errors=0 word=10033073 pass=true
+acase 484 `sret x1` words=0 errors=1 refused: wrong operand count pass=true
+acase 485 `sfence.vma` words=0 errors=1 refused: wrong operand count pass=true
+acase 486 `sfence.vma x1` words=0 errors=1 refused: wrong operand count pass=true
+acase 487 `sfence.vma x1, x2, x3` words=0 errors=1 refused: wrong operand count pass=true
+acase 488 `sfence.vma x1, 5` words=0 errors=1 refused: bad register, expected x0 to x31 pass=true
+acase 489 `sfence.vma x32, x1` words=0 errors=1 refused: bad register, expected x0 to x31 pass=true
+acase 490 `sfence x1, x2` words=0 errors=1 refused: unknown mnemonic pass=true
+acase 491 `sfence.vma x1, x2 x3` words=0 errors=1 refused: trailing text after an operand pass=true
+acase 492 `csrrw x0, sstatuz, x1` words=0 errors=1 refused: unknown CSR name pass=true
+acase 493 `csrrs x1, SATP, x2` words=0 errors=1 refused: unknown CSR name pass=true
+acases: 493 run, 0 failed

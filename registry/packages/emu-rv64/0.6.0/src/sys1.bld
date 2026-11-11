@@ -8,9 +8,9 @@
 // riscv/riscv-isa-manual at commit d50ad50f. Rules: SPEC.md, "System
 // profile" and the sections after it.
 //
-// Every function of the system profile takes a variant number `v` first.
-// Variant 0 is the machine. Variants 38 to 57 each plant one defect; only
-// the checks pass them (sctl.bld).
+// The functions of the system profile that hold a rule take a variant
+// number `v` first and pass it down. Variant 0 is the machine. Variants 38
+// to 57 each plant one defect; only the checks pass them (sctl.bld).
 
 // 0: no such CSR. 1: the register exists.
 fn sys_csr_kind(n: u64) -> u64 {

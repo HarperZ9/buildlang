@@ -1022,7 +1022,7 @@ rules, and they share no code:
 |---|---|---|
 | The core | `src/sys1.bld` to `src/sys5.bld` | `mstatus` as one word with masks, the walk as a loop over the levels with shifts, an access as at most two parts, one per page. |
 | The reference model | `src/smodel.bld` to `src/smodel4.bld` | Every field of `mstatus` in a slot of its own, the walk as a function that calls itself for the next level, the address put together field by field, every byte of an access translated by itself. |
-| The oracle script | `tests/tools/sv39_oracle.py` and the six modules beside it | Python, standard library only. The fields of `mstatus` and `sstatus` are the field lists of the manual's figures, typed in the order of the figure; the encodings are rows of the listings typed as bit strings; the walk follows the ten numbered steps. It computed every word and every expected value of the hand cases. |
+| The oracle script | `tests/tools/sv39_oracle.py` and the seven modules beside it | Python, standard library only. The fields of `mstatus` and `sstatus` are the field lists of the manual's figures, typed in the order of the figure; the encodings are rows of the listings typed as bit strings; the walk follows the ten numbered steps. It computed every word and every expected value of the hand cases. |
 
 | Check | Command | What it does |
 |---|---|---|
@@ -1042,7 +1042,7 @@ rules, and they share no code:
 | Controls, images and replay | `emu-rv64 rcontrols` | Seven planted defects, numbered 20 to 26: three in the loader, two in the state hash, one in the start state of the second run and one in the checkpoint compare. The hand-computed cases must refuse each one, and the property rules, run without the cases, must refuse each one. A number passed down selects the defect; with the number 0 every function calls the core directly, and the commands `run` and `replay` use that same path. |
 | Hand cases, system profile | `emu-rv64 scases` | 875 generic cases and the 3456 rows of the permission matrix, all computed by the oracle script. The generic cases: 218 on the CSRs (71 that write all ones or zero to a register and read it back, 23 on `mstatus` and `sstatus`, 36 on `sie`, `sip`, `mie` and `mip`, 22 on `satp` and TVM, 66 on the access rules in each mode), 33 on SRET, MRET, WFI, SFENCE.VMA, ECALL and EBREAK in each mode with TSR, TW and TVM clear and set, 48 on the status stack at trap entry and at the two returns, 104 that raise each synchronous cause in each mode with the cause delegated, not delegated, and every other cause delegated, 156 on the six interrupts in each mode with MIE and SIE clear and set, 75 on priority, 10 on vectoring, 7 sequences, and 224 on translation: 54 on the shape of the walk and on superpages, 108 on the flags, SUM, MXR and MPRV, 11 on addresses and on devices behind a page, 27 on accesses across two pages and 24 on the atomic instructions. A row of the matrix is one fetch, load or store of one page: six machine modes (U, S, M, and M with MPRV and MPP = U, S or M) x SUM x MXR x the eight values of R, W and X x U x three states of A and D x three kinds of access. `src/svec.bld` and `src/svec2.bld` explain the layout. |
 | Differential fuzz, system profile | `emu-rv64 sfuzz SEED STEPS` | A seeded stream in 32768 bytes of memory, eight pages. Every 256 steps the stream writes fresh page table entries: seven times in eight a gigapage that maps memory for the supervisor and one that maps it for the user, and drawn entries elsewhere, among them entries that are not valid, pointers with a reserved flag, misaligned superpages, entries with a reserved bit, and entries that name a frame outside memory or a device. Every 32 steps it draws the whole state: the mode, every writable bit of `mstatus`, `satp` (12 of 16 on the root table, 2 with MODE 0, 1 with another table as root, 1 with a root outside memory), `medeleg`, `mideleg`, `mie`, `mip`, the vectors, the saved pcs and the pc. Twice in a round, one time in two, the host moves the machine to a drawn mode. The words: of 16, 3 Zicsr on a drawn CSR, 2 of the PRIV group, 4 loads or stores at drawn virtual addresses (one in four in the last eight bytes of a page), 2 atomic, 1 M, 1 noise, 3 RV64I. The result code, the pc, the counters, the timer, the reservation, the mode, every CSR, all 32 registers and the serial output are compared after every step. All of memory is compared after every eighth step and after the last one. |
-| Properties, system profile | `emu-rv64 sprops SEED STEPS` | Fifteen kinds of rule, 90 to 104 of `tests/props.txt`, judged on the stream of `sfuzz` with no model. The section "Rules of the system profile" lists them. |
+| Properties, system profile | `emu-rv64 sprops SEED STEPS` | Thirteen kinds of rule, numbered 90 to 104 in `tests/props.txt` with 101 and 102 unused, judged on the stream of `sfuzz` with no model. The section "Rules of the system profile" lists them. |
 | Controls, system profile | `emu-rv64 scontrols` | Twenty planted defects, numbered 38 to 57. The command runs the hand cases, the differential check and the property rules on each and prints which of the three refuse it. |
 | The program `sv39` | `emu-rv64 srun tests/sv39.img 200` | A program of 75 instruction words in an image of 4132 bytes. Machine code builds three page tables and delegates causes 8 and 13, then drops to S-mode. The supervisor turns paging on and enters U-mode. The user program makes an environment call, stores and loads in its own page, and loads from a page that is not mapped. The supervisor handles both traps and stops in a loop. `asm-rv64` 0.3.0 assembled it from `tests/sv39.s` of that package, where the expected end state is worked out by hand. |
 
@@ -1092,11 +1092,13 @@ controls commands exit with status 1 in that case.
 The reference model of the system profile calls no function of the five
 core files. This was checked by listing every call in `smodel.bld` to
 `smodel4.bld`: each is a `sref_` function of those files, a `ref_`
-function of the older model files, or the built-in `len`. It is a second
-implementation of the whole profile and not an extension of the older
-models: it has its own CSR table, trap entry, interrupt scan, walk and
-memory access, and it takes from the older files the arithmetic of RV64I
-and of the M extension and the helper that mixes an AMO.
+function of the older model files, or the built-in `len`. The model has
+its own CSR table, status fields, trap entry, returns, interrupt scan,
+walk and memory access. From the older model files it takes the
+arithmetic of RV64I and of the M extension, the helper that mixes an
+AMO, the five machine registers whose rules did not change (`mtvec`,
+`mscratch`, `mepc`, `mcause`, `mtval`), the pending bits of the three
+machine interrupts, and the byte helpers of the timer and of memory.
 
 The harness around the two uses core helpers to build the stream. One
 needs saying: to place the word of a step at the pc, the harness asks the
@@ -1106,8 +1108,9 @@ would then run different words, which the comparison sees.
 
 Unlike the controls of 0.1.0 to 0.5.0, which are copies or wrappers of
 the core, the twenty defects of the system profile live inside the core:
-every function of `sys1.bld` to `sys5.bld` takes a variant number, and a
-defect is a branch on it. `emu_step` passes 0. This puts test branches
+the functions of `sys1.bld` to `sys5.bld` that hold a rule take a variant
+number and pass it down, and a defect is a branch on it. `emu_step`
+passes 0. This puts test branches
 into the code that runs a program. It was chosen because most of the
 defects sit in the middle of the walk, where no wrapper reaches.
 
@@ -1712,17 +1715,35 @@ else has run on the system profile.
   | `src/priv/machine.adoc` | `ed164558403bba4e05a14bfceba5b0940fd109ac280b2c13b5ea9cdd87531ade` | The privilege stack, MPRV, SUM, MXR, TVM, TW, TSR, SXL and UXL, delegation, `mip` and `mie`, the interrupt order, `mcounteren`, `menvcfg`, ECALL, the two returns, WFI, reset, and the sentence on memory operations with no PMP entry. |
   | `src/priv/csrs.adoc` | `a8aff82d214b98b5487a8699d2a671ac8b6236586cb83822c034d7631dbb994d` | The access rules from the bits of a CSR number, and the fifteen CSR numbers. |
   | `src/priv/svadu.adoc` | `baf23f5ee5e72b1063337f943c9f8b07f91c3b704587cd5ab7bf772fcbe0cdb8` | That Svade is in effect when Svadu is absent. |
-  | `src/priv/sv.adoc`, `src/priv/ssstrict.adoc`, `src/priv/insns.adoc`, `src/priv/intro.adoc` | `a923d8ac...01bb3`, `8d867db6...a93e2`, `60724767...50124`, `35479982...ded4b` | Read, and no rule was taken from them. |
+  | `src/priv/sv.adoc` | `a923d8ac6ef8e01f6f639b2aab3ce18a1394c17a86ec025fa61bbb5f85901bb3` | Read. No rule was taken from it. |
+  | `src/priv/ssstrict.adoc` | `8d867db6a1c444a9cbfe664f8df7b4b7fde3d0f967ec287dcbcd5a8e06fa93e2` | Read. No rule was taken from it. |
+  | `src/priv/insns.adoc` | `6072476703632cd87b0aa803074b375fb2cb349a7b77fdfc799cc62ba0b50124` | That the listing of privileged instructions is the figure below. |
+  | `src/priv/intro.adoc` | `3547998289902ccb3161068913284e8b6ea2cc090ab3fd4e3e41970e0ffded4b` | Read. No rule was taken from it. |
   | `src/unpriv/rv-32-64g.adoc` | `21f8d1b70e2064660af53d3971d018049a8a9a212943257a6f3b32e812e9426b` | The rows the oracle script types for ADDI, JAL, the loads and stores, the Zicsr instructions, ECALL, EBREAK and the atomic instructions. |
   | `src/priv/images/bytefield/priv-instr-set.edn` | `7574703d12f22d76c096ffd4ebaa6e5cb417e6c22b1c314464fc21855c6c4705` | The encodings of SRET, MRET, WFI and SFENCE.VMA. This also confirms the WFI and MRET words that earlier versions took from memory. |
   | `src/priv/images/wavedrom/mstatusreg.edn` | `38e5bd922c7f8616a39f59c15c84e0b77f07d4dc87ac59b01ed49874f0cd0a05` | The position of every field of `mstatus`. |
   | `src/priv/images/bytefield/rv64satp.edn` | `06f8c1cac1cb1ab3a15fb35452bb2d34cd9e0dbb1102b936cbc444d4376379a8` | MODE in bits 63 to 60, ASID in 59 to 44, PPN in 43 to 0. |
-  | `src/priv/images/bytefield/sv39va.edn`, `sv39pa.edn`, `sv39pte.edn` | `db24ffd2...24bb8`, `556fe429...28ddb`, `771ef6c4...dfce` | The three VPN fields, the three PPN fields, and the flags and PPN of a PTE. |
-  | `src/priv/images/bytefield/mipreg-standard.edn`, `sipreg-standard.edn` | `bd7c2fb3...fedc`, `faec1b8e...f491a` | The bit of each interrupt in `mip` and `sip`. |
-  | `src/priv/images/wavedrom/sfencevma.edn`, `trap-return.edn`, `wfi.edn`, `mm-env-call.edn`, `menvcfgreg.edn`; `src/priv/images/bytefield/sv32pte.edn`, `medeleg.edn`, `mideleg.edn`, `miereg-standard.edn`, `siereg-standard.edn`, `counteren.edn`, `scounteren.edn` | in `SHA256SUMS` beside the files | Field names and widths only. No number was taken from them that is not in the files above. |
+  | `src/priv/images/bytefield/sv39va.edn` | `db24ffd26a4c54a0926b7700d0c42d1c70e8a7db828dd50c0702fd6487c24bb8` | The three VPN fields of a virtual address. |
+  | `src/priv/images/bytefield/sv39pa.edn` | `556fe429ac655cfad28420d0cdbc4eeb1855d31d9a7f57f29f472bf0a5828ddb` | The three PPN fields of a physical address. |
+  | `src/priv/images/bytefield/sv39pte.edn` | `771ef6c42ea533eb19ab4a493daeec6c2e10bc54586e717876299626b0d5dfce` | The flags, the PPN and the reserved bits of a PTE. |
+  | `src/priv/images/bytefield/mipreg-standard.edn` | `bd7c2fb3a1bb05b2fed6e8e371bafa085cfa8e75af4c84dedbb8fd020226fedc` | The bit of each interrupt in `mip`. |
+  | `src/priv/images/bytefield/sipreg-standard.edn` | `faec1b8e373048261ada1f35cb9c893a3391e7fb208f17b625fbb3bdae4f491a` | The bit of each interrupt in `sip`. |
+  | `src/priv/images/wavedrom/sfencevma.edn` | `76ca0b6e8435d19ee7b1ef8e5526ce615e6c7452e8de57ff0f96d5e5a934e696` | Field names and widths only. |
+  | `src/priv/images/wavedrom/trap-return.edn` | `7b061fc85d66fa0c971f49d23f2c2216d0ba17677b7bae38d28d6cbda018b9ec` | Field names and widths only. |
+  | `src/priv/images/wavedrom/wfi.edn` | `ee9f428323dc2d1a2a99aa67e8590207c32db8b5a73fac0c42e54f21e940b492` | Field names and widths only. |
+  | `src/priv/images/wavedrom/mm-env-call.edn` | `24b440e02314d43ad0105124b892401f10b767c9c2ee7eedb2db8fdfafedb0e9` | Field names and widths only. |
+  | `src/priv/images/wavedrom/menvcfgreg.edn` | `0ec46253ccb54e056cbfef9fc45df3fe76d945dd670c291592eb97be670a26f0` | Field names and widths only. |
+  | `src/priv/images/bytefield/sv32pte.edn` | `cfd1c42dc5518aa1aea59258e6859dbf39749163071ce8b41a6e055e5208a72c` | Field names and widths only. |
+  | `src/priv/images/bytefield/medeleg.edn` | `02de2d276f08d687851f0d467dc6c202c49ca7ca0b3f4accb61b8951f2fcc130` | Field names and widths only. |
+  | `src/priv/images/bytefield/mideleg.edn` | `85b4ac41b4c3906cb74c312eef221305b88397bcc7fed1bfe28230f3bfc06d16` | Field names and widths only. |
+  | `src/priv/images/bytefield/miereg-standard.edn` | `f73d21fa3be8fa22440619a352404607492ea0813c5b93f935c4ba26334e1e5c` | Field names and widths only. |
+  | `src/priv/images/bytefield/siereg-standard.edn` | `67c677acd07db0f3f274bb8aba99b717471da3d581549d86712ab30af6857ffc` | Field names and widths only. |
+  | `src/priv/images/bytefield/counteren.edn` | `dab213fb5d83328fb7c763581bd17c5d75ded915f0213cb12bf5faa9534891b9` | Field names and widths only. |
+  | `src/priv/images/bytefield/scounteren.edn` | `922cdbbc37072293481772c037e2f078db076cded646a6ed4a7ffbf18d20c337` | Field names and widths only. |
 
-  The folder that holds these files also holds a `SHA256SUMS` file with
-  every hash in full and a note of the source.
+  The manual keeps every field position in such figure files. The folder
+  the files were fetched into holds a note of the source and a
+  `SHA256SUMS` file; neither is part of this package.
 - The two timer addresses are those of the `virt` machine of QEMU, from
   memory. No QEMU source or program was fetched or run.
 - FNV-1a is the public-domain hash of Fowler, Noll and Vo. Its constants

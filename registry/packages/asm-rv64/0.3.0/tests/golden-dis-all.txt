@@ -1,12 +1,12 @@
 lui x1, 0xfffff
 auipc x2, 0x0
-jal x1, 448
+jal x1, 456
 jalr x0, -2048(x1)
 beq x1, x2, -8
 bne x3, x4, -4096
 blt x5, x6, 4094
 bge x7, x8, -20
-bltu x9, x10, 424
+bltu x9, x10, 432
 bgeu x11, x12, 0
 lb x13, -2048(x14)
 lh x15, 2047(x16)
@@ -103,6 +103,8 @@ amomin.d x28, x29, (x30)
 amomax.d x31, x0, (x1)
 amominu.d x2, x3, (x4)
 amomaxu.d x5, x6, (x7)
+sret
+sfence.vma x1, x2
 lr.w.aq x8, (x9)
 sc.d.rl x10, x11, (x12)
 amoswap.w.aqrl x13, x14, (x15)
@@ -112,4 +114,4 @@ jal x29, -150038
 .word 0x00000000
 .word 0x00000000
 .word 0x00000000
-jal x0, -448
+jal x0, -456

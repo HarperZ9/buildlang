@@ -1,8 +1,8 @@
-# asm-rv64 0.2.0: RV64IMA text assembler
+# asm-rv64 0.3.0: RV64IMA text assembler with the supervisor statements
 
 An assembler turns a program written as text, one instruction to a line,
 into the machine code a processor runs. This package is one for RISC-V, an
-open instruction set. It covers what the core of `emu-rv64` 0.5.0 executes:
+open instruction set. It covers what the core of `emu-rv64` 0.6.0 executes:
 
 - RV64I, the 64-bit base integer set, 52 instructions;
 - Zicsr, the six instructions that read and write control and status
@@ -11,7 +11,11 @@ open instruction set. It covers what the core of `emu-rv64` 0.5.0 executes:
 - since 0.2.0 the M extension, 13 instructions that multiply and divide;
 - since 0.2.0 the A extension, 22 atomic instructions: LR and SC, a load
   and a store that happens only if nothing came between, and the AMOs,
-  which read, combine and store in one instruction.
+  which read, combine and store in one instruction;
+- since 0.3.0 the statements of the system profile of `emu-rv64`: SRET,
+  the return from a supervisor handler, SFENCE.VMA, the instruction a
+  kernel runs after it has changed a page table, and the names of the
+  fifteen CSRs that profile adds.
 
 The output is a flat image: raw bytes with no header, the form `emu-rv64`
 loads at the start of memory. Each instruction is one word of 32 bits,
@@ -32,11 +36,11 @@ calls `emu_encode` of that package, the encoder its own checks already
 exercise. The renderer calls `emu_decode` the same way. So there is one
 encoder and one decoder for the emulator and the assembler.
 
-`asm-rv64` reaches them through a registry dependency, `emu-rv64 = "=0.5.0"`.
+`asm-rv64` reaches them through a registry dependency, `emu-rv64 = "=0.6.0"`.
 A dependency joins every library file of the other package in front of
 this one. Three consequences:
 
-- `emu-rv64` 0.5.0 is used as published. No byte of it changes.
+- `emu-rv64` 0.6.0 is used as published. No byte of it changes.
 - The function `show_refusal` now comes with those library files.
   `emu-rv64` 0.4.0 kept it in its `src/main.bld`, which a dependent package
   does not receive, so version 0.1.0 of this package held a copy. The copy
@@ -101,7 +105,8 @@ Every instruction takes 4 bytes. `rd` is the register written, `rs1` and
 | `fence` | `rd, rs1, bits` | 0 to 4095 |
 | `csrrw` `csrrs` `csrrc` | `rd, csr, rs1` | CSR number 0 to 4095 |
 | `csrrwi` `csrrsi` `csrrci` | `rd, csr, uimm` | `uimm` 0 to 31 |
-| `ecall` `ebreak` `mret` `wfi` | none | none |
+| `ecall` `ebreak` `mret` `wfi` `sret` | none | none |
+| `sfence.vma` | `rs1, rs2` | none |
 
 Notes on single forms:
 
@@ -124,8 +129,15 @@ Notes on single forms:
   `mstatus` (0x300), `misa` (0x301), `mie` (0x304), `mtvec` (0x305),
   `mscratch` (0x340), `mepc` (0x341), `mcause` (0x342), `mtval` (0x343),
   `mip` (0x344), `mvendorid` (0xF11), `marchid` (0xF12), `mimpid` (0xF13),
-  `mhartid` (0xF14), `mconfigptr` (0xF15). Any other CSR is written by
-  number, and the assembler does not ask whether the core implements it.
+  `mhartid` (0xF14), `mconfigptr` (0xF15), and since 0.3.0 `sstatus`
+  (0x100), `sie` (0x104), `stvec` (0x105), `scounteren` (0x106),
+  `senvcfg` (0x10A), `sscratch` (0x140), `sepc` (0x141), `scause`
+  (0x142), `stval` (0x143), `sip` (0x144), `satp` (0x180), `medeleg`
+  (0x302), `mideleg` (0x303), `mcounteren` (0x306), `menvcfg` (0x30A).
+  Any other CSR is written by number, and the assembler does not ask
+  whether the core implements it, nor in which of its profiles.
+- `sfence.vma` takes two registers, the address and the address space
+  identifier, in this order. Both must be written: `sfence.vma x0, x0`.
 - `uimm` is the 5-bit value in the place of `rs1`.
 - The atomic forms are written as the manual writes them in its atomics
   examples: `lr.w t0, (a0)`, `sc.w t0, a2, (a0)` and
@@ -175,7 +187,7 @@ gives no word and exit status 1. No value is ever cut to fit a field.
 | `trailing text after an operand` | More text follows a complete operand, as in `add x1, x2, x3 x4`. |
 | `bad number` | A number has no digit, a digit that is not of its radix, or does not fit 64 bits. |
 | `expected imm(rs1)` | A load, a store or `jalr` has an operand that is not a number and a register in brackets. The number may not be left out. |
-| `unknown CSR name` | A CSR operand is neither a number nor one of the 14 names. |
+| `unknown CSR name` | A CSR operand is neither a number nor one of the 29 names. |
 | `.org offset is not a multiple of 4 or lies before the location` | |
 | `unknown directive` | A statement starts with a dot and is neither `.word` nor `.org`. |
 | `image larger than 65536 bytes` | A statement or `.org` would pass the limit. |
@@ -222,7 +234,7 @@ of the file.
 `dis` prints, for each word, the instruction the decoder of `emu-rv64`
 reads in it, or `.word 0x........` when the decoder refuses the word. An
 atomic word prints with its ordering suffix, so every word the decoder of
-0.5.0 accepts has a text that assembles back to it. The
+0.6.0 accepts has a text that assembles back to it. The
 text is in the operand forms above, with decimal numbers, hex for `imm20`,
 `bits`, CSR numbers and `.word`, CSR names where the core has one, and a
 branch or jump target as a numeric offset. It has no labels and no
@@ -239,11 +251,12 @@ worked out from the field layouts outside this package.
 
 | Check | Command | What it does |
 |---|---|---|
-| Hand cases | `acases` | 459 cases. Cases 1 to 359 are those of 0.1.0, unchanged: 231 single statements that must give one given word, 111 that must be refused with one given reason, and 17 programs. Cases 360 to 423 are 64 statements of the M and A extensions that must give one given word: every mnemonic once, the lowest and highest register numbers, the three ordering suffixes, the three statements the manual prints, and ways of writing. Cases 424 to 458 are 35 statements that must be refused: an address with no brackets or with an offset, a missing bracket, a wrong operand count, a suffix on a mnemonic that takes none, a suffix that does not exist. Case 459 is the program `mulatomic`, below. |
-| Hand cases of the emulator | `hand` | `tests/hand-cases.s`, `tests/hand-mcases.s`, `tests/hand-icases.s` and `tests/hand-xcases.s` hold, as text, the 61, 59, 50 and 398 instruction words that the commands `cases`, `mcases`, `icases` and `xcases` of `emu-rv64` 0.5.0 print. `hand` assembles each file and compares the words with the golden file of that command. `tests/emu-golden-*.txt` are copies of those golden files. |
+| Hand cases | `acases` | 493 cases. Cases 1 to 359 are those of 0.1.0, unchanged: 231 single statements that must give one given word, 111 that must be refused with one given reason, and 17 programs. Cases 360 to 423 are 64 statements of the M and A extensions that must give one given word: every mnemonic once, the lowest and highest register numbers, the three ordering suffixes, the three statements the manual prints, and ways of writing. Cases 424 to 458 are 35 statements that must be refused: an address with no brackets or with an offset, a missing bracket, a wrong operand count, a suffix on a mnemonic that takes none, a suffix that does not exist. Case 459 is the program `mulatomic`, below. Cases 460 to 493, since 0.3.0: 24 statements that must give one given word (SRET, SFENCE.VMA with six register pairs, one instruction for each of the fifteen new CSR names and two more) and 10 that must be refused. Case 332 changed: it refused `sstatus` as an unknown CSR name, and since that is now a name it refuses `hstatus`. |
+| Hand cases of the emulator | `hand` | `tests/hand-cases.s`, `tests/hand-mcases.s`, `tests/hand-icases.s` and `tests/hand-xcases.s` hold, as text, the 61, 59, 50 and 398 instruction words that the commands `cases`, `mcases`, `icases` and `xcases` of `emu-rv64` 0.6.0 print, which are those 0.5.0 printed. `hand` assembles each file and compares the words with the golden file of that command. `tests/emu-golden-*.txt` are copies of those golden files. |
 | Programs of the emulator | `match`, `same` | `tests/timer.s` and `tests/trap.s` were written from the listings in the comments of `src/iprog.bld` and `src/mprog.bld` of `emu-rv64`. `match` compares the assembled bytes with the built-in image, which those files build from their hand-assembled words. `same` compares with `tests/emu-timer.img`, a copy of `tests/timer.img` of `emu-rv64`. |
 | The program `mulatomic` | `acases`, `same` | `tests/mulatomic.s` multiplies 12 by -7, divides by 5, takes the remainder, and adds to a doubleword three times in an LR and SC loop that it enters past the LR, so the first SC fails and the loop retries. The comment at its top works out every register by hand. Case 459 holds the same statements, assembles them, runs the image for 100 steps on the core of `emu-rv64` and compares 13 registers, the doubleword, `pc`, the counters and the serial byte with that working. `same` compares the assembled bytes with `tests/emu-mulatomic.img`, a copy of the file `emu-rv64` 0.5.0 runs in its own tests. |
-| Properties | `aprops SEED STEPS` | Nine rules on seeded random input, listed below. Since 0.2.0 the random instructions and words include the M and A extensions. |
+| The program `sv39` | `asm`, `bytes`, `same`, `dis` | `tests/sv39.s` is the test program of the system profile of `emu-rv64` 0.6.0: machine code builds three page tables and delegates two causes, the supervisor turns paging on and enters user mode, the user program makes an environment call and then loads from a page that is not mapped, and the supervisor handles both. The comment at its top works out the end state by hand. `same` compares the assembled bytes with `tests/emu-sv39.img`, a copy of the image `emu-rv64 srun` runs. This package does not run the program; `emu-rv64` does, in its golden files. |
+| Properties | `aprops SEED STEPS` | Nine rules on seeded random input, listed below. Since 0.2.0 the random instructions and words include the M and A extensions, and since 0.3.0 SRET, SFENCE.VMA and the new CSR names. |
 | Controls | `acontrols` | The assembler with one planted defect at a time, thirteen in all. The hand cases must refuse each, and the property rules, run without the cases, must refuse each. |
 | Text round trip | `dis`, `asm` | `tests/all.s` holds every mnemonic. `tests/cases.txt` assembles it, prints the text of the words, and assembles that text to the same words. |
 
@@ -257,6 +270,11 @@ Where an expected word comes from:
   manual, typed as strings, and shares no code and no table with the
   encoder or the assembler. The same script computed the hand cases of
   `emu-rv64` 0.5.0 and wrote `tests/hand-xcases.s`.
+- The 24 statements of the system profile: the script
+  `tests/tools/sv39_oracle.py` with the modules beside it, a copy of the
+  script of `emu-rv64` 0.6.0. Its encoder holds the bit rows of the
+  manual's listings as strings and shares no code and no table with the
+  encoder or the assembler.
 - The 231 single statements and the label programs: the sum of the shifted
   fields of the instruction format, computed outside the package by a
   short script written for this purpose. It shares no code with the
@@ -270,7 +288,8 @@ Where an expected word comes from:
 Every eighth round makes one random program and judges rules 66 to 69 on
 it. Random instructions come from the generators of `emu-rv64` for RV64I
 and for the M and A extensions, and from a generator of this package for
-Zicsr, MRET and WFI. Of 95 operations, 35 are M or A. The renderer
+Zicsr, MRET and WFI, and since 0.3.0 SRET and SFENCE.VMA. Of 97
+operations, 35 are M or A. The renderer
 writes them in one of 16 styles: decimal or hex numbers, CSR names or
 numbers, single spaces or tabs and extra spaces, with or without a plus
 sign on an offset.
@@ -345,7 +364,19 @@ assembler the commands use, and there is no second copy of its code.
   address. `%hi` and `%lo` do not exist.
 - `fence` is written in a form of this package. The usual form is refused.
 - Mnemonics outside the table are unknown: no floating-point or compressed
-  instructions, no `sret`, no `fence.i`.
+  instructions, no `fence.i`.
+- Added in 0.3.0: no planted defect was added for `sret`, `sfence.vma` or
+  the new CSR names. The thirteen controls of 0.2.0 are run again; a
+  defect in the two operands of `sfence.vma` would meet the hand cases
+  and rules 61 to 64 only.
+- The program `sv39` is assembled and compared here and is not run here.
+  `emu-rv64` 0.6.0 runs the image. Its addresses were worked out by hand,
+  because the assembler has no expression that gives the distance to a
+  label for `addi`.
+- The order `rs1, rs2` of `sfence.vma` is the order of the fields in the
+  manual's figure of the instruction, which names them `vaddr` and `asid`.
+  The fetched text shows no written example of the instruction with
+  operands.
 - The assembler encodes a Zicsr instruction for any CSR number. Whether
   the core implements the CSR, or lets it be written, is decided when the
   instruction runs.
@@ -359,13 +390,58 @@ assembler the commands use, and there is no second copy of its code.
   themselves as spelled here; the operand form `imm(rs1)` for loads and
   stores (the text shows it for `jalr`); the order `rs2, imm(rs1)` of a
   store; that a branch or jump operand given as a number is an offset from
-  the instruction; the 14 CSR names and their numbers, which are those
-  `emu-rv64` took from the privileged manual for 0.2.0.
+  the instruction; the 14 CSR names of 0.1.0 and their numbers, which are
+  those `emu-rv64` took from the privileged manual for 0.2.0. The fifteen
+  names added in 0.3.0 and their numbers were read from the CSR listing
+  of the manual, `src/priv/csrs.adoc`, for `emu-rv64` 0.6.0.
 - Built and run on one Windows x86-64 host with one C compiler.
 
 ## Verified
 
-Every line below was run on the 0.2.0 build, on one Windows x86-64 host.
+Every line of the first list below was run on the 0.3.0 build, on one
+Windows x86-64 host.
+
+Checks of 0.3.0:
+
+- `acases`: 493 of 493 cases pass. Cases 1 to 459 print the lines 0.2.0
+  printed, but for case 332, which now names `hstatus`.
+- The four `hand` commands: 61, 59, 50 and 398 words, equal, as in 0.2.0.
+  The four copies of the golden files are byte for byte those of
+  `emu-rv64` 0.6.0, which are those of 0.5.0.
+- `asm tests/sv39.s`: 1033 words, 75 of them instructions and the rest the
+  zeros up to the user page at `0x1000`.
+  `same tests/sv39.s: 4132 bytes, file tests/emu-sv39.img has 4132 bytes, equal=true`. That file has the SHA-256
+  `82d30101dd65995fd8f7d79428b387f8ce6df2c73c2563b4acb2b0819b7f25d7` and is
+  byte for byte `tests/sv39.img` of `emu-rv64` 0.6.0. It was made from the
+  output of `bytes tests/sv39.s` with `xxd -r -p`. `dis` of the words and
+  `asm` of that text give the same words.
+- `asm tests/all.s`: 117 words, two more than in 0.2.0. `dis` of them and
+  `asm` of that text: the same words.
+- The commands of `tests/cases.txt` on `timer`, `trap`, `serial`, `sum`,
+  `mulatomic` and the refusals print the bytes of the 0.2.0 goldens.
+- `aprops`: accepted at the three seeds run. The counts are not those of
+  0.2.0, because the random instructions now include two more
+  operations and fifteen more CSR names.
+
+  | Seed | Rounds | Raw words | Decoded | Edge values | Refusals | Programs | Statements | Label left out |
+  |---|---|---|---|---|---|---|---|---|
+  | 1 | 20000 | 60000 | 20809 | 6652 | 13348 | 2500 | 35038 | 2358 |
+  | 7 | 50000 | 150000 | 51937 | 16624 | 33376 | 6250 | 87375 | 5900 |
+  | 3 | 300000 | 900000 | 311860 | 99793 | 200207 | 37500 | 523796 | 35249 |
+
+- `acontrols` (seed 1, 20000 rounds): `result: the assembler accepted, 13
+  of 13 planted defects refused by the cases and by the properties`. The
+  first hand case that fails is the one 0.2.0 recorded for every control.
+  The round of the refusing rule changed for controls 2 to 6, and for
+  controls 11 to 13 rule 66 now refuses first where rule 61 did, because
+  the random stream is another one. `tests/controls.txt` holds the new
+  rounds.
+- `buildc pkg check-registry` accepts the registry with this package in
+  it, and the registry package test of the compiler builds the package
+  and compares the 40 commands of `tests/cases.txt` with their goldens.
+
+As recorded for 0.2.0, on the 0.2.0 build, and not repeated on this
+build beyond what the list above says:
 
 - `acases`: 459 of 459 cases pass. Cases 1 to 359 print the lines 0.1.0
   printed.
@@ -440,14 +516,11 @@ Every line below was run on the 0.2.0 build, on one Windows x86-64 host.
   | 12 | 23 | 378, `lr.w x3, (x1)` | 61 at round 0 |
   | 13 | 44 | 378, `lr.w x3, (x1)` | 61 at round 0 |
 
-- `buildc pkg check-registry` accepts the registry with this package in
-  it, and the registry package test of the compiler builds the package and
-  compares the 35 commands of `tests/cases.txt` with their goldens.
-
 Not verified: the package was not built or run on a second host or with a
 second C compiler. Control 5 fails one hand case only, so that defect
 rests on one case and on rule 66. No file assembled here was assembled by
-another tool.
+another tool. The long `aprops` runs of 0.2.0, seeds 2, 4, 5, 9 and 11,
+were not repeated.
 
 ## Sources
 
@@ -494,7 +567,13 @@ another tool.
   whose rows the oracle script holds. The chapter text of the M extension
   names `div rdq, rs1, rs2` and `mulh rdh, rs1, rs2`, which gives the
   operand order of that extension.
-- `emu-rv64` 0.5.0 of this registry: the encoder, the decoder, the
+- For 0.3.0: the mnemonics `sret` and `sfence.vma` as the privileged
+  manual spells them (`src/priv/machine.adoc`, `src/priv/supervisor.adoc`),
+  the fifteen CSR names and numbers from `src/priv/csrs.adoc`, and the
+  operand fields of SFENCE.VMA from the figure
+  `src/priv/images/wavedrom/sfencevma.edn`. `SPEC.md` of `emu-rv64` 0.6.0
+  lists the SHA-256 of each file.
+- `emu-rv64` 0.6.0 of this registry: the encoder, the decoder, the
   operation numbers, the hand-assembled words, the two built-in images and
   the core that runs the program of case 459.
 - The host tool `xxd` turned hex text into bytes for one comparison. It

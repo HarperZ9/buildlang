@@ -3,11 +3,11 @@ lock-version = 1
 
 [root]
 name = "asm-rv64"
-version = "0.2.0"
-requires = ["emu-rv64 =0.5.0"]
+version = "0.3.0"
+requires = ["emu-rv64 =0.6.0"]
 
 [[package]]
 name = "emu-rv64"
-version = "0.5.0"
-checksum = "sha256:eeb77ab1c45088588a329e694457832c79ab9ace4d046b29f93add30c4490b6d"
+version = "0.6.0"
+checksum = "sha256:617a37a6d9dc491ea4321dccd7507ad547ea49d12cd181bef85ff5bc2356c109"
 dependencies = []

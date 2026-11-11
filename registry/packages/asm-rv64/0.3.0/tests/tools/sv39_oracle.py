@@ -4,7 +4,8 @@
 # Standard library only. It shares no code and no table with the package.
 # The machine is in sv39_model.py, sv39_exec.py and sv39_step.py, written
 # from the text of the RISC-V manual at commit d50ad50f; the cases are in
-# sv39_cases.py, sv39_cases2.py and sv39_cases3.py.
+# sv39_cases.py, sv39_cases2.py and sv39_cases3.py, and the cases of the
+# assembler in sv39_asm.py.
 #
 # Usage: python sv39_oracle.py OUTDIR
 # It writes the case tables as BuildLang source: svec_g*.bld (generic
