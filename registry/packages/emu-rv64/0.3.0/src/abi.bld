@@ -1,0 +1,158 @@
+// emu-rv64: every constant of the package, in one file that sorts first.
+// The package sources are joined in name order, and a constant is declared
+// here before any function uses it.
+
+const EMU_OK: i64 = 0;
+const EMU_BREAK: i64 = 1;
+const EMU_ECALL: i64 = 2;
+const EMU_ILLEGAL: i64 = -1;
+const EMU_BUS: i64 = -2;
+const EMU_ALIGN: i64 = -3;
+const EMU_SMALL: i64 = -4;
+// Trap profile only: the step took a trap. See SPEC.md, "Step codes".
+const EMU_TRAP: i64 = 3;
+
+// Profiles. REPORT stops and reports to the caller, as version 0.1.0 does.
+// TRAP delivers synchronous exceptions to the handler named by mtvec.
+const EMU_PROFILE_REPORT: u64 = 0_u64;
+const EMU_PROFILE_TRAP: u64 = 1_u64;
+
+// Exception codes written to mcause.
+const EXC_INSN_ALIGN: u64 = 0_u64;
+const EXC_INSN_ACCESS: u64 = 1_u64;
+const EXC_ILLEGAL: u64 = 2_u64;
+const EXC_BREAK: u64 = 3_u64;
+const EXC_LOAD_ACCESS: u64 = 5_u64;
+const EXC_STORE_ACCESS: u64 = 7_u64;
+const EXC_ECALL_M: u64 = 11_u64;
+
+// Control and status register numbers.
+const CSR_MSTATUS: u64 = 0x300_u64;
+const CSR_MISA: u64 = 0x301_u64;
+const CSR_MIE: u64 = 0x304_u64;
+const CSR_MTVEC: u64 = 0x305_u64;
+const CSR_MSCRATCH: u64 = 0x340_u64;
+const CSR_MEPC: u64 = 0x341_u64;
+const CSR_MCAUSE: u64 = 0x342_u64;
+const CSR_MTVAL: u64 = 0x343_u64;
+const CSR_MIP: u64 = 0x344_u64;
+const CSR_MVENDORID: u64 = 0xF11_u64;
+const CSR_MCONFIGPTR: u64 = 0xF15_u64;
+
+// mstatus bits: MIE is bit 3, MPIE is bit 7, MPP is bits 12 and 11.
+const MS_MIE: u64 = 0x8_u64;
+const MS_MPIE: u64 = 0x80_u64;
+const MS_MPP: u64 = 0x1800_u64;
+// The machine software, timer and external interrupt bits of mie and mip.
+const MI_BITS: u64 = 0x888_u64;
+const MI_MSIP: u64 = 0x8_u64;
+const MI_MTIP: u64 = 0x80_u64;
+const MI_MEIP: u64 = 0x800_u64;
+// Interrupt cause numbers. mcause holds the number with bit 63 set.
+const IRQ_SOFT: u64 = 3_u64;
+const IRQ_TIMER: u64 = 7_u64;
+const IRQ_EXT: u64 = 11_u64;
+// The timer device: two 64-bit registers in the address space, eight bytes
+// each, little-endian. See SPEC.md, "Timer".
+const EMU_MTIMECMP: u64 = 0x02004000_u64;
+const EMU_MTIME: u64 = 0x0200BFF8_u64;
+// misa: MXL = 2 (64-bit) in bits 63 and 62, extension I in bit 8.
+const MISA_VALUE: u64 = 0x8000000000000100_u64;
+
+const EMU_RAM_BASE: u64 = 0x80000000_u64;
+const EMU_UART_BASE: u64 = 0x10000000_u64;
+const EMU_UART_LSR: u64 = 0x10000005_u64;
+const EMU_SIGN: u64 = 0x8000000000000000_u64;
+
+// Operation numbers. 0 means "not an RV64I instruction".
+const OP_LUI: u64 = 1_u64;
+const OP_AUIPC: u64 = 2_u64;
+const OP_JAL: u64 = 3_u64;
+const OP_JALR: u64 = 4_u64;
+const OP_BEQ: u64 = 5_u64;
+const OP_BGEU: u64 = 10_u64;
+const OP_LB: u64 = 11_u64;
+const OP_LWU: u64 = 17_u64;
+const OP_SB: u64 = 18_u64;
+const OP_SD: u64 = 21_u64;
+const OP_ADDI: u64 = 22_u64;
+const OP_SLLI: u64 = 28_u64;
+const OP_SRLI: u64 = 29_u64;
+const OP_SRAI: u64 = 30_u64;
+const OP_ADD: u64 = 31_u64;
+const OP_AND: u64 = 40_u64;
+const OP_ADDIW: u64 = 41_u64;
+const OP_SLLIW: u64 = 42_u64;
+const OP_SRAIW: u64 = 44_u64;
+const OP_ADDW: u64 = 45_u64;
+const OP_SRAW: u64 = 49_u64;
+const OP_FENCE: u64 = 50_u64;
+const OP_ECALL: u64 = 51_u64;
+const OP_EBREAK: u64 = 52_u64;
+// Zicsr and the trap return. Operations 53 to 55 take a register operand,
+// 56 to 58 take a 5-bit immediate in the rs1 field.
+const OP_CSRRW: u64 = 53_u64;
+const OP_CSRRS: u64 = 54_u64;
+const OP_CSRRC: u64 = 55_u64;
+const OP_CSRRWI: u64 = 56_u64;
+const OP_CSRRSI: u64 = 57_u64;
+const OP_CSRRCI: u64 = 58_u64;
+const OP_MRET: u64 = 59_u64;
+// WFI, wait for interrupt. Since 0.3.0. It retires as a no-op.
+const OP_WFI: u64 = 60_u64;
+
+// Field classes: which fields of a decoded instruction carry meaning.
+const CL_U: u64 = 1_u64;
+const CL_J: u64 = 2_u64;
+const CL_I: u64 = 3_u64;
+const CL_B: u64 = 4_u64;
+const CL_S: u64 = 5_u64;
+const CL_R: u64 = 6_u64;
+const CL_SYS: u64 = 7_u64;
+// CSR instructions: rd, rs1 (a register or a 5-bit immediate) and the CSR
+// number in imm, 0 to 4095, not sign-extended.
+const CL_CSR: u64 = 8_u64;
+
+// Differential fuzz: bytes of memory and of serial output per machine.
+const FZ_RAM: u64 = 1024_u64;
+const FZ_OUT: u64 = 64_u64;
+
+// Number of planted-defect variants.
+const CTL_COUNT: u64 = 6_u64;
+// Planted-defect variants of the trap profile are numbered 7 to 12.
+const MCTL_FIRST: u64 = 7_u64;
+const MCTL_LAST: u64 = 12_u64;
+// Planted-defect variants of interrupt delivery and the timer: 13 to 19.
+const ICTL_FIRST: u64 = 13_u64;
+const ICTL_LAST: u64 = 19_u64;
+
+// Reference model: slots of its CSR array.
+const RC_MIE: usize = 0;
+const RC_MPIE: usize = 1;
+const RC_MTVEC: usize = 2;
+const RC_MEPC: usize = 3;
+const RC_MCAUSE: usize = 4;
+const RC_MTVAL: usize = 5;
+const RC_IE: usize = 6;
+const RC_IP: usize = 7;
+const RC_SCRATCH: usize = 8;
+const RC_TIME: usize = 9;
+const RC_CMP: usize = 10;
+
+// Hand-computed cases: base address, next address, a branch target and two
+// bit patterns.
+const V_B: u64 = 0x80000000_u64;
+const V_N: u64 = 0x80000004_u64;
+const V_P: u64 = 0x80000100_u64;
+const V_ONES: u64 = 0xFFFFFFFFFFFFFFFF_u64;
+const V_NEG32: u64 = 0xFFFFFFFF80000000_u64;
+
+// Hand-computed cases of the trap profile: the trap vector, the saved pc,
+// the scratch value and the mstatus value every case starts from, and the
+// value mstatus has after a trap taken from that start.
+const MV_TVEC: u64 = 0x80000100_u64;
+const MV_EPC: u64 = 0x80000040_u64;
+const MV_SCR: u64 = 0x1111222233334444_u64;
+const MV_ST: u64 = 0x1808_u64;
+const MV_ST_TRAP: u64 = 0x1880_u64;
+const MV_MISA: u64 = 0x8000000000000100_u64;

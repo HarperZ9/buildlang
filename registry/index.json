@@ -51,12 +51,12 @@
       }
     },
     "emu-rv64": {
-      "version": "0.2.0",
-      "description": "RV64I machine emulator core with Zicsr, machine-mode CSRs, synchronous traps and MRET: decoder, encoder and deterministic step function with flat memory and one serial device, checked by hand-computed cases, a reference model, differential fuzz and planted controls",
+      "version": "0.3.0",
+      "description": "RV64I machine emulator core with Zicsr, machine-mode CSRs, traps, MRET, a step-counted timer and machine interrupts: decoder, encoder and deterministic step function with flat memory and one serial device, checked by hand-computed cases, a reference model, differential fuzz and planted controls",
       "author": "Zain Dana Harper",
       "license": "AGPL-3.0-only",
-      "checksum": "sha256:f7892143ad1cf263b196915e680c7d18f4a35bcd9bcc8e9f241ecf1435543532",
-      "path": "packages/emu-rv64/0.2.0",
+      "checksum": "sha256:3ac95aa01c2efc297971d6e0267c13b739e632a71048f10caf9a65f6fd673d62",
+      "path": "packages/emu-rv64/0.3.0",
       "versions": {
         "0.1.0": {
           "path": "packages/emu-rv64/0.1.0",
@@ -66,6 +66,11 @@
         "0.2.0": {
           "path": "packages/emu-rv64/0.2.0",
           "checksum": "sha256:f7892143ad1cf263b196915e680c7d18f4a35bcd9bcc8e9f241ecf1435543532",
+          "dependencies": {}
+        },
+        "0.3.0": {
+          "path": "packages/emu-rv64/0.3.0",
+          "checksum": "sha256:3ac95aa01c2efc297971d6e0267c13b739e632a71048f10caf9a65f6fd673d62",
           "dependencies": {}
         }
       }

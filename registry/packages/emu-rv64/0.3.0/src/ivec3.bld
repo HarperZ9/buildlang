@@ -1,0 +1,155 @@
+// Hand-computed cases for the timer and the interrupts of emu-rv64, third
+// part: cases of more than one step, and the runner. Harness: ivec.bld.
+//
+// A sequence case loads up to three words at pc, pc + 4 and pc + 8, and two
+// fixed words elsewhere:
+//   0x80000040  ADDI x3, x0, 1 = 0x00100193   where the MRET of case 51 lands
+//   0x80000100  ADDI x3, x0, 2 = 0x00200193   the first handler instruction
+// Then n steps run, and the state after the last one is compared.
+//   MRET                   = 0x30200073
+//   CSRRSI x0, mstatus, 8  = 0x300 << 20 | 8 << 15 | 6 << 12 | 0x73 = 0x30046073
+//   ADDI x0, x0, 0         = 0x00000013
+//   SD x2, 0(x1)           = 0x0020B023
+
+// What a sequence runs and what it must count.
+struct ISeq { w0: u64, w1: u64, w2: u64, n: u64, steps: u64, traps: u64 }
+
+fn iv_seq_ok(m: &Machine, x: &[u64], i: &IIn, e: &IExp, q: &ISeq, rc: i64) -> bool {
+    rc == e.rc && x[0] == 0_u64 && x[1] == i.x1 && x[2] == i.x2 && x[3] == e.x3 && m.pc == e.pc &&
+    m.steps == q.steps && m.traps == q.traps && m.out_len == 0_u64
+}
+
+fn iv_seq(st: &mut ISt, i: &IIn, q: &ISeq, e: &IExp) ~ Console {
+    st.count = st.count + 1_u64;
+    let mut m = iv_machine(i);
+    let mut x: [u64; 32] = [0_u64; 32];
+    let mut ram: [u8; 512] = [0_u8; 512];
+    let mut out: [u8; 8] = [0_u8; 8];
+    x[1] = i.x1;
+    x[2] = i.x2;
+    emu_poke(&mut ram, 0x80000040_u64, 4_u64, 0x00100193_u64);
+    emu_poke(&mut ram, 0x80000100_u64, 4_u64, 0x00200193_u64);
+    emu_poke(&mut ram, i.pc, 4_u64, q.w0);
+    emu_poke(&mut ram, i.pc + 4_u64, 4_u64, q.w1);
+    emu_poke(&mut ram, i.pc + 8_u64, 4_u64, q.w2);
+    let mut got: i64 = 0;
+    let mut k: u64 = 0_u64;
+    while k < q.n {
+        got = istep_v(st.v, &mut m, &mut x, &mut ram, &mut out);
+        k = k + 1_u64;
+    }
+    let ok = iv_seq_ok(&m, &x, i, e, q, got) && iv_csr_ok(&m, i, e);
+    if st.show {
+        println!("icase {} steps={} rc={} x3={:x} pc={:08x} mstatus={:x} mepc={:x} mcause={:x} mtval={:x}",
+            st.count, q.n, got, x[3], m.pc, m.mstatus, m.mepc, m.mcause, m.mtval);
+        println!("  mtime={:x} mtimecmp={:x} pass={}", m.mtime, m.mtimecmp, ok);
+    }
+    iv_note(st, ok);
+}
+
+// Cases 51 to 53: MRET and the handler. The timer is pending throughout
+// (mtime = mtimecmp = 5) and enabled in mie.
+fn iv_return(st: &mut ISt) ~ Console {
+    // 51: mstatus = 0x1880 (MIE 0, MPIE 1), mepc = 0x80000040. MRET is not
+    // interrupted because MIE is 0. It sets MIE from MPIE: mstatus 0x1888.
+    let mut a = ii_irq(0x1880_u64, 0x80_u64, 0_u64, true);
+    a.word = 0x30200073_u64;
+    let one = ISeq { w0: 0x30200073_u64, w1: 0_u64, w2: 0_u64, n: 1_u64, steps: 1_u64, traps: 0_u64 };
+    let mut ea = ie_run(0x1888_u64, true);
+    ea.x3 = 0_u64;
+    ea.pc = MV_EPC;
+    iv_seq(st, &a, &one, &ea);
+    // 52: one more step. MIE is 1 again and the timer is still pending, so
+    // the interrupt is taken at once: the instruction at 0x80000040 does
+    // not run (x3 stays 0) and mepc holds 0x80000040. Two ticks: mtime 7.
+    let two = ISeq { w0: 0x30200073_u64, w1: 0_u64, w2: 0_u64, n: 2_u64, steps: 1_u64, traps: 1_u64 };
+    let mut eb = ie_irq(7_u64, MV_TVEC, true);
+    eb.mepc = MV_EPC;
+    eb.mtime = 7_u64;
+    iv_seq(st, &a, &two, &eb);
+    // 53: delivery, then one more step. Entry cleared MIE, so the first
+    // handler instruction runs though the timer is still pending: x3 = 2,
+    // pc = 0x80000104, one trap in all.
+    let b = ii_irq(0x1808_u64, 0x80_u64, 0_u64, true);
+    let run = ISeq { w0: 0x00100193_u64, w1: 0_u64, w2: 0_u64, n: 2_u64, steps: 1_u64, traps: 1_u64 };
+    let mut ec = ie_irq(7_u64, 0x80000104_u64, true);
+    ec.rc = 0;
+    ec.x3 = 2_u64;
+    ec.mtime = 7_u64;
+    iv_seq(st, &b, &run, &ec);
+}
+
+// Cases 54 and 55: software moves mtimecmp and the pending bit follows.
+// Both start with MIE = 0, the timer bit of mie set and mtime = mtimecmp
+// = 5, and both run three steps. The second word sets MIE.
+fn iv_rearm(st: &mut ISt) ~ Console {
+    // 54: the first word stores x2 = 1000 to mtimecmp. When MIE turns on,
+    // the timer is no longer pending (7 < 1000): the ADDI runs, x3 = 1.
+    let mut a = ii_irq(0x1800_u64, 0x80_u64, 0_u64, true);
+    a.x1 = EMU_MTIMECMP;
+    a.x2 = 1000_u64;
+    let moved = ISeq { w0: 0x0020B023_u64, w1: 0x30046073_u64, w2: 0x00100193_u64, n: 3_u64, steps: 3_u64, traps: 0_u64 };
+    let mut ea = ie_run(0x1808_u64, true);
+    ea.pc = 0x8000000C_u64;
+    ea.mtime = 8_u64;
+    ea.mtimecmp = 1000_u64;
+    iv_seq(st, &a, &moved, &ea);
+    // 55: the first word is a no-op. The step after MIE turns on takes the
+    // interrupt in place of the ADDI at 0x80000008.
+    let kept = ISeq { w0: 0x00000013_u64, w1: 0x30046073_u64, w2: 0x00100193_u64, n: 3_u64, steps: 2_u64, traps: 1_u64 };
+    let mut eb = ie_irq(7_u64, MV_TVEC, true);
+    eb.mepc = 0x80000008_u64;
+    eb.mtime = 8_u64;
+    iv_seq(st, &a, &kept, &eb);
+}
+
+// Case 56: a register array of 31 entries. The step returns -4 and changes
+// nothing: no interrupt is taken though one is pending and enabled, and
+// mtime does not rise.
+fn iv_small(st: &mut ISt) ~ Console {
+    st.count = st.count + 1_u64;
+    let i = ii_irq(0x1808_u64, 0x80_u64, 0_u64, true);
+    let mut m = iv_machine(&i);
+    let mut x: [u64; 31] = [0_u64; 31];
+    let mut ram: [u8; 512] = [0_u8; 512];
+    let mut out: [u8; 8] = [0_u8; 8];
+    emu_poke(&mut ram, i.pc, 4_u64, i.word);
+    let got = istep_v(st.v, &mut m, &mut x, &mut ram, &mut out);
+    let same = m.pc == V_B && m.steps == 0_u64 && m.traps == 0_u64 && m.mstatus == 0x1808_u64 &&
+               m.mepc == MV_EPC && m.mcause == 0x55_u64 && m.mtval == 0x66_u64;
+    let ok = got == EMU_SMALL && same && m.mtime == 5_u64 && m.mtimecmp == 5_u64 && x[3] == 0_u64;
+    if st.show {
+        println!("icase {} short register array rc={} pc={:08x} mtime={:x} pass={}", st.count, got, m.pc, m.mtime, ok);
+    }
+    iv_note(st, ok);
+}
+
+fn iv_all(st: &mut ISt) ~ Console {
+    iv_loads(st);
+    iv_faults(st);
+    iv_stores(st);
+    iv_mtip(st);
+    iv_gate(st);
+    iv_prio(st);
+    iv_vector(st);
+    iv_wfi(st);
+    iv_return(st);
+    iv_rearm(st);
+    iv_small(st);
+}
+
+// Runs every case through variant v. Returns the number of the first
+// failing case, or 0.
+fn ivec_run(v: u64, show: bool) -> u64 ~ Console {
+    let mut st = ISt { v: v, show: show, fail: 0_u64, count: 0_u64, bad: 0_u64 };
+    iv_all(&mut st);
+    if show { println!("icases: {} run, first failure {}", st.count, st.fail); }
+    st.fail
+}
+
+// The failing cases of variant v: bit k is set when case k failed.
+fn ivec_mask(v: u64) -> u64 ~ Console {
+    let mut st = ISt { v: v, show: false, fail: 0_u64, count: 0_u64, bad: 0_u64 };
+    iv_all(&mut st);
+    st.bad
+}
