@@ -1,0 +1,86 @@
+// Differential corpus: vectors of bytes and of 64-bit words (growth past
+// the first buffer, reads, writes, length, a vector behind a reference),
+// slices over byte and word arrays, and the forms of printf.
+
+fn fill8(n: u64) -> Vec<u8> {
+    let mut v: Vec<u8> = Vec::new();
+    let mut i: u64 = 0_u64;
+    while i < n {
+        v.push((i * 7_u64 % 256_u64) as u8);
+        i = i + 1_u64;
+    }
+    v
+}
+
+fn sum8(v: &Vec<u8>) -> u64 {
+    let mut t: u64 = 0_u64;
+    let mut i: usize = 0;
+    while i < v.len() {
+        t = t + v[i] as u64;
+        i = i + 1;
+    }
+    t
+}
+
+fn flip(v: &mut Vec<u8>, at: u64) {
+    v[at as usize] = 255_u8 - v[at as usize];
+}
+
+fn squares(n: u64) -> Vec<u64> {
+    let mut v: Vec<u64> = Vec::new();
+    let mut i: u64 = 0_u64;
+    while i < n {
+        v.push(i.wrapping_mul(0x9E3779B97F4A7C15_u64));
+        i = i + 1_u64;
+    }
+    v
+}
+
+fn xor_all(v: &Vec<u64>) -> u64 {
+    let mut t: u64 = 0_u64;
+    let mut i: usize = 0;
+    while i < v.len() {
+        t = t ^ v[i];
+        i = i + 1;
+    }
+    t
+}
+
+fn bytes_sum(s: &[u8]) -> u64 {
+    let mut t: u64 = 0_u64;
+    let mut i: usize = 0;
+    while i < s.len() {
+        t = t * 3_u64 + s[i] as u64;
+        i = i + 1;
+    }
+    t
+}
+
+fn formats(k: u64) ~ Console {
+    let a: i8 = -1_i8;
+    let b: u8 = 255_u8;
+    let c: i16 = -32767_i16;
+    let d: u32 = 0xDEADBEEF_u32;
+    let e: i64 = -9223372036854775807;
+    println!("dec {} {} {} {} {} {}", a, b, c, d, e, k);
+    println!("hex {:x} {:x} {:08x} {:016x} {:x}", b, d, d, k, 0_u32);
+    println!("pad {:02x} {:04x} {:016x}", 5_u8, 0xABC_u16, 0xFEDCBA9876543210_u64);
+    println!("bool {} {} 100% {{}}", k == 0_u64, k != 0_u64);
+}
+
+fn run(k: u64) ~ Console {
+    let mut v = fill8(k * 9_u64 + 3_u64);
+    println!("v8 len {} sum {}", v.len(), sum8(&v));
+    flip(&mut v, k % 3_u64);
+    println!("v8 sum {} first {}", sum8(&v), v[0]);
+    let w = squares(k + 20_u64);
+    println!("v64 len {} xor {:016x} last {}", w.len(), xor_all(&w), w[w.len() - 1]);
+    let mut raw: [u8; 6] = [10_u8, 20_u8, 30_u8, 40_u8, 250_u8, 255_u8];
+    raw[(k % 6_u64) as usize] = 1_u8;
+    println!("bytes {}", bytes_sum(&raw));
+    formats(k);
+}
+
+fn main() ~ Console + Process + Environment {
+    run(args_get(1).parse_int() as u64);
+}

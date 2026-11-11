@@ -1,0 +1,88 @@
+// cg-rv64: places. A reference names a local and a list of projections;
+// the address of the part they name is built in x7. Split from crv.bld in
+// 0.2.0, which added the slice step and the index through a reference.
+
+// One step of a place: x7 holds the address of a value of type t and
+// is moved to the part the projection p names. Returns the type of that
+// part, or CG_NONE after a refusal.
+//   "Deref"                    t is a pointer; the value it points to
+//   {"Field": [i, name, type]} a field of a struct, or of the struct a
+//                              pointer points to
+//   {"Index": local}           an element of an array, with the bounds
+//                              check. The hosted program does not check
+//                              this index; see SPEC.md, "Differences".
+fn cr_project(g: &mut Cg, d: &CjDoc, p: u64, t: u64) -> u64 {
+    let body = cj_body(d, p);
+    let mut cur = t;
+    // An index through a reference to an array or a slice (`xs[i].y = v`
+    // with `xs: &mut [S]`) reads the reference first. Since 0.2.0.
+    let ek = ct_kind(d, ct_elem(d, t));
+    if cj_tag_is(d, p, "Index") && ct_kind(d, t) == CT_PTR && (ek == CT_ARRAY || ek == CT_SLICE) {
+        ci_m(g, "ld", 7_u64, 0_u64, 7_u64);
+        return cr_project(g, d, p, ct_elem(d, t));
+    }
+    if cj_tag_is(d, p, "Deref") || (cj_tag_is(d, p, "Field") && ct_kind(d, t) == CT_PTR) {
+        ci_m(g, "ld", 7_u64, 0_u64, 7_u64);
+        cur = ct_elem(d, t);
+        if ct_kind(d, t) != CT_PTR || !ct_known(g, d, cur) { cur = CG_NONE; }
+        if cj_tag_is(d, p, "Deref") && cur != CG_NONE { return cur; }
+    }
+    if cj_tag_is(d, p, "Field") {
+        let name = cj_next(d, cj_first(d, body));
+        let f = ct_field(g, d, cur, name);
+        if f.ok && ct_same(d, f.ty, cj_next(d, name)) {
+            ci_add(g, 7_u64, 7_u64, f.off);
+            return f.ty;
+        }
+    }
+    let it = cv_lty(g, cj_mag(d, body));
+    if cj_tag_is(d, p, "Index") && cj_kind(d, body) == CJ_NUM && ct_kind(d, t) == CT_ARRAY && ct_kind(d, it) == CT_INT {
+        ci_load(g, d, 28_u64, 2_u64, cv_loff(g, cj_mag(d, body)), it);
+        ci_i(g, "addi", 6_u64, 7_u64, 0_u64);
+        ci_li(g, 7_u64, ct_alen(d, t));
+        cr_bounds(g, false, false);
+        cr_elem(g, d, ct_elem(d, t));
+        return ct_elem(d, t);
+    }
+    if cj_tag_is(d, p, "Index") && cj_kind(d, body) == CJ_NUM && ct_kind(d, t) == CT_SLICE && ct_kind(d, it) == CT_INT {
+        return cr_slice_step(g, d, t, cj_mag(d, body));
+    }
+    cg_refuse_tag(g, d, "place projection the generator does not cover:", p);
+    CG_NONE
+}
+
+// An index step into a slice: x7 holds the address of a slice (the
+// address of its elements, then its length) and is moved to the element
+// local idx names, after the bounds check. Since 0.2.0. Defect 28 reads
+// the length from the address word.
+fn cr_slice_step(g: &mut Cg, d: &CjDoc, t: u64, idx: u64) -> u64 {
+    let it = cv_lty(g, idx);
+    ci_load(g, d, 28_u64, 2_u64, cv_loff(g, idx), it);
+    ci_m(g, "ld", 6_u64, 0_u64, 7_u64);
+    if g.v == CGC_SLICEPROJ { ci_m(g, "ld", 7_u64, 0_u64, 7_u64); } else { ci_m(g, "ld", 7_u64, 8_u64, 7_u64); }
+    cr_bounds(g, false, false);
+    cr_elem(g, d, ct_elem(d, t));
+    ct_elem(d, t)
+}
+
+// A reference: the address of a local, or of a part of it that a list of
+// projections names. dty is a pointer to the type of that part.
+fn cr_ref(g: &mut Cg, d: &CjDoc, body: u64, dty: u64) {
+    let place = cj_get(d, body, "place");
+    let id = cj_mag(d, cj_get(d, place, "local"));
+    let mut t = cv_lty(g, id);
+    ci_add(g, 7_u64, 2_u64, cv_loff(g, id));
+    g.nobounds = g.v == CGC_GBOUNDS && (id as usize) < g.gptr.len() && g.gptr[id as usize] == 1_u64;
+    let mut p = cj_first(d, cj_get(d, place, "projections"));
+    while p != CG_NONE && t != CG_NONE {
+        t = cr_project(g, d, p, t);
+        p = cj_next(d, p);
+    }
+    g.nobounds = false;
+    if t == CG_NONE { return; }
+    if ct_kind(d, dty) != CT_PTR || !ct_same(d, ct_elem(d, dty), t) {
+        cg_refuse(g, d, "reference whose place does not have the pointed-to type");
+        return;
+    }
+    ci_i(g, "addi", 5_u64, 7_u64, 0_u64);
+}

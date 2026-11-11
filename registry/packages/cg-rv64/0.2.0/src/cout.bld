@@ -1,0 +1,153 @@
+// cg-rv64: the state of one generation, the output text and the refusal.
+
+// v: the planted defect, 0 for none. bad: set by the first refusal.
+// out: the assembly text. msg: the text of the first refusal.
+// fmt, lit: work space for a format string and one run of its bytes.
+// funcs, types, strings, globals: the lists of the MIR module.
+// todo: the functions to compile, in the order they were first called;
+// the index of a function in todo is its number in every label.
+// The current function: fnode its node, fid its number, name its name,
+// lty and loff the type and the frame offset of every local, frame the
+// frame size in bytes, ret its return type, hid 1 when the result is
+// returned through a hidden pointer.
+struct Cg {
+    v: u64, bad: bool,
+    out: Vec<u8>, msg: Vec<u8>, fmt: Vec<u8>, lit: Vec<u8>,
+    funcs: u64, types: u64, strings: u64, globals: u64,
+    todo: Vec<u64>,
+    fnode: u64, fid: u64, name: u64,
+    lty: Vec<u64>, loff: Vec<u64>,
+    frame: u64, ret: u64, hid: u64,
+    gnode: Vec<u64>, goff: Vec<u64>, gsize: u64,
+    gptr: Vec<u64>, nobounds: bool
+}
+
+fn cg_new(v: u64) -> Cg {
+    Cg { v: v, bad: false,
+         out: Vec::new(), msg: Vec::new(), fmt: Vec::new(), lit: Vec::new(),
+         funcs: CG_NONE, types: CG_NONE, strings: CG_NONE, globals: CG_NONE,
+         todo: Vec::new(),
+         fnode: CG_NONE, fid: 0_u64, name: CG_NONE,
+         lty: Vec::new(), loff: Vec::new(),
+         frame: 0_u64, ret: CG_NONE, hid: 0_u64,
+         gnode: Vec::new(), goff: Vec::new(), gsize: 0_u64,
+         gptr: Vec::new(), nobounds: false }
+}
+
+fn cg_push_str(buf: &mut Vec<u8>, s: str) {
+    let b = s.as_bytes();
+    let mut i: usize = 0;
+    while i < s.len() {
+        buf.push(b[i]);
+        i = i + 1;
+    }
+}
+
+// The bytes of a JSON string node, as written.
+fn cg_push_node(buf: &mut Vec<u8>, d: &CjDoc, n: u64) {
+    let start = cj_sstart(d, n);
+    let len = cj_slen(d, n);
+    let mut i: u64 = 0_u64;
+    while i < len {
+        buf.push(d.src[(start + i) as usize]);
+        i = i + 1_u64;
+    }
+}
+
+// Records the first refusal: the function being compiled and the
+// construct. Generation goes on, and its output is thrown away.
+fn cg_refuse(g: &mut Cg, d: &CjDoc, what: str) {
+    if g.bad { return; }
+    g.bad = true;
+    cg_push_str(&mut g.msg, "function ");
+    if g.name == CG_NONE { cg_push_str(&mut g.msg, "(none)"); } else { cg_push_node(&mut g.msg, d, g.name); }
+    cg_push_str(&mut g.msg, ": ");
+    cg_push_str(&mut g.msg, what);
+}
+
+// A refusal that also names a tag of the MIR: the key of the one member
+// of node n, or its text when it is a string.
+fn cg_refuse_tag(g: &mut Cg, d: &CjDoc, what: str, n: u64) {
+    if g.bad { return; }
+    cg_refuse(g, d, what);
+    cg_push_str(&mut g.msg, " ");
+    if cj_kind(d, n) == CJ_STR {
+        cg_push_node(&mut g.msg, d, n);
+        return;
+    }
+    let m = cj_first(d, n);
+    if cj_kind(d, n) != CJ_OBJ || m == CG_NONE {
+        cg_push_str(&mut g.msg, "(unreadable)");
+        return;
+    }
+    let start = d.n[(m + 4_u64) as usize];
+    let len = d.n[(m + 5_u64) as usize];
+    let mut i: u64 = 0_u64;
+    while i < len {
+        g.msg.push(d.src[(start + i) as usize]);
+        i = i + 1_u64;
+    }
+}
+
+// Output text.
+fn co_s(g: &mut Cg, s: str) {
+    cg_push_str(&mut g.out, s);
+}
+
+fn co_ch(g: &mut Cg, c: u8) {
+    g.out.push(c);
+}
+
+// v in decimal.
+fn co_u(g: &mut Cg, v: u64) {
+    let mut div: u64 = 1_u64;
+    while v / div >= 10_u64 { div = div * 10_u64; }
+    while div > 0_u64 {
+        g.out.push((48_u64 + (v / div) % 10_u64) as u8);
+        div = div / 10_u64;
+    }
+}
+
+// v, read as a signed 64-bit number, in decimal.
+fn co_i(g: &mut Cg, v: u64) {
+    if (v >> 63_u64) == 1_u64 {
+        g.out.push(45_u8);
+        co_u(g, (0_u64).wrapping_sub(v));
+    } else {
+        co_u(g, v);
+    }
+}
+
+// Register number r as text.
+fn co_x(g: &mut Cg, r: u64) {
+    g.out.push(120_u8);
+    co_u(g, r);
+}
+
+// A comment line with the name of a JSON string node.
+fn co_comment(g: &mut Cg, d: &CjDoc, n: u64) {
+    co_s(g, "# ");
+    let start = cj_sstart(d, n);
+    let len = cj_slen(d, n);
+    let mut i: u64 = 0_u64;
+    while i < len {
+        let c = d.src[(start + i) as usize];
+        if c >= 32_u8 && c < 127_u8 && c != 35_u8 { g.out.push(c); } else { g.out.push(63_u8); }
+        i = i + 1_u64;
+    }
+    co_ch(g, 10_u8);
+}
+
+// The label of block b of the current function: f<fid>_<b>.
+fn co_block(g: &mut Cg, b: u64) {
+    co_ch(g, 102_u8);
+    co_u(g, g.fid);
+    co_ch(g, 95_u8);
+    co_u(g, b);
+}
+
+// The label of function number f: fn_<f>.
+fn co_fn(g: &mut Cg, f: u64) {
+    co_s(g, "fn_");
+    co_u(g, f);
+}

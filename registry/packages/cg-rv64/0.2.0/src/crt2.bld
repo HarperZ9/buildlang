@@ -1,0 +1,153 @@
+// cg-rv64: the runtime, second part: the start code, the heap and the
+// vectors.
+//
+// Memory, with the image loaded at 0x80000000:
+//   0x80000000  the image: start code, runtime, compiled functions
+//   0x80100000  the heap, growing up; x26 is the next free address
+//   0x80400000  the top of memory; the stack grows down from here
+// x27 is the stack limit, 1024 bytes above the heap. A function that
+// would move the stack pointer below it traps.
+
+// The first two words of the image: the entry point at offset 0 and the
+// machine trap vector at offset 4. Then rt_start: sets mtvec, the stack
+// pointer, the heap pointer and the stack limit.
+fn cq_start(g: &mut Cg) {
+    cq(g, "jal x0, rt_start");
+    cq(g, "jal x0, rt_mtrap");
+    cql(g, "rt_start");
+    cq(g, "addi x5, x0, 1");
+    cq(g, "slli x5, x5, 31");
+    cq(g, "addi x6, x5, 4");
+    cq(g, "csrrw x0, mtvec, x6");
+    cq(g, "lui x6, 0x400");
+    cq(g, "add x2, x5, x6");
+    cq(g, "lui x6, 0x100");
+    cq(g, "add x26, x5, x6");
+    cq(g, "addi x27, x26, 1024");
+}
+
+// rt_alloc: x10 = a byte count. Returns in x10 the address of that many
+// bytes, a multiple of 16. The heap only grows. Traps when the new top
+// plus the margin would pass the stack pointer.
+fn cq_alloc(g: &mut Cg) {
+    cql(g, "rt_alloc");
+    cq(g, "addi x10, x10, 15");
+    cq(g, "andi x10, x10, -16");
+    cq(g, "add x5, x26, x10");
+    cq(g, "bltu x5, x26, rt_alloc_fail");
+    cq(g, "addi x6, x5, 1024");
+    cq(g, "bltu x6, x5, rt_alloc_fail");
+    cq(g, "bltu x2, x6, rt_alloc_fail");
+    cq(g, "addi x10, x26, 0");
+    cq(g, "addi x26, x5, 0");
+    cq(g, "addi x27, x6, 0");
+    cq(g, "jalr x0, 0(x1)");
+    cql(g, "rt_alloc_fail");
+    cq(g, "jal x0, rt_memory");
+}
+
+// A vector is the address of three doublewords: the address of its
+// elements, its length and its capacity, both counted in elements.
+// rt_vec_new returns a new empty vector in x10.
+fn cq_vec_new(g: &mut Cg) {
+    cql(g, "rt_vec_new");
+    cq(g, "addi x2, x2, -16");
+    cq(g, "sd x1, 8(x2)");
+    cq(g, "addi x10, x0, 24");
+    cq(g, "jal x1, rt_alloc");
+    cq(g, "sd x0, 0(x10)");
+    cq(g, "sd x0, 8(x10)");
+    cq(g, "sd x0, 16(x10)");
+    cq(g, "ld x1, 8(x2)");
+    cq(g, "addi x2, x2, 16");
+    cq(g, "jalr x0, 0(x1)");
+}
+
+// rt_vec_push: x10 = vector, x11 = value, x12 = element size in bytes
+// (1, 2, 4 or 8). A full vector moves to a buffer of twice the
+// capacity, 8 elements the first time, as build_vec_push does.
+fn cq_vec_push(g: &mut Cg) {
+    cql(g, "rt_vec_push");
+    cq(g, "ld x5, 8(x10)");
+    cq(g, "ld x6, 16(x10)");
+    cq(g, "bltu x5, x6, rt_vec_push_store");
+    cq(g, "addi x2, x2, -48");
+    cq(g, "sd x1, 40(x2)");
+    cq(g, "sd x10, 32(x2)");
+    cq(g, "sd x11, 24(x2)");
+    cq(g, "sd x12, 16(x2)");
+    cq(g, "slli x7, x6, 1");
+    cq(g, "bne x6, x0, rt_vec_push_grow");
+    cq(g, "addi x7, x0, 8");
+    cql(g, "rt_vec_push_grow");
+    cq(g, "sd x7, 8(x2)");
+    cq(g, "mul x10, x7, x12");
+    cq(g, "jal x1, rt_alloc");
+    cq(g, "ld x5, 32(x2)");
+    cq(g, "ld x6, 0(x5)");
+    cq(g, "ld x7, 8(x5)");
+    cq(g, "ld x12, 16(x2)");
+    cq(g, "mul x7, x7, x12");
+    cq(g, "addi x28, x10, 0");
+    cql(g, "rt_vec_push_copy");
+    cq(g, "beq x7, x0, rt_vec_push_moved");
+    cq(g, "lbu x29, 0(x6)");
+    cq(g, "sb x29, 0(x28)");
+    cq(g, "addi x6, x6, 1");
+    cq(g, "addi x28, x28, 1");
+    cq(g, "addi x7, x7, -1");
+    cq(g, "jal x0, rt_vec_push_copy");
+    cql(g, "rt_vec_push_moved");
+    cq(g, "sd x10, 0(x5)");
+    cq(g, "ld x7, 8(x2)");
+    cq(g, "sd x7, 16(x5)");
+    cq(g, "addi x10, x5, 0");
+    cq(g, "ld x11, 24(x2)");
+    cq(g, "ld x1, 40(x2)");
+    cq(g, "addi x2, x2, 48");
+    cq(g, "ld x5, 8(x10)");
+    cq_vec_store(g);
+}
+
+// The end of rt_vec_push: stores the value at element x5 and adds one
+// to the length.
+fn cq_vec_store(g: &mut Cg) {
+    cql(g, "rt_vec_push_store");
+    cq(g, "ld x6, 0(x10)");
+    cq(g, "mul x7, x5, x12");
+    cq(g, "add x6, x6, x7");
+    cq(g, "addi x7, x0, 1");
+    cq(g, "beq x12, x7, rt_vec_push_1");
+    cq(g, "addi x7, x0, 2");
+    cq(g, "beq x12, x7, rt_vec_push_2");
+    cq(g, "addi x7, x0, 4");
+    cq(g, "beq x12, x7, rt_vec_push_4");
+    cq(g, "sd x11, 0(x6)");
+    cq(g, "jal x0, rt_vec_push_end");
+    cql(g, "rt_vec_push_1");
+    cq(g, "sb x11, 0(x6)");
+    cq(g, "jal x0, rt_vec_push_end");
+    cql(g, "rt_vec_push_2");
+    cq(g, "sh x11, 0(x6)");
+    cq(g, "jal x0, rt_vec_push_end");
+    cql(g, "rt_vec_push_4");
+    cq(g, "sw x11, 0(x6)");
+    cql(g, "rt_vec_push_end");
+    cq(g, "addi x5, x5, 1");
+    cq(g, "sd x5, 8(x10)");
+    cq(g, "jalr x0, 0(x1)");
+}
+
+// The whole runtime, in the order it stands in the image.
+fn cq_runtime(g: &mut Cg) {
+    cq_die(g);
+    cq_puts(g);
+    cq_dec(g);
+    cq_hex(g);
+    cq_traps(g);
+    cq_oob(g);
+    cq_mtrap(g);
+    cq_alloc(g);
+    cq_vec_new(g);
+    cq_vec_push(g);
+}

@@ -1,0 +1,1 @@
+error: cannot read tests/mir/no-such.json

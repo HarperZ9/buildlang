@@ -1,0 +1,601 @@
+block -> -3
+tick -> -1
+tick -> -1
+add 3 -> -2
+tick -> -1
+tick -> -1
+block -> -3
+tick -> -1
+block -> -3
+tick -> -1
+tick -> -1
+add 3 -> -2
+next -> -1
+tick -> -1
+remove 2 -> -3
+tick -> -1
+remove 2 -> -3
+remove 1 -> -3
+exit -> -3
+wake 3 -> -2
+add 2 -> 0
+remove 1 -> -3
+add 3 -> -2
+next -> 2
+add 1 -> 0
+tick -> 2
+add 1 -> -3
+next -> 1
+wake 0 -> -3
+add 2 -> -3
+tick -> 1
+wake 3 -> -2
+tick -> 2
+next -> 1
+remove 1 -> 0
+next -> 2
+add 1 -> 0
+next -> 1
+block -> 2
+next -> 2
+add 0 -> 0
+tick -> 2
+block -> 0
+tick -> 0
+tick -> 0
+remove 2 -> 0
+tick -> 0
+block -> -1
+add 2 -> 0
+next -> 2
+block -> -1
+add 2 -> -3
+exit -> -3
+remove 0 -> 0
+add 2 -> -3
+block -> -3
+tick -> -1
+tick -> -1
+block -> -3
+add 3 -> -2
+tick -> -1
+remove 0 -> -3
+tick -> -1
+tick -> -1
+exit -> -3
+tick -> -1
+block -> -3
+tick -> -1
+add 0 -> 0
+wake 0 -> -3
+add 2 -> -3
+add 2 -> -3
+tick -> 0
+next -> 0
+wake 2 -> 0
+tick -> 0
+next -> 2
+tick -> 2
+tick -> 0
+add 2 -> -3
+tick -> 0
+block -> 2
+add 0 -> -3
+block -> -1
+add 3 -> -2
+wake 3 -> -2
+tick -> -1
+tick -> -1
+tick -> -1
+tick -> -1
+tick -> -1
+add 1 -> -3
+tick -> -1
+add 1 -> -3
+next -> -1
+tick -> -1
+block -> -3
+block -> -3
+wake 3 -> -2
+exit -> -3
+tick -> -1
+add 0 -> -3
+block -> -3
+add 3 -> -2
+next -> -1
+tick -> -1
+tick -> -1
+block -> -3
+next -> -1
+exit -> -3
+next -> -1
+tick -> -1
+exit -> -3
+add 3 -> -2
+tick -> -1
+wake 2 -> 0
+wake 3 -> -2
+tick -> 2
+add 3 -> -2
+tick -> 2
+wake 1 -> 0
+tick -> 1
+tick -> 1
+tick -> 2
+tick -> 2
+tick -> 1
+tick -> 1
+wake 3 -> -2
+block -> 2
+add 3 -> -2
+block -> -1
+block -> -3
+add 3 -> -2
+next -> -1
+add 0 -> -3
+wake 2 -> 0
+wake 3 -> -2
+wake 2 -> -3
+exit -> -3
+wake 3 -> -2
+tick -> 2
+tick -> 2
+remove 0 -> 0
+exit -> -1
+tick -> -1
+tick -> -1
+block -> -3
+tick -> -1
+wake 2 -> -3
+tick -> -1
+tick -> -1
+tick -> -1
+remove 0 -> -3
+tick -> -1
+add 3 -> -2
+wake 2 -> -3
+wake 0 -> -3
+tick -> -1
+tick -> -1
+exit -> -3
+next -> -1
+tick -> -1
+add 0 -> 0
+block -> -3
+tick -> 0
+add 3 -> -2
+block -> -1
+tick -> -1
+exit -> -3
+block -> -3
+remove 3 -> -2
+add 0 -> -3
+tick -> -1
+wake 3 -> -2
+tick -> -1
+exit -> -3
+exit -> -3
+tick -> -1
+add 2 -> 0
+block -> -3
+tick -> 2
+tick -> 2
+block -> -1
+add 2 -> -3
+tick -> -1
+next -> -1
+tick -> -1
+tick -> -1
+next -> -1
+block -> -3
+block -> -3
+wake 2 -> 0
+tick -> 2
+wake 3 -> -2
+add 2 -> -3
+exit -> -1
+add 1 -> -3
+wake 3 -> -2
+tick -> -1
+block -> -3
+tick -> -1
+add 2 -> 0
+next -> 2
+add 3 -> -2
+block -> -1
+tick -> -1
+tick -> -1
+next -> -1
+remove 2 -> 0
+tick -> -1
+wake 3 -> -2
+block -> -3
+wake 0 -> 0
+tick -> 0
+exit -> -1
+wake 1 -> 0
+wake 0 -> -3
+tick -> 1
+tick -> 1
+tick -> 1
+add 3 -> -2
+tick -> 1
+tick -> 1
+next -> 1
+wake 0 -> -3
+tick -> 1
+tick -> 1
+tick -> 1
+wake 3 -> -2
+tick -> 1
+tick -> 1
+tick -> 1
+tick -> 1
+tick -> 1
+remove 2 -> -3
+block -> -1
+block -> -3
+wake 1 -> 0
+wake 1 -> -3
+exit -> -3
+tick -> 1
+remove 1 -> 0
+tick -> -1
+tick -> -1
+block -> -3
+add 0 -> 0
+block -> -3
+add 0 -> -3
+tick -> 0
+exit -> -1
+wake 3 -> -2
+block -> -3
+tick -> -1
+tick -> -1
+tick -> -1
+block -> -3
+add 2 -> 0
+exit -> -3
+exit -> -3
+block -> -3
+block -> -3
+next -> 2
+tick -> 2
+add 0 -> 0
+add 0 -> -3
+block -> 0
+exit -> -1
+wake 2 -> 0
+exit -> -3
+add 0 -> 0
+remove 0 -> 0
+tick -> 2
+block -> -1
+next -> -1
+remove 2 -> 0
+add 0 -> 0
+add 0 -> -3
+tick -> 0
+add 3 -> -2
+add 1 -> 0
+tick -> 0
+tick -> 1
+block -> 0
+tick -> 0
+add 0 -> -3
+add 2 -> 0
+block -> 2
+add 0 -> -3
+block -> -1
+wake 1 -> 0
+block -> -3
+add 3 -> -2
+tick -> 1
+tick -> 1
+tick -> 1
+tick -> 1
+add 3 -> -2
+block -> -1
+exit -> -3
+tick -> -1
+wake 0 -> 0
+block -> -3
+tick -> 0
+tick -> 0
+add 1 -> -3
+remove 0 -> 0
+tick -> -1
+add 1 -> -3
+tick -> -1
+exit -> -3
+tick -> -1
+tick -> -1
+tick -> -1
+block -> -3
+wake 3 -> -2
+add 1 -> -3
+add 1 -> -3
+block -> -3
+next -> -1
+tick -> -1
+block -> -3
+wake 1 -> 0
+add 1 -> -3
+tick -> 1
+tick -> 1
+add 1 -> -3
+tick -> 1
+exit -> -1
+exit -> -3
+remove 2 -> 0
+tick -> -1
+add 0 -> 0
+next -> 0
+add 3 -> -2
+wake 2 -> -3
+tick -> 0
+remove 3 -> -2
+tick -> 0
+remove 2 -> -3
+tick -> 0
+next -> 0
+remove 1 -> -3
+tick -> 0
+add 3 -> -2
+add 2 -> 0
+block -> 2
+tick -> 2
+tick -> 2
+add 0 -> -3
+next -> 2
+tick -> 2
+tick -> 2
+add 1 -> 0
+wake 2 -> -3
+tick -> 2
+add 0 -> -3
+tick -> 1
+remove 3 -> -2
+add 1 -> -3
+block -> 2
+wake 1 -> 0
+wake 0 -> 0
+block -> 1
+add 0 -> -3
+block -> 0
+wake 0 -> -3
+block -> -1
+tick -> -1
+remove 3 -> -2
+tick -> -1
+tick -> -1
+block -> -3
+remove 0 -> 0
+exit -> -3
+add 2 -> -3
+tick -> -1
+exit -> -3
+wake 0 -> -3
+tick -> -1
+add 0 -> 0
+block -> -3
+exit -> -3
+tick -> 0
+block -> -1
+tick -> -1
+remove 1 -> 0
+tick -> -1
+add 0 -> -3
+remove 1 -> -3
+add 1 -> 0
+tick -> 1
+tick -> 1
+tick -> 1
+tick -> 1
+tick -> 1
+tick -> 1
+tick -> 1
+tick -> 1
+add 0 -> -3
+exit -> -1
+remove 1 -> -3
+tick -> -1
+wake 1 -> -3
+tick -> -1
+next -> -1
+tick -> -1
+tick -> -1
+tick -> -1
+tick -> -1
+wake 0 -> 0
+next -> 0
+wake 3 -> -2
+exit -> -1
+next -> -1
+exit -> -3
+wake 3 -> -2
+tick -> -1
+tick -> -1
+tick -> -1
+tick -> -1
+exit -> -3
+block -> -3
+exit -> -3
+add 3 -> -2
+tick -> -1
+block -> -3
+add 1 -> 0
+next -> 1
+tick -> 1
+remove 0 -> -3
+remove 0 -> -3
+block -> -1
+tick -> -1
+next -> -1
+add 3 -> -2
+wake 3 -> -2
+block -> -3
+block -> -3
+add 2 -> -3
+tick -> -1
+wake 0 -> -3
+tick -> -1
+tick -> -1
+wake 0 -> -3
+tick -> -1
+tick -> -1
+remove 3 -> -2
+add 3 -> -2
+remove 2 -> 0
+add 0 -> 0
+wake 3 -> -2
+add 2 -> 0
+tick -> 0
+tick -> 0
+next -> 2
+tick -> 2
+tick -> 0
+wake 0 -> -3
+tick -> 0
+next -> 2
+block -> 0
+remove 1 -> 0
+block -> -1
+tick -> -1
+exit -> -3
+tick -> -1
+block -> -3
+remove 3 -> -2
+block -> -3
+add 1 -> 0
+remove 0 -> 0
+wake 2 -> 0
+add 2 -> -3
+exit -> -3
+tick -> 1
+add 3 -> -2
+tick -> 1
+tick -> 2
+next -> 1
+tick -> 1
+tick -> 2
+tick -> 2
+add 3 -> -2
+remove 0 -> -3
+block -> 1
+remove 0 -> -3
+next -> 1
+block -> -1
+wake 2 -> 0
+tick -> 2
+block -> -1
+add 0 -> 0
+tick -> 0
+add 1 -> -3
+wake 0 -> -3
+wake 1 -> 0
+tick -> 0
+next -> 1
+next -> 0
+tick -> 0
+tick -> 1
+block -> 0
+tick -> 0
+tick -> 0
+tick -> 0
+wake 0 -> -3
+tick -> 0
+block -> -1
+tick -> -1
+add 0 -> -3
+tick -> -1
+tick -> -1
+block -> -3
+add 2 -> -3
+tick -> -1
+tick -> -1
+tick -> -1
+tick -> -1
+tick -> -1
+add 3 -> -2
+tick -> -1
+wake 3 -> -2
+block -> -3
+exit -> -3
+tick -> -1
+wake 2 -> 0
+tick -> 2
+add 3 -> -2
+exit -> -1
+remove 3 -> -2
+tick -> -1
+tick -> -1
+wake 0 -> 0
+add 0 -> -3
+wake 2 -> -3
+tick -> 0
+tick -> 0
+tick -> 0
+tick -> 0
+block -> -1
+tick -> -1
+wake 2 -> -3
+remove 0 -> 0
+tick -> -1
+add 1 -> -3
+wake 2 -> -3
+tick -> -1
+wake 3 -> -2
+wake 0 -> -3
+tick -> -1
+add 0 -> 0
+tick -> 0
+tick -> 0
+wake 1 -> 0
+tick -> 1
+tick -> 1
+tick -> 0
+block -> 1
+add 1 -> -3
+tick -> 1
+tick -> 1
+tick -> 1
+add 1 -> -3
+add 0 -> -3
+tick -> 1
+block -> -1
+wake 1 -> 0
+exit -> -3
+block -> -3
+block -> -3
+wake 2 -> -3
+tick -> 1
+tick -> 1
+tick -> 1
+block -> -1
+tick -> -1
+wake 1 -> 0
+tick -> 1
+block -> -1
+tick -> -1
+tick -> -1
+add 2 -> 0
+wake 1 -> 0
+next -> 2
+exit -> 1
+block -> -1
+tick -> -1
+add 0 -> -3
+tick -> -1
+block -> -3
+block -> -3
+add 3 -> -2
+wake 1 -> 0
+tick -> 1
+wake 1 -> -3
+tick -> 1
+wake 1 -> -3
+tick -> 1
+tick -> 1
+wake 0 -> 0
+cap=3 cur=1 left=1 digest=95c7ae904f246d38

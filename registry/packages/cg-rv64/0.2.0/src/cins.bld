@@ -1,0 +1,203 @@
+// cg-rv64: instruction lines. One function per operand form of asm-rv64.
+// A register is its number. An offset or an immediate is 64 bits in
+// two's complement and is written as a signed decimal number.
+
+fn ci_open(g: &mut Cg, op: str) {
+    co_s(g, "    ");
+    co_s(g, op);
+    co_ch(g, 32_u8);
+}
+
+// op rd, rs1, rs2
+fn ci_r(g: &mut Cg, op: str, rd: u64, rs1: u64, rs2: u64) {
+    ci_open(g, op);
+    co_x(g, rd);
+    co_s(g, ", ");
+    co_x(g, rs1);
+    co_s(g, ", ");
+    co_x(g, rs2);
+    co_ch(g, 10_u8);
+}
+
+// op rd, rs1, imm
+fn ci_i(g: &mut Cg, op: str, rd: u64, rs1: u64, imm: u64) {
+    ci_open(g, op);
+    co_x(g, rd);
+    co_s(g, ", ");
+    co_x(g, rs1);
+    co_s(g, ", ");
+    co_i(g, imm);
+    co_ch(g, 10_u8);
+}
+
+// op r, off(base): loads, stores and jalr. off is -2048 to 2047.
+fn ci_m(g: &mut Cg, op: str, r: u64, off: u64, base: u64) {
+    ci_open(g, op);
+    co_x(g, r);
+    co_s(g, ", ");
+    co_i(g, off);
+    co_ch(g, 40_u8);
+    co_x(g, base);
+    co_s(g, ")\n");
+}
+
+// A branch over the next n instructions when the condition holds.
+fn ci_skip(g: &mut Cg, op: str, rs1: u64, rs2: u64, n: u64) {
+    ci_open(g, op);
+    co_x(g, rs1);
+    co_s(g, ", ");
+    co_x(g, rs2);
+    co_s(g, ", ");
+    co_u(g, 4_u64 * (n + 1_u64));
+    co_ch(g, 10_u8);
+}
+
+// jal rd, label
+fn ci_jal(g: &mut Cg, rd: u64, label: str) {
+    ci_open(g, "jal");
+    co_x(g, rd);
+    co_s(g, ", ");
+    co_s(g, label);
+    co_ch(g, 10_u8);
+}
+
+// A jump to block b of the current function.
+fn ci_goto(g: &mut Cg, b: u64) {
+    co_s(g, "    jal x0, ");
+    co_block(g, b);
+    co_ch(g, 10_u8);
+}
+
+fn ci_word(g: &mut Cg, w: u64) {
+    co_s(g, "    .word ");
+    co_u(g, w & 0xFFFFFFFF_u64);
+    co_ch(g, 10_u8);
+}
+
+// True when v, read as a signed number, is -2048 to 2047.
+fn ci_small(v: u64) -> bool {
+    v <= 2047_u64 || v >= 0xFFFFFFFFFFFFF800_u64
+}
+
+// rd = the 64-bit constant v. A small constant is one addi. Any other is
+// kept in the code: jal steps over two data words and leaves their
+// address in rd, and ld reads them.
+fn ci_li(g: &mut Cg, rd: u64, v: u64) {
+    if ci_small(v) {
+        ci_i(g, "addi", rd, 0_u64, v);
+        return;
+    }
+    ci_open(g, "jal");
+    co_x(g, rd);
+    co_s(g, ", 12\n");
+    ci_word(g, v);
+    ci_word(g, v >> 32_u64);
+    ci_m(g, "ld", rd, 0_u64, rd);
+}
+
+// rd = base + off, for any off. rd may be base. Uses x31 when off is not
+// small.
+fn ci_add(g: &mut Cg, rd: u64, base: u64, off: u64) {
+    if ci_small(off) {
+        if off != 0_u64 || rd != base { ci_i(g, "addi", rd, base, off); }
+        return;
+    }
+    ci_li(g, 31_u64, off);
+    ci_r(g, "add", rd, base, 31_u64);
+}
+
+// The load and store mnemonics for a scalar type.
+fn ci_load_op(d: &CjDoc, t: u64) -> str {
+    let bits = ct_bits(d, t);
+    let sg = ct_signed(d, t);
+    if bits == 8_u64 && sg { return "lb"; }
+    if bits == 8_u64 { return "lbu"; }
+    if bits == 16_u64 && sg { return "lh"; }
+    if bits == 16_u64 { return "lhu"; }
+    if bits == 32_u64 && sg { return "lw"; }
+    if bits == 32_u64 { return "lwu"; }
+    "ld"
+}
+
+fn ci_store_op(d: &CjDoc, t: u64) -> str {
+    let bits = ct_bits(d, t);
+    if bits == 8_u64 { return "sb"; }
+    if bits == 16_u64 { return "sh"; }
+    if bits == 32_u64 { return "sw"; }
+    "sd"
+}
+
+// op r, off(base) for any off. Uses x31 when off is not small.
+fn ci_mem(g: &mut Cg, op: str, r: u64, base: u64, off: u64) {
+    if ci_small(off) {
+        ci_m(g, op, r, off, base);
+        return;
+    }
+    ci_li(g, 31_u64, off);
+    ci_r(g, "add", 31_u64, 31_u64, base);
+    ci_m(g, op, r, 0_u64, 31_u64);
+}
+
+// rd = the scalar of type t at base + off. The load extends the value to
+// 64 bits by the sign of the type, the form every register holds.
+fn ci_load(g: &mut Cg, d: &CjDoc, rd: u64, base: u64, off: u64, t: u64) {
+    ci_mem(g, ci_load_op(d, t), rd, base, off);
+}
+
+fn ci_store(g: &mut Cg, d: &CjDoc, rs: u64, base: u64, off: u64, t: u64) {
+    ci_mem(g, ci_store_op(d, t), rs, base, off);
+}
+
+// Brings register r to the form of type t: the low bits of the type,
+// extended to 64 bits by its sign. Defect 1 extends a signed type with
+// zeros.
+fn ci_norm(g: &mut Cg, d: &CjDoc, r: u64, t: u64) {
+    let bits = ct_bits(d, t);
+    if bits >= 64_u64 { return; }
+    let sh = 64_u64 - bits;
+    ci_i(g, "slli", r, r, sh);
+    if ct_signed(d, t) && g.v != CGC_SEXT {
+        ci_i(g, "srai", r, r, sh);
+    } else {
+        ci_i(g, "srli", r, r, sh);
+    }
+}
+
+// Copies n bytes from the address in src to the address in dst. dst and
+// src are x6 and x7 in some order; x28, x29 and x30 are used. Eight
+// bytes at a time when n is a multiple of 8, else byte by byte; a short
+// copy is written out, a long one is a loop.
+fn ci_copy(g: &mut Cg, dst: u64, src: u64, n: u64) {
+    let mut step: u64 = 1_u64;
+    if n % 8_u64 == 0_u64 { step = 8_u64; }
+    let mut ld = "lbu";
+    let mut st = "sb";
+    if step == 8_u64 {
+        ld = "ld";
+        st = "sd";
+    }
+    if n / step <= 8_u64 {
+        let mut o: u64 = 0_u64;
+        while o < n {
+            ci_m(g, ld, 28_u64, o, src);
+            ci_m(g, st, 28_u64, o, dst);
+            o = o + step;
+        }
+        return;
+    }
+    ci_i(g, "addi", 29_u64, src, 0_u64);
+    ci_i(g, "addi", 30_u64, dst, 0_u64);
+    ci_li(g, 28_u64, n / step);
+    ci_m(g, ld, 31_u64, 0_u64, 29_u64);
+    ci_m(g, st, 31_u64, 0_u64, 30_u64);
+    ci_i(g, "addi", 29_u64, 29_u64, step);
+    ci_i(g, "addi", 30_u64, 30_u64, step);
+    ci_i(g, "addi", 28_u64, 28_u64, 0xFFFFFFFFFFFFFFFF_u64);
+    co_s(g, "    bne x28, x0, -20\n");
+}
+
+// A trap: jumps to a routine of the runtime that prints its message and
+// halts. It follows a branch that skips it when all is well.
+fn ci_trap(g: &mut Cg, label: str) {
+    ci_jal(g, 0_u64, label);
+}

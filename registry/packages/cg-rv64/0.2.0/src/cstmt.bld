@@ -1,0 +1,294 @@
+// cg-rv64: statements. An aggregate (array, struct, slice) lives in
+// memory only and is copied byte for byte; a scalar goes through x5.
+
+// Copies the aggregate local named by the right-hand side rv, which must
+// be `Use(Local)` of exactly type t, to the address in x6.
+fn cs_copy_local(g: &mut Cg, d: &CjDoc, rv: u64, t: u64) {
+    let v = cj_body(d, rv);
+    let id = cv_local(d, v);
+    if !cj_tag_is(d, rv, "Use") || !cv_is_local(d, v) || !ct_same(d, cv_lty(g, id), t) || !ct_agg(d, t) {
+        cg_refuse(g, d, "aggregate store whose source is not a local of the stored type");
+        return;
+    }
+    ci_add(g, 7_u64, 2_u64, cv_loff(g, id));
+    ci_copy(g, 6_u64, 7_u64, ct_size(g, d, t));
+}
+
+// Stores operand op, of type t, at frame offset off.
+fn cs_elem(g: &mut Cg, d: &CjDoc, op: u64, t: u64, off: u64) {
+    if ct_scalar(d, t) {
+        cv_load(g, d, 5_u64, op, t);
+        ci_store(g, d, 5_u64, 2_u64, off, t);
+        return;
+    }
+    let id = cv_local(d, op);
+    if !cv_is_local(d, op) || !ct_same(d, cv_lty(g, id), t) || !ct_agg(d, t) {
+        cg_refuse(g, d, "aggregate element that is not a local of the element type");
+        return;
+    }
+    ci_add(g, 7_u64, 2_u64, cv_loff(g, id));
+    ci_add(g, 6_u64, 2_u64, off);
+    ci_copy(g, 6_u64, 7_u64, ct_size(g, d, t));
+}
+
+// An array literal: one operand for every element.
+fn cs_array(g: &mut Cg, d: &CjDoc, body: u64, t: u64, off: u64) {
+    let e = cj_body(d, cj_get(d, body, "kind"));
+    let ops = cj_get(d, body, "operands");
+    if ct_kind(d, t) != CT_ARRAY || !ct_same(d, e, ct_elem(d, t)) || cj_count(d, ops) != ct_alen(d, t) {
+        cg_refuse(g, d, "array literal that does not match the array it is stored to");
+        return;
+    }
+    let es = ct_size(g, d, e);
+    let mut op = cj_first(d, ops);
+    let mut i: u64 = 0_u64;
+    while op != CG_NONE {
+        cs_elem(g, d, op, e, off + i * es);
+        i = i + 1_u64;
+        op = cj_next(d, op);
+    }
+}
+
+// An array member of a struct literal: the operand is an array local of
+// the field's type, copied into the field. Since 0.2.0; 0.1.0 refused the
+// literal, because the hosted program built a wrong value (G26). Defect
+// 23 writes it one element past the field, defect 24 copies one element
+// fewer.
+fn cs_array_member(g: &mut Cg, d: &CjDoc, op: u64, t: u64, off: u64) {
+    let id = cv_local(d, op);
+    if !cv_is_local(d, op) || !ct_same(d, cv_lty(g, id), t) {
+        cg_refuse(g, d, "array member of a struct literal that is not a local of the field's type");
+        return;
+    }
+    let es = ct_size(g, d, ct_elem(d, t));
+    let mut at = off;
+    let mut n = ct_size(g, d, t);
+    if g.v == CGC_ARROFF { at = at + es; }
+    if g.v == CGC_ARRSHORT { n = n - es; }
+    ci_add(g, 7_u64, 2_u64, cv_loff(g, id));
+    ci_add(g, 6_u64, 2_u64, at);
+    ci_copy(g, 6_u64, 7_u64, n);
+}
+
+// A struct literal: one operand for every field, in field order.
+fn cs_struct(g: &mut Cg, d: &CjDoc, body: u64, t: u64, off: u64) {
+    let name = cj_body(d, cj_get(d, body, "kind"));
+    let ops = cj_get(d, body, "operands");
+    let fl = ct_fields(g, d, t);
+    if !cj_same_str(d, name, cj_body(d, t)) || fl == CG_NONE || cj_count(d, ops) != cj_count(d, fl) {
+        cg_refuse(g, d, "struct literal that does not match the struct it is stored to");
+        return;
+    }
+    let mut op = cj_first(d, ops);
+    let mut f = cj_first(d, fl);
+    while op != CG_NONE {
+        let fd = ct_field(g, d, t, cj_first(d, f));
+        if ct_kind(d, fd.ty) == CT_ARRAY {
+            cs_array_member(g, d, op, fd.ty, off + fd.off);
+        } else {
+            cs_elem(g, d, op, fd.ty, off + fd.off);
+        }
+        f = cj_next(d, f);
+        op = cj_next(d, op);
+    }
+}
+
+// A slice made from a whole array: the MIR writes it as a struct literal
+// named BlSlice_... with the array and its length. The slice holds the
+// address of the array and that length. The array is a local, or, since
+// 0.2.0, the array a pointer local points to: a field, an element or a
+// global borrowed where it lives.
+fn cs_slice(g: &mut Cg, d: &CjDoc, body: u64, t: u64, off: u64) {
+    let ops = cj_get(d, body, "operands");
+    let a = cj_first(d, ops);
+    let pt = cv_lty(g, cv_local(d, a));
+    if cv_is_local(d, a) && ct_kind(d, pt) == CT_PTR && ct_kind(d, ct_elem(d, pt)) == CT_ARRAY {
+        cs_slice_of_ptr(g, d, body, t, off);
+        return;
+    }
+    let name = cj_body(d, cj_get(d, body, "kind"));
+    let n = cj_next(d, a);
+    let at = cv_lty(g, cv_local(d, a));
+    let whole = cv_is_int(d, n) && cv_int_bits(d, n) == ct_alen(d, at);
+    let arr = cv_is_local(d, a) && ct_kind(d, at) == CT_ARRAY && ct_same(d, ct_elem(d, at), ct_elem(d, t));
+    if !cj_str_starts(d, name, "BlSlice_") || cj_count(d, ops) != 2_u64 || !arr || !whole {
+        cg_refuse(g, d, "slice that is not made from a whole array local");
+        return;
+    }
+    ci_add(g, 5_u64, 2_u64, cv_loff(g, cv_local(d, a)));
+    ci_mem(g, "sd", 5_u64, 2_u64, off);
+    ci_li(g, 5_u64, ct_alen(d, at));
+    ci_mem(g, "sd", 5_u64, 2_u64, off + 8_u64);
+}
+
+// A slice of the whole array a pointer local points to. Since 0.2.0.
+fn cs_slice_of_ptr(g: &mut Cg, d: &CjDoc, body: u64, t: u64, off: u64) {
+    let name = cj_body(d, cj_get(d, body, "kind"));
+    let ops = cj_get(d, body, "operands");
+    let a = cj_first(d, ops);
+    let n = cj_next(d, a);
+    let at = ct_elem(d, cv_lty(g, cv_local(d, a)));
+    let whole = cv_is_int(d, n) && cv_int_bits(d, n) == ct_alen(d, at);
+    let typed = ct_same(d, ct_elem(d, at), ct_elem(d, t));
+    if !cj_str_starts(d, name, "BlSlice_") || cj_count(d, ops) != 2_u64 || !typed || !whole {
+        cg_refuse(g, d, "slice that is not made from a whole array behind a pointer local");
+        return;
+    }
+    ci_mem(g, "ld", 5_u64, 2_u64, cv_loff(g, cv_local(d, a)));
+    ci_mem(g, "sd", 5_u64, 2_u64, off);
+    ci_li(g, 5_u64, ct_alen(d, at));
+    ci_mem(g, "sd", 5_u64, 2_u64, off + 8_u64);
+}
+
+// Assigns the right-hand side rv to the aggregate of type t at frame
+// offset off.
+fn cs_agg(g: &mut Cg, d: &CjDoc, rv: u64, t: u64, off: u64) {
+    let body = cj_body(d, rv);
+    let gi = cd_of(g, d, body);
+    if cj_tag_is(d, rv, "Use") && gi != CG_NONE {
+        if !ct_same(d, cd_ty(g, d, gi), t) {
+            cg_refuse(g, d, "aggregate copy of a global of another type");
+            return;
+        }
+        cd_addr(g, 7_u64, gi);
+        ci_add(g, 6_u64, 2_u64, off);
+        ci_copy(g, 6_u64, 7_u64, ct_size(g, d, t));
+    } else if cj_tag_is(d, rv, "Use") {
+        ci_add(g, 6_u64, 2_u64, off);
+        cs_copy_local(g, d, rv, t);
+    } else if cj_tag_is(d, rv, "Aggregate") {
+        let kind = cj_get(d, body, "kind");
+        if cj_tag_is(d, kind, "Array") {
+            cs_array(g, d, body, t, off);
+        } else if cj_tag_is(d, kind, "Struct") && ct_kind(d, t) == CT_SLICE {
+            cs_slice(g, d, body, t, off);
+        } else if cj_tag_is(d, kind, "Struct") && ct_kind(d, t) == CT_STRUCT {
+            cs_struct(g, d, body, t, off);
+        } else {
+            cg_refuse_tag(g, d, "aggregate literal", kind);
+        }
+    } else if cj_tag_is(d, rv, "FieldAccess") || cj_tag_is(d, rv, "IndexAccess") || cj_tag_is(d, rv, "Deref") {
+        let pt = cr_place(g, d, rv);
+        if pt == CG_NONE || !ct_same(d, pt, t) {
+            cg_refuse(g, d, "read of a place whose type is not the type it is stored to");
+            return;
+        }
+        ci_add(g, 6_u64, 2_u64, off);
+        ci_copy(g, 6_u64, 7_u64, ct_size(g, d, t));
+    } else {
+        cg_refuse_tag(g, d, "right-hand side of an aggregate assignment:", rv);
+    }
+}
+
+// local = rvalue. An assignment to a Void local, or from one, does
+// nothing, as in the C backend.
+fn cs_assign(g: &mut Cg, d: &CjDoc, body: u64) {
+    let dest = cj_mag(d, cj_get(d, body, "dest"));
+    let rv = cj_get(d, body, "value");
+    let t = cv_lty(g, dest);
+    if ct_kind(d, t) == CT_VOID { return; }
+    if (dest as usize) < g.gptr.len() && cj_tag_is(d, rv, "AddressOfGlobal") { g.gptr[dest as usize] = 1_u64; }
+    let src = cj_body(d, rv);
+    if cj_tag_is(d, rv, "Use") && cv_is_local(d, src) && ct_kind(d, cv_lty(g, cv_local(d, src))) == CT_VOID { return; }
+    if ct_scalar(d, t) {
+        cr_scalar(g, d, rv, t);
+        ci_store(g, d, 5_u64, 2_u64, cv_loff(g, dest), t);
+    } else if ct_agg(d, t) {
+        cs_agg(g, d, rv, t, cv_loff(g, dest));
+    } else {
+        cg_refuse(g, d, "assignment to a local of a type the generator does not cover");
+    }
+}
+
+// Stores the right-hand side rv, of type t, at the address x7 + off,
+// where x7 is loaded from the pointer local `ptr` when ptr is not
+// CG_NONE, and is the stack pointer otherwise.
+fn cs_store(g: &mut Cg, d: &CjDoc, rv: u64, t: u64, ptr: u64, off: u64) {
+    let mut base: u64 = 2_u64;
+    if ct_scalar(d, t) {
+        cr_scalar(g, d, rv, t);
+        if ptr != CG_NONE {
+            ci_mem(g, "ld", 7_u64, 2_u64, cv_loff(g, ptr));
+            base = 7_u64;
+        }
+        ci_store(g, d, 5_u64, base, off, t);
+        return;
+    }
+    if ptr != CG_NONE {
+        ci_mem(g, "ld", 6_u64, 2_u64, cv_loff(g, ptr));
+        base = 6_u64;
+    }
+    ci_add(g, 6_u64, base, off);
+    cs_copy_local(g, d, rv, t);
+}
+
+// ptr->field = rvalue and local.field = rvalue.
+fn cs_field_store(g: &mut Cg, d: &CjDoc, body: u64, through: bool) {
+    let mut id = cj_mag(d, cj_get(d, body, "base"));
+    if through { id = cj_mag(d, cj_get(d, body, "ptr")); }
+    let mut st = cv_lty(g, id);
+    if through {
+        if ct_kind(d, st) != CT_PTR { st = CG_NONE; }
+        st = ct_elem(d, st);
+    }
+    let f = ct_field(g, d, st, cj_get(d, body, "field_name"));
+    if !f.ok || !ct_known(g, d, f.ty) {
+        cg_refuse(g, d, "store to a field of a base that is not a struct or a pointer to one");
+        return;
+    }
+    if through {
+        cs_store(g, d, cj_get(d, body, "value"), f.ty, id, f.off);
+    } else {
+        cs_store(g, d, cj_get(d, body, "value"), f.ty, CG_NONE, cv_loff(g, id) + f.off);
+    }
+}
+
+// *ptr = rvalue.
+fn cs_deref_store(g: &mut Cg, d: &CjDoc, body: u64) {
+    let id = cj_mag(d, cj_get(d, body, "ptr"));
+    let pt = cv_lty(g, id);
+    let to = ct_elem(d, pt);
+    if ct_kind(d, pt) != CT_PTR || !ct_known(g, d, to) || ct_kind(d, to) == CT_VOID {
+        cg_refuse(g, d, "store through a local that is not a pointer");
+        return;
+    }
+    cs_store(g, d, cj_get(d, body, "value"), to, id, 0_u64);
+}
+
+// base[index] = rvalue, with the bounds check. Defect 13 stores eight
+// bytes whatever the element width.
+fn cs_index_store(g: &mut Cg, d: &CjDoc, body: u64) {
+    let e = cj_get(d, body, "elem_ty");
+    let rv = cj_get(d, body, "value");
+    if ct_scalar(d, e) { cr_scalar(g, d, rv, e); }
+    let got = cr_index(g, d, cj_get(d, body, "base"), cj_get(d, body, "index"), e, true);
+    if got == CG_NONE { return; }
+    if ct_scalar(d, e) {
+        if g.v == CGC_STORE8 { ci_m(g, "sd", 5_u64, 0_u64, 7_u64); } else { ci_store(g, d, 5_u64, 7_u64, 0_u64, e); }
+        return;
+    }
+    ci_i(g, "addi", 6_u64, 7_u64, 0_u64);
+    cs_copy_local(g, d, rv, e);
+}
+
+fn cs_stmt(g: &mut Cg, d: &CjDoc, stmt: u64) {
+    let kind = cj_get(d, stmt, "kind");
+    let body = cj_body(d, kind);
+    if cj_tag_is(d, kind, "Assign") {
+        cs_assign(g, d, body);
+    } else if cj_tag_is(d, kind, "FieldDerefAssign") {
+        cs_field_store(g, d, body, true);
+    } else if cj_tag_is(d, kind, "FieldAssign") {
+        cs_field_store(g, d, body, false);
+    } else if cj_tag_is(d, kind, "IndexStore") {
+        cs_index_store(g, d, body);
+    } else if cj_tag_is(d, kind, "DerefAssign") {
+        cs_deref_store(g, d, body);
+    } else if cj_tag_is(d, kind, "GlobalStore") {
+        cd_store(g, d, body);
+    } else if cj_tag_is(d, kind, "StorageLive") || cj_tag_is(d, kind, "StorageDead") || cj_tag_is(d, kind, "Nop") {
+        return;
+    } else {
+        cg_refuse_tag(g, d, "statement", kind);
+    }
+}

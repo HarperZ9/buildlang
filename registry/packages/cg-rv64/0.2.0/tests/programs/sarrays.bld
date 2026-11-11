@@ -1,0 +1,216 @@
+// Differential corpus, since 0.2.0: struct literals with an array field
+// beside other fields (refused by 0.1.0), stores into array fields of
+// locals, nested structs and arrays of structs, and an element store
+// through a slice of structs. Written by tests/tools/gen_corpus2.py.
+
+struct A_u8 { a: u8, w: [u8; 3], z: i64 }
+struct B_u8 { w: [u8; 4], b: u16 }
+struct C_u8 { c: i32, w: [u8; 1] }
+struct N_u8 { h: u8, inner: A_u8, ws: [A_u8; 2] }
+fn mk_u8(k: u64) -> A_u8 { A_u8 { a: k as u8, w: [51_u8, 228_u8, 149_u8], z: -7_i64 } }
+fn sw_u8(xs: &mut [A_u8], i: u64, v: u8) { xs[i].w[i % 3] = v; xs[i].a = 9_u8; }
+fn byv_u8(mut x: A_u8) -> u8 { x.w[1] = 0_u8; x.w[1] }
+fn sec_u8(k: u64) ~ Console {
+    let four: [u8; 4] = [255_u8, 168_u8, 89_u8, 10_u8];
+    let mut a = A_u8 { a: 1_u8, w: [0_u8, 255_u8, 29_u8], z: -2_i64 };
+    let b = B_u8 { w: four, b: 9_u16 };
+    let c = C_u8 { c: -1_i32, w: [206_u8] };
+    println!("{} {} {} {} {} {} {} {} {} {}", a.a, a.w[0], a.w[1], a.w[2], a.z, b.w[0], b.w[3], b.b, c.c, c.w[0]);
+    a.w[k % 3] = 127_u8;
+    let r = byv_u8(a);
+    println!("{} {} {} {} {} {}", r, a.a, a.w[0], a.w[1], a.w[2], a.z);
+    let mut nn = N_u8 { h: 2_u8, inner: a, ws: [a, mk_u8(k)] };
+    nn.ws[1].w[2] = 0_u8;
+    nn.inner.w[(k + 1) % 3] = 255_u8;
+    println!("{} {} {} {} {} {} {} {}", nn.h, nn.inner.w[0], nn.inner.w[1], nn.inner.w[2], nn.ws[0].w[0], nn.ws[1].a, nn.ws[1].w[2], nn.ws[1].z);
+    let mut xs: [A_u8; 2] = [a, mk_u8(k + 1)];
+    sw_u8(&mut xs, k % 2, 146_u8);
+    println!("{} {} {} {} {}", xs[0].a, xs[0].w[0], xs[1].a, xs[1].w[1], xs[1].w[2]);
+}
+struct A_i8 { a: u8, w: [i8; 3], z: i64 }
+struct B_i8 { w: [i8; 4], b: u16 }
+struct C_i8 { c: i32, w: [i8; 1] }
+struct N_i8 { h: u8, inner: A_i8, ws: [A_i8; 2] }
+fn mk_i8(k: u64) -> A_i8 { A_i8 { a: k as u8, w: [(-121_i8), 56_i8, (-23_i8)], z: -7_i64 } }
+fn sw_i8(xs: &mut [A_i8], i: u64, v: i8) { xs[i].w[i % 3] = v; xs[i].a = 9_u8; }
+fn byv_i8(mut x: A_i8) -> i8 { x.w[1] = (-128_i8); x.w[1] }
+fn sec_i8(k: u64) ~ Console {
+    let four: [i8; 4] = [127_i8, (-4_i8), (-83_i8), 94_i8];
+    let mut a = A_i8 { a: 1_u8, w: [(-128_i8), 127_i8, 113_i8], z: -2_i64 };
+    let b = B_i8 { w: four, b: 9_u16 };
+    let c = C_i8 { c: -1_i32, w: [34_i8] };
+    println!("{} {} {} {} {} {} {} {} {} {}", a.a, a.w[0], a.w[1], a.w[2], a.z, b.w[0], b.w[3], b.b, c.c, c.w[0]);
+    a.w[k % 3] = (-45_i8);
+    let r = byv_i8(a);
+    println!("{} {} {} {} {} {}", r, a.a, a.w[0], a.w[1], a.w[2], a.z);
+    let mut nn = N_i8 { h: 2_u8, inner: a, ws: [a, mk_i8(k)] };
+    nn.ws[1].w[2] = (-128_i8);
+    nn.inner.w[(k + 1) % 3] = 127_i8;
+    println!("{} {} {} {} {} {} {} {}", nn.h, nn.inner.w[0], nn.inner.w[1], nn.inner.w[2], nn.ws[0].w[0], nn.ws[1].a, nn.ws[1].w[2], nn.ws[1].z);
+    let mut xs: [A_i8; 2] = [a, mk_i8(k + 1)];
+    sw_i8(&mut xs, k % 2, (-26_i8));
+    println!("{} {} {} {} {}", xs[0].a, xs[0].w[0], xs[1].a, xs[1].w[1], xs[1].w[2]);
+}
+struct A_u16 { a: u8, w: [u16; 3], z: i64 }
+struct B_u16 { w: [u16; 4], b: u16 }
+struct C_u16 { c: i32, w: [u16; 1] }
+struct N_u16 { h: u8, inner: A_u16, ws: [A_u16; 2] }
+fn mk_u16(k: u64) -> A_u16 { A_u16 { a: k as u8, w: [64219_u16, 29836_u16, 60989_u16], z: -7_i64 } }
+fn sw_u16(xs: &mut [A_u16], i: u64, v: u16) { xs[i].w[i % 3] = v; xs[i].a = 9_u8; }
+fn byv_u16(mut x: A_u16) -> u16 { x.w[1] = 0_u16; x.w[1] }
+fn sec_u16(k: u64) ~ Console {
+    let four: [u16; 4] = [65535_u16, 23376_u16, 54529_u16, 20146_u16];
+    let mut a = A_u16 { a: 1_u8, w: [0_u16, 65535_u16, 48069_u16], z: -2_i64 };
+    let b = B_u16 { w: four, b: 9_u16 };
+    let c = C_u16 { c: -1_i32, w: [13686_u16] };
+    println!("{} {} {} {} {} {} {} {} {} {}", a.a, a.w[0], a.w[1], a.w[2], a.z, b.w[0], b.w[3], b.b, c.c, c.w[0]);
+    a.w[k % 3] = 44839_u16;
+    let r = byv_u16(a);
+    println!("{} {} {} {} {} {}", r, a.a, a.w[0], a.w[1], a.w[2], a.z);
+    let mut nn = N_u16 { h: 2_u8, inner: a, ws: [a, mk_u16(k)] };
+    nn.ws[1].w[2] = 0_u16;
+    nn.inner.w[(k + 1) % 3] = 65535_u16;
+    println!("{} {} {} {} {} {} {} {}", nn.h, nn.inner.w[0], nn.inner.w[1], nn.inner.w[2], nn.ws[0].w[0], nn.ws[1].a, nn.ws[1].w[2], nn.ws[1].z);
+    let mut xs: [A_u16; 2] = [a, mk_u16(k + 1)];
+    sw_u16(&mut xs, k % 2, 7226_u16);
+    println!("{} {} {} {} {}", xs[0].a, xs[0].w[0], xs[1].a, xs[1].w[1], xs[1].w[2]);
+}
+struct A_i16 { a: u8, w: [i16; 3], z: i64 }
+struct B_i16 { w: [i16; 4], b: u16 }
+struct C_i16 { c: i32, w: [i16; 1] }
+struct N_i16 { h: u8, inner: A_i16, ws: [A_i16; 2] }
+fn mk_i16(k: u64) -> A_i16 { A_i16 { a: k as u8, w: [(-849_i16), 30304_i16, (-4079_i16)], z: -7_i64 } }
+fn sw_i16(xs: &mut [A_i16], i: u64, v: i16) { xs[i].w[i % 3] = v; xs[i].a = 9_u8; }
+fn byv_i16(mut x: A_i16) -> i16 { x.w[1] = (-32768_i16); x.w[1] }
+fn sec_i16(k: u64) ~ Console {
+    let four: [i16; 4] = [32767_i16, 23844_i16, (-10539_i16), 20614_i16];
+    let mut a = A_i16 { a: 1_u8, w: [(-32768_i16), 32767_i16, (-16999_i16)], z: -2_i64 };
+    let b = B_i16 { w: four, b: 9_u16 };
+    let c = C_i16 { c: -1_i32, w: [14154_i16] };
+    println!("{} {} {} {} {} {} {} {} {} {}", a.a, a.w[0], a.w[1], a.w[2], a.z, b.w[0], b.w[3], b.b, c.c, c.w[0]);
+    a.w[k % 3] = (-20229_i16);
+    let r = byv_i16(a);
+    println!("{} {} {} {} {} {}", r, a.a, a.w[0], a.w[1], a.w[2], a.z);
+    let mut nn = N_i16 { h: 2_u8, inner: a, ws: [a, mk_i16(k)] };
+    nn.ws[1].w[2] = (-32768_i16);
+    nn.inner.w[(k + 1) % 3] = 32767_i16;
+    println!("{} {} {} {} {} {} {} {}", nn.h, nn.inner.w[0], nn.inner.w[1], nn.inner.w[2], nn.ws[0].w[0], nn.ws[1].a, nn.ws[1].w[2], nn.ws[1].z);
+    let mut xs: [A_i16; 2] = [a, mk_i16(k + 1)];
+    sw_i16(&mut xs, k % 2, 7694_i16);
+    println!("{} {} {} {} {}", xs[0].a, xs[0].w[0], xs[1].a, xs[1].w[1], xs[1].w[2]);
+}
+struct A_u32 { a: u8, w: [u32; 3], z: i64 }
+struct B_u32 { w: [u32; 4], b: u16 }
+struct C_u32 { c: i32, w: [u32; 1] }
+struct N_u32 { h: u8, inner: A_u32, ws: [A_u32; 2] }
+fn mk_u32(k: u64) -> A_u32 { A_u32 { a: k as u8, w: [2915368579_u32, 1274837044_u32, 3929272805_u32], z: -7_i64 } }
+fn sw_u32(xs: &mut [A_u32], i: u64, v: u32) { xs[i].w[i % 3] = v; xs[i].a = 9_u8; }
+fn byv_u32(mut x: A_u32) -> u32 { x.w[1] = 0_u32; x.w[1] }
+fn sec_u32(k: u64) ~ Console {
+    let four: [u32; 4] = [4294967295_u32, 3302645496_u32, 1662113961_u32, 21582426_u32];
+    let mut a = A_u32 { a: 1_u8, w: [0_u32, 4294967295_u32, 3689922413_u32], z: -2_i64 };
+    let b = B_u32 { w: four, b: 9_u16 };
+    let c = C_u32 { c: -1_i32, w: [2049390878_u32] };
+    println!("{} {} {} {} {} {} {} {} {} {}", a.a, a.w[0], a.w[1], a.w[2], a.z, b.w[0], b.w[3], b.b, c.c, c.w[0]);
+    a.w[k % 3] = 408859343_u32;
+    let r = byv_u32(a);
+    println!("{} {} {} {} {} {}", r, a.a, a.w[0], a.w[1], a.w[2], a.z);
+    let mut nn = N_u32 { h: 2_u8, inner: a, ws: [a, mk_u32(k)] };
+    nn.ws[1].w[2] = 0_u32;
+    nn.inner.w[(k + 1) % 3] = 4294967295_u32;
+    println!("{} {} {} {} {} {} {} {}", nn.h, nn.inner.w[0], nn.inner.w[1], nn.inner.w[2], nn.ws[0].w[0], nn.ws[1].a, nn.ws[1].w[2], nn.ws[1].z);
+    let mut xs: [A_u32; 2] = [a, mk_u32(k + 1)];
+    sw_u32(&mut xs, k % 2, 4077199330_u32);
+    println!("{} {} {} {} {}", xs[0].a, xs[0].w[0], xs[1].a, xs[1].w[1], xs[1].w[2]);
+}
+struct A_i32 { a: u8, w: [i32; 3], z: i64 }
+struct B_i32 { w: [i32; 4], b: u16 }
+struct C_i32 { c: i32, w: [i32; 1] }
+struct N_i32 { h: u8, inner: A_i32, ws: [A_i32; 2] }
+fn mk_i32(k: u64) -> A_i32 { A_i32 { a: k as u8, w: [(-1977974697_i32), 676461064_i32, (-964070471_i32)], z: -7_i64 } }
+fn sw_i32(xs: &mut [A_i32], i: u64, v: i32) { xs[i].w[i % 3] = v; xs[i].a = 9_u8; }
+fn byv_i32(mut x: A_i32) -> i32 { x.w[1] = (-2147483648_i32); x.w[1] }
+fn sec_i32(k: u64) ~ Console {
+    let four: [i32; 4] = [2147483647_i32, (-1590697780_i32), 1063737981_i32, (-576793554_i32)];
+    let mut a = A_i32 { a: 1_u8, w: [(-2147483648_i32), 2147483647_i32, (-1203420863_i32)], z: -2_i64 };
+    let b = B_i32 { w: four, b: 9_u16 };
+    let c = C_i32 { c: -1_i32, w: [1451014898_i32] };
+    println!("{} {} {} {} {} {} {} {} {} {}", a.a, a.w[0], a.w[1], a.w[2], a.z, b.w[0], b.w[3], b.b, c.c, c.w[0]);
+    a.w[k % 3] = (-189516637_i32);
+    let r = byv_i32(a);
+    println!("{} {} {} {} {} {}", r, a.a, a.w[0], a.w[1], a.w[2], a.z);
+    let mut nn = N_i32 { h: 2_u8, inner: a, ws: [a, mk_i32(k)] };
+    nn.ws[1].w[2] = (-2147483648_i32);
+    nn.inner.w[(k + 1) % 3] = 2147483647_i32;
+    println!("{} {} {} {} {} {} {} {}", nn.h, nn.inner.w[0], nn.inner.w[1], nn.inner.w[2], nn.ws[0].w[0], nn.ws[1].a, nn.ws[1].w[2], nn.ws[1].z);
+    let mut xs: [A_i32; 2] = [a, mk_i32(k + 1)];
+    sw_i32(&mut xs, k % 2, (-816143946_i32));
+    println!("{} {} {} {} {}", xs[0].a, xs[0].w[0], xs[1].a, xs[1].w[1], xs[1].w[2]);
+}
+struct A_u64 { a: u8, w: [u64; 3], z: i64 }
+struct B_u64 { w: [u64; 4], b: u16 }
+struct C_u64 { c: i32, w: [u64; 1] }
+struct N_u64 { h: u8, inner: A_u64, ws: [A_u64; 2] }
+fn mk_u64(k: u64) -> A_u64 { A_u64 { a: k as u8, w: [323841163819_u64, 326495599580_u64, 329150035341_u64], z: -7_i64 } }
+fn sw_u64(xs: &mut [A_u64], i: u64, v: u64) { xs[i].w[i % 3] = v; xs[i].a = 9_u8; }
+fn byv_u64(mut x: A_u64) -> u64 { x.w[1] = 0_u64; x.w[1] }
+fn sec_u64(k: u64) ~ Console {
+    let four: [u64; 4] = [18446744073709551615_u64, 337113342624_u64, 339767778385_u64, 342422214146_u64];
+    let mut a = A_u64 { a: 1_u8, w: [0_u64, 18446744073709551615_u64, 350385521429_u64], z: -2_i64 };
+    let b = B_u64 { w: four, b: 9_u16 };
+    let c = C_u64 { c: -1_i32, w: [353039957190_u64] };
+    println!("{} {} {} {} {} {} {} {} {} {}", a.a, a.w[0], a.w[1], a.w[2], a.z, b.w[0], b.w[3], b.b, c.c, c.w[0]);
+    a.w[k % 3] = 355694392951_u64;
+    let r = byv_u64(a);
+    println!("{} {} {} {} {} {}", r, a.a, a.w[0], a.w[1], a.w[2], a.z);
+    let mut nn = N_u64 { h: 2_u8, inner: a, ws: [a, mk_u64(k)] };
+    nn.ws[1].w[2] = 0_u64;
+    nn.inner.w[(k + 1) % 3] = 18446744073709551615_u64;
+    println!("{} {} {} {} {} {} {} {}", nn.h, nn.inner.w[0], nn.inner.w[1], nn.inner.w[2], nn.ws[0].w[0], nn.ws[1].a, nn.ws[1].w[2], nn.ws[1].z);
+    let mut xs: [A_u64; 2] = [a, mk_u64(k + 1)];
+    sw_u64(&mut xs, k % 2, 363657700234_u64);
+    println!("{} {} {} {} {}", xs[0].a, xs[0].w[0], xs[1].a, xs[1].w[1], xs[1].w[2]);
+}
+struct A_i64 { a: u8, w: [i64; 3], z: i64 }
+struct B_i64 { w: [i64; 4], b: u16 }
+struct C_i64 { c: i32, w: [i64; 1] }
+struct N_i64 { h: u8, inner: A_i64, ws: [A_i64; 2] }
+fn mk_i64(k: u64) -> A_i64 { A_i64 { a: k as u8, w: [(-9223371659924896769_i64), (-9223371657270461008_i64), (-9223371654616025247_i64)], z: -7_i64 } }
+fn sw_i64(xs: &mut [A_i64], i: u64, v: i64) { xs[i].w[i % 3] = v; xs[i].a = 9_u8; }
+fn byv_i64(mut x: A_i64) -> i64 { x.w[1] = (-9223372036854775808_i64); x.w[1] }
+fn sec_i64(k: u64) ~ Console {
+    let four: [i64; 4] = [9223372036854775807_i64, (-9223371646652717964_i64), (-9223371643998282203_i64), (-9223371641343846442_i64)];
+    let mut a = A_i64 { a: 1_u8, w: [(-9223372036854775808_i64), 9223372036854775807_i64, (-9223371633380539159_i64)], z: -2_i64 };
+    let b = B_i64 { w: four, b: 9_u16 };
+    let c = C_i64 { c: -1_i32, w: [(-9223371630726103398_i64)] };
+    println!("{} {} {} {} {} {} {} {} {} {}", a.a, a.w[0], a.w[1], a.w[2], a.z, b.w[0], b.w[3], b.b, c.c, c.w[0]);
+    a.w[k % 3] = (-9223371628071667637_i64);
+    let r = byv_i64(a);
+    println!("{} {} {} {} {} {}", r, a.a, a.w[0], a.w[1], a.w[2], a.z);
+    let mut nn = N_i64 { h: 2_u8, inner: a, ws: [a, mk_i64(k)] };
+    nn.ws[1].w[2] = (-9223372036854775808_i64);
+    nn.inner.w[(k + 1) % 3] = 9223372036854775807_i64;
+    println!("{} {} {} {} {} {} {} {}", nn.h, nn.inner.w[0], nn.inner.w[1], nn.inner.w[2], nn.ws[0].w[0], nn.ws[1].a, nn.ws[1].w[2], nn.ws[1].z);
+    let mut xs: [A_i64; 2] = [a, mk_i64(k + 1)];
+    sw_i64(&mut xs, k % 2, (-9223371620108360354_i64));
+    println!("{} {} {} {} {}", xs[0].a, xs[0].w[0], xs[1].a, xs[1].w[1], xs[1].w[2]);
+}
+fn run(k: u64) ~ Console {
+    sec_u8(k % 2);
+    sec_i8(k % 2);
+    sec_u16(k % 2);
+    sec_i16(k % 2);
+    sec_u32(k % 2);
+    sec_i32(k % 2);
+    sec_u64(k % 2);
+    sec_i64(k % 2);
+    let mut xs: [A_u16; 2] = [mk_u16(1_u64), mk_u16(2_u64)];
+    if k == 2_u64 { sw_u16(&mut xs, k, 5_u16); }
+    let mut q = mk_i64(k);
+    if k >= 3_u64 { q.w[k] = 1_i64; }
+    println!("{} {}", q.w[0], xs[1].w[1]);
+}
+
+fn main() ~ Console + Process + Environment {
+    run(args_get(1).parse_int() as u64);
+}

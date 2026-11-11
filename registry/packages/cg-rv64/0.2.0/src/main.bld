@@ -1,0 +1,164 @@
+// cg-rv64 command line.
+//
+//   cg-rv64 gen MIR ENTRY [ARG...]            print the assembly text
+//   cg-rv64 run MIR ENTRY MAX [ARG...]        generate, assemble with
+//                                             asm-rv64, run on the serial
+//                                             run of emu-rv64 for at most
+//                                             MAX steps, and print the
+//                                             serial bytes and nothing else
+//   cg-rv64 run-check MIR ENTRY MAX [ARG...]  the same run twice, with a
+//                                             summary in place of the bytes
+//   cg-rv64 genv V MIR ENTRY [ARG...]         gen with planted defect V
+//   cg-rv64 runv V MIR ENTRY MAX [ARG...]     run with planted defect V
+//   cg-rv64 controls                          the list of planted defects
+//
+// MIR is a file written by `buildc mir emit`. ENTRY is the name of the
+// function to start in, and each ARG is a decimal integer for one of its
+// parameters. This file is the only one that reads the command line.
+
+// Reads a decimal integer with an optional minus sign into out as a
+// magnitude and a sign. Returns false when s is not one or does not fit
+// 64 bits.
+fn cx_int(s: str, out: &mut Vec<u64>) -> bool {
+    let b = s.as_bytes();
+    let mut i: usize = 0;
+    let mut neg: u64 = 0_u64;
+    if s.len() > 0 && b[0] == 45_u8 {
+        neg = 1_u64;
+        i = 1;
+    }
+    let mut ok = i < s.len();
+    let mut mag: u64 = 0_u64;
+    while i < s.len() {
+        let c = b[i];
+        if c < 48_u8 || c > 57_u8 {
+            ok = false;
+        } else {
+            let v = (c - 48_u8) as u64;
+            if mag > (0xFFFFFFFFFFFFFFFF_u64 - v) / 10_u64 { ok = false; } else { mag = mag * 10_u64 + v; }
+        }
+        i = i + 1;
+    }
+    out.push(mag);
+    out.push(neg);
+    ok
+}
+
+// The bytes lo to hi of a buffer as text, for printing.
+fn cx_text(buf: &Vec<u8>, lo: usize, hi: usize) -> str {
+    let mut s = "";
+    let mut i = lo;
+    while i < hi {
+        s = s + format!("{}", buf[i] as char);
+        i = i + 1;
+    }
+    s
+}
+
+// Prints a buffer of text line by line.
+fn cx_print(buf: &Vec<u8>) ~ Console {
+    let mut lo: usize = 0;
+    let mut i: usize = 0;
+    while i < buf.len() {
+        if buf[i] == 10_u8 {
+            println!("{}", cx_text(buf, lo, i));
+            lo = i + 1;
+        }
+        i = i + 1;
+    }
+    if lo < buf.len() { println!("{}", cx_text(buf, lo, buf.len())); }
+}
+
+// Generates into g. first is the index of the MIR argument on the
+// command line. Returns 0, or the exit status after printing why
+// nothing was generated.
+fn cx_generate(g: &mut Cg, first: i32, skip: i32) -> i64 ~ Console + FileSystem + Environment {
+    let path = args_get(first);
+    let mut nums: Vec<u64> = Vec::new();
+    let mut k = first + 2 + skip;
+    while k < args_count() {
+        if !cx_int(args_get(k), &mut nums) {
+            println!("error: argument {} is not a decimal integer of 64 bits", args_get(k));
+            return 2;
+        }
+        k = k + 1;
+    }
+    if !file_exists(path) {
+        println!("error: cannot read {}", path);
+        return 3;
+    }
+    let d = cj_load(path);
+    cm_generate(g, &d, args_get(first + 1), &nums);
+    if g.bad {
+        println!("refused: {}", cx_text(&g.msg, 0, g.msg.len()));
+        return 1;
+    }
+    0
+}
+
+// Assembles the generated text and runs the image. check: print a
+// summary of two runs in place of the serial bytes.
+fn cx_run(g: &Cg, max: u64, check: bool) -> i64 ~ Console {
+    let mut o = as_out_new();
+    if as_assemble_big(0_u64, &g.out, g.out.len(), &mut o) != 0_u64 {
+        println!("internal error: asm-rv64 refused the generated text, line {}: {}", o.errs[0], as_err_text(o.errs[1]));
+        return 6;
+    }
+    let mut img: Vec<u8> = Vec::new();
+    ay_image(&o, &mut img);
+    let mut ram = ser_ram(SER_RAM);
+    let mut a: Vec<u8> = Vec::new();
+    let r = ser_run(&img, img.len(), &mut ram, max, &mut a);
+    if !check {
+        let bad = ser_print(&a);
+        eprintln!("serial: halted={} code={} steps={} serial_len={} serial_fnv={:016x} hash={:016x}",
+                  r.halted, r.code, r.steps, a.len(), ser_fnv(&a), r.hash);
+        return ser_status(&r, bad);
+    }
+    let mut b: Vec<u8> = Vec::new();
+    let q = ser_run(&img, img.len(), &mut ram, max, &mut b);
+    println!("run-check image_bytes={} ram={} max={}", img.len(), SER_RAM, max);
+    let same = ser_show(&r, &q, &a, &b);
+    if same && r.halted { return 0; }
+    1
+}
+
+fn cx_usage() ~ Console {
+    println!("usage: cg-rv64 gen MIR ENTRY [ARG...] | run MIR ENTRY MAX [ARG...] | run-check MIR ENTRY MAX [ARG...]");
+    println!("       cg-rv64 genv V MIR ENTRY [ARG...] | runv V MIR ENTRY MAX [ARG...] | controls");
+}
+
+// Runs a command. Returns the exit status, or -1 for no command.
+fn cx_main() -> i64 ~ Console + FileSystem + Process + Environment {
+    let cmd = args_get(1);
+    let argc = args_count();
+    if cmd == "controls" { return cx_controls(); }
+    let withv = cmd == "genv" || cmd == "runv";
+    let mut first: i32 = 2;
+    let mut v: u64 = 0_u64;
+    if withv {
+        first = 3;
+        v = args_get(2).parse_int() as u64;
+    }
+    let gen = cmd == "gen" || cmd == "genv";
+    let run = cmd == "run" || cmd == "runv" || cmd == "run-check";
+    if (!gen && !run) || (gen && argc < first + 2) || (run && argc < first + 3) || v > CGC_COUNT { return -1; }
+    let mut g = cg_new(v);
+    let mut skip: i32 = 0;
+    if run { skip = 1; }
+    let rc = cx_generate(&mut g, first, skip);
+    if rc != 0 { return rc; }
+    if gen {
+        cx_print(&g.out);
+        return 0;
+    }
+    cx_run(&g, args_get(first + 2).parse_int() as u64, cmd == "run-check")
+}
+
+fn main() ~ Console + FileSystem + Process + Environment {
+    let rc = cx_main();
+    if rc == 0 { return; }
+    if rc > 0 { exit(rc as i32); }
+    cx_usage();
+    exit(2);
+}

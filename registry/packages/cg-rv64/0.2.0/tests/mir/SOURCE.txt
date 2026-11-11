@@ -1,0 +1,21 @@
+# How the MIR fixtures of this folder were made.
+# Compiler: buildc 1.14.0, built from the repository at commit 709d6ad31f83b8fc55fa9211f2adaf6a1982677f;
+# its compiler/ folder equals that of 72a4eb26, the base of this package.
+# Commands, run from the package folder with BUILDLANG_STDLIB set to the stdlib folder of the repository.
+# The last column of each line is the SHA-256 of the fixture.
+copy of registry/packages/os-pfa/0.1.0: buildc pkg build . --registry REGISTRY; buildc mir emit target/pkg/work/main.bld -o tests/mir/os-pfa.mir.json | 2ec8df239e9019e4105b2d81332a18b2574198f956ace20499b74d81c6ea0a97
+copy of registry/packages/os-runq/0.1.0: buildc pkg build . --registry REGISTRY; buildc mir emit target/pkg/work/main.bld -o tests/mir/os-runq.mir.json | 0dad1f9e84d1844e9368e2ad608624e7e34747b51908c5e83a772df504262c41
+buildc mir emit tests/programs/structs.bld -o tests/mir/structs.mir.json | 977c1c2b749b046a3ad095987efa21984669fde3efe75beb500312634c16a977
+buildc mir emit tests/programs/calls.bld -o tests/mir/calls.mir.json | baf194b1e0221248662a8fffb859f96db73739b5a645a22fb48dde0e32987a48
+buildc mir emit tests/programs/vecs.bld -o tests/mir/vecs.mir.json | 204bc967639a008082e05009138f548bb972ce4689dab70e21c81d26a50b8e00
+buildc mir emit tests/programs/traps_s.bld -o tests/mir/traps_s.mir.json | 1774d07eb6b73737c230d5615028d2ee18b85ab4d05a299e70282c36902aef2c
+buildc mir emit tests/programs/refuse_float.bld -o tests/mir/refuse_float.mir.json | 33494fef3edf17285f9e2766c59793569bba9eebac530e7efc2f89017d3a43e5
+buildc mir emit tests/programs/refuse_str.bld -o tests/mir/refuse_str.mir.json | 9817d70811044f3cac5a4bc83bed9571d80c06583985f612ba2d27a2f68c9776
+buildc mir emit tests/programs/refuse_exit.bld -o tests/mir/refuse_exit.mir.json | 396942ec00dd188f20d05b64e3486c16fdf95d8db4d05bbe3d75af754f57196d
+# Since 0.2.0. The nine fixtures above were regenerated with the compiler of buildlang branch
+# compiler/g33-g35-g37 at commit 7170ab59 (the compiler/ folder of 11cd9894) and are byte for byte
+# equal to the 0.1.0 files, so they are kept. The four below were made with that compiler.
+buildc mir emit tests/programs/sarrays.bld -o tests/mir/sarrays.mir.json | a58c84370e5e809e2c1ea5b2cc2971704b9101112d3a372bb8f60a8f0833bfaa
+buildc mir emit tests/programs/globals.bld -o tests/mir/globals.mir.json | 8470d0984d7bc903a22b617a0076bb97f2fe03581335c59ceb63b6482a5d37be
+buildc mir emit tests/programs/byval.bld -o tests/mir/byval.mir.json | 5ffd146ff39513300714ad76d51b960e69bc8033f12f0a2f453615bfbc294f5a
+buildc mir emit tests/programs/refuse_gtuple.bld -o tests/mir/refuse_gtuple.mir.json | b6b92ad8b263fd5583be8beb63d9c29a54ccbfaa337d22fdf8b906fdee24be34
