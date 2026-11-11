@@ -1,0 +1,13 @@
+// emu-rv64 command line, seventh part: the checks of the system profile.
+
+// Runs a system profile command. Returns -1 when the first argument is not
+// one, else the exit status.
+fn sys_main() -> i64 ~ Console + Process + Environment {
+    let cmd = args_get(1);
+    if cmd == "scases" {
+        let st = svec_run(0_u64, true);
+        if st.bad != 0_u64 { return 1; }
+        return 0;
+    }
+    -1
+}

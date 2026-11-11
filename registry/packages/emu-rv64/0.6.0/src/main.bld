@@ -152,6 +152,9 @@ fn main() ~ Console + FileSystem + Process + Environment {
     let xc = ma_main();
     if xc == 0 { return; }
     if xc > 0 { exit(1); }
+    let sc = sys_main();
+    if sc == 0 { return; }
+    if sc > 0 { exit(1); }
     println!("usage: emu-rv64 cases | controls | fuzz SEED STEPS | props SEED STEPS");
     println!("       emu-rv64 mcases | mcontrols | mfuzz SEED STEPS | mprops SEED STEPS");
     println!("       emu-rv64 icases | icontrols | ifuzz SEED STEPS | iprops SEED STEPS");
