@@ -1,0 +1,117 @@
+variant 0: the core
+ differential:
+  accepted, 20000 steps: retired=12914 csr=3771 mret=2346 fetch_faults=421
+  traps by cause: 0=255 1=257 2=2710 3=443 5=1129 7=682 11=456
+  interrupts by cause: 3=370 7=322 11=462 timer_accesses=1393
+ properties:
+  accepted, 59 and 56 cases, 20000 round trips, 20000 raw words, 20000 timer round trips
+  20000 stream steps, 1116 interrupts judged, timer program 99 interrupts
+control 13: an interrupt is taken while MIE is 0
+ differential:
+  REFUSED kind=14 step=12 got=800000000000000b want=3
+ properties:
+  REFUSED kind=44 step=29 got=0 want=0
+ hand-computed case 29 fails
+ hand-computed case 49 fails
+ hand-computed case 51 fails
+ hand-computed case 52 fails
+ hand-computed case 53 fails
+ hand-computed case 54 fails
+ hand-computed case 55 fails
+ stream properties alone:
+  REFUSED kind=46 step=15 got=3 want=0
+control 14: an interrupt leaves bit 63 of mcause clear
+ differential:
+  REFUSED kind=14 step=98 got=3 want=8000000000000003
+ properties:
+  REFUSED kind=44 step=31 got=0 want=0
+ hand-computed case 31 fails
+ hand-computed case 32 fails
+ hand-computed case 33 fails
+ hand-computed case 36 fails
+ hand-computed case 37 fails
+ hand-computed case 38 fails
+ hand-computed case 39 fails
+ hand-computed case 40 fails
+ hand-computed case 41 fails
+ hand-computed case 42 fails
+ hand-computed case 43 fails
+ hand-computed case 44 fails
+ hand-computed case 46 fails
+ hand-computed case 48 fails
+ hand-computed case 52 fails
+ hand-computed case 53 fails
+ hand-computed case 55 fails
+ stream properties alone:
+  REFUSED kind=47 step=52 got=0 want=b
+control 15: an interrupt saves pc + 4 in mepc
+ differential:
+  REFUSED kind=13 step=98 got=800002ac want=800002a8
+ properties:
+  REFUSED kind=44 step=31 got=0 want=0
+ hand-computed case 31 fails
+ hand-computed case 32 fails
+ hand-computed case 33 fails
+ hand-computed case 36 fails
+ hand-computed case 37 fails
+ hand-computed case 38 fails
+ hand-computed case 39 fails
+ hand-computed case 40 fails
+ hand-computed case 41 fails
+ hand-computed case 42 fails
+ hand-computed case 43 fails
+ hand-computed case 44 fails
+ hand-computed case 46 fails
+ hand-computed case 48 fails
+ hand-computed case 52 fails
+ hand-computed case 53 fails
+ hand-computed case 55 fails
+ stream properties alone:
+  REFUSED kind=48 step=52 got=80000024 want=80000020
+control 16: vectored handler at BASE + cause
+ differential:
+  REFUSED kind=2 step=135 got=80000303 want=80000318
+ properties:
+  REFUSED kind=44 step=42 got=0 want=0
+ hand-computed case 42 fails
+ hand-computed case 43 fails
+ hand-computed case 44 fails
+ stream properties alone:
+  REFUSED kind=49 step=101 got=800003ef want=800003f8
+control 17: timer pending only while mtime > mtimecmp
+ differential:
+  REFUSED kind=1 step=900 got=0 want=3
+ properties:
+  REFUSED kind=44 step=22 got=0 want=0
+ hand-computed case 22 fails
+ hand-computed case 28 fails
+ hand-computed case 31 fails
+ hand-computed case 41 fails
+ hand-computed case 42 fails
+ hand-computed case 46 fails
+ hand-computed case 48 fails
+ hand-computed case 53 fails
+ stream properties alone:
+  REFUSED kind=47 step=2884 got=0 want=7
+control 18: timer interrupt taken before software
+ differential:
+  REFUSED kind=2 step=324 got=80000268 want=80000258
+ properties:
+  REFUSED kind=44 step=37 got=0 want=0
+ hand-computed case 37 fails
+ hand-computed case 40 fails
+ stream properties alone:
+  REFUSED kind=46 step=278 got=7 want=3
+control 19: mtime rises before the interrupt check
+ differential:
+  REFUSED kind=19 step=31 got=21 want=22
+ properties:
+  REFUSED kind=44 step=9 got=0 want=0
+ hand-computed case 9 fails
+ hand-computed case 19 fails
+ hand-computed case 20 fails
+ hand-computed case 21 fails
+ hand-computed case 50 fails
+ stream properties alone:
+  REFUSED kind=46 step=2883 got=7 want=0
+result: core accepted, 7 of 7 controls refused by both checks

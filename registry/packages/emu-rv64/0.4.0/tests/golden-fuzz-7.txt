@@ -1,0 +1,2 @@
+fuzz seed=7 steps=50000
+  accepted, 50000 steps: ok=29348 illegal=11863 bus=6557 align=808 loads=993 stores=575 jumps=5100

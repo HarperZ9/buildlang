@@ -1,0 +1,83 @@
+// Hand-computed cases 12 to 19 for the state hash and the checkpoint
+// compare of emu-rv64. Cases 20 to 27, which run an image, are in
+// rvec3.bld.
+
+// The hash of a small fixed state after one change. part: 0 nothing,
+// 1 mtime, 2 one byte of the output buffer, 3 register 31, 4 one byte of
+// memory, 5 pc.
+fn rv_hash_part(v: u64, part: u64) -> u64 {
+    let mut m = emu_new_machine();
+    let mut x: [u64; 32] = [0_u64; 32];
+    let mut ram: [u8; 16] = [0_u8; 16];
+    let mut out: [u8; 8] = [0_u8; 8];
+    let t = tape_new();
+    if part == 1_u64 { m.mtime = 1_u64; }
+    if part == 2_u64 { out[0] = 1_u8; }
+    if part == 3_u64 { x[31] = 1_u64; }
+    if part == 4_u64 { ram[15] = 1_u8; }
+    if part == 5_u64 { m.pc = V_N; }
+    rctl_hash(v, &m, &x, &ram, &out, &t)
+}
+
+// The hash of the same state after `sent` bytes were emptied from the
+// output buffer, the last of them `byte`.
+fn rv_hash_tape(v: u64, sent: u64, byte: u64) -> u64 {
+    let m = emu_new_machine();
+    let x: [u64; 32] = [0_u64; 32];
+    let ram: [u8; 16] = [0_u8; 16];
+    let out: [u8; 8] = [0_u8; 8];
+    let t = Tape { sent: sent, dig: fnv_byte(FNV_BASIS, byte), irqs: 0_u64 };
+    rctl_hash(v, &m, &x, &ram, &out, &t)
+}
+
+// The 0.3.0 state hash of the state of rv_hash_part(v, 0).
+fn rv_hash_plain() -> u64 {
+    let m = emu_new_machine();
+    let x: [u64; 32] = [0_u64; 32];
+    let ram: [u8; 16] = [0_u8; 16];
+    let out: [u8; 8] = [0_u8; 8];
+    state_hash(&m, &x, &ram, &out)
+}
+
+// Cases 12 to 15: the hash changes with each part of the state.
+fn rv_hashes(st: &mut RSt) ~ Console {
+    let h0 = rv_hash_part(st.v, 0_u64);
+    rv_note(st, 12_u64, rv_hash_part(st.v, 1_u64) != h0, "two states that differ only in mtime hash differently");
+    rv_note(st, 13_u64, rv_hash_part(st.v, 2_u64) != h0, "two states that differ only in one output byte hash differently");
+    let ta = rv_hash_tape(st.v, 1_u64, 0x2E_u64);
+    let tb = rv_hash_tape(st.v, 1_u64, 0x2F_u64);
+    rv_note(st, 14_u64, ta != tb && ta != h0 && h0 == rv_hash_plain(),
+            "one emptied byte 2E or 2F hashes differently, and with none emptied the hash is the 0.3.0 state hash");
+    let rest = rv_hash_part(st.v, 3_u64) != h0 && rv_hash_part(st.v, 4_u64) != h0 && rv_hash_part(st.v, 5_u64) != h0;
+    rv_note(st, 15_u64, rest, "a register, a memory byte and pc each change the hash");
+}
+
+// A list of three hashes.
+fn rv_list(a: u64, b: u64, c: u64, n: u64) -> Vec<u64> {
+    let mut l: Vec<u64> = Vec::new();
+    if n > 0_u64 { l.push(a); }
+    if n > 1_u64 { l.push(b); }
+    if n > 2_u64 { l.push(c); }
+    l
+}
+
+// Cases 16 to 19: the checkpoint compare.
+fn rv_compare(st: &mut RSt) ~ Console {
+    let base = rv_list(1_u64, 2_u64, 3_u64, 3_u64);
+    let same = rv_list(1_u64, 2_u64, 3_u64, 3_u64);
+    let mid = rv_list(1_u64, 9_u64, 3_u64, 3_u64);
+    let end = rv_list(1_u64, 2_u64, 9_u64, 3_u64);
+    let short = rv_list(1_u64, 2_u64, 3_u64, 2_u64);
+    let d16 = rctl_diff(st.v, &base, &same);
+    rv_note(st, 16_u64, d16 == 3_u64 && rctl_same(st.v, &base, &same),
+            format!("1 2 3 against 1 2 3: no difference, index {}", d16));
+    let d17 = rctl_diff(st.v, &mid, &base);
+    rv_note(st, 17_u64, d17 == 1_u64 && !rctl_same(st.v, &mid, &base),
+            format!("1 9 3 against 1 2 3: first difference at index {}", d17));
+    let d18 = rctl_diff(st.v, &end, &base);
+    rv_note(st, 18_u64, d18 == 2_u64 && !rctl_same(st.v, &end, &base),
+            format!("1 2 9 against 1 2 3: first difference at index {}", d18));
+    let d19 = rctl_diff(st.v, &short, &base);
+    rv_note(st, 19_u64, d19 == 2_u64 && !rctl_same(st.v, &short, &base),
+            format!("1 2 against 1 2 3: lists differ, index {}", d19));
+}

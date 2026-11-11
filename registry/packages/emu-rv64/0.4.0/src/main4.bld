@@ -1,0 +1,184 @@
+// emu-rv64 command line, fourth part: flat images and replay.
+//
+//   emu-rv64 run IMAGE STEPS [RAM]     load a flat image file and run it
+//   emu-rv64 replay IMAGE STEPS [RAM]  run it twice from scratch and compare
+//                                      the state hash every 1000 steps
+//   emu-rv64 image NAME                print a built-in image as hex bytes
+//   emu-rv64 image NAME FILE           check that FILE holds exactly those bytes
+//   emu-rv64 rcases | rprops SEED STEPS | rcontrols    the checks, in main5.bld
+//
+// RAM is the memory size in bytes, 256 (the default) or 65536. This file is
+// the only one in the package that reads a file.
+
+// Copies the start of a file into buf. Returns the length of the file,
+// which may be more than buf holds.
+fn file_into(path: str, buf: &mut [u8]) -> usize ~ FileSystem {
+    let s = read_bytes(path);
+    let b = s.as_bytes();
+    let mut i: usize = 0;
+    while i < s.len() && i < buf.len() {
+        buf[i] = b[i];
+        i = i + 1;
+    }
+    s.len()
+}
+
+// Prints why an image was refused. Returns the exit status: 4 for an empty
+// image, 5 for one larger than memory.
+fn img_refuse(path: str, len: usize, cap: usize, rc: u64) -> i64 ~ Console {
+    if rc == IMG_EMPTY {
+        println!("error: image {} is empty", path);
+        return 4;
+    }
+    println!("error: image {} has {} bytes and memory has {}", path, len, cap);
+    5
+}
+
+fn cmd_run(path: str, len: usize, steps: u64, ram: &mut [u8], buf: &[u8]) -> i64 ~ Console {
+    let mut m = emu_new_machine();
+    let mut x: [u64; 32] = [0_u64; 32];
+    let mut out: [u8; 128] = [0_u8; 128];
+    let mut t = tape_new();
+    let mut ck: Vec<u64> = Vec::new();
+    let mut n = len;
+    if n > buf.len() { n = buf.len(); }
+    let p = plan_new(0_u64, 0_u64, steps, 0_u64);
+    let rc = rr_run(&p, buf, n, &mut m, &mut x, ram, &mut out, &mut t, &mut ck);
+    if rc != IMG_OK { return img_refuse(path, len, ram.len(), rc); }
+    println!("run image={} bytes={} ram={} steps={}", path, len, ram.len(), steps);
+    println!("  interrupts={} retired={} traps={} pc={:08x} mtime={} serial_len={}",
+             t.irqs, m.steps, m.traps, m.pc, m.mtime, t.sent + m.out_len);
+    println!("  hash={:016x}", ck[ck.len() - 1]);
+    if m.steps + m.traps != steps {
+        println!("  STOPPED after {} steps", m.steps + m.traps);
+        return 1;
+    }
+    0
+}
+
+// Prints the outcome of a replay from the two checkpoint lists.
+fn replay_show(a: &Vec<u64>, b: &Vec<u64>, steps: u64) -> i64 ~ Console {
+    let d = ck_first_diff(a, b);
+    let mut k: u64 = 0_u64;
+    while k < d {
+        println!("  step {} hash={:016x}", ck_step(k, RR_EVERY, steps), a[k as usize]);
+        k = k + 1_u64;
+    }
+    if ck_same(a, b) {
+        println!("  runs agree at {} of {} checkpoints", d, a.len());
+        return 0;
+    }
+    let s = ck_step(d, RR_EVERY, steps);
+    if (d as usize) < a.len() && (d as usize) < b.len() {
+        println!("  step {}: run 1 hash={:016x} run 2 hash={:016x}", s, a[d as usize], b[d as usize]);
+    }
+    println!("  RUNS DISAGREE, first at step {}", s);
+    1
+}
+
+fn cmd_replay(path: str, len: usize, steps: u64, ram: &mut [u8], buf: &[u8]) -> i64 ~ Console {
+    let mut m = emu_new_machine();
+    let mut x: [u64; 32] = [0_u64; 32];
+    let mut out: [u8; 128] = [0_u8; 128];
+    let mut t = tape_new();
+    let mut a: Vec<u64> = Vec::new();
+    let mut b: Vec<u64> = Vec::new();
+    let mut n = len;
+    if n > buf.len() { n = buf.len(); }
+    let p = plan_new(0_u64, 0_u64, steps, RR_EVERY);
+    let rc = rr_run(&p, buf, n, &mut m, &mut x, ram, &mut out, &mut t, &mut a);
+    if rc != IMG_OK { return img_refuse(path, len, ram.len(), rc); }
+    let q = plan_new(0_u64, 1_u64, steps, RR_EVERY);
+    rr_run(&q, buf, n, &mut m, &mut x, ram, &mut out, &mut t, &mut b);
+    println!("replay image={} bytes={} ram={} steps={} interval={}", path, len, ram.len(), steps, RR_EVERY);
+    replay_show(&a, &b, steps)
+}
+
+// Reads the file and runs the command on a memory of ram.len() bytes. buf
+// holds one byte more than memory, so the loader sees an image that is too
+// large as too large.
+fn cmd_file(cmd: str, path: str, steps: u64, ram: &mut [u8], buf: &mut [u8]) -> i64 ~ Console + FileSystem {
+    if !file_exists(path) {
+        println!("error: cannot read image {}", path);
+        return 3;
+    }
+    let len = file_into(path, buf);
+    if cmd == "run" { return cmd_run(path, len, steps, ram, buf); }
+    cmd_replay(path, len, steps, ram, buf)
+}
+
+fn img_name(name: str) -> u64 {
+    if name == "timer" { return 1_u64; }
+    if name == "trap" { return 2_u64; }
+    0_u64
+}
+
+// Prints n bytes as hex, 16 to a line.
+fn hex_dump(buf: &[u8], n: usize) ~ Console {
+    let mut i: usize = 0;
+    let mut line = "";
+    while i < n {
+        line = line + format!("{:02x}", buf[i] as u64);
+        i = i + 1;
+        if i % 16 == 0 || i == n {
+            println!("{}", line);
+            line = "";
+        }
+    }
+}
+
+fn cmd_image(name: str, path: str, check: bool) -> i64 ~ Console + FileSystem {
+    let mut want: [u8; 256] = [0_u8; 256];
+    let mut got: [u8; 256] = [0_u8; 256];
+    let n = img_builtin(img_name(name), &mut want);
+    if n == 0 {
+        println!("error: no built-in image {} (timer, trap)", name);
+        return 2;
+    }
+    if !check {
+        hex_dump(&want, n);
+        return 0;
+    }
+    if !file_exists(path) {
+        println!("error: cannot read image {}", path);
+        return 3;
+    }
+    let len = file_into(path, &mut got);
+    let mut same = len == n;
+    let mut i: usize = 0;
+    while i < n {
+        if got[i] != want[i] { same = false; }
+        i = i + 1;
+    }
+    println!("image {}: {} bytes, file {} has {} bytes, equal={}", name, n, path, len, same);
+    if same { return 0; }
+    1
+}
+
+// Runs an image command. Returns -1 when the first argument is not one,
+// else the exit status.
+fn replay_main() -> i64 ~ Console + FileSystem + Process + Environment {
+    let cmd = args_get(1);
+    let argc = args_count();
+    if cmd == "image" && argc >= 3 {
+        return cmd_image(args_get(2), args_get(3), argc >= 4);
+    }
+    if (cmd == "run" || cmd == "replay") && argc >= 4 {
+        let steps = args_get(3).parse_int() as u64;
+        let mut size = "256";
+        if argc >= 5 { size = args_get(4); }
+        if size == "65536" {
+            let mut ram: [u8; 65536] = [0_u8; 65536];
+            let mut buf: [u8; 65537] = [0_u8; 65537];
+            return cmd_file(cmd, args_get(2), steps, &mut ram, &mut buf);
+        }
+        if size == "256" {
+            let mut ram: [u8; 256] = [0_u8; 256];
+            let mut buf: [u8; 257] = [0_u8; 257];
+            return cmd_file(cmd, args_get(2), steps, &mut ram, &mut buf);
+        }
+        println!("error: RAM is 256 or 65536");
+        return 2;
+    }
+    rcheck_main()
+}

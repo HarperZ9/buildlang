@@ -1,0 +1,97 @@
+// emu-rv64 command line, fifth part: the checks of the image loader and of
+// replay.
+//
+//   emu-rv64 rcases              hand-computed loader, hash, compare and run
+//                                cases
+//   emu-rv64 rprops SEED STEPS   property run on seeded random images, no model
+//   emu-rv64 rcontrols           shows that every planted defect is refused
+
+// Runs the property rules for variant v. Returns 1 when they refuse it.
+fn rprops_one(v: u64, seed: u64, steps: u64) -> i64 ~ Console {
+    let mut ct: [u64; 12] = [0_u64; 12];
+    let f = rprop_run(v, seed, steps, &mut ct);
+    if f.kind != 0 {
+        show_refusal(&f);
+        return 1;
+    }
+    println!("  accepted, {} images, {} steps, {} retired, {} traps, {} interrupts, {} checkpoints",
+             ct[0], ct[1], ct[2], ct[3], ct[7], ct[4]);
+    println!("  images: {} random bytes, {} stream words, {} with a handler, {} timer; {} of 256 bytes; {} flipped bytes overwritten",
+             ct[8], ct[9], ct[10], ct[11], ct[6], ct[5]);
+    0
+}
+
+fn rcontrol_name(v: u64) ~ Console {
+    if v == 0_u64 { println!("variant 0: the core"); }
+    if v == 20_u64 { println!("control 20: the loader drops the last byte of the image"); }
+    if v == 21_u64 { println!("control 21: the loader places the image one byte late"); }
+    if v == 22_u64 { println!("control 22: the loader leaves memory of an earlier run in place"); }
+    if v == 23_u64 { println!("control 23: the state hash leaves mtime out"); }
+    if v == 24_u64 { println!("control 24: the state hash leaves the serial output out"); }
+    if v == 25_u64 { println!("control 25: the second run starts with mtime = 1"); }
+    if v == 26_u64 { println!("control 26: the checkpoint compare looks only at the last hash"); }
+}
+
+// Prints every hand-computed case that variant v fails. Returns 1 when at
+// least one fails.
+fn rcontrol_cases(v: u64) -> i64 ~ Console {
+    let mask = rvec_mask(v);
+    let mut k: u64 = 1_u64;
+    while k < 64_u64 {
+        if ((mask >> k) & 1_u64) == 1_u64 { println!("  hand-computed case {} fails", k); }
+        k = k + 1_u64;
+    }
+    if mask == 0_u64 {
+        println!("  accepted, 27 cases");
+        return 0;
+    }
+    1
+}
+
+// Every control must be refused by the cases and by the property rules,
+// and the core must pass both.
+fn rcontrols() -> i64 ~ Console {
+    let mut bad: i64 = 0;
+    let mut v: u64 = 0_u64;
+    while v <= RCTL_LAST {
+        rcontrol_name(v);
+        println!(" cases:");
+        let c = rcontrol_cases(v);
+        println!(" properties:");
+        let q = rprops_one(v, 1_u64, 20000_u64);
+        if v == 0_u64 && (c + q) != 0 { bad = bad + 1; }
+        if v != 0_u64 && (c == 0 || q == 0) {
+            println!("  ACCEPTED A PLANTED DEFECT");
+            bad = bad + 1;
+        }
+        v = v + 1_u64;
+        if v == 1_u64 { v = RCTL_FIRST; }
+    }
+    if bad == 0 {
+        println!("result: core accepted, 7 of 7 controls refused by both checks");
+    } else {
+        println!("result: FAILED, {} variants judged wrongly", bad);
+    }
+    bad
+}
+
+// Runs a loader or replay check. Returns -1 when the first argument is not
+// one, else the exit status.
+fn rcheck_main() -> i64 ~ Console + Process + Environment {
+    let cmd = args_get(1);
+    if cmd == "rcases" {
+        if rvec_run(0_u64, true) != 0_u64 { return 1; }
+        return 0;
+    }
+    if cmd == "rcontrols" {
+        if rcontrols() != 0 { return 1; }
+        return 0;
+    }
+    if cmd == "rprops" {
+        let seed = args_get(2).parse_int() as u64;
+        let steps = args_get(3).parse_int() as u64;
+        println!("rprops seed={} steps={}", seed, steps);
+        return rprops_one(0_u64, seed, steps);
+    }
+    -1
+}
