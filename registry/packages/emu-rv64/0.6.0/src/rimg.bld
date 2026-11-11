@@ -55,9 +55,12 @@ fn tape_new() -> Tape {
 
 // The start state of everything but memory: the machine in the reset state
 // of the trap profile, every register 0, the output buffer zero and the
-// tape empty.
+// tape empty. Since 0.6.0 a machine in the system profile is reset to the
+// reset state of that profile.
 fn rr_reset(m: &mut Machine, x: &mut [u64], out: &mut [u8], t: &mut Tape) {
+    let system = m.profile == EMU_PROFILE_SYSTEM;
     *m = emu_new_machine();
+    if system { *m = emu_new_system(); }
     *t = tape_new();
     let mut i: usize = 0;
     while i < x.len() {
@@ -101,7 +104,9 @@ fn rr_step(m: &mut Machine, x: &mut [u64], ram: &mut [u8], out: &mut [u8], t: &m
         rr_drain(m, out, t);
         rc = emu_step(m, x, ram, out);
     }
-    if rc == EMU_TRAP && (m.mcause & EMU_SIGN) != 0_u64 { t.irqs = t.irqs + 1_u64; }
+    let mut cause = m.mcause;
+    if m.profile == EMU_PROFILE_SYSTEM && m.prv == PRIV_S { cause = m.scause; }
+    if rc == EMU_TRAP && (cause & EMU_SIGN) != 0_u64 { t.irqs = t.irqs + 1_u64; }
     rc
 }
 

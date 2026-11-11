@@ -1,0 +1,155 @@
+// Hand cases of asm-rv64, third part: one statement, one word. Branches,
+// jumps, upper immediates, Zicsr, the rest, and ways of writing.
+
+// Branches: rs1, rs2, offset in bytes from the instruction. The lowest
+// and highest offset, -2 and 0, then offsets that set one bit each.
+fn ac_branch(st: &mut AcSt) ~ Console {
+    ac_w(st, "beq x1, x2, -4096", 0x80208063_u64);
+    ac_w(st, "beq x1, x2, -2", 0xFE208FE3_u64);
+    ac_w(st, "beq x1, x2, 0", 0x00208063_u64);
+    ac_w(st, "beq x1, x2, 4094", 0x7E208FE3_u64);
+    ac_w(st, "bne x1, x2, -4096", 0x80209063_u64);
+    ac_w(st, "bne x1, x2, -2", 0xFE209FE3_u64);
+    ac_w(st, "bne x1, x2, 0", 0x00209063_u64);
+    ac_w(st, "bne x1, x2, 4094", 0x7E209FE3_u64);
+    ac_w(st, "blt x1, x2, -4096", 0x8020C063_u64);
+    ac_w(st, "blt x1, x2, -2", 0xFE20CFE3_u64);
+    ac_w(st, "blt x1, x2, 0", 0x0020C063_u64);
+    ac_w(st, "blt x1, x2, 4094", 0x7E20CFE3_u64);
+    ac_w(st, "bge x1, x2, -4096", 0x8020D063_u64);
+    ac_w(st, "bge x1, x2, -2", 0xFE20DFE3_u64);
+    ac_w(st, "bge x1, x2, 0", 0x0020D063_u64);
+    ac_w(st, "bge x1, x2, 4094", 0x7E20DFE3_u64);
+    ac_w(st, "bltu x1, x2, -4096", 0x8020E063_u64);
+    ac_w(st, "bltu x1, x2, -2", 0xFE20EFE3_u64);
+    ac_w(st, "bltu x1, x2, 0", 0x0020E063_u64);
+    ac_w(st, "bltu x1, x2, 4094", 0x7E20EFE3_u64);
+    ac_w(st, "bgeu x1, x2, -4096", 0x8020F063_u64);
+    ac_w(st, "bgeu x1, x2, -2", 0xFE20FFE3_u64);
+    ac_w(st, "bgeu x1, x2, 0", 0x0020F063_u64);
+    ac_w(st, "bgeu x1, x2, 4094", 0x7E20FFE3_u64);
+    ac_w(st, "beq x1, x2, 6", 0x00208363_u64);
+    ac_w(st, "beq x1, x2, 2048", 0x002080E3_u64);
+    ac_w(st, "beq x1, x2, 32", 0x02208063_u64);
+    ac_w(st, "bne x31, x30, -8", 0xFFEF9CE3_u64);
+    ac_w(st, "self: beq x1, x2, self", 0x00208063_u64);
+}
+
+// jal: rd, offset in bytes from the instruction. The lowest and highest
+// offset, -2 and 0, then offsets that set one bit each.
+fn ac_jump(st: &mut AcSt) ~ Console {
+    ac_w(st, "jal x1, -1048576", 0x800000EF_u64);
+    ac_w(st, "jal x1, -2", 0xFFFFF0EF_u64);
+    ac_w(st, "jal x1, 0", 0x000000EF_u64);
+    ac_w(st, "jal x1, 1048574", 0x7FFFF0EF_u64);
+    ac_w(st, "jal x0, -4", 0xFFDFF06F_u64);
+    ac_w(st, "jal x3, 8192", 0x000021EF_u64);
+    ac_w(st, "jal x1, 2048", 0x001000EF_u64);
+    ac_w(st, "jal x1, 4096", 0x000010EF_u64);
+    ac_w(st, "jal x1, 0x80000", 0x000800EF_u64);
+    ac_w(st, "jal x31, 2", 0x00200FEF_u64);
+    ac_w(st, "self: jal x0, self", 0x0000006F_u64);
+}
+
+// lui and auipc: rd, the upper 20 bits as a number 0 to 1048575.
+fn ac_upper(st: &mut AcSt) ~ Console {
+    ac_w(st, "lui x3, 0", 0x000001B7_u64);
+    ac_w(st, "lui x3, 1", 0x000011B7_u64);
+    ac_w(st, "lui x3, 0x80000", 0x800001B7_u64);
+    ac_w(st, "lui x3, 0xFFFFF", 0xFFFFF1B7_u64);
+    ac_w(st, "lui x3, 1048575", 0xFFFFF1B7_u64);
+    ac_w(st, "auipc x3, 0", 0x00000197_u64);
+    ac_w(st, "auipc x3, 1", 0x00001197_u64);
+    ac_w(st, "auipc x3, 0x80000", 0x80000197_u64);
+    ac_w(st, "auipc x3, 0xFFFFF", 0xFFFFF197_u64);
+    ac_w(st, "auipc x3, 1048575", 0xFFFFF197_u64);
+    ac_w(st, "lui x5, 0x2004", 0x020042B7_u64);
+    ac_w(st, "lui x31, 0x12345", 0x12345FB7_u64);
+}
+
+// Zicsr: rd, csr, rs1 and rd, csr, uimm. CSR numbers 0 and 4095, and uimm
+// 0 and 31.
+fn ac_csr(st: &mut AcSt) ~ Console {
+    ac_w(st, "csrrw x3, mscratch, x1", 0x340091F3_u64);
+    ac_w(st, "csrrs x3, mscratch, x1", 0x3400A1F3_u64);
+    ac_w(st, "csrrc x3, mscratch, x1", 0x3400B1F3_u64);
+    ac_w(st, "csrrwi x3, mscratch, 0", 0x340051F3_u64);
+    ac_w(st, "csrrwi x3, mscratch, 21", 0x340AD1F3_u64);
+    ac_w(st, "csrrwi x3, mscratch, 31", 0x340FD1F3_u64);
+    ac_w(st, "csrrsi x3, mscratch, 0", 0x340061F3_u64);
+    ac_w(st, "csrrsi x3, mscratch, 21", 0x340AE1F3_u64);
+    ac_w(st, "csrrsi x3, mscratch, 31", 0x340FE1F3_u64);
+    ac_w(st, "csrrci x3, mscratch, 0", 0x340071F3_u64);
+    ac_w(st, "csrrci x3, mscratch, 21", 0x340AF1F3_u64);
+    ac_w(st, "csrrci x3, mscratch, 31", 0x340FF1F3_u64);
+    ac_w(st, "csrrw x1, 0, x2", 0x000110F3_u64);
+    ac_w(st, "csrrw x1, 4095, x2", 0xFFF110F3_u64);
+    ac_w(st, "csrrs x3, 0x7c0, x0", 0x7C0021F3_u64);
+    ac_w(st, "csrrs x3, 0xC00, x0", 0xC00021F3_u64);
+    ac_w(st, "csrrc x31, 0x340, x31", 0x340FBFF3_u64);
+    ac_w(st, "csrrwi x0, 0xfff, 31", 0xFFFFD073_u64);
+    ac_w(st, "csrrsi x0, mstatus, 8", 0x30046073_u64);
+    ac_w(st, "csrrw x0, 773, x7", 0x30539073_u64);
+}
+
+// Every CSR name, each in one statement.
+fn ac_csr_names(st: &mut AcSt) ~ Console {
+    ac_w(st, "csrrs x3, mstatus, x0", 0x300021F3_u64);
+    ac_w(st, "csrrs x3, misa, x0", 0x301021F3_u64);
+    ac_w(st, "csrrs x3, mie, x0", 0x304021F3_u64);
+    ac_w(st, "csrrs x3, mtvec, x0", 0x305021F3_u64);
+    ac_w(st, "csrrs x3, mscratch, x0", 0x340021F3_u64);
+    ac_w(st, "csrrs x3, mepc, x0", 0x341021F3_u64);
+    ac_w(st, "csrrs x3, mcause, x0", 0x342021F3_u64);
+    ac_w(st, "csrrs x3, mtval, x0", 0x343021F3_u64);
+    ac_w(st, "csrrs x3, mip, x0", 0x344021F3_u64);
+    ac_w(st, "csrrs x3, mvendorid, x0", 0xF11021F3_u64);
+    ac_w(st, "csrrs x3, marchid, x0", 0xF12021F3_u64);
+    ac_w(st, "csrrs x3, mimpid, x0", 0xF13021F3_u64);
+    ac_w(st, "csrrs x3, mhartid, x0", 0xF14021F3_u64);
+    ac_w(st, "csrrs x3, mconfigptr, x0", 0xF15021F3_u64);
+}
+
+// The instructions with no operand, fence, and .word.
+fn ac_misc(st: &mut AcSt) ~ Console {
+    ac_w(st, "ecall", 0x00000073_u64);
+    ac_w(st, "ebreak", 0x00100073_u64);
+    ac_w(st, "mret", 0x30200073_u64);
+    ac_w(st, "wfi", 0x10500073_u64);
+    ac_w(st, "fence x0, x0, 0x0ff", 0x0FF0000F_u64);
+    ac_w(st, "fence x0, x0, 0", 0x0000000F_u64);
+    ac_w(st, "fence x31, x31, 4095", 0xFFFF8F8F_u64);
+    ac_w(st, "fence x1, x2, 0x800", 0x8001008F_u64);
+    ac_w(st, ".word 0", 0x00000000_u64);
+    ac_w(st, ".word 0xFFFFFFFF", 0xFFFFFFFF_u64);
+    ac_w(st, ".word 4294967295", 0xFFFFFFFF_u64);
+    ac_w(st, ".word 0xdeadBEEF", 0xDEADBEEF_u64);
+    ac_w(st, ".word 0x04009193", 0x04009193_u64);
+    ac_w(st, ".word +7", 0x00000007_u64);
+}
+
+// Ways of writing one statement: spaces, signs, radix, a label and a
+// comment on the line. The comment of the last two holds an instruction.
+fn ac_forms(st: &mut AcSt) ~ Console {
+    ac_w(st, "addi x1,x2,3", 0x00310093_u64);
+    ac_w(st, "   addi   x1 ,  x2 ,  3   ", 0x00310093_u64);
+    ac_w(st, "here: addi x1, x2, 3", 0x00310093_u64);
+    ac_w(st, "here:addi x1, x2, 3", 0x00310093_u64);
+    ac_w(st, "addi x1, x2, 3 # note", 0x00310093_u64);
+    ac_w(st, "addi x1, x2, 3#tight", 0x00310093_u64);
+    ac_w(st, "addi x1, x2, 0x7ff", 0x7FF10093_u64);
+    ac_w(st, "addi x1, x2, 0x7FF", 0x7FF10093_u64);
+    ac_w(st, "addi x1, x2, -0x800", 0x80010093_u64);
+    ac_w(st, "addi x1, x2, -0x1", 0xFFF10093_u64);
+    ac_w(st, "addi x1, x2, 007", 0x00710093_u64);
+    ac_w(st, "addi x1, x2, -0", 0x00010093_u64);
+    ac_w(st, "addi x1, x2, +2047", 0x7FF10093_u64);
+    ac_w(st, "addi x1, x2, 0x0000000000000010", 0x01010093_u64);
+    ac_w(st, "lb x3, 0x10( x1 )", 0x01008183_u64);
+    ac_w(st, "lb x3, -0x10 (x1)", 0xFF008183_u64);
+    ac_w(st, "beq x1, x2, +8", 0x00208463_u64);
+    ac_w(st, "beq x1, x2, -0x10", 0xFE2088E3_u64);
+    ac_w(st, "jal x0, 0x10", 0x0100006F_u64);
+    ac_w(st, "ecall # mret", 0x00000073_u64);
+    ac_w(st, "addi x1, x2, 3 # , x4", 0x00310093_u64);
+}

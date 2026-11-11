@@ -2,7 +2,7 @@
 name = "emu-rv64"
 version = "0.6.0"
 edition = "2026"
-description = "RV64IMA machine emulator core with Zicsr, machine-mode CSRs, traps, MRET, a step-counted timer, machine interrupts, the M and A extensions on one hart, a flat image loader and a replay check that compares the state hash of two runs every 1000 steps: decoder, encoder and deterministic step function with flat memory and one serial device, checked by hand-computed cases, an oracle script outside the package, a reference model, differential fuzz, property rules and planted controls"
+description = "RV64IMA machine emulator core with Zicsr, traps, a step-counted timer, interrupts, the M and A extensions on one hart, a flat image loader and a replay check, and since 0.6.0 a system profile with the privilege modes M, S and U, the supervisor CSRs, trap delegation, SRET, SFENCE.VMA and Sv39 virtual memory with no translation cache: decoder, encoder and deterministic step function with flat memory and one serial device, checked by hand cases from oracle scripts outside the package, reference models, differential fuzz, property rules and planted controls"
 author = "Zain Dana Harper"
 license = "AGPL-3.0-only"
 

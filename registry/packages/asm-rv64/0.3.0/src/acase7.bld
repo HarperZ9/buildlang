@@ -1,0 +1,137 @@
+// Hand cases of asm-rv64, seventh part: the M and A extensions, one
+// statement each. Written by tests/tools/ma_oracle.py; do not edit by
+// hand. The words come from that script, which builds each from the bit
+// rows of the instruction listing in the manual and shares no code and
+// no table with the encoder or the assembler.
+
+// The M extension: rd, rs1, rs2.
+fn ac_x_mul(st: &mut AcSt) ~ Console {
+    ac_w(st, "mul x3, x1, x2", 0x022081B3_u64);
+    ac_w(st, "mulh x3, x1, x2", 0x022091B3_u64);
+    ac_w(st, "mulhsu x3, x1, x2", 0x0220A1B3_u64);
+    ac_w(st, "mulhu x3, x1, x2", 0x0220B1B3_u64);
+    ac_w(st, "div x3, x1, x2", 0x0220C1B3_u64);
+    ac_w(st, "divu x3, x1, x2", 0x0220D1B3_u64);
+    ac_w(st, "rem x3, x1, x2", 0x0220E1B3_u64);
+    ac_w(st, "remu x3, x1, x2", 0x0220F1B3_u64);
+    ac_w(st, "mulw x3, x1, x2", 0x022081BB_u64);
+    ac_w(st, "divw x3, x1, x2", 0x0220C1BB_u64);
+    ac_w(st, "divuw x3, x1, x2", 0x0220D1BB_u64);
+    ac_w(st, "remw x3, x1, x2", 0x0220E1BB_u64);
+    ac_w(st, "remuw x3, x1, x2", 0x0220F1BB_u64);
+    ac_w(st, "mul x0, x0, x0", 0x02000033_u64);
+    ac_w(st, "mul x31, x31, x31", 0x03FF8FB3_u64);
+    ac_w(st, "divu x10, x20, x30", 0x03EA5533_u64);
+    ac_w(st, "remw x9, x19, x29", 0x03D9E4BB_u64);
+    ac_w(st, "mulhsu x7, x8, x9", 0x029423B3_u64);
+}
+
+// The 32-bit atomic forms.
+fn ac_x_atomic_w(st: &mut AcSt) ~ Console {
+    ac_w(st, "lr.w x3, (x1)", 0x1000A1AF_u64);
+    ac_w(st, "sc.w x3, x2, (x1)", 0x1820A1AF_u64);
+    ac_w(st, "amoswap.w x3, x2, (x1)", 0x0820A1AF_u64);
+    ac_w(st, "amoadd.w x3, x2, (x1)", 0x0020A1AF_u64);
+    ac_w(st, "amoxor.w x3, x2, (x1)", 0x2020A1AF_u64);
+    ac_w(st, "amoand.w x3, x2, (x1)", 0x6020A1AF_u64);
+    ac_w(st, "amoor.w x3, x2, (x1)", 0x4020A1AF_u64);
+    ac_w(st, "amomin.w x3, x2, (x1)", 0x8020A1AF_u64);
+    ac_w(st, "amomax.w x3, x2, (x1)", 0xA020A1AF_u64);
+    ac_w(st, "amominu.w x3, x2, (x1)", 0xC020A1AF_u64);
+    ac_w(st, "amomaxu.w x3, x2, (x1)", 0xE020A1AF_u64);
+}
+
+// The 64-bit atomic forms.
+fn ac_x_atomic_d(st: &mut AcSt) ~ Console {
+    ac_w(st, "lr.d x3, (x1)", 0x1000B1AF_u64);
+    ac_w(st, "sc.d x3, x2, (x1)", 0x1820B1AF_u64);
+    ac_w(st, "amoswap.d x3, x2, (x1)", 0x0820B1AF_u64);
+    ac_w(st, "amoadd.d x3, x2, (x1)", 0x0020B1AF_u64);
+    ac_w(st, "amoxor.d x3, x2, (x1)", 0x2020B1AF_u64);
+    ac_w(st, "amoand.d x3, x2, (x1)", 0x6020B1AF_u64);
+    ac_w(st, "amoor.d x3, x2, (x1)", 0x4020B1AF_u64);
+    ac_w(st, "amomin.d x3, x2, (x1)", 0x8020B1AF_u64);
+    ac_w(st, "amomax.d x3, x2, (x1)", 0xA020B1AF_u64);
+    ac_w(st, "amominu.d x3, x2, (x1)", 0xC020B1AF_u64);
+    ac_w(st, "amomaxu.d x3, x2, (x1)", 0xE020B1AF_u64);
+}
+
+// Ordering suffixes, register edges and ways of writing.
+fn ac_x_order(st: &mut AcSt) ~ Console {
+    ac_w(st, "lr.w x5, (x10)", 0x100522AF_u64);
+    ac_w(st, "sc.w x5, x12, (x10)", 0x18C522AF_u64);
+    ac_w(st, "amoswap.w.aq x6, x5, (x10)", 0x0C55232F_u64);
+    ac_w(st, "amoswap.w.rl x0, x0, (x10)", 0x0A05202F_u64);
+    ac_w(st, "lr.w.aq x3, (x1)", 0x1400A1AF_u64);
+    ac_w(st, "lr.d.rl x3, (x1)", 0x1200B1AF_u64);
+    ac_w(st, "lr.d.aqrl x3, (x1)", 0x1600B1AF_u64);
+    ac_w(st, "sc.w.rl x3, x2, (x1)", 0x1A20A1AF_u64);
+    ac_w(st, "sc.d.aq x3, x2, (x1)", 0x1C20B1AF_u64);
+    ac_w(st, "sc.d.aqrl x3, x2, (x1)", 0x1E20B1AF_u64);
+    ac_w(st, "amoadd.d.aqrl x31, x30, (x29)", 0x07EEBFAF_u64);
+    ac_w(st, "amomaxu.w.aqrl x31, x31, (x31)", 0xE7FFAFAF_u64);
+    ac_w(st, "amomin.d.aq x9, x8, (x7)", 0x8483B4AF_u64);
+    ac_w(st, "lr.w x0, (x0)", 0x1000202F_u64);
+    ac_w(st, "lr.d x31, (x31)", 0x100FBFAF_u64);
+    ac_w(st, "sc.w x0, x0, (x0)", 0x1800202F_u64);
+    ac_w(st, "sc.d x1, x31, (x2)", 0x19F130AF_u64);
+    ac_w(st, "amoor.d x4, x5, (x6)", 0x4053322F_u64);
+    ac_w(st, "lr.w x5,(x10)", 0x100522AF_u64);
+    ac_w(st, "lr.w  x5 , ( x10 )", 0x100522AF_u64);
+    ac_w(st, "sc.d   x5,x12,( x10)", 0x18C532AF_u64);
+    ac_w(st, "amoadd.w x1, x2, (x3) # note", 0x0021A0AF_u64);
+    ac_w(st, "here: amoxor.d x4, x5, (x6)", 0x2053322F_u64);
+    ac_w(st, "  mulw x4,x5,x6", 0x0262823B_u64);
+}
+
+// Statements that must be refused, part 1.
+fn ac_x_refuse_1(st: &mut AcSt) ~ Console {
+    ac_e(st, "lr.w x1, x2", AE_ADDR);
+    ac_e(st, "lr.w x1, 0(x2)", AE_ADDR);
+    ac_e(st, "lr.d x1, 8(x2)", AE_ADDR);
+    ac_e(st, "lr.w x1, (x2", AE_ADDR);
+    ac_e(st, "lr.w x1, (x2) x3", AE_TRAIL);
+    ac_e(st, "lr.w x1, (x32)", AE_REG);
+    ac_e(st, "lr.w x1, ()", AE_REG);
+    ac_e(st, "lr.w x1, (5)", AE_REG);
+    ac_e(st, "lr.w x1, (x2), x3", AE_COUNT);
+    ac_e(st, "lr.w x1", AE_COUNT);
+    ac_e(st, "lr.w (x2)", AE_COUNT);
+    ac_e(st, "lr.w 1, (x2)", AE_REG);
+    ac_e(st, "sc.w x1, (x2)", AE_COUNT);
+    ac_e(st, "sc.w x1, x2, x3", AE_ADDR);
+    ac_e(st, "sc.d x1, 3, (x2)", AE_REG);
+    ac_e(st, "sc.d x1, (x2), x3", AE_REG);
+    ac_e(st, "amoadd.w x1, x2, 0(x3)", AE_ADDR);
+    ac_e(st, "amoadd.w x1, x2, (x3))", AE_TRAIL);
+}
+
+// Statements that must be refused, part 2.
+fn ac_x_refuse_2(st: &mut AcSt) ~ Console {
+    ac_e(st, "amoadd.w x1, x2, (x3), x4", AE_COUNT);
+    ac_e(st, "amoadd.w x1, , (x3)", AE_EMPTY);
+    ac_e(st, "amoswap.d x1, x2", AE_COUNT);
+    ac_e(st, "mul.aq x1, x2, x3", AE_MNEMONIC);
+    ac_e(st, "add.aqrl x1, x2, x3", AE_MNEMONIC);
+    ac_e(st, "lr.w.rlaq x1, (x2)", AE_MNEMONIC);
+    ac_e(st, "lr.w.aq.rl x1, (x2)", AE_MNEMONIC);
+    ac_e(st, "lr.q x1, (x2)", AE_MNEMONIC);
+    ac_e(st, "lr x1, (x2)", AE_MNEMONIC);
+    ac_e(st, "amoadd x1, x2, (x3)", AE_MNEMONIC);
+    ac_e(st, "LR.W x1, (x2)", AE_MNEMONIC);
+    ac_e(st, "amoadd.w.AQ x1, x2, (x3)", AE_MNEMONIC);
+    ac_e(st, ".aq x1, (x2)", AE_DIRECTIVE);
+    ac_e(st, "mulhsu x1, x2", AE_COUNT);
+    ac_e(st, "divw x1, x2, 3", AE_REG);
+    ac_e(st, "rem x1, x2, x3, x4", AE_COUNT);
+    ac_e(st, "mulh x1, x2, (x3)", AE_REG);
+}
+
+fn ac_x_all(st: &mut AcSt) ~ Console {
+    ac_x_mul(st);
+    ac_x_atomic_w(st);
+    ac_x_atomic_d(st);
+    ac_x_order(st);
+    ac_x_refuse_1(st);
+    ac_x_refuse_2(st);
+}

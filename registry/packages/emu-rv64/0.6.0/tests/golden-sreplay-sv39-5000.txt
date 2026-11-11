@@ -1,0 +1,7 @@
+replay image=tests/sv39.img bytes=4132 ram=65536 steps=5000 interval=1000
+  step 1000 hash=928d90fb1f681f44
+  step 2000 hash=871efbf4d44adc9c
+  step 3000 hash=529d68098d1d5574
+  step 4000 hash=862804d38baafbfc
+  step 5000 hash=3537068c02481e44
+  runs agree at 5 of 5 checkpoints

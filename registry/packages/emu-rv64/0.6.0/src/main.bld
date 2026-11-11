@@ -161,5 +161,7 @@ fn main() ~ Console + FileSystem + Process + Environment {
     println!("       emu-rv64 run IMAGE STEPS [RAM] | replay IMAGE STEPS [RAM] | image NAME [FILE]");
     println!("       emu-rv64 rcases | rcontrols | rprops SEED STEPS");
     println!("       emu-rv64 xcases | xcontrols | xfuzz SEED STEPS | xprops SEED STEPS");
+    println!("       emu-rv64 scases | scontrols | sfuzz SEED STEPS | sprops SEED STEPS");
+    println!("       emu-rv64 srun IMAGE STEPS | sreplay IMAGE STEPS");
     exit(2);
 }

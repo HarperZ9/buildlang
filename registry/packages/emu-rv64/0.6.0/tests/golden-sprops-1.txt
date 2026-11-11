@@ -1,0 +1,2 @@
+sprops seed=1 steps=20000
+  accepted, 20000 steps of kinds 90 to 104

@@ -1,4 +1,4 @@
-# emu-rv64 0.5.0: RV64IMA machine emulator core with a timer, interrupts, flat images and replay
+# emu-rv64 0.6.0: RV64IMA machine emulator core with supervisor and user modes, Sv39 virtual memory, a timer, interrupts, flat images and replay
 
 An emulator is a program that behaves like a computer: it reads the machine
 code of that computer and carries out each instruction. This package is the
@@ -49,6 +49,18 @@ profile:
   read a value, combine it with a register and store the result in one
   instruction.
 
+Version 0.6.0 adds what a machine needs to run an operating system kernel
+that keeps programs apart, in a third profile, the system profile:
+
+- Two more privilege modes, supervisor (S) for a kernel and user (U) for
+  the programs it runs, beside machine mode (M).
+- The supervisor CSRs, and delegation: a trap can enter the supervisor
+  handler directly.
+- Sv39 virtual memory: each address a program uses is translated through
+  three levels of page tables, which also say what the program may do
+  with the page.
+- SRET, the return from a supervisor handler, and SFENCE.VMA.
+
 The package holds a decoder (word to operation and fields), an encoder (the
 reverse, which the assembler `asm-rv64` uses), a step function that executes
 one instruction against registers, memory, one serial device and the timer,
@@ -63,15 +75,21 @@ Exactness class: `exact-int`. Every result is an integer. The same starting
 state and the same instruction give the same next state on every host, bit for
 bit.
 
-## Two profiles
+## Three profiles
 
 A profile is the rule the step function follows when an instruction cannot
-complete. The caller picks one when it makes the machine.
+complete, and since 0.6.0 also the set of privilege modes the machine
+has. The caller picks one when it makes the machine.
 
 | Constructor | Profile | An instruction that cannot complete |
 |---|---|---|
-| `emu_new()` | report | The step changes nothing and returns a code that names the reason. This is the 0.1.0 contract, unchanged. Every instruction added since 0.1.0 is illegal in this profile: Zicsr, MRET, WFI and the M and A extensions. |
-| `emu_new_machine()` | trap | The machine takes a trap: it records the cause in its CSRs and moves `pc` to the handler. The step returns `EMU_TRAP`. The timer, the interrupts and the M and A extensions exist in this profile only. |
+| `emu_new()` | report | The step changes nothing and returns a code that names the reason. This is the 0.1.0 contract, unchanged. Every instruction added since 0.1.0 is illegal in this profile: Zicsr, MRET, WFI, the M and A extensions, SRET and SFENCE.VMA. |
+| `emu_new_machine()` | trap | The machine takes a trap: it records the cause in its CSRs and moves `pc` to the handler. The step returns `EMU_TRAP`. The timer, the interrupts and the M and A extensions exist in this profile and in the system profile. |
+| `emu_new_system()` | system | Since 0.6.0. As the trap profile, with the modes S and U, trap delegation and Sv39 virtual memory. The sections from "System profile" on give its rules. |
+
+The sections up to "Encodings" describe the report and trap profiles.
+Where they say "the trap profile only", the system profile is included
+unless "System profile" says otherwise.
 
 ## Machine
 
@@ -432,6 +450,391 @@ here. A word with the opcode `0101111` and any other value in bits 14 to 12
 or bits 31 to 27 is illegal. Operation numbers 61 to 95 are in
 `src/abi.bld`.
 
+## System profile
+
+Since 0.6.0 the package has a third profile, made by `emu_new_system()`.
+It is the trap profile with two more privilege modes and with virtual
+memory. Everything the sections above say about the trap profile holds in
+it, except where this section and the ones after it say otherwise. The
+trap profile itself is unchanged: a machine made by `emu_new_machine()`
+has machine mode only, as in 0.5.0, and every word and CSR number this
+version adds is illegal there.
+
+A privilege mode is the level of trust the processor is in. It decides
+which instructions and which CSRs a program may use. The machine has
+three, and `Machine.prv` holds the present one.
+
+| Mode | Number | Meant for |
+|---|---|---|
+| M, machine | 3 | The first code after reset. It may do everything. |
+| S, supervisor | 1 | An operating system kernel. |
+| U, user | 0 | A program the kernel runs. |
+
+"Upon reset, a hart's privilege mode is set to M." `misa` reads
+`0x8000000000141101` in this profile: the value of the trap profile with
+bit 18 for S and bit 20 for U.
+
+The state the profile adds to the machine:
+
+| Field | Meaning | Start value |
+|---|---|---|
+| `Machine.prv` | The privilege mode. | 3 |
+| `Machine.medeleg`, `Machine.mideleg` | The delegation registers. | 0 |
+| `Machine.stvec`, `sscratch`, `sepc`, `scause`, `stval` | The supervisor trap registers. | 0 |
+| `Machine.satp` | The register that turns translation on and names the root page table. | 0 |
+| `Machine.menvcfg`, `Machine.senvcfg` | The environment configuration registers. | 0 |
+
+`mstatus` starts at `0xA00001800`: MPP = 3 as in the trap profile, and the
+two read-only fields UXL and SXL, both 2, which say that S-mode and U-mode
+run with 64-bit registers.
+
+The step codes, the timer, the order within a step, the M and A
+extensions, the serial device and the flat image are those of the trap
+profile. `emu_run` treats the profile like the trap profile.
+
+## CSRs of the system profile
+
+The profile has the CSRs of the trap profile, with more writable bits in
+some of them, and fifteen more. The table gives the value stored for a
+written value `v`. The bit positions of `mstatus` come from the field list
+of the manual's figure for the register.
+
+| Number | Name | Reads | A write of `v` stores |
+|---|---|---|---|
+| `0x300` | `mstatus` | Stored value | The bits of `v` in the mask `0x7E19AA`: SIE (1), MIE (3), SPIE (5), MPIE (7), SPP (8), MPP (12 and 11), MPRV (17), SUM (18), MXR (19), TVM (20), TW (21), TSR (22). A write of 2 to MPP leaves MPP as it was. UXL (33 and 32) and SXL (35 and 34) always read 2. Every other bit reads 0. |
+| `0x100` | `sstatus` | `mstatus` and `0x2000C0122`: SIE, SPIE, SPP, SUM, MXR and UXL | The bits of `v` in the mask `0xC0122` go to the same bits of `mstatus`. No other bit of `mstatus` changes. |
+| `0x301` | `misa` | `0x8000000000141101` | Nothing. |
+| `0x302` | `medeleg` | Stored value | `v & 0xB3FF`: one bit for each of the causes 0 to 9, 12, 13 and 15. |
+| `0x303` | `mideleg` | Stored value | `v & 0x222`: the three supervisor interrupts. |
+| `0x304` | `mie` | Stored value | `v & 0xAAA`: the enable bits of all six interrupts. |
+| `0x104` | `sie` | `mie & mideleg` | The bits of `v` that `mideleg` has set go to `mie`. |
+| `0x344` | `mip` | The pending bits. The section "Interrupts in the system profile" gives the source of each. | Bits 1, 5 and 9 of `v`: SSIP, STIP and SEIP. Bits 3, 7 and 11 are read-only. |
+| `0x144` | `sip` | `mip & mideleg` | Bit 1 of `v`, SSIP, when `mideleg` has bit 1 set. Nothing else. |
+| `0x305`, `0x105` | `mtvec`, `stvec` | Stored value | `v & ~2`, as `mtvec` in the trap profile. |
+| `0x341`, `0x141` | `mepc`, `sepc` | Stored value | `v & ~3` |
+| `0x340`, `0x342`, `0x343`, `0x140`, `0x142`, `0x143` | `mscratch`, `mcause`, `mtval`, `sscratch`, `scause`, `stval` | Stored value | `v`, all 64 bits |
+| `0x180` | `satp` | Stored value | See below. |
+| `0x306`, `0x106` | `mcounteren`, `scounteren` | 0 | Nothing. |
+| `0x30A`, `0x10A` | `menvcfg`, `senvcfg` | Stored value | `v & 1`: the bit FIOM, which has no effect here. |
+| `0xF11` to `0xF15` | as in the trap profile | 0 | Read-only. |
+
+`satp` has three fields: MODE in bits 63 to 60, ASID in bits 59 to 44 and
+PPN, the page number of the root page table, in bits 43 to 0. A write
+depends on the MODE it names:
+
+| MODE in `v` | Effect |
+|---|---|
+| 8, Sv39 | `satp` = MODE 8, ASID 0, and the PPN of `v`. |
+| 0, Bare | `satp` = 0, whatever the other fields of `v` hold. |
+| any other | None. `satp` keeps its value. |
+
+Two rules decide whether a CSR instruction may touch a CSR at all. Bits 9
+and 8 of the number are the lowest mode that may access it: the numbers
+`0x1xx` need S-mode or M-mode, `0x3xx` and `0xFxx` need M-mode. Bits 11
+and 10 both set mark a read-only register. An instruction that breaks
+either rule, or names a number that is not in the table, traps with cause
+2 and changes nothing. A third rule belongs to one register: in S-mode
+with TVM = 1 every access to `satp` traps with cause 2.
+
+Which of this the manual fixes and which is a choice of this machine:
+
+| Rule here | Manual |
+|---|---|
+| The access rules from the number. | "The top two bits (csr[11:10]) indicate whether the register is read/write (00, 01, or 10) or read-only (11). The next two bits (csr[9:8]) encode the lowest privilege level that can access the CSR". "Attempts to access a CSR address without sufficient privilege raise illegal-instruction exceptions". "Attempts to write a read-only CSR address raise illegal-instruction exceptions." |
+| A CSR that does not exist traps with cause 2. | A choice, as since 0.2.0: "Instructions that access a non-existent CSR address are reserved." |
+| `sstatus` is a view. | "The sstatus register is a subset of the mstatus register." |
+| MPP holds 0, 1 or 3, and a write of 2 leaves it. | "xPP fields are WARL fields that can hold only privilege mode x and any implemented privilege mode lower than x." Which legal value a write of 2 gives is a choice. |
+| SXL and UXL read 2 and cannot be written. | "an implementation may make SXL be a read-only field whose value always ensures that SXLEN=MXLEN", and the same sentence for UXL. |
+| The fields of `mstatus` this machine does not have read 0: UBE, SBE, MBE (no big-endian access), VS, FS, XS and SD (no vector or floating-point state), SPELP, MPELP, SDT, MDT, GVA and MPV (extensions that are absent). | Each is WARL or belongs to an extension, and the text lets it be read-only 0 when the extension is absent. A choice for each. |
+| `sie` and `sip` show only delegated interrupts. | "If an interrupt is delegated to S-mode by setting a bit in the mideleg register, it becomes visible in the sip register and is maskable using the sie register. Otherwise, the corresponding bits in sip and sie are read-only zero." |
+| SSIP, STIP and SEIP can be written in `mip`. | "SEIP is writable in mip", "If the stimecmp register is not implemented, STIP is writable in mip", "SSIP is writable in mip". |
+| Only SSIP can be written in `sip`. | "If implemented, SEIP is read-only in sip", "If implemented, STIP is read-only in sip", "If implemented, SSIP is writable in sip". |
+| `medeleg` has bits for the causes this machine can raise below M-mode. | "medeleg[11] is read-only zero." "An implementation can choose to subset the delegatable traps". |
+| The machine interrupts cannot be delegated. | A choice the text permits: an implementation "shall not fix as read-only one any bits of mideleg corresponding to machine-level interrupts", and here they are read-only zero. |
+| `satp` ignores a write of a MODE it does not support. | "Implementations are not required to support all MODE settings, and if satp is written with an unsupported MODE, the entire write has no effect; no fields in satp are modified." |
+| No ASID bit. | "The number of ASID bits is UNSPECIFIED and may be zero." |
+| A write of MODE 0 stores 0. | A choice. "To select MODE=Bare, software must write zero to the remaining fields of satp", and a write that does not "has an UNSPECIFIED effect on the value that the remaining fields assume". |
+| `mcounteren` and `scounteren` exist and read 0. | "In harts with U-mode, the mcounteren must be implemented, but all fields are WARL and may be read-only zero". "scounteren must be implemented. However, any of the bits may be read-only zero". |
+| `menvcfg` and `senvcfg` exist with FIOM alone. | "In harts with U-mode, menvcfg must be implemented, but all WARL fields may be read-only zero." FIOM is kept writable because the text allows it to be read-only zero only "If S-mode is not supported, or if satp.MODE is read-only zero". It changes the order of device accesses as other harts see them, and with one hart it has no effect. |
+
+## Traps in the system profile
+
+Delegation is the rule that lets a trap enter the supervisor handler
+directly, without passing through machine mode. `medeleg` has one bit for
+each synchronous cause and `mideleg` one for each interrupt.
+
+A trap goes to S-mode when its bit is set and the machine is in S-mode or
+U-mode. In every other case it goes to M-mode. A trap taken in M-mode
+always stays in M-mode. The entry writes the registers of the mode that
+takes the trap and leaves those of the other mode alone.
+
+| Entry into | Registers written | Status stack | New `pc` |
+|---|---|---|---|
+| M-mode | `mepc` = `pc` with the two low bits cleared, `mcause`, `mtval` | MPIE = MIE, MIE = 0, MPP = the mode before | BASE of `mtvec` |
+| S-mode | `sepc`, `scause`, `stval`, the same way | SPIE = SIE, SIE = 0, SPP = 0 when the mode before was U, else 1 | BASE of `stvec` |
+
+The mode becomes the mode of the handler. An interrupt goes to BASE + 4 x
+cause when the vector register of the handler's mode is in vectored mode.
+The reservation is not changed by a trap.
+
+The synchronous causes are those of the trap profile and five more:
+
+| Cause | Name | When | Trap value |
+|---|---|---|---|
+| 8 | Environment call from U-mode | ECALL in U-mode | 0 |
+| 9 | Environment call from S-mode | ECALL in S-mode | 0 |
+| 12 | Instruction page fault | Translation refuses the fetch. | `pc` |
+| 13 | Load page fault | Translation refuses a load or an LR. | The virtual address, see "Memory access in the system profile" |
+| 15 | Store/AMO page fault | Translation refuses a store, an SC or an AMO. | The same |
+
+ECALL in M-mode still has cause 11. The access faults 1, 5 and 7 keep
+their meaning, with the virtual address as trap value, and one more case:
+a page table entry that the walk needs lies outside memory.
+
+MRET and SRET return from a handler. With x for M or S:
+
+1. The mode becomes the value of xPP.
+2. xIE = xPIE, then xPIE = 1.
+3. xPP = 0, the user mode.
+4. MPRV = 0 when the new mode is not M.
+5. `pc` = `mepc` or `sepc`.
+
+MRET in S-mode or U-mode traps with cause 2. SRET in U-mode traps with
+cause 2, and so does SRET in S-mode while TSR = 1. In M-mode SRET is
+legal whatever TSR holds. Both retire, so `steps` rises by 1. Neither
+changes the reservation.
+
+Two more instructions depend on a bit of `mstatus`:
+
+| Instruction | Word | Traps with cause 2 | Otherwise |
+|---|---|---|---|
+| WFI | `0x10500073` | In S-mode or U-mode while TW = 1. | Retires as a no-op, in every mode. |
+| SFENCE.VMA `rs1`, `rs2` | `0x12000073` with `rs1` in bits 19 to 15 and `rs2` in bits 24 to 20 | In U-mode, and in S-mode while TVM = 1. | Retires as a no-op. |
+| SRET | `0x10200073` | As above. | As above. |
+
+The rows of the manual's listing of privileged instructions give SRET as
+`0001000 00010 00000 000 00000 1110011`, MRET as `0011000 00010 ...`, WFI
+as `0001000 00101 ...` and SFENCE.VMA as `0001001 rs2 rs1 000 00000
+1110011`. The operation numbers are 96 for SRET and 97 for SFENCE.VMA.
+The decoder and the encoder know both in every profile; the report
+profile and the trap profile refuse to execute them.
+
+Which of this the manual fixes:
+
+| Rule here | Manual |
+|---|---|
+| Delegation, and never from M-mode. | "setting a bit in medeleg or mideleg will delegate the corresponding trap, when occurring in S-mode or U-mode, to the S-mode trap handler." "Traps never transition from a more-privileged mode to a less-privileged mode." |
+| What the entry into S-mode writes. | "When a trap is delegated to S-mode, the scause register is written with the trap cause; the sepc register is written with the virtual address of the instruction that took the trap; the stval register is written with an exception-specific datum; the SPP field of mstatus is written with the active privilege mode at the time of the trap; the SPIE field of mstatus is written with the value of the SIE field at the time of the trap; and the SIE field of mstatus is cleared. The mcause, mepc, and mtval registers and the MPP and MPIE fields of mstatus are not written." |
+| The status stack at entry. | "When a trap is taken from privilege mode y into privilege mode x, xPIE is set to the value of xIE; xIE is set to 0; and xPP is set to y." |
+| The two returns. | "When executing an xRET instruction, supposing xPP holds the value y, xIE is set to xPIE; the privilege mode is changed to y; xPIE is set to 1; and xPP is set to the least-privileged supported mode (U if U-mode is implemented, else M). If y != M, xRET also sets MPRV=0." |
+| Who may return. | "An xRET instruction can be executed in privilege mode x or higher". "Attempting to execute an xRET instruction in a mode less privileged than x will raise an illegal-instruction exception." |
+| TSR. | "When TSR=1, attempts to execute SRET while executing in S-mode will raise an illegal-instruction exception." |
+| TVM. | "When TVM=1, attempts to read or write the satp CSR or execute an SFENCE.VMA or SINVAL.VMA instruction while executing in S-mode will raise an illegal-instruction exception." |
+| TW. | A choice the text permits: "An implementation may have WFI always raise an illegal-instruction exception in modes less privileged than M when TW=1". |
+| WFI in U-mode with TW = 0 retires. | A choice. "When S-mode is implemented, then executing WFI in U-mode causes an illegal-instruction exception, regardless of the value of the TW bit, unless the instruction completes within an implementation-specific, bounded time limit." Here WFI never waits, so it completes at once. |
+| The three causes of ECALL. | "When executed in U-mode, S-mode, or M-mode, it generates an environment-call-from-U-mode exception, environment-call-from-S-mode exception, or environment-call-from-M-mode exception, respectively". |
+| A trap and a return leave the reservation. | A choice the text permits, as in 0.5.0: "the xRET instruction is allowed to clear any outstanding LR address reservation but is not required to." The text names no effect of a trap entry on the reservation. |
+
+## Interrupts in the system profile
+
+There are six interrupts. The three of the trap profile are joined by
+three for the supervisor.
+
+| Cause | Name | Bit of `mip` | Pending while |
+|---|---|---|---|
+| 11 | Machine external, MEI | 11 | The host has set bit 11 of `Machine.mip`. |
+| 3 | Machine software, MSI | 3 | The host has set bit 3. |
+| 7 | Machine timer, MTI | 7 | `mtime >= mtimecmp` |
+| 9 | Supervisor external, SEI | 9 | Bit 9 of `Machine.mip` is set. Machine-mode software writes it through `mip`. |
+| 1 | Supervisor software, SSI | 1 | Bit 1 is set. Software writes it through `mip`, or through `sip` when it is delegated. |
+| 5 | Supervisor timer, STI | 5 | Bit 5 is set. Machine-mode software writes it through `mip`. |
+
+There is no supervisor timer register (the Sstc extension is absent), so
+the supervisor timer interrupt is pending exactly while machine-mode
+software holds STIP set. There is no interrupt controller: no device sets
+SEIP, and the host may set any of the five stored bits in `Machine.mip`.
+
+Before the fetch, each step checks for an interrupt. Interrupt i can be
+taken when bit i is set in both `mip` and `mie` and the present mode
+allows its destination:
+
+| Destination | Condition on i | Allowed when |
+|---|---|---|
+| M-mode | Bit i of `mideleg` is clear. | The mode is S or U, or the mode is M and MIE = 1. |
+| S-mode | Bit i of `mideleg` is set. | The mode is U, or the mode is S and SIE = 1. Never in M-mode. |
+
+So a delegated interrupt is taken in U-mode whatever SIE holds, and an
+interrupt for M-mode is taken in S-mode and U-mode whatever MIE holds.
+When several can be taken, every interrupt for M-mode comes before every
+interrupt for S-mode, and inside each group the order is MEI, MSI, MTI,
+SEI, SSI, STI.
+
+| Rule here | Manual |
+|---|---|
+| To M-mode. | "An interrupt i will trap to M-mode (causing the privilege mode to change to M-mode) if all of the following are true: (a) either the current privilege mode is M and the MIE bit in the mstatus register is set, or the current privilege mode has less privilege than M-mode; (b) bit i is set in both mip and mie; and (c) if register mideleg exists, bit i is not set in mideleg." |
+| To S-mode. | "An interrupt i will trap to S-mode if both of the following are true: (a) either the current privilege mode is S and the SIE bit in the sstatus register is set, or the current privilege mode has less privilege than S-mode; and (b) bit i is set in both sip and sie." |
+| The order. | "Interrupts to M-mode take priority over any interrupts to lower privilege modes." "Multiple simultaneous interrupts destined for M-mode are handled in the following decreasing priority order: MEI, MSI, MTI, SEI, SSI, STI, LCOFI." "Multiple simultaneous interrupts destined for supervisor mode are handled in the following decreasing priority order: SEI, SSI, STI, LCOFI." |
+| STIP comes from machine-mode software. | "When the Sstc extension is not implemented, STIP is set and cleared by the execution environment." |
+
+## Sv39 translation
+
+A virtual address is the address a program uses. A physical address is
+the address of a byte of the machine: memory, the serial device or the
+timer. Translation turns a virtual address into a physical one. A page is 4096 bytes
+that are translated together. A page table is one page that holds 512
+page table entries (PTEs) of 8 bytes; an entry either points to the next
+page table or, as a leaf, names the page an address belongs to. Sv39 is
+the scheme with three levels of page tables and 39 bits of virtual
+address.
+
+Translation is on for an access when `satp` holds MODE 8 and the mode
+the access is checked in is S or U. That mode is the present mode for a
+fetch. For a load or a store it is MPP when MPRV = 1 and the present
+mode otherwise. In every other case, M-mode and `satp` MODE 0, the
+physical address is the virtual address and nothing is checked.
+
+An access has a kind: a fetch, a load (also LR) or a store (also SC and
+the AMOs). A page fault of a kind has cause 12, 13 or 15.
+
+1. A canonical address is one whose bits 63 to 39 all equal bit 38. An
+   address that is not canonical takes the page fault.
+2. The address has three 9-bit fields, VPN[2] in bits 38 to 30, VPN[1]
+   in bits 29 to 21 and VPN[0] in bits 20 to 12, and a 12-bit page
+   offset. The walk starts at the root table, at PPN of `satp` x 4096,
+   with level 2.
+3. The PTE of the level is the doubleword at table + VPN[level] x 8. If
+   any of its 8 bytes lies outside memory, the access fault of the kind
+   is taken (cause 1, 5 or 7).
+4. The PTE has the flags V (bit 0), R, W, X, U, G, A and D (bit 7), two
+   bits for software, the page number PPN in bits 53 to 10, and reserved
+   bits 63 to 54. The page fault is taken when V = 0, when W = 1 and
+   R = 0, or when any of bits 63 to 54 is set.
+5. With R = 0 and X = 0 the PTE points to the next table, at its PPN x
+   4096. The page fault is taken when D, A or U is set in such a PTE, and
+   when the level is already 0. Otherwise the walk goes on at step 3 one
+   level down.
+6. Otherwise the PTE is a leaf. A leaf at level 1 or 2 is a superpage:
+   it maps 2 MiB or 1 GiB at once. The low 9 bits of its PPN at level 1,
+   and the low 18 at level 2, must be 0, or the page fault is taken.
+7. The U bit. In U-mode the page needs U = 1. In S-mode a page with
+   U = 1 is refused for a fetch always, and for a load or a store unless
+   SUM = 1. A page with U = 0 is refused in U-mode.
+8. The permission bits. A fetch needs X. A load needs R, or X when
+   MXR = 1. A store needs W.
+9. The page fault is taken when A = 0, and for a store when D = 0. The
+   machine never writes a PTE.
+10. The physical address takes the page offset of the virtual address,
+    the VPN fields below the level of the leaf, and the PPN of the leaf
+    above them.
+
+G and the two software bits are ignored. Steps 7 to 9 are the same for a
+superpage.
+
+| Rule here | Manual |
+|---|---|
+| Canonical addresses. | Addresses "must have bits 63-39 all equal to bit 38, or else a page-fault exception will occur". |
+| The walk. | The ten steps of "Virtual Address Translation Process" with "LEVELS equals 3 and PTESIZE equals 8". Step 3 of the text: "If pte.v=0, or if pte.r=0 and pte.w=1, or if any bits or encodings that are reserved for future standard use are set within pte, stop and raise a page-fault exception". |
+| A PTE outside memory. | "If accessing pte violates a PMA or PMP check, raise an access-fault exception corresponding to the original access type." |
+| Bits 63 to 54. | Bit 63: "If Svnapot is not implemented, bit 63 remains reserved and must be zeroed by software for forward compatibility, or else a page-fault exception is raised". Bits 62 and 61: the same sentence for Svpbmt. Bits 60 to 54: "If any of these bits are set, a page-fault exception is raised". |
+| D, A and U in a pointer. | "For non-leaf PTEs, the D, A, and U bits are reserved for future standard use." They fall under step 3 of the text. This reading is a choice: the text does not say in so many words that such a PTE faults. |
+| Superpages. | "If i>0 and pte.ppn[i-1:0] != 0, this is a misaligned superpage; stop and raise a page-fault exception". |
+| U and SUM. | "U-mode software may only access the page when U=1. If the SUM bit in the sstatus register is set, supervisor mode software may also access pages with U=1." "Irrespective of SUM, the supervisor may not execute code on pages with U=1." |
+| MXR. | "When MXR=1, loads from pages marked either readable or executable (R=1 or X=1) will succeed." |
+| MPRV. | "When MPRV=1, load and store memory addresses are translated and protected, and endianness is applied, as though the current privilege mode were set to MPP. Instruction address-translation and protection are unaffected by the setting of MPRV." |
+| A and D. | The Svade scheme: "when a virtual page is accessed and the A bit is clear, or is written and the D bit is clear, a page-fault exception is raised." The text defines two schemes and adds, of the other one: "Simple implementations may instead generate page-fault exceptions." With Svadu absent, "the Svade extension, which mandates exceptions when A/D bits need be set, instead takes effect." |
+| The fault kinds. | "Attempting to fetch an instruction from a page that does not have execute permissions raises a fetch page-fault exception." The same for a load or load-reserved and a load page fault, and for "a store, store-conditional, AMO" and a store page fault. "AMOs never raise load page-fault exceptions." |
+| MODE 0. | "When MODE=Bare, supervisor virtual addresses are equal to supervisor physical addresses, and there is no additional memory protection beyond the physical memory protection scheme". |
+
+MPRV is honoured in every mode. Architecturally it can be 1 only in
+M-mode, because both returns clear it and only M-mode can write it. The
+host can set it in any mode, and the checks do.
+
+### No translation cache
+
+A real processor keeps translations it has worked out in a cache, and
+SFENCE.VMA is the instruction that tells it to forget them after software
+has changed a page table. This machine keeps none. Every fetch, load and
+store walks the page tables as they are in memory at that moment, so
+SFENCE.VMA does its privilege check and nothing else.
+
+What this means for a program: a change to a page table or to `satp`
+takes effect at the very next access. A kernel that forgets SFENCE.VMA
+runs correctly here and may fail on a machine with a cache, where the old
+translation can stay in use. This machine cannot show that fault.
+
+### No physical memory protection
+
+Physical memory protection (PMP) is a set of machine-mode registers that
+limit which physical addresses S-mode and U-mode may use. The machine has
+none of them, and their CSR numbers do not exist. The text gives the
+result: "If no PMP entry matches an S-mode or U-mode memory operation,
+the operation fails if at least one PMP entry is implemented and succeeds
+otherwise." No entry is implemented, so the operation succeeds: with
+`satp` MODE 0, S-mode and U-mode reach every physical address M-mode
+reaches.
+
+## Memory access in the system profile
+
+A load or a store of n bytes at a virtual address may cross from one page
+into the next, because the machine allows an address that is not a
+multiple of the size. Each page is translated by itself.
+
+1. The page of the first byte is translated. A fault is taken with the
+   address of the access as trap value.
+2. If the access crosses into the next page, that page is translated. A
+   fault is taken with the address of the first byte in that page as trap
+   value.
+3. The physical check. An access inside one page may name the serial
+   device (one byte), one timer register, or memory, as in the trap
+   profile. An access across two pages must lie in memory with both
+   parts. Otherwise the access fault of the kind is taken (cause 5 or
+   7), and the trap value is the virtual address of the first byte that
+   is outside memory.
+4. The access happens. The two parts of a crossing access may lie
+   anywhere in memory.
+
+All three checks come before any effect, so a trap changes no register,
+no byte of memory, no byte of output and not the reservation. This is
+stricter than the text asks, which allows that "a portion of a misaligned
+store that passes the exception check may become visible, even if another
+portion fails the exception check."
+
+The atomic instructions check alignment first, on the virtual address,
+with cause 4 or 6 as in the trap profile. Then the address is translated,
+as a load for LR and as a store for SC and the AMOs, then the physical
+check runs, then the effect of the section "A extension". An SC is
+translated as a store also when it holds no reservation. The reservation
+holds the physical address, so an SC through another virtual address of
+the same page succeeds. An aligned access never crosses a page, which
+keeps the reservation inside one page: "the LR/SC reservation set must
+lie completely within a single base physical page".
+
+The fetch translates `pc`. A page fault or an access fault of the fetch
+has `pc` as trap value. An instruction is 4 bytes at a multiple of 4, so
+a fetch never crosses a page.
+
+## State hash, images and commands in the system profile
+
+In the system profile the state hash takes eleven more words after the
+fields of the machine and the reservation: `prv`, `medeleg`, `mideleg`,
+`stvec`, `sscratch`, `sepc`, `scause`, `stval`, `satp`, `menvcfg` and
+`senvcfg`, in this order. The field `profile`, which is 2 here, is part
+of the hash as before, so no state of this profile hashes like a state of
+the trap profile. Hashes of the report and trap profiles are those of
+0.5.0.
+
+`rr_boot` resets a machine of the system profile to the reset state of
+that profile. Two commands run a flat image in it, with 65536 bytes of
+memory:
+
+| Command | What it does |
+|---|---|
+| `emu-rv64 srun IMAGE STEPS` | As `run`, and two more lines: the mode, `satp`, `scause`, `stval` and `sepc`, then `x10` to `x17`. |
+| `emu-rv64 sreplay IMAGE STEPS` | As `replay`. |
+
+`run` and `replay` keep the trap profile. The count of interrupts that
+`srun` prints takes the cause from `scause` when the trap went to S-mode.
+
 ## Flat image
 
 A flat image is a file of raw bytes. It has no header, no load address and
@@ -556,7 +959,9 @@ seen.
 | `emu-rv64 image NAME FILE` | Compares `FILE` with the built-in image and prints `equal=true` or `equal=false`. Exit status 1 when they differ. |
 
 Since 0.5.0 `run` and `replay` execute M and A instructions, because they
-use the trap profile.
+use the trap profile. Since 0.6.0 `srun` and `sreplay` do the same in the
+system profile; the section "State hash, images and commands in the
+system profile" describes them.
 
 `RAM` is `256` or `65536`. The commands print the length of the serial
 output and never its bytes.
@@ -610,6 +1015,15 @@ The property rules are a fourth statement of the M rules: they multiply on
 16-bit digits and judge division by the identity quotient x divisor +
 remainder = dividend, with no model.
 
+For the system profile there are again three implementations of the
+rules, and they share no code:
+
+| Implementation | Where | How it is built |
+|---|---|---|
+| The core | `src/sys1.bld` to `src/sys5.bld` | `mstatus` as one word with masks, the walk as a loop over the levels with shifts, an access as at most two parts, one per page. |
+| The reference model | `src/smodel.bld` to `src/smodel4.bld` | Every field of `mstatus` in a slot of its own, the walk as a function that calls itself for the next level, the address put together field by field, every byte of an access translated by itself. |
+| The oracle script | `tests/tools/sv39_oracle.py` and the six modules beside it | Python, standard library only. The fields of `mstatus` and `sstatus` are the field lists of the manual's figures, typed in the order of the figure; the encodings are rows of the listings typed as bit strings; the walk follows the ten numbered steps. It computed every word and every expected value of the hand cases. |
+
 | Check | Command | What it does |
 |---|---|---|
 | Hand-computed cases, report profile | `emu-rv64 cases` | The 61 single instructions and two programs of 0.1.0. |
@@ -626,6 +1040,11 @@ remainder = dividend, with no model.
 | Controls, M and A | `emu-rv64 xcontrols` | Eleven planted defects, numbered 27 to 37. The differential check, the property rules and the hand cases must each refuse every one. |
 | The program `mulatomic` | `emu-rv64 run tests/mulatomic.img 100` | A program of 50 words that multiplies, divides, takes a remainder and adds to a doubleword in an LR and SC loop whose first SC fails. It checks its own results and sends one byte when they are right. `asm-rv64` 0.2.0 assembled it from `tests/mulatomic.s` of that package, where the expected registers are worked out by hand. |
 | Controls, images and replay | `emu-rv64 rcontrols` | Seven planted defects, numbered 20 to 26: three in the loader, two in the state hash, one in the start state of the second run and one in the checkpoint compare. The hand-computed cases must refuse each one, and the property rules, run without the cases, must refuse each one. A number passed down selects the defect; with the number 0 every function calls the core directly, and the commands `run` and `replay` use that same path. |
+| Hand cases, system profile | `emu-rv64 scases` | 875 generic cases and the 3456 rows of the permission matrix, all computed by the oracle script. The generic cases: 218 on the CSRs (71 that write all ones or zero to a register and read it back, 23 on `mstatus` and `sstatus`, 36 on `sie`, `sip`, `mie` and `mip`, 22 on `satp` and TVM, 66 on the access rules in each mode), 33 on SRET, MRET, WFI, SFENCE.VMA, ECALL and EBREAK in each mode with TSR, TW and TVM clear and set, 48 on the status stack at trap entry and at the two returns, 104 that raise each synchronous cause in each mode with the cause delegated, not delegated, and every other cause delegated, 156 on the six interrupts in each mode with MIE and SIE clear and set, 75 on priority, 10 on vectoring, 7 sequences, and 224 on translation: 54 on the shape of the walk and on superpages, 108 on the flags, SUM, MXR and MPRV, 11 on addresses and on devices behind a page, 27 on accesses across two pages and 24 on the atomic instructions. A row of the matrix is one fetch, load or store of one page: six machine modes (U, S, M, and M with MPRV and MPP = U, S or M) x SUM x MXR x the eight values of R, W and X x U x three states of A and D x three kinds of access. `src/svec.bld` and `src/svec2.bld` explain the layout. |
+| Differential fuzz, system profile | `emu-rv64 sfuzz SEED STEPS` | A seeded stream in 32768 bytes of memory, eight pages. Every 256 steps the stream writes fresh page table entries: seven times in eight a gigapage that maps memory for the supervisor and one that maps it for the user, and drawn entries elsewhere, among them entries that are not valid, pointers with a reserved flag, misaligned superpages, entries with a reserved bit, and entries that name a frame outside memory or a device. Every 32 steps it draws the whole state: the mode, every writable bit of `mstatus`, `satp` (12 of 16 on the root table, 2 with MODE 0, 1 with another table as root, 1 with a root outside memory), `medeleg`, `mideleg`, `mie`, `mip`, the vectors, the saved pcs and the pc. Twice in a round, one time in two, the host moves the machine to a drawn mode. The words: of 16, 3 Zicsr on a drawn CSR, 2 of the PRIV group, 4 loads or stores at drawn virtual addresses (one in four in the last eight bytes of a page), 2 atomic, 1 M, 1 noise, 3 RV64I. The result code, the pc, the counters, the timer, the reservation, the mode, every CSR, all 32 registers and the serial output are compared after every step. All of memory is compared after every eighth step and after the last one. |
+| Properties, system profile | `emu-rv64 sprops SEED STEPS` | Fifteen kinds of rule, 90 to 104 of `tests/props.txt`, judged on the stream of `sfuzz` with no model. The section "Rules of the system profile" lists them. |
+| Controls, system profile | `emu-rv64 scontrols` | Twenty planted defects, numbered 38 to 57. The command runs the hand cases, the differential check and the property rules on each and prints which of the three refuse it. |
+| The program `sv39` | `emu-rv64 srun tests/sv39.img 200` | A program of 75 instruction words in an image of 4132 bytes. Machine code builds three page tables and delegates causes 8 and 13, then drops to S-mode. The supervisor turns paging on and enters U-mode. The user program makes an environment call, stores and loads in its own page, and loads from a page that is not mapped. The supervisor handles both traps and stops in a loop. `asm-rv64` 0.3.0 assembled it from `tests/sv39.s` of that package, where the expected end state is worked out by hand. |
 
 The reference model shares no code with the core. For RV64I
 (`src/model.bld`, `src/model2.bld`) it matches a word against a table of mask
@@ -669,6 +1088,56 @@ table. It is still by the same author, from the same reading of the text.
 `tests/controls.txt` lists the planted defects and the check that refuses
 each. A check that accepts a planted defect is a broken check, and the
 controls commands exit with status 1 in that case.
+
+The reference model of the system profile calls no function of the five
+core files. This was checked by listing every call in `smodel.bld` to
+`smodel4.bld`: each is a `sref_` function of those files, a `ref_`
+function of the older model files, or the built-in `len`. It is a second
+implementation of the whole profile and not an extension of the older
+models: it has its own CSR table, trap entry, interrupt scan, walk and
+memory access, and it takes from the older files the arithmetic of RV64I
+and of the M extension and the helper that mixes an AMO.
+
+The harness around the two uses core helpers to build the stream. One
+needs saying: to place the word of a step at the pc, the harness asks the
+core's own translation for the physical address. A wrong translation of
+the pc would put the word where the model does not fetch, and the two
+would then run different words, which the comparison sees.
+
+Unlike the controls of 0.1.0 to 0.5.0, which are copies or wrappers of
+the core, the twenty defects of the system profile live inside the core:
+every function of `sys1.bld` to `sys5.bld` takes a variant number, and a
+defect is a branch on it. `emu_step` passes 0. This puts test branches
+into the code that runs a program. It was chosen because most of the
+defects sit in the middle of the walk, where no wrapper reaches.
+
+### Rules of the system profile
+
+`sprops` runs the stream of `sfuzz` through the core alone. The rules own
+one piece of machinery, `sp_leaf` in `src/sprops.bld`: it follows the
+pointers of the page tables for an address and returns the PTE the walk
+must end at, with its level. It decides nothing about permission. Kinds
+91, 93 to 95, 97 to 100 and 103 are judged at every step, from the state
+before it and the state after it. Kinds 90, 92, 96 and 104 are judged
+before every sixteenth step.
+
+| Kind | Rule |
+|---|---|
+| 90 | With `satp` MODE 0, and in M-mode without MPRV whatever `satp` holds, the translation of a drawn address is the address itself, for each kind of access. |
+| 91 | A step that trapped changed no register, no byte of memory (by a hash of all of it), no byte of output, not the reservation, not `mtimecmp` and no CSR outside the trap registers of the mode that took the trap. |
+| 92 | The walk reads nothing but the PTEs on its path. The PTEs on the path of a drawn address are copied into a second memory that is otherwise a fixed pattern, and the translation there gives the same result. |
+| 93 | An instruction that retired below M-mode with translation on was fetched through a canonical address whose path ends in an aligned leaf with X and A set, and with U set exactly when the mode is U. |
+| 94 | A load, store or atomic instruction that retired through translation used a canonical address whose path ends in an aligned leaf with A set; in U-mode with U set, in S-mode with U clear or SUM set; for a load with R, or X under MXR; for a store with W and D. Judged for the page of the first byte. |
+| 95 | A synchronous trap goes to S-mode exactly when its `medeleg` bit is set and the machine was not in M-mode, and no trap lowers the mode. |
+| 96 | In S-mode, `sstatus` reads `mstatus` and `0x2000C0122`, `sie` reads `mie & mideleg` and `sip` reads `mip & mideleg`. |
+| 97 | An interrupt is taken exactly when the state before the step permits one; the one taken is permitted; it goes to S-mode exactly when it is delegated; and none permitted for M-mode is passed over for one for S-mode. |
+| 98 | An instruction that retired was allowed in its mode: MRET only in M, SRET not in U nor in S under TSR, WFI not below M under TW, SFENCE.VMA not in U nor in S under TVM, a Zicsr word only on a CSR whose number allows the mode and not on `satp` in S under TVM. After SRET and MRET the mode, the enable, the stack, MPRV and the pc are those the rule of the return gives. |
+| 99 | After every step `satp` is 0 or has MODE 8 with no ASID bit, `mstatus` has no bit outside its writable fields but UXL = SXL = 2 and MPP is not 2, the delegation and enable registers hold only bits that exist, the saved pcs are multiples of 4 and the mode is 0, 1 or 3. |
+| 100 | Causes 4, 5 and 13 are taken only by a load or LR, and causes 6, 7 and 15 only by a store, SC or AMO. |
+| 103 | In M-mode no fetch takes a page fault, whatever MPRV holds. |
+| 104 | A load in S-mode from a drawn page: an execute-only page faults with cause 13 while MXR is clear and gives the data while it is set; a readable user page faults while SUM is clear and gives the data while it is set. |
+
+Kinds 101 and 102 are not used.
 
 ### The timer program
 
@@ -755,6 +1224,85 @@ with the hash `97c89756f2969aae`.
 
 ## Limits
 
+Limits of the system profile, added in 0.6.0:
+
+- One hart. Nothing here exercises two harts, an interrupt sent from one
+  hart to another, or a page table changed by another hart during a
+  walk.
+- One author wrote the core, the reference model, the property rules,
+  the controls, the oracle script and the test program, from one reading
+  of the manual. A misreading can sit in all of them. The oracle is a
+  second language and shares no code or table with the package, but it
+  is the same reading. The script was run with one Python, 3.12, on the
+  same host.
+- No architecture test has been run, and no other emulator, assembler or
+  fuzzer was used or downloaded. The only reference is the text of the
+  manual. No kernel has run on the machine.
+- The system profile is a third profile beside the trap profile, which
+  stays a machine with M-mode alone. Another design would have given
+  the trap profile itself the two modes, as 0.5.0 gave it the M and A
+  extensions. The third profile was chosen so that the 34 commands of 0.5.0
+  print the same bytes and the checks of 0.2.0 to 0.5.0 keep judging the
+  machine they were written for.
+- No translation cache, so a program that forgets SFENCE.VMA cannot fail
+  here. No physical memory protection: its CSRs do not exist, and S-mode
+  and U-mode reach every physical address when translation is off.
+- A and D follow the Svade scheme: the machine never sets either bit,
+  and a kernel must set them or handle the page fault. Software written
+  for hardware that sets the bits itself takes page faults here that it
+  does not take there.
+- Absent, and reported as absent where the manual gives a way: the
+  hypervisor extension, Sstc (no `stimecmp`; STIP comes from machine-mode
+  software), Svnapot, Svpbmt, Svinval, Svadu, the counters `cycle`,
+  `time` and `instret` and their enable bits, and every device but the
+  serial device and the timer. `mcycle` and `minstret`, which the manual
+  lists for M-mode, have been absent since 0.2.0 and still are.
+- Choices of this machine that software can see, each marked "a choice"
+  in the tables above: an access to a CSR that does not exist traps; a
+  write of 2 to MPP is ignored; a write of `satp` MODE 0 clears the whole
+  register; no ASID bit; the machine interrupts cannot be delegated; WFI
+  traps below M-mode under TW and never waits; a pointer PTE with D, A
+  or U set faults; a store across two pages changes nothing when either
+  page faults; for an access across two pages both pages are translated
+  before either part is checked against physical memory, so a page fault
+  of the second page comes before an access fault of the first; the
+  reservation holds a physical address; a trap and a
+  return leave the reservation; MPRV is honoured in every mode.
+- The prose of the chapters does not give the field positions. They
+  came from figure files of the manual: the fields of `mstatus` and `sstatus`, the three fields of
+  `satp`, the fields of a virtual address, a physical address and a PTE,
+  the interrupt bits of `mip` and `sip`, and the encodings of SRET, MRET,
+  WFI and SFENCE.VMA. The section "Sources" lists the files. Everything
+  else was read from the text of the chapters.
+- Not confirmed from the fetched text: that a pointer PTE with D, A or U
+  set must fault (the text calls the bits reserved and step 3 of the walk
+  faults on reserved bits, but no sentence joins the two); the trap value
+  of an access fault raised for a PTE outside memory (the virtual address
+  of the access is used); and the exact meaning of MPRV when it is set
+  below M-mode, which the architecture cannot reach.
+- The hand cases cover the 32-bit atomic forms and the instructions of
+  the M extension in the system profile only through the fuzz. Their
+  rules are those of 0.5.0 and their code is shared with the trap
+  profile.
+- In the fuzz, U-mode is entered often and left fast: about one step in
+  sixteen begins in U-mode and about one in eight of those retires an
+  instruction, because most drawn words trap there. The stream sits in
+  M-mode for more than half of its steps.
+- The fuzz compares all of memory after every eighth step only. A
+  difference in memory that appears and is gone again
+  within eight steps is not seen. Registers and CSRs are compared after
+  every step.
+- The property rules judge the page of the first byte of a data access.
+  The second page of an access that crosses is covered by the hand cases
+  and by the differential check only.
+- The planted defects are branches inside the core, as the section "How
+  the contract is checked" says. A reader who wants the machine without
+  them has to read past them.
+- The image `tests/sv39.img` was written by the host tool `xxd` from the
+  hexadecimal text `asm-rv64 bytes` prints.
+- The fuzz memory is 32768 bytes and the commands `srun` and `sreplay`
+  use 65536. Other sizes were not run.
+
 Limits of the M and A extensions, added in 0.5.0:
 
 - One hart. The atomic instructions are exercised on one hart only, so no
@@ -801,7 +1349,6 @@ Limits of the M and A extensions, added in 0.5.0:
   the A chapter and their figures: the instruction listing, the atomics
   examples, the two chapters the A chapter is made of, and the
   machine-level chapter. The section "Sources" lists every file.
-- There is no supervisor mode and no virtual memory.
 
 Limits of the loader and of replay, added in 0.4.0:
 
@@ -861,11 +1408,11 @@ Limits carried over from 0.3.0:
   - MTIP is read-only in `mip` and is pending while `mtime >= mtimecmp`,
     compared as unsigned integers;
   - WFI may be implemented as a no-op.
-- Two things are still from memory and unconfirmed:
-  - the WFI word `0x10500073`. The manual keeps the encoding in a figure
-    file that could not be fetched;
-  - the CLINT addresses `0x02004000` and `0x0200BFF8` of the QEMU `virt`
-    machine. The manual gives `mtime` and `mtimecmp` no address.
+- One thing is still from memory and unconfirmed: the CLINT addresses
+  `0x02004000` and `0x0200BFF8` of the QEMU `virt` machine. The manual
+  gives `mtime` and `mtimecmp` no address. The WFI word `0x10500073` was
+  confirmed for 0.6.0 from the figure that lists the privileged
+  instructions.
 - The comparison was a reading of the text by the author of the core. No
   second reader has checked it, and no architecture test has been run.
 - The hand-computed cases, the model and the property rules were written by
@@ -876,9 +1423,10 @@ Limits carried over from 0.3.0:
   timer block has no `msip` register, and there is no PLIC, the platform
   interrupt controller that would drive MEIP.
 - `mtime` counts steps. It has no relation to seconds.
-- Machine mode only: no supervisor or user mode, no virtual memory, no
-  physical memory protection, no interrupt delegation.
-- Software cannot set a bit of `mip`.
+- The report and trap profiles have machine mode only. The system
+  profile adds the other two modes, virtual memory and delegation. No
+  profile has physical memory protection.
+- In the trap profile software cannot set a bit of `mip`.
 - The `mfuzz` stream takes software and external interrupts and never the
   timer interrupt. The `ifuzz` stream takes all three.
 - The state hash of the timer program uses the FNV-1a constants
@@ -895,20 +1443,119 @@ Limits carried over from 0.3.0:
   `asm-rv64` does not have.
 - The interpreter decodes every instruction each time it runs. No speed is
   claimed.
-- Rules of 0.2.0 taken from memory and still not confirmed against the
-  text: the `funct3` values of the six Zicsr instructions (1, 2, 3, 5, 6, 7), the
-  SYSTEM opcode `0x73`, and the MRET word `0x30200073`. The manual says an
-  access to a CSR that does not exist is reserved; trapping with cause 2 is
-  the choice made here.
+- The rules of 0.2.0 that were taken from memory were confirmed for
+  0.6.0: the `funct3` values of the six Zicsr instructions (1, 2, 3, 5,
+  6, 7) and the SYSTEM opcode `0x73` from the rows of the instruction
+  listing, and the MRET word `0x30200073` from the figure that lists the
+  privileged instructions. The manual says an access to a CSR that does
+  not exist is reserved; trapping with cause 2 is the choice made here.
 
 ## Verified
 
-Every line below was run on the 0.5.0 build, on one Windows x86-64 host.
-"Accepted" means the run ended with no difference from the model, or with
-no rule broken. The limit beside all of it: these runs check the core
-against this document, with checks written by the author of the core.
+Every line of the first two lists below was run on the 0.6.0 build, on
+one Windows x86-64 host. "Accepted" means the run ended with no
+difference from the model, or with no rule broken. The limit beside all
+of it: these runs check the core against this document, with checks
+written by the author of the core.
 
-Checks added in 0.5.0:
+Checks added in 0.6.0:
+
+- `scases`: 875 of 875 generic cases and 3456 of 3456 rows of the
+  permission matrix pass. Of the rows, 3188 expect a fault and 268 expect
+  the access to succeed. The oracle script, run again, wrote the 38 table
+  files with the bytes that are committed (compared with `cmp`). It
+  checks itself too: the field list of `sstatus` lies inside that of
+  `mstatus` field for field, each row of its listing decodes to itself,
+  the four words of the PRIV group have the values of the listing figure,
+  and every matrix row is asserted against the state of its own machine
+  (the page unchanged and `x10` 0 after a fault, the trap value equal to
+  the address).
+- `sfuzz`: accepted at every seed, 18,070,000 steps in all. "Begun" counts the
+  steps that started in each mode and "Retired" the instructions retired
+  there. "Fetches" and "Data" count retired instructions whose fetch, and
+  whose load, store or atomic access, went through the page tables. The
+  causes and the interrupts are counted whichever mode took them, and "In
+  S" counts all traps taken in S-mode.
+
+  | Seed | Steps | Begun U | S | M | Retired U | S | M | Fetches | Data | MRET | SRET | CSR | Cause 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 11 | 12 | 13 | 15 | Int. 1 | 3 | 5 | 7 | 9 | 11 | In S |
+  |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+  | 1 | 20000 | 1289 | 6874 | 11837 | 170 | 2146 | 6305 | 1951 | 666 | 335 | 451 | 1853 | 66 | 1056 | 2617 | 316 | 49 | 1575 | 167 | 2006 | 10 | 104 | 210 | 1290 | 455 | 600 | 91 | 123 | 93 | 359 | 67 | 125 | 4486 |
+  | 7 | 50000 | 3165 | 15874 | 30961 | 337 | 4550 | 16625 | 4064 | 1424 | 930 | 1144 | 4782 | 179 | 2714 | 6347 | 814 | 156 | 4067 | 419 | 5042 | 11 | 222 | 570 | 3544 | 910 | 1179 | 190 | 347 | 182 | 1022 | 194 | 379 | 10639 |
+  | 3 | 2000000 | 127262 | 665758 | 1206980 | 15526 | 207307 | 642082 | 188889 | 67839 | 36589 | 43690 | 187603 | 7306 | 102707 | 259411 | 32027 | 5152 | 161184 | 15940 | 200594 | 907 | 9018 | 22350 | 127804 | 42993 | 55769 | 7866 | 13002 | 6709 | 43243 | 7230 | 13873 | 431859 |
+  | 9 | 2000000 | 127488 | 669646 | 1202866 | 15481 | 206820 | 638525 | 188080 | 67142 | 36490 | 43393 | 187044 | 7291 | 103658 | 259882 | 31926 | 5345 | 159957 | 15951 | 200146 | 951 | 8925 | 22344 | 132327 | 42801 | 56140 | 7296 | 13007 | 6951 | 43010 | 7440 | 13826 | 437020 |
+  | 4 | 2000000 | 127498 | 661283 | 1211219 | 15488 | 203728 | 643540 | 185252 | 66502 | 36538 | 43316 | 187338 | 7316 | 101578 | 258122 | 32164 | 5307 | 160992 | 15916 | 200913 | 971 | 8957 | 22538 | 131319 | 42824 | 55983 | 7428 | 13030 | 7031 | 43575 | 7306 | 13974 | 430945 |
+  | 5 | 2000000 | 127291 | 660561 | 1212148 | 15147 | 205683 | 643500 | 186565 | 66739 | 36559 | 43657 | 187861 | 7253 | 105011 | 258708 | 32384 | 5290 | 161038 | 15902 | 201518 | 906 | 8923 | 22306 | 126048 | 42357 | 55303 | 7582 | 13216 | 6853 | 43084 | 7555 | 14433 | 428017 |
+  | 11 | 10000000 | 637789 | 3321032 | 6041179 | 76985 | 1025342 | 3208947 | 931357 | 331914 | 181564 | 217629 | 937175 | 36531 | 520370 | 1293419 | 161209 | 26675 | 805772 | 79916 | 1002505 | 4518 | 44741 | 111930 | 649820 | 213269 | 278383 | 37243 | 66794 | 34026 | 216194 | 36331 | 69080 | 2164686 |
+
+- `sprops`: accepted at seed 1 with 20000 steps, seed 7 with 50000, seed
+  2 with 1,000,000 and seed 3 with 2,000,000.
+- `scontrols` (seed 1, 20000 steps for the differential check and for
+  the rules): the core accepted by all three checks, and each of the
+  twenty planted defects refused by all three. The last column says
+  whether the hand cases, the differential check and the rules refused
+  the control.
+
+  | Control | Planted defect | Differential refusal | Property rule | Hand cases that fail | Cases, fuzz, rules |
+  |---|---|---|---|---|---|
+  | 38 | the canonical test of a virtual address is missing | kind 1 at step 774 | kind 94 at step 589 | 9, first 653 | yes, yes, yes |
+  | 39 | a misaligned superpage is accepted | kind 1 at step 578 | kind 94 at step 561 | 9, first 659 | yes, yes, yes |
+  | 40 | the U bit of a page is ignored | kind 2 at step 96 | kind 104 at step 3 | 192, first 729 | yes, yes, yes |
+  | 41 | SUM is ignored: S-mode may always read and write a user page | kind 1 at step 740 | kind 104 at step 3 | 49, first 729 | yes, yes, yes |
+  | 42 | MXR is ignored: an execute-only page is never readable | kind 1 at step 3595 | kind 104 at step 3 | 21, first 734 | yes, yes, yes |
+  | 43 | a PTE with W and without R is accepted as a leaf | kind 1 at step 1096 | kind 94 at step 265 | 81, first 742 | yes, yes, yes |
+  | 44 | the walk has two levels | kind 33 at step 12 | kind 104 at step 3 | 1799, first 380 | yes, yes, yes |
+  | 45 | the walk has four levels | kind 33 at step 12 | kind 104 at step 3 | 1106, first 386 | yes, yes, yes |
+  | 46 | the A bit is ignored | kind 1 at step 3943 | kind 94 at step 3786 | 122, first 725 | yes, yes, yes |
+  | 47 | the D bit is ignored | kind 1 at step 11813 | kind 94 at step 5480 | 44, first 762 | yes, yes, yes |
+  | 48 | MPRV also applies to the fetch | kind 32 at step 33 | kind 103 at step 192 | 803, first 667 | yes, yes, yes |
+  | 49 | a delegated trap goes to S-mode also when taken in M-mode | kind 2 at step 34 | kind 95 at step 67 | 11, first 307 | yes, yes, yes |
+  | 50 | SRET returns to S-mode whatever SPP holds | kind 30 at step 227 | kind 98 at step 111 | 12, first 230 | yes, yes, yes |
+  | 51 | TSR is ignored | kind 1 at step 1810 | kind 98 at step 275 | 1, first 231 | yes, yes, yes |
+  | 52 | TVM is ignored | kind 1 at step 912 | kind 98 at step 368 | 3, first 150 | yes, yes, yes |
+  | 53 | TW is ignored | kind 1 at step 528 | kind 98 at step 645 | 2, first 224 | yes, yes, yes |
+  | 54 | a delegated interrupt is blocked in U-mode while SIE is clear | kind 2 at step 940 | kind 97 at step 1216 | 6, first 408 | yes, yes, yes |
+  | 55 | sstatus reads all of mstatus | kind 3 at step 422 | kind 96 at step 3 | 17, first 27 | yes, yes, yes |
+  | 56 | satp accepts a write with an unsupported MODE | kind 37 at step 14376 | kind 99 at step 4907 | 9, first 47 | yes, yes, yes |
+  | 57 | a store page fault is reported with cause 13 | kind 2 at step 21 | kind 100 at step 259 | 789, first 395 | yes, yes, yes |
+
+  The line the command ends with: `result: core accepted, 20 of 20 controls refused by all three checks, 0 by one or two`.
+  The hand cases are thinnest for controls 51, 53 and 52, which fail 1, 2 and 3 of them.
+- `srun tests/sv39.img 200` (first line `run image=tests/sv39.img bytes=4132 ram=65536 steps=200`) prints the values worked
+  out by hand in `tests/sv39.s` of `asm-rv64` 0.3.0: 198 instructions
+  retired, 2 traps, the loop of the supervisor at `0x80000100`, mode S,
+  `scause` 13, `stval` `0x80006018`, `sepc` `0x8000101C`, and `x10` to
+  `x17`. The lines it prints after the first:
+
+      interrupts=0 retired=198 traps=2 pc=80000100 mtime=200 serial_len=0
+      mode=1 satp=8000000000080002 scause=d stval=80006018 sepc=8000101c
+      x10=2a x11=7 x12=7 x13=80006018 x14=2a x15=80006018 x16=d x17=8000101c
+      hash=e15fb2f971dfeb00
+
+  The file has 4132 bytes and the SHA-256
+  `82d30101dd65995fd8f7d79428b387f8ce6df2c73c2563b4acb2b0819b7f25d7`.
+- `sreplay tests/sv39.img 200`: the two runs agree at 1 of 1 checkpoints.
+  `sreplay tests/sv39.img 5000`: runs agree at 5 of 5 checkpoints, and the last line before it is
+  `step 5000 hash=3537068c02481e44`.
+- `run tests/sv39.img 200 65536`, the same image in the trap profile: 25
+  instructions retired and 175 traps. The write to `medeleg` is illegal
+  there and traps to `mtvec` = 0, outside memory.
+
+Checks of 0.1.0 to 0.5.0, run again on the 0.6.0 build:
+
+- The 34 commands that `tests/cases.txt` listed for 0.5.0 print the bytes
+  of the 0.5.0 goldens. The 34 golden files are byte for byte those of
+  0.5.0.
+- Seven long runs were repeated and gave the counts 0.5.0 recorded, which
+  are in the tables further down: `fuzz 3 2000000`, `mfuzz 3 2000000`,
+  `ifuzz 3 2000000`, `xfuzz 3 2000000`, `rprops 3 2000000`,
+  `xprops 2 1000000` and `iprops 2 1000000`.
+- The other rows of the tables further down were not repeated on this
+  build.
+- `buildc pkg check-registry` accepts the registry with this version in
+  it, and the registry package test of the compiler builds the package
+  and compares the 43 commands of `tests/cases.txt` with their goldens.
+
+Checks added in 0.5.0, as recorded for 0.5.0:
 
 - `xcases`: 398 of 398 cases pass. The oracle script that computed them
   also checks itself: every row of its listing decodes to itself, the two
@@ -960,7 +1607,7 @@ Checks added in 0.5.0:
   checkpoints. `replay tests/mulatomic.img 5000`: they agree at 5 of 5,
   and the last hash is `5a177a91ef57a513`.
 
-Checks of 0.1.0 to 0.4.0, run again:
+Checks of 0.1.0 to 0.4.0, as recorded for 0.5.0:
 
 - 21 of the 26 commands that `tests/cases.txt` listed for 0.4.0 print the
   same bytes as the 0.4.0 goldens. The other five are the ones "Limits"
@@ -1017,14 +1664,12 @@ Checks of 0.1.0 to 0.4.0, run again:
   | 5 | 2000000 | 6000 | 974409 | 1025591 | 4412 | 600972 | 0 |
   | 11 | 20000127 | 60326 | 9473717 | 10526410 | 42200 | 5865324 | 1 |
 
-- `buildc pkg check-registry` accepts the registry with this version in
-  it, and the registry package test of the compiler builds the package and
-  compares the 34 commands of `tests/cases.txt` with their goldens.
-
 Not verified: the package was not built or run on a second host or with a
 second C compiler, so the claim that results are the same on every host
-rests on the integer arithmetic alone. The oracle script was not run with
-a second Python. No program was run on two harts, because there is one.
+rests on the integer arithmetic alone. The oracle scripts were not run
+with a second Python. No program was run on two harts, because there is
+one. No kernel, no architecture test and no program written by anyone
+else has run on the system profile.
 
 ## Sources
 
@@ -1056,6 +1701,28 @@ a second Python. No program was run on two harts, because there is one.
 
   No encoding and no rule of the M and A extensions is from memory: each
   was read from the text of these files.
+- For 0.6.0, files of the same repository at the same commit, fetched on
+  2026-11-10 and kept as data. Quotations in this document leave out the
+  markup of the source, write its dashes in number ranges as hyphens and
+  its not-equal sign as `!=`.
+
+  | File | SHA-256 | What was read from it |
+  |---|---|---|
+  | `src/priv/supervisor.adoc` | `80fc178596d15a79de1654d9237606c48e1a2e9cd2f42d8adbcd922397ab59d7` | The supervisor CSRs, the field list of `sstatus`, `satp` and its MODE table, SFENCE.VMA, the PTE flags, the two schemes for A and D, the ten steps of the walk, Sv39. |
+  | `src/priv/machine.adoc` | `ed164558403bba4e05a14bfceba5b0940fd109ac280b2c13b5ea9cdd87531ade` | The privilege stack, MPRV, SUM, MXR, TVM, TW, TSR, SXL and UXL, delegation, `mip` and `mie`, the interrupt order, `mcounteren`, `menvcfg`, ECALL, the two returns, WFI, reset, and the sentence on memory operations with no PMP entry. |
+  | `src/priv/csrs.adoc` | `a8aff82d214b98b5487a8699d2a671ac8b6236586cb83822c034d7631dbb994d` | The access rules from the bits of a CSR number, and the fifteen CSR numbers. |
+  | `src/priv/svadu.adoc` | `baf23f5ee5e72b1063337f943c9f8b07f91c3b704587cd5ab7bf772fcbe0cdb8` | That Svade is in effect when Svadu is absent. |
+  | `src/priv/sv.adoc`, `src/priv/ssstrict.adoc`, `src/priv/insns.adoc`, `src/priv/intro.adoc` | `a923d8ac...01bb3`, `8d867db6...a93e2`, `60724767...50124`, `35479982...ded4b` | Read, and no rule was taken from them. |
+  | `src/unpriv/rv-32-64g.adoc` | `21f8d1b70e2064660af53d3971d018049a8a9a212943257a6f3b32e812e9426b` | The rows the oracle script types for ADDI, JAL, the loads and stores, the Zicsr instructions, ECALL, EBREAK and the atomic instructions. |
+  | `src/priv/images/bytefield/priv-instr-set.edn` | `7574703d12f22d76c096ffd4ebaa6e5cb417e6c22b1c314464fc21855c6c4705` | The encodings of SRET, MRET, WFI and SFENCE.VMA. This also confirms the WFI and MRET words that earlier versions took from memory. |
+  | `src/priv/images/wavedrom/mstatusreg.edn` | `38e5bd922c7f8616a39f59c15c84e0b77f07d4dc87ac59b01ed49874f0cd0a05` | The position of every field of `mstatus`. |
+  | `src/priv/images/bytefield/rv64satp.edn` | `06f8c1cac1cb1ab3a15fb35452bb2d34cd9e0dbb1102b936cbc444d4376379a8` | MODE in bits 63 to 60, ASID in 59 to 44, PPN in 43 to 0. |
+  | `src/priv/images/bytefield/sv39va.edn`, `sv39pa.edn`, `sv39pte.edn` | `db24ffd2...24bb8`, `556fe429...28ddb`, `771ef6c4...dfce` | The three VPN fields, the three PPN fields, and the flags and PPN of a PTE. |
+  | `src/priv/images/bytefield/mipreg-standard.edn`, `sipreg-standard.edn` | `bd7c2fb3...fedc`, `faec1b8e...f491a` | The bit of each interrupt in `mip` and `sip`. |
+  | `src/priv/images/wavedrom/sfencevma.edn`, `trap-return.edn`, `wfi.edn`, `mm-env-call.edn`, `menvcfgreg.edn`; `src/priv/images/bytefield/sv32pte.edn`, `medeleg.edn`, `mideleg.edn`, `miereg-standard.edn`, `siereg-standard.edn`, `counteren.edn`, `scounteren.edn` | in `SHA256SUMS` beside the files | Field names and widths only. No number was taken from them that is not in the files above. |
+
+  The folder that holds these files also holds a `SHA256SUMS` file with
+  every hash in full and a note of the source.
 - The two timer addresses are those of the `virt` machine of QEMU, from
   memory. No QEMU source or program was fetched or run.
 - FNV-1a is the public-domain hash of Fowler, Noll and Vo. Its constants

@@ -57,3 +57,18 @@ exact tests/golden-xcontrols.txt xcontrols
 exact tests/golden-run-mulatomic.txt run tests/mulatomic.img 100
 exact tests/golden-replay-mulatomic.txt replay tests/mulatomic.img 100
 exact tests/golden-replay-mulatomic-5000.txt replay tests/mulatomic.img 5000
+# system profile: hand cases of the CSRs, the privileged instructions, delegation, interrupts and Sv39, and the permission matrix; every word and expected value comes from tests/tools/sv39_oracle.py
+exact tests/golden-scases.txt scases
+# system profile: seeded differential runs of a stream with drawn page tables, CSR states and modes against the reference model
+exact tests/golden-sfuzz-1.txt sfuzz 1 20000
+exact tests/golden-sfuzz-7.txt sfuzz 7 50000
+# system profile: seeded property run, no model
+exact tests/golden-sprops-1.txt sprops 1 20000
+# system profile: twenty planted defects, each run through the hand cases, the differential check and the properties
+exact tests/golden-scontrols.txt scontrols
+# the program tests/sv39.s of asm-rv64 0.3.0 (page tables, delegation, S-mode and U-mode, an environment call and a page fault), from the committed image
+exact tests/golden-srun-sv39.txt srun tests/sv39.img 200
+exact tests/golden-sreplay-sv39.txt sreplay tests/sv39.img 200
+exact tests/golden-sreplay-sv39-5000.txt sreplay tests/sv39.img 5000
+# the same image in the trap profile, which has no medeleg: the write traps to mtvec = 0 and every later step traps too
+exact tests/golden-run-sv39-trap.txt run tests/sv39.img 200 65536

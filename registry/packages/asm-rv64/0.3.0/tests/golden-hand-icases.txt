@@ -1,0 +1,1 @@
+hand tests/hand-icases.s: 50 words, tests/emu-golden-icases.txt has 50 case words, equal=true

@@ -1,0 +1,52 @@
+// Hand cases of asm-rv64, ninth part: the statements of the system
+// profile, one each. Written by tests/tools/sv39_oracle.py of emu-rv64;
+// do not edit by hand. The words come from that script, which builds
+// each from the bit rows of the manual's listings and shares no code and
+// no table with the encoder or the assembler.
+
+// SRET, SFENCE.VMA and one instruction that names each new CSR.
+fn ac_s_words(st: &mut AcSt) ~ Console {
+    ac_w(st, "sret", 0x10200073_u64);
+    ac_w(st, "sfence.vma x0, x0", 0x12000073_u64);
+    ac_w(st, "sfence.vma x1, x2", 0x12208073_u64);
+    ac_w(st, "sfence.vma x31, x31", 0x13FF8073_u64);
+    ac_w(st, "sfence.vma x5, x0", 0x12028073_u64);
+    ac_w(st, "sfence.vma x0, x7", 0x12700073_u64);
+    ac_w(st, "sfence.vma x10, x11", 0x12B50073_u64);
+    ac_w(st, "csrrs x1, sstatus, x2", 0x100120F3_u64);
+    ac_w(st, "csrrs x1, sie, x2", 0x104120F3_u64);
+    ac_w(st, "csrrs x1, stvec, x2", 0x105120F3_u64);
+    ac_w(st, "csrrs x1, scounteren, x2", 0x106120F3_u64);
+    ac_w(st, "csrrs x1, senvcfg, x2", 0x10A120F3_u64);
+    ac_w(st, "csrrs x1, sscratch, x2", 0x140120F3_u64);
+    ac_w(st, "csrrs x1, sepc, x2", 0x141120F3_u64);
+    ac_w(st, "csrrs x1, scause, x2", 0x142120F3_u64);
+    ac_w(st, "csrrs x1, stval, x2", 0x143120F3_u64);
+    ac_w(st, "csrrs x1, sip, x2", 0x144120F3_u64);
+    ac_w(st, "csrrs x1, satp, x2", 0x180120F3_u64);
+    ac_w(st, "csrrs x1, medeleg, x2", 0x302120F3_u64);
+    ac_w(st, "csrrs x1, mideleg, x2", 0x303120F3_u64);
+    ac_w(st, "csrrs x1, mcounteren, x2", 0x306120F3_u64);
+    ac_w(st, "csrrs x1, menvcfg, x2", 0x30A120F3_u64);
+    ac_w(st, "csrrw x0, satp, x6", 0x18031073_u64);
+    ac_w(st, "csrrc x0, sstatus, x6", 0x10033073_u64);
+}
+
+// Statements that must be refused.
+fn ac_s_refuse(st: &mut AcSt) ~ Console {
+    ac_e(st, "sret x1", AE_COUNT);
+    ac_e(st, "sfence.vma", AE_COUNT);
+    ac_e(st, "sfence.vma x1", AE_COUNT);
+    ac_e(st, "sfence.vma x1, x2, x3", AE_COUNT);
+    ac_e(st, "sfence.vma x1, 5", AE_REG);
+    ac_e(st, "sfence.vma x32, x1", AE_REG);
+    ac_e(st, "sfence x1, x2", AE_MNEMONIC);
+    ac_e(st, "sfence.vma x1, x2 x3", AE_TRAIL);
+    ac_e(st, "csrrw x0, sstatuz, x1", AE_CSR);
+    ac_e(st, "csrrs x1, SATP, x2", AE_CSR);
+}
+
+fn ac_s_all(st: &mut AcSt) ~ Console {
+    ac_s_words(st);
+    ac_s_refuse(st);
+}

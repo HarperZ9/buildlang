@@ -6,9 +6,12 @@
 //   emu-rv64 image NAME                print a built-in image as hex bytes
 //   emu-rv64 image NAME FILE           check that FILE holds exactly those bytes
 //   emu-rv64 rcases | rprops SEED STEPS | rcontrols    the checks, in main5.bld
+//   emu-rv64 srun IMAGE STEPS          since 0.6.0: run in the system profile
+//   emu-rv64 sreplay IMAGE STEPS       since 0.6.0: replay in the system profile
 //
-// RAM is the memory size in bytes, 256 (the default) or 65536. This file is
-// the only one in the package that reads a file.
+// RAM is the memory size in bytes, 256 (the default) or 65536. srun and
+// sreplay give the machine 65536 bytes. This file is the only one in the
+// package that reads a file.
 
 // Copies the start of a file into buf. Returns the length of the file,
 // which may be more than buf holds.
@@ -34,8 +37,23 @@ fn img_refuse(path: str, len: usize, cap: usize, rc: u64) -> i64 ~ Console {
     5
 }
 
-fn cmd_run(path: str, len: usize, steps: u64, ram: &mut [u8], buf: &[u8]) -> i64 ~ Console {
-    let mut m = emu_new_machine();
+// The machine a file command starts from: the system profile for srun and
+// sreplay, the trap profile for run and replay.
+fn cmd_machine(system: bool) -> Machine {
+    if system { return emu_new_system(); }
+    emu_new_machine()
+}
+
+// What srun prints beside the lines of run: the mode, the registers that
+// say where and why the supervisor was entered last, and x10 to x17.
+fn cmd_show_system(m: &Machine, x: &[u64]) ~ Console {
+    println!("  mode={} satp={:x} scause={:x} stval={:x} sepc={:x}", m.prv, m.satp, m.scause, m.stval, m.sepc);
+    println!("  x10={:x} x11={:x} x12={:x} x13={:x} x14={:x} x15={:x} x16={:x} x17={:x}",
+             x[10], x[11], x[12], x[13], x[14], x[15], x[16], x[17]);
+}
+
+fn cmd_run(path: str, len: usize, steps: u64, ram: &mut [u8], buf: &[u8], system: bool) -> i64 ~ Console {
+    let mut m = cmd_machine(system);
     let mut x: [u64; 32] = [0_u64; 32];
     let mut out: [u8; 128] = [0_u8; 128];
     let mut t = tape_new();
@@ -48,6 +66,7 @@ fn cmd_run(path: str, len: usize, steps: u64, ram: &mut [u8], buf: &[u8]) -> i64
     println!("run image={} bytes={} ram={} steps={}", path, len, ram.len(), steps);
     println!("  interrupts={} retired={} traps={} pc={:08x} mtime={} serial_len={}",
              t.irqs, m.steps, m.traps, m.pc, m.mtime, t.sent + m.out_len);
+    if system { cmd_show_system(&m, &x); }
     println!("  hash={:016x}", ck[ck.len() - 1]);
     if m.steps + m.traps != steps {
         println!("  STOPPED after {} steps", m.steps + m.traps);
@@ -76,8 +95,8 @@ fn replay_show(a: &Vec<u64>, b: &Vec<u64>, steps: u64) -> i64 ~ Console {
     1
 }
 
-fn cmd_replay(path: str, len: usize, steps: u64, ram: &mut [u8], buf: &[u8]) -> i64 ~ Console {
-    let mut m = emu_new_machine();
+fn cmd_replay(path: str, len: usize, steps: u64, ram: &mut [u8], buf: &[u8], system: bool) -> i64 ~ Console {
+    let mut m = cmd_machine(system);
     let mut x: [u64; 32] = [0_u64; 32];
     let mut out: [u8; 128] = [0_u8; 128];
     let mut t = tape_new();
@@ -103,8 +122,9 @@ fn cmd_file(cmd: str, path: str, steps: u64, ram: &mut [u8], buf: &mut [u8]) -> 
         return 3;
     }
     let len = file_into(path, buf);
-    if cmd == "run" { return cmd_run(path, len, steps, ram, buf); }
-    cmd_replay(path, len, steps, ram, buf)
+    if cmd == "run" { return cmd_run(path, len, steps, ram, buf, false); }
+    if cmd == "srun" { return cmd_run(path, len, steps, ram, buf, true); }
+    cmd_replay(path, len, steps, ram, buf, cmd == "sreplay")
 }
 
 fn img_name(name: str) -> u64 {
@@ -163,10 +183,12 @@ fn replay_main() -> i64 ~ Console + FileSystem + Process + Environment {
     if cmd == "image" && argc >= 3 {
         return cmd_image(args_get(2), args_get(3), argc >= 4);
     }
-    if (cmd == "run" || cmd == "replay") && argc >= 4 {
+    let system = cmd == "srun" || cmd == "sreplay";
+    if (cmd == "run" || cmd == "replay" || system) && argc >= 4 {
         let steps = args_get(3).parse_int() as u64;
         let mut size = "256";
         if argc >= 5 { size = args_get(4); }
+        if system { size = "65536"; }
         if size == "65536" {
             let mut ram: [u8; 65536] = [0_u8; 65536];
             let mut buf: [u8; 65537] = [0_u8; 65537];

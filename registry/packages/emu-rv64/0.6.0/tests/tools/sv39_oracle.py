@@ -8,8 +8,9 @@
 #
 # Usage: python sv39_oracle.py OUTDIR
 # It writes the case tables as BuildLang source: svec_g*.bld (generic
-# cases), svec_p*.bld (the permission matrix) and svec_run.bld. Run again,
-# it writes the same bytes.
+# cases), svec_p*.bld (the permission matrix) and svec_run.bld for this
+# package, and acase9.bld for asm-rv64 0.3.0. Run again, it writes the same
+# bytes.
 
 import os
 import sys
@@ -21,6 +22,7 @@ from sv39_step import run_generic, matrix_row, MX_ADDI, MX_STORED, MX_VA
 from sv39_cases import part1, status
 from sv39_cases2 import part2
 from sv39_cases3 import part3
+from sv39_asm import emit_asm
 
 FN_LINES, FILE_LINES = 44, 280
 
@@ -112,8 +114,8 @@ def emit_matrix(rows):
               "// 16 and 15 (0 fetch, 1 load, 2 store) and the expected cause in bits 31",
               "// to 24, 0 when the access succeeds. svec2.bld runs a row."]
     blocks = []
-    for at in range(0, len(rows), 288):
-        part = rows[at:at + 288]
+    for at in range(0, len(rows), 256):
+        part = rows[at:at + 256]
         body = wrap("    let r: [u64; %d] = [" % len(part), part)
         blocks.append(body + ["    sv_rows(st, &r);"])
     return pack(blocks, "p", header)
@@ -166,7 +168,7 @@ def main():
     rows = matrix_rows()
     g_files, g_names = emit_generic(cases)
     p_files, p_names = emit_matrix(rows)
-    for name, text in g_files + p_files + emit_run(g_names, p_names, len(cases), len(rows)):
+    for name, text in g_files + p_files + emit_run(g_names, p_names, len(cases), len(rows)) + emit_asm():
         with open(os.path.join(outdir, name), "w", newline="\n") as f:
             f.write(text + "\n")
     with open(os.path.join(outdir, "scases-listing.txt"), "w", newline="\n") as f:

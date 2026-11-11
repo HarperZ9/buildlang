@@ -1,0 +1,3 @@
+run image=tests/sv39.img bytes=4132 ram=65536 steps=200
+  interrupts=0 retired=25 traps=175 pc=00000000 mtime=200 serial_len=0
+  hash=a10b6a50a343b1ba

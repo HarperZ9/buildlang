@@ -61,3 +61,26 @@
 81 | property: an atomic instruction past the end of memory traps with cause 5 (LR) or 7 and mtval = the address, also an SC with no reservation
 82 | property: misa reads 2 in bits 63 and 62 and exactly the bits A, I and M
 83 | property: the state hash changes with the width and with the address of a held reservation, and a state with none hashes as before
+30 | differential, system profile: the privilege mode
+31 | differential, system profile: mstatus, composed by the model from one slot per field
+32 | differential, system profile: mepc, mcause or mtval
+33 | differential, system profile: sepc, scause or stval
+34 | differential, system profile: mie
+35 | differential, system profile: the stored bits of mip
+36 | differential, system profile: medeleg or mideleg
+37 | differential, system profile: satp
+38 | differential, system profile: mtvec, stvec, mscratch or sscratch
+39 | differential, system profile: menvcfg or senvcfg
+90 | property: with satp MODE 0, and in M-mode without MPRV, the translation of a drawn address is the address itself for a fetch, a load and a store
+91 | property: a step that trapped changed no register, no byte of memory, no byte of output, not the reservation, not mtimecmp and no CSR outside the trap registers of the mode that took the trap
+92 | property: the walk reads nothing but the PTEs on its path: with only those copied into a second memory filled with a pattern, the translation gives the same result
+93 | property: an instruction that retired below M-mode with translation on was fetched through a canonical address whose path ends in an aligned leaf with X and A set, and U set exactly when the mode is U
+94 | property: a retired load, store or atomic instruction through translation used a canonical address whose path ends in an aligned leaf with A set, with U as the mode and SUM demand, R (or X under MXR) for a load, W and D for a store
+95 | property: a synchronous trap goes to S-mode exactly when its medeleg bit is set and the machine was not in M-mode, and no trap lowers the mode
+96 | property: in S-mode sstatus reads mstatus and 0x2000C0122, sie reads mie and mideleg, sip reads mip and mideleg
+97 | property: an interrupt is taken exactly when the state before the step permits one, the one taken is permitted, it goes to S-mode exactly when delegated, and none for M-mode is passed over for one for S-mode
+98 | property: a retired MRET, SRET, WFI, SFENCE.VMA or Zicsr word was allowed in its mode under TSR, TW and TVM, and after SRET and MRET the mode, the enable, the stack, MPRV and the pc follow the rule of the return
+99 | property: after every step satp is 0 or MODE 8 with no ASID bit, mstatus holds only writable bits and UXL = SXL = 2 with MPP not 2, the delegation and enable registers hold only bits that exist, the saved pcs are multiples of 4
+100 | property: causes 4, 5 and 13 are taken only by a load or LR, causes 6, 7 and 15 only by a store, SC or AMO
+103 | property: in M-mode no fetch takes a page fault, whatever MPRV holds
+104 | property: a load in S-mode from a drawn execute-only page faults with cause 13 while MXR is clear and reads the data while it is set, and from a drawn user page faults while SUM is clear and reads while it is set

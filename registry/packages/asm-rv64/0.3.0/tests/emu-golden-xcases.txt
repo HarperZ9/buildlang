@@ -1,0 +1,399 @@
+xcase 1 word=022081b3 a=7 b=6 rc=0 x3=2a pass=true
+xcase 2 word=022081b3 a=fffffffffffffff9 b=6 rc=0 x3=ffffffffffffffd6 pass=true
+xcase 3 word=022081b3 a=ffffffffffffffff b=ffffffffffffffff rc=0 x3=1 pass=true
+xcase 4 word=022081b3 a=8000000000000000 b=ffffffffffffffff rc=0 x3=8000000000000000 pass=true
+xcase 5 word=022081b3 a=8000000000000000 b=2 rc=0 x3=0 pass=true
+xcase 6 word=022081b3 a=7fffffffffffffff b=7fffffffffffffff rc=0 x3=1 pass=true
+xcase 7 word=022081b3 a=100000000 b=100000000 rc=0 x3=0 pass=true
+xcase 8 word=022081b3 a=ffffffff b=ffffffff rc=0 x3=fffffffe00000001 pass=true
+xcase 9 word=022081b3 a=123456789abcdef0 b=fedcba987654321 rc=0 x3=2236d88fe5618cf0 pass=true
+xcase 10 word=022081b3 a=8000000000000000 b=8000000000000000 rc=0 x3=0 pass=true
+xcase 11 word=022081b3 a=0 b=ffffffffffffffff rc=0 x3=0 pass=true
+xcase 12 word=022081b3 a=1 b=8000000000000000 rc=0 x3=8000000000000000 pass=true
+xcase 13 word=022081b3 a=ffffffffffffffff b=1 rc=0 x3=ffffffffffffffff pass=true
+xcase 14 word=022081b3 a=ffffffffffffffff b=2 rc=0 x3=fffffffffffffffe pass=true
+xcase 15 word=022081b3 a=2 b=ffffffffffffffff rc=0 x3=fffffffffffffffe pass=true
+xcase 16 word=022081b3 a=7fffffffffffffff b=8000000000000000 rc=0 x3=8000000000000000 pass=true
+xcase 17 word=022081b3 a=ffffffff00000001 b=1ffffffff rc=0 x3=2ffffffff pass=true
+xcase 18 word=022091b3 a=7 b=6 rc=0 x3=0 pass=true
+xcase 19 word=022091b3 a=fffffffffffffff9 b=6 rc=0 x3=ffffffffffffffff pass=true
+xcase 20 word=022091b3 a=ffffffffffffffff b=ffffffffffffffff rc=0 x3=0 pass=true
+xcase 21 word=022091b3 a=8000000000000000 b=ffffffffffffffff rc=0 x3=0 pass=true
+xcase 22 word=022091b3 a=8000000000000000 b=2 rc=0 x3=ffffffffffffffff pass=true
+xcase 23 word=022091b3 a=7fffffffffffffff b=7fffffffffffffff rc=0 x3=3fffffffffffffff pass=true
+xcase 24 word=022091b3 a=100000000 b=100000000 rc=0 x3=1 pass=true
+xcase 25 word=022091b3 a=ffffffff b=ffffffff rc=0 x3=0 pass=true
+xcase 26 word=022091b3 a=123456789abcdef0 b=fedcba987654321 rc=0 x3=121fa00ad77d742 pass=true
+xcase 27 word=022091b3 a=8000000000000000 b=8000000000000000 rc=0 x3=4000000000000000 pass=true
+xcase 28 word=022091b3 a=0 b=ffffffffffffffff rc=0 x3=0 pass=true
+xcase 29 word=022091b3 a=1 b=8000000000000000 rc=0 x3=ffffffffffffffff pass=true
+xcase 30 word=022091b3 a=ffffffffffffffff b=1 rc=0 x3=ffffffffffffffff pass=true
+xcase 31 word=022091b3 a=ffffffffffffffff b=2 rc=0 x3=ffffffffffffffff pass=true
+xcase 32 word=022091b3 a=2 b=ffffffffffffffff rc=0 x3=ffffffffffffffff pass=true
+xcase 33 word=022091b3 a=7fffffffffffffff b=8000000000000000 rc=0 x3=c000000000000000 pass=true
+xcase 34 word=022091b3 a=ffffffff00000001 b=1ffffffff rc=0 x3=fffffffffffffffe pass=true
+xcase 35 word=0220a1b3 a=7 b=6 rc=0 x3=0 pass=true
+xcase 36 word=0220a1b3 a=fffffffffffffff9 b=6 rc=0 x3=ffffffffffffffff pass=true
+xcase 37 word=0220a1b3 a=ffffffffffffffff b=ffffffffffffffff rc=0 x3=ffffffffffffffff pass=true
+xcase 38 word=0220a1b3 a=8000000000000000 b=ffffffffffffffff rc=0 x3=8000000000000000 pass=true
+xcase 39 word=0220a1b3 a=8000000000000000 b=2 rc=0 x3=ffffffffffffffff pass=true
+xcase 40 word=0220a1b3 a=7fffffffffffffff b=7fffffffffffffff rc=0 x3=3fffffffffffffff pass=true
+xcase 41 word=0220a1b3 a=100000000 b=100000000 rc=0 x3=1 pass=true
+xcase 42 word=0220a1b3 a=ffffffff b=ffffffff rc=0 x3=0 pass=true
+xcase 43 word=0220a1b3 a=123456789abcdef0 b=fedcba987654321 rc=0 x3=121fa00ad77d742 pass=true
+xcase 44 word=0220a1b3 a=8000000000000000 b=8000000000000000 rc=0 x3=c000000000000000 pass=true
+xcase 45 word=0220a1b3 a=0 b=ffffffffffffffff rc=0 x3=0 pass=true
+xcase 46 word=0220a1b3 a=1 b=8000000000000000 rc=0 x3=0 pass=true
+xcase 47 word=0220a1b3 a=ffffffffffffffff b=1 rc=0 x3=ffffffffffffffff pass=true
+xcase 48 word=0220a1b3 a=ffffffffffffffff b=2 rc=0 x3=ffffffffffffffff pass=true
+xcase 49 word=0220a1b3 a=2 b=ffffffffffffffff rc=0 x3=1 pass=true
+xcase 50 word=0220a1b3 a=7fffffffffffffff b=8000000000000000 rc=0 x3=3fffffffffffffff pass=true
+xcase 51 word=0220a1b3 a=ffffffff00000001 b=1ffffffff rc=0 x3=fffffffffffffffe pass=true
+xcase 52 word=0220b1b3 a=7 b=6 rc=0 x3=0 pass=true
+xcase 53 word=0220b1b3 a=fffffffffffffff9 b=6 rc=0 x3=5 pass=true
+xcase 54 word=0220b1b3 a=ffffffffffffffff b=ffffffffffffffff rc=0 x3=fffffffffffffffe pass=true
+xcase 55 word=0220b1b3 a=8000000000000000 b=ffffffffffffffff rc=0 x3=7fffffffffffffff pass=true
+xcase 56 word=0220b1b3 a=8000000000000000 b=2 rc=0 x3=1 pass=true
+xcase 57 word=0220b1b3 a=7fffffffffffffff b=7fffffffffffffff rc=0 x3=3fffffffffffffff pass=true
+xcase 58 word=0220b1b3 a=100000000 b=100000000 rc=0 x3=1 pass=true
+xcase 59 word=0220b1b3 a=ffffffff b=ffffffff rc=0 x3=0 pass=true
+xcase 60 word=0220b1b3 a=123456789abcdef0 b=fedcba987654321 rc=0 x3=121fa00ad77d742 pass=true
+xcase 61 word=0220b1b3 a=8000000000000000 b=8000000000000000 rc=0 x3=4000000000000000 pass=true
+xcase 62 word=0220b1b3 a=0 b=ffffffffffffffff rc=0 x3=0 pass=true
+xcase 63 word=0220b1b3 a=1 b=8000000000000000 rc=0 x3=0 pass=true
+xcase 64 word=0220b1b3 a=ffffffffffffffff b=1 rc=0 x3=0 pass=true
+xcase 65 word=0220b1b3 a=ffffffffffffffff b=2 rc=0 x3=1 pass=true
+xcase 66 word=0220b1b3 a=2 b=ffffffffffffffff rc=0 x3=1 pass=true
+xcase 67 word=0220b1b3 a=7fffffffffffffff b=8000000000000000 rc=0 x3=3fffffffffffffff pass=true
+xcase 68 word=0220b1b3 a=ffffffff00000001 b=1ffffffff rc=0 x3=1fffffffd pass=true
+xcase 69 word=0220c1b3 a=7 b=2 rc=0 x3=3 pass=true
+xcase 70 word=0220c1b3 a=fffffffffffffff9 b=2 rc=0 x3=fffffffffffffffd pass=true
+xcase 71 word=0220c1b3 a=7 b=fffffffffffffffe rc=0 x3=fffffffffffffffd pass=true
+xcase 72 word=0220c1b3 a=fffffffffffffff9 b=fffffffffffffffe rc=0 x3=3 pass=true
+xcase 73 word=0220c1b3 a=0 b=0 rc=0 x3=ffffffffffffffff pass=true
+xcase 74 word=0220c1b3 a=1 b=0 rc=0 x3=ffffffffffffffff pass=true
+xcase 75 word=0220c1b3 a=ffffffffffffffff b=0 rc=0 x3=ffffffffffffffff pass=true
+xcase 76 word=0220c1b3 a=8000000000000000 b=0 rc=0 x3=ffffffffffffffff pass=true
+xcase 77 word=0220c1b3 a=3039 b=0 rc=0 x3=ffffffffffffffff pass=true
+xcase 78 word=0220c1b3 a=8000000000000000 b=ffffffffffffffff rc=0 x3=8000000000000000 pass=true
+xcase 79 word=0220c1b3 a=8000000000000000 b=1 rc=0 x3=8000000000000000 pass=true
+xcase 80 word=0220c1b3 a=7fffffffffffffff b=ffffffffffffffff rc=0 x3=8000000000000001 pass=true
+xcase 81 word=0220c1b3 a=1 b=8000000000000000 rc=0 x3=0 pass=true
+xcase 82 word=0220c1b3 a=ffffffffffffffff b=1 rc=0 x3=ffffffffffffffff pass=true
+xcase 83 word=0220c1b3 a=8000000000000001 b=ffffffff rc=0 x3=ffffffff80000000 pass=true
+xcase 84 word=0220c1b3 a=5 b=7 rc=0 x3=0 pass=true
+xcase 85 word=0220c1b3 a=fffffffffffffffb b=7 rc=0 x3=0 pass=true
+xcase 86 word=0220c1b3 a=8000000000000000 b=2 rc=0 x3=c000000000000000 pass=true
+xcase 87 word=0220c1b3 a=8000000000000000 b=8000000000000000 rc=0 x3=1 pass=true
+xcase 88 word=0220c1b3 a=ffffffffffffffff b=7fffffffffffffff rc=0 x3=0 pass=true
+xcase 89 word=0220c1b3 a=100000000 b=ffffffff rc=0 x3=1 pass=true
+xcase 90 word=0220d1b3 a=7 b=2 rc=0 x3=3 pass=true
+xcase 91 word=0220d1b3 a=fffffffffffffff9 b=2 rc=0 x3=7ffffffffffffffc pass=true
+xcase 92 word=0220d1b3 a=7 b=fffffffffffffffe rc=0 x3=0 pass=true
+xcase 93 word=0220d1b3 a=fffffffffffffff9 b=fffffffffffffffe rc=0 x3=0 pass=true
+xcase 94 word=0220d1b3 a=0 b=0 rc=0 x3=ffffffffffffffff pass=true
+xcase 95 word=0220d1b3 a=1 b=0 rc=0 x3=ffffffffffffffff pass=true
+xcase 96 word=0220d1b3 a=ffffffffffffffff b=0 rc=0 x3=ffffffffffffffff pass=true
+xcase 97 word=0220d1b3 a=8000000000000000 b=0 rc=0 x3=ffffffffffffffff pass=true
+xcase 98 word=0220d1b3 a=3039 b=0 rc=0 x3=ffffffffffffffff pass=true
+xcase 99 word=0220d1b3 a=8000000000000000 b=ffffffffffffffff rc=0 x3=0 pass=true
+xcase 100 word=0220d1b3 a=8000000000000000 b=1 rc=0 x3=8000000000000000 pass=true
+xcase 101 word=0220d1b3 a=7fffffffffffffff b=ffffffffffffffff rc=0 x3=0 pass=true
+xcase 102 word=0220d1b3 a=1 b=8000000000000000 rc=0 x3=0 pass=true
+xcase 103 word=0220d1b3 a=ffffffffffffffff b=1 rc=0 x3=ffffffffffffffff pass=true
+xcase 104 word=0220d1b3 a=8000000000000001 b=ffffffff rc=0 x3=80000000 pass=true
+xcase 105 word=0220d1b3 a=5 b=7 rc=0 x3=0 pass=true
+xcase 106 word=0220d1b3 a=fffffffffffffffb b=7 rc=0 x3=2492492492492491 pass=true
+xcase 107 word=0220d1b3 a=8000000000000000 b=2 rc=0 x3=4000000000000000 pass=true
+xcase 108 word=0220d1b3 a=8000000000000000 b=8000000000000000 rc=0 x3=1 pass=true
+xcase 109 word=0220d1b3 a=ffffffffffffffff b=7fffffffffffffff rc=0 x3=2 pass=true
+xcase 110 word=0220d1b3 a=100000000 b=ffffffff rc=0 x3=1 pass=true
+xcase 111 word=0220e1b3 a=7 b=2 rc=0 x3=1 pass=true
+xcase 112 word=0220e1b3 a=fffffffffffffff9 b=2 rc=0 x3=ffffffffffffffff pass=true
+xcase 113 word=0220e1b3 a=7 b=fffffffffffffffe rc=0 x3=1 pass=true
+xcase 114 word=0220e1b3 a=fffffffffffffff9 b=fffffffffffffffe rc=0 x3=ffffffffffffffff pass=true
+xcase 115 word=0220e1b3 a=0 b=0 rc=0 x3=0 pass=true
+xcase 116 word=0220e1b3 a=1 b=0 rc=0 x3=1 pass=true
+xcase 117 word=0220e1b3 a=ffffffffffffffff b=0 rc=0 x3=ffffffffffffffff pass=true
+xcase 118 word=0220e1b3 a=8000000000000000 b=0 rc=0 x3=8000000000000000 pass=true
+xcase 119 word=0220e1b3 a=3039 b=0 rc=0 x3=3039 pass=true
+xcase 120 word=0220e1b3 a=8000000000000000 b=ffffffffffffffff rc=0 x3=0 pass=true
+xcase 121 word=0220e1b3 a=8000000000000000 b=1 rc=0 x3=0 pass=true
+xcase 122 word=0220e1b3 a=7fffffffffffffff b=ffffffffffffffff rc=0 x3=0 pass=true
+xcase 123 word=0220e1b3 a=1 b=8000000000000000 rc=0 x3=1 pass=true
+xcase 124 word=0220e1b3 a=ffffffffffffffff b=1 rc=0 x3=0 pass=true
+xcase 125 word=0220e1b3 a=8000000000000001 b=ffffffff rc=0 x3=ffffffff80000001 pass=true
+xcase 126 word=0220e1b3 a=5 b=7 rc=0 x3=5 pass=true
+xcase 127 word=0220e1b3 a=fffffffffffffffb b=7 rc=0 x3=fffffffffffffffb pass=true
+xcase 128 word=0220e1b3 a=8000000000000000 b=2 rc=0 x3=0 pass=true
+xcase 129 word=0220e1b3 a=8000000000000000 b=8000000000000000 rc=0 x3=0 pass=true
+xcase 130 word=0220e1b3 a=ffffffffffffffff b=7fffffffffffffff rc=0 x3=ffffffffffffffff pass=true
+xcase 131 word=0220e1b3 a=100000000 b=ffffffff rc=0 x3=1 pass=true
+xcase 132 word=0220f1b3 a=7 b=2 rc=0 x3=1 pass=true
+xcase 133 word=0220f1b3 a=fffffffffffffff9 b=2 rc=0 x3=1 pass=true
+xcase 134 word=0220f1b3 a=7 b=fffffffffffffffe rc=0 x3=7 pass=true
+xcase 135 word=0220f1b3 a=fffffffffffffff9 b=fffffffffffffffe rc=0 x3=fffffffffffffff9 pass=true
+xcase 136 word=0220f1b3 a=0 b=0 rc=0 x3=0 pass=true
+xcase 137 word=0220f1b3 a=1 b=0 rc=0 x3=1 pass=true
+xcase 138 word=0220f1b3 a=ffffffffffffffff b=0 rc=0 x3=ffffffffffffffff pass=true
+xcase 139 word=0220f1b3 a=8000000000000000 b=0 rc=0 x3=8000000000000000 pass=true
+xcase 140 word=0220f1b3 a=3039 b=0 rc=0 x3=3039 pass=true
+xcase 141 word=0220f1b3 a=8000000000000000 b=ffffffffffffffff rc=0 x3=8000000000000000 pass=true
+xcase 142 word=0220f1b3 a=8000000000000000 b=1 rc=0 x3=0 pass=true
+xcase 143 word=0220f1b3 a=7fffffffffffffff b=ffffffffffffffff rc=0 x3=7fffffffffffffff pass=true
+xcase 144 word=0220f1b3 a=1 b=8000000000000000 rc=0 x3=1 pass=true
+xcase 145 word=0220f1b3 a=ffffffffffffffff b=1 rc=0 x3=0 pass=true
+xcase 146 word=0220f1b3 a=8000000000000001 b=ffffffff rc=0 x3=80000001 pass=true
+xcase 147 word=0220f1b3 a=5 b=7 rc=0 x3=5 pass=true
+xcase 148 word=0220f1b3 a=fffffffffffffffb b=7 rc=0 x3=4 pass=true
+xcase 149 word=0220f1b3 a=8000000000000000 b=2 rc=0 x3=0 pass=true
+xcase 150 word=0220f1b3 a=8000000000000000 b=8000000000000000 rc=0 x3=0 pass=true
+xcase 151 word=0220f1b3 a=ffffffffffffffff b=7fffffffffffffff rc=0 x3=1 pass=true
+xcase 152 word=0220f1b3 a=100000000 b=ffffffff rc=0 x3=1 pass=true
+xcase 153 word=022081bb a=7 b=6 rc=0 x3=2a pass=true
+xcase 154 word=022081bb a=7fffffff b=2 rc=0 x3=fffffffffffffffe pass=true
+xcase 155 word=022081bb a=ffffffff b=ffffffff rc=0 x3=1 pass=true
+xcase 156 word=022081bb a=100000003 b=200000005 rc=0 x3=f pass=true
+xcase 157 word=022081bb a=80000000 b=80000000 rc=0 x3=0 pass=true
+xcase 158 word=022081bb a=10000 b=8000 rc=0 x3=ffffffff80000000 pass=true
+xcase 159 word=022081bb a=ffffffffffffffff b=1 rc=0 x3=ffffffffffffffff pass=true
+xcase 160 word=022081bb a=80000000 b=1 rc=0 x3=ffffffff80000000 pass=true
+xcase 161 word=022081bb a=ffff b=10001 rc=0 x3=ffffffffffffffff pass=true
+xcase 162 word=0220c1bb a=7 b=2 rc=0 x3=3 pass=true
+xcase 163 word=0220c1bb a=fffffffffffffff9 b=2 rc=0 x3=fffffffffffffffd pass=true
+xcase 164 word=0220c1bb a=7 b=fffffffffffffffe rc=0 x3=fffffffffffffffd pass=true
+xcase 165 word=0220c1bb a=fffffffffffffff9 b=fffffffffffffffe rc=0 x3=3 pass=true
+xcase 166 word=0220c1bb a=0 b=0 rc=0 x3=ffffffffffffffff pass=true
+xcase 167 word=0220c1bb a=5 b=0 rc=0 x3=ffffffffffffffff pass=true
+xcase 168 word=0220c1bb a=80000000 b=0 rc=0 x3=ffffffffffffffff pass=true
+xcase 169 word=0220c1bb a=ffffffff00000005 b=0 rc=0 x3=ffffffffffffffff pass=true
+xcase 170 word=0220c1bb a=ffffffffffffffff b=0 rc=0 x3=ffffffffffffffff pass=true
+xcase 171 word=0220c1bb a=80000000 b=ffffffff rc=0 x3=ffffffff80000000 pass=true
+xcase 172 word=0220c1bb a=aaaaaaaa80000000 b=55555555ffffffff rc=0 x3=ffffffff80000000 pass=true
+xcase 173 word=0220c1bb a=ffffffff b=1 rc=0 x3=ffffffffffffffff pass=true
+xcase 174 word=0220c1bb a=7fffffff b=ffffffff rc=0 x3=ffffffff80000001 pass=true
+xcase 175 word=0220c1bb a=100000000 b=3 rc=0 x3=0 pass=true
+xcase 176 word=0220c1bb a=80000000 b=2 rc=0 x3=ffffffffc0000000 pass=true
+xcase 177 word=0220c1bb a=100000007 b=100000000 rc=0 x3=ffffffffffffffff pass=true
+xcase 178 word=0220c1bb a=fffffffe b=7fffffff rc=0 x3=0 pass=true
+xcase 179 word=0220d1bb a=7 b=2 rc=0 x3=3 pass=true
+xcase 180 word=0220d1bb a=fffffffffffffff9 b=2 rc=0 x3=7ffffffc pass=true
+xcase 181 word=0220d1bb a=7 b=fffffffffffffffe rc=0 x3=0 pass=true
+xcase 182 word=0220d1bb a=fffffffffffffff9 b=fffffffffffffffe rc=0 x3=0 pass=true
+xcase 183 word=0220d1bb a=0 b=0 rc=0 x3=ffffffffffffffff pass=true
+xcase 184 word=0220d1bb a=5 b=0 rc=0 x3=ffffffffffffffff pass=true
+xcase 185 word=0220d1bb a=80000000 b=0 rc=0 x3=ffffffffffffffff pass=true
+xcase 186 word=0220d1bb a=ffffffff00000005 b=0 rc=0 x3=ffffffffffffffff pass=true
+xcase 187 word=0220d1bb a=ffffffffffffffff b=0 rc=0 x3=ffffffffffffffff pass=true
+xcase 188 word=0220d1bb a=80000000 b=ffffffff rc=0 x3=0 pass=true
+xcase 189 word=0220d1bb a=aaaaaaaa80000000 b=55555555ffffffff rc=0 x3=0 pass=true
+xcase 190 word=0220d1bb a=ffffffff b=1 rc=0 x3=ffffffffffffffff pass=true
+xcase 191 word=0220d1bb a=7fffffff b=ffffffff rc=0 x3=0 pass=true
+xcase 192 word=0220d1bb a=100000000 b=3 rc=0 x3=0 pass=true
+xcase 193 word=0220d1bb a=80000000 b=2 rc=0 x3=40000000 pass=true
+xcase 194 word=0220d1bb a=100000007 b=100000000 rc=0 x3=ffffffffffffffff pass=true
+xcase 195 word=0220d1bb a=fffffffe b=7fffffff rc=0 x3=2 pass=true
+xcase 196 word=0220e1bb a=7 b=2 rc=0 x3=1 pass=true
+xcase 197 word=0220e1bb a=fffffffffffffff9 b=2 rc=0 x3=ffffffffffffffff pass=true
+xcase 198 word=0220e1bb a=7 b=fffffffffffffffe rc=0 x3=1 pass=true
+xcase 199 word=0220e1bb a=fffffffffffffff9 b=fffffffffffffffe rc=0 x3=ffffffffffffffff pass=true
+xcase 200 word=0220e1bb a=0 b=0 rc=0 x3=0 pass=true
+xcase 201 word=0220e1bb a=5 b=0 rc=0 x3=5 pass=true
+xcase 202 word=0220e1bb a=80000000 b=0 rc=0 x3=ffffffff80000000 pass=true
+xcase 203 word=0220e1bb a=ffffffff00000005 b=0 rc=0 x3=5 pass=true
+xcase 204 word=0220e1bb a=ffffffffffffffff b=0 rc=0 x3=ffffffffffffffff pass=true
+xcase 205 word=0220e1bb a=80000000 b=ffffffff rc=0 x3=0 pass=true
+xcase 206 word=0220e1bb a=aaaaaaaa80000000 b=55555555ffffffff rc=0 x3=0 pass=true
+xcase 207 word=0220e1bb a=ffffffff b=1 rc=0 x3=0 pass=true
+xcase 208 word=0220e1bb a=7fffffff b=ffffffff rc=0 x3=0 pass=true
+xcase 209 word=0220e1bb a=100000000 b=3 rc=0 x3=0 pass=true
+xcase 210 word=0220e1bb a=80000000 b=2 rc=0 x3=0 pass=true
+xcase 211 word=0220e1bb a=100000007 b=100000000 rc=0 x3=7 pass=true
+xcase 212 word=0220e1bb a=fffffffe b=7fffffff rc=0 x3=fffffffffffffffe pass=true
+xcase 213 word=0220f1bb a=7 b=2 rc=0 x3=1 pass=true
+xcase 214 word=0220f1bb a=fffffffffffffff9 b=2 rc=0 x3=1 pass=true
+xcase 215 word=0220f1bb a=7 b=fffffffffffffffe rc=0 x3=7 pass=true
+xcase 216 word=0220f1bb a=fffffffffffffff9 b=fffffffffffffffe rc=0 x3=fffffffffffffff9 pass=true
+xcase 217 word=0220f1bb a=0 b=0 rc=0 x3=0 pass=true
+xcase 218 word=0220f1bb a=5 b=0 rc=0 x3=5 pass=true
+xcase 219 word=0220f1bb a=80000000 b=0 rc=0 x3=ffffffff80000000 pass=true
+xcase 220 word=0220f1bb a=ffffffff00000005 b=0 rc=0 x3=5 pass=true
+xcase 221 word=0220f1bb a=ffffffffffffffff b=0 rc=0 x3=ffffffffffffffff pass=true
+xcase 222 word=0220f1bb a=80000000 b=ffffffff rc=0 x3=ffffffff80000000 pass=true
+xcase 223 word=0220f1bb a=aaaaaaaa80000000 b=55555555ffffffff rc=0 x3=ffffffff80000000 pass=true
+xcase 224 word=0220f1bb a=ffffffff b=1 rc=0 x3=0 pass=true
+xcase 225 word=0220f1bb a=7fffffff b=ffffffff rc=0 x3=7fffffff pass=true
+xcase 226 word=0220f1bb a=100000000 b=3 rc=0 x3=0 pass=true
+xcase 227 word=0220f1bb a=80000000 b=2 rc=0 x3=0 pass=true
+xcase 228 word=0220f1bb a=100000007 b=100000000 rc=0 x3=7 pass=true
+xcase 229 word=0220f1bb a=fffffffe b=7fffffff rc=0 x3=0 pass=true
+xcase 230 word=1000a52f rc=0 x10=55667788 x11=0 d0=1122334455667788 d1=99aabbccddeeff00 res=4:80000100 mcause=0 mtval=0 pass=true
+xcase 231 word=1000a52f rc=0 x10=ffffffffd5667788 x11=0 d0=11223344d5667788 d1=99aabbccddeeff00 res=4:80000100 mcause=0 mtval=0 pass=true
+xcase 232 word=1000a02f rc=0 x10=0 x11=0 d0=1122334455667788 d1=99aabbccddeeff00 res=4:80000100 mcause=0 mtval=0 pass=true
+xcase 233 word=1000a52f rc=0 x10=55667788 x11=0 d0=1122334455667788 d1=99aabbccddeeff00 res=4:80000100 mcause=0 mtval=0 pass=true
+xcase 234 word=1400a52f rc=0 x10=55667788 x11=0 d0=1122334455667788 d1=99aabbccddeeff00 res=4:80000100 mcause=0 mtval=0 pass=true
+xcase 235 word=1000a52f rc=3 x10=0 x11=0 d0=1122334455667788 d1=99aabbccddeeff00 res=4:80000100 mcause=4 mtval=80000101 pass=true
+xcase 236 word=1000a52f rc=3 x10=0 x11=0 d0=1122334455667788 d1=99aabbccddeeff00 res=4:80000100 mcause=4 mtval=80000102 pass=true
+xcase 237 word=1000a52f rc=3 x10=0 x11=0 d0=1122334455667788 d1=99aabbccddeeff00 res=4:80000100 mcause=4 mtval=80000103 pass=true
+xcase 238 word=1000a52f rc=3 x10=0 x11=0 d0=1122334455667788 d1=99aabbccddeeff00 res=0:0 mcause=5 mtval=80000200 pass=true
+xcase 239 word=1000a52f rc=3 x10=0 x11=0 d0=1122334455667788 d1=99aabbccddeeff00 res=0:0 mcause=5 mtval=7ffffff8 pass=true
+xcase 240 word=1000a52f rc=3 x10=0 x11=0 d0=1122334455667788 d1=99aabbccddeeff00 res=0:0 mcause=5 mtval=10000000 pass=true
+xcase 241 word=1820a52f rc=0 x10=0 x11=0 d0=11223344e5f60718 d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 242 word=1820a52f rc=0 x10=1 x11=0 d0=1122334455667788 d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 243 word=1820a52f rc=0 x10=1 x11=0 d0=1122334455667788 d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 244 word=1820a52f rc=0 x10=1 x11=0 d0=1122334455667788 d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 245 word=1a20a52f rc=0 x10=0 x11=0 d0=1122334400000055 d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 246 word=1820a12f rc=0 x10=0 x11=0 d0=1122334489abcdef d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 247 word=1820a02f rc=0 x10=0 x11=0 d0=1122334400000042 d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 248 word=1820a52f rc=3 x10=0 x11=0 d0=1122334455667788 d1=99aabbccddeeff00 res=4:80000100 mcause=6 mtval=80000102 pass=true
+xcase 249 word=1820a52f rc=3 x10=0 x11=0 d0=1122334455667788 d1=99aabbccddeeff00 res=0:0 mcause=7 mtval=80000200 pass=true
+xcase 250 word=1820a52f rc=3 x10=0 x11=0 d0=1122334455667788 d1=99aabbccddeeff00 res=4:80000200 mcause=7 mtval=80000200 pass=true
+xcase 251 word=1000a52f rc=0 x10=55667788 x11=0 d0=11223344beef0001 d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 252 word=1000a52f rc=0 x10=55667788 x11=0 d0=1122334400001111 d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 253 word=1000a52f rc=0 x10=55667788 x11=ffffffffddeeff00 d0=1122334455667788 d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 254 word=1000a52f rc=0 x10=55667788 x11=ffffffffddeeff00 d0=1122334455667788 d1=99aabbcc00003333 res=0:0 mcause=0 mtval=0 pass=true
+xcase 255 word=1000a52f rc=0 x10=55667788 x11=1 d0=1122334455667788 d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 256 word=1000a52f rc=0 x10=55667788 x11=55667788 d0=1122334400005555 d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 257 word=1000a52f rc=0 x10=55667788 x11=100336698 d0=1122334400336698 d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 258 word=1000b52f rc=0 x10=1122334455667788 x11=0 d0=1122334455667788 d1=99aabbccddeeff00 res=8:80000100 mcause=0 mtval=0 pass=true
+xcase 259 word=1000b52f rc=0 x10=11223344d5667788 x11=0 d0=11223344d5667788 d1=99aabbccddeeff00 res=8:80000100 mcause=0 mtval=0 pass=true
+xcase 260 word=1000b02f rc=0 x10=0 x11=0 d0=1122334455667788 d1=99aabbccddeeff00 res=8:80000100 mcause=0 mtval=0 pass=true
+xcase 261 word=1000b52f rc=0 x10=1122334455667788 x11=0 d0=1122334455667788 d1=99aabbccddeeff00 res=8:80000100 mcause=0 mtval=0 pass=true
+xcase 262 word=1400b52f rc=0 x10=1122334455667788 x11=0 d0=1122334455667788 d1=99aabbccddeeff00 res=8:80000100 mcause=0 mtval=0 pass=true
+xcase 263 word=1000b52f rc=3 x10=0 x11=0 d0=1122334455667788 d1=99aabbccddeeff00 res=8:80000100 mcause=4 mtval=80000101 pass=true
+xcase 264 word=1000b52f rc=3 x10=0 x11=0 d0=1122334455667788 d1=99aabbccddeeff00 res=8:80000100 mcause=4 mtval=80000102 pass=true
+xcase 265 word=1000b52f rc=3 x10=0 x11=0 d0=1122334455667788 d1=99aabbccddeeff00 res=8:80000100 mcause=4 mtval=80000103 pass=true
+xcase 266 word=1000b52f rc=3 x10=0 x11=0 d0=1122334455667788 d1=99aabbccddeeff00 res=8:80000100 mcause=4 mtval=80000104 pass=true
+xcase 267 word=1000b52f rc=3 x10=0 x11=0 d0=1122334455667788 d1=99aabbccddeeff00 res=0:0 mcause=5 mtval=80000200 pass=true
+xcase 268 word=1000b52f rc=3 x10=0 x11=0 d0=1122334455667788 d1=99aabbccddeeff00 res=0:0 mcause=5 mtval=7ffffff8 pass=true
+xcase 269 word=1000b52f rc=3 x10=0 x11=0 d0=1122334455667788 d1=99aabbccddeeff00 res=0:0 mcause=5 mtval=10000000 pass=true
+xcase 270 word=1820b52f rc=0 x10=0 x11=0 d0=a1b2c3d4e5f60718 d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 271 word=1820b52f rc=0 x10=1 x11=0 d0=1122334455667788 d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 272 word=1820b52f rc=0 x10=1 x11=0 d0=1122334455667788 d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 273 word=1820b52f rc=0 x10=1 x11=0 d0=1122334455667788 d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 274 word=1a20b52f rc=0 x10=0 x11=0 d0=55 d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 275 word=1820b12f rc=0 x10=0 x11=0 d0=123456789abcdef d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 276 word=1820b02f rc=0 x10=0 x11=0 d0=42 d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 277 word=1820b52f rc=3 x10=0 x11=0 d0=1122334455667788 d1=99aabbccddeeff00 res=8:80000100 mcause=6 mtval=80000102 pass=true
+xcase 278 word=1820b52f rc=3 x10=0 x11=0 d0=1122334455667788 d1=99aabbccddeeff00 res=0:0 mcause=7 mtval=80000200 pass=true
+xcase 279 word=1820b52f rc=3 x10=0 x11=0 d0=1122334455667788 d1=99aabbccddeeff00 res=8:80000200 mcause=7 mtval=80000200 pass=true
+xcase 280 word=1000b52f rc=0 x10=1122334455667788 x11=0 d0=cafe0000beef0001 d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 281 word=1000b52f rc=0 x10=1122334455667788 x11=0 d0=1111 d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 282 word=1000b52f rc=0 x10=1122334455667788 x11=99aabbccddeeff00 d0=1122334455667788 d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 283 word=1000b52f rc=0 x10=1122334455667788 x11=99aabbccddeeff00 d0=1122334455667788 d1=3333 res=0:0 mcause=0 mtval=0 pass=true
+xcase 284 word=1000b52f rc=0 x10=1122334455667788 x11=1 d0=1122334455667788 d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 285 word=1000b52f rc=0 x10=1122334455667788 x11=1122334455667788 d0=5555 d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 286 word=1000b52f rc=0 x10=1122334455667788 x11=336699cd00336698 d0=336699cd00336698 d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 287 word=1000a52f rc=0 x10=55667788 x11=1 d0=1122334455667788 d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 288 word=1000b52f rc=0 x10=1122334455667788 x11=1 d0=1122334455667788 d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 289 word=1000b52f rc=0 x10=1122334455667788 x11=1 d0=1122334455667788 d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 290 word=1000a52f rc=0 x10=11223344 x11=0 d0=8000000155667788 d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 291 word=1000b52f rc=3 x10=1122334455667788 x11=0 d0=1122334455667788 d1=99aabbccddeeff00 res=8:80000100 mcause=4 mtval=8000010c pass=true
+xcase 292 word=0820a52f rc=0 x10=55667788 x11=0 d0=1122334433335555 d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 293 word=0820a52f rc=0 x10=ffffffffffffffff x11=0 d0=ffffffff00000001 d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 294 word=0820a52f rc=0 x10=1 x11=0 d0=ffffffff d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 295 word=0820a52f rc=0 x10=ffffffff80000000 x11=0 d0=123456787fffffff d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 296 word=0020a52f rc=0 x10=55667788 x11=0 d0=112233448899ccdd d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 297 word=0020a52f rc=0 x10=ffffffffffffffff x11=0 d0=ffffffff00000000 d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 298 word=0020a52f rc=0 x10=1 x11=0 d0=0 d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 299 word=0020a52f rc=0 x10=ffffffff80000000 x11=0 d0=12345678ffffffff d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 300 word=2020a52f rc=0 x10=55667788 x11=0 d0=11223344665522dd d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 301 word=2020a52f rc=0 x10=ffffffffffffffff x11=0 d0=fffffffffffffffe d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 302 word=2020a52f rc=0 x10=1 x11=0 d0=fffffffe d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 303 word=2020a52f rc=0 x10=ffffffff80000000 x11=0 d0=12345678ffffffff d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 304 word=6020a52f rc=0 x10=55667788 x11=0 d0=1122334411225500 d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 305 word=6020a52f rc=0 x10=ffffffffffffffff x11=0 d0=ffffffff00000001 d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 306 word=6020a52f rc=0 x10=1 x11=0 d0=1 d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 307 word=6020a52f rc=0 x10=ffffffff80000000 x11=0 d0=1234567800000000 d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 308 word=4020a52f rc=0 x10=55667788 x11=0 d0=11223344777777dd d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 309 word=4020a52f rc=0 x10=ffffffffffffffff x11=0 d0=ffffffffffffffff d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 310 word=4020a52f rc=0 x10=1 x11=0 d0=ffffffff d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 311 word=4020a52f rc=0 x10=ffffffff80000000 x11=0 d0=12345678ffffffff d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 312 word=8020a52f rc=0 x10=55667788 x11=0 d0=1122334433335555 d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 313 word=8020a52f rc=0 x10=ffffffffffffffff x11=0 d0=ffffffffffffffff d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 314 word=8020a52f rc=0 x10=1 x11=0 d0=ffffffff d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 315 word=8020a52f rc=0 x10=ffffffff80000000 x11=0 d0=1234567880000000 d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 316 word=a020a52f rc=0 x10=55667788 x11=0 d0=1122334455667788 d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 317 word=a020a52f rc=0 x10=ffffffffffffffff x11=0 d0=ffffffff00000001 d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 318 word=a020a52f rc=0 x10=1 x11=0 d0=1 d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 319 word=a020a52f rc=0 x10=ffffffff80000000 x11=0 d0=123456787fffffff d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 320 word=c020a52f rc=0 x10=55667788 x11=0 d0=1122334433335555 d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 321 word=c020a52f rc=0 x10=ffffffffffffffff x11=0 d0=ffffffff00000001 d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 322 word=c020a52f rc=0 x10=1 x11=0 d0=1 d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 323 word=c020a52f rc=0 x10=ffffffff80000000 x11=0 d0=123456787fffffff d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 324 word=e020a52f rc=0 x10=55667788 x11=0 d0=1122334455667788 d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 325 word=e020a52f rc=0 x10=ffffffffffffffff x11=0 d0=ffffffffffffffff d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 326 word=e020a52f rc=0 x10=1 x11=0 d0=ffffffff d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 327 word=e020a52f rc=0 x10=ffffffff80000000 x11=0 d0=1234567880000000 d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 328 word=0020a02f rc=0 x10=0 x11=0 d0=112233445566778d d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 329 word=0020a12f rc=0 x10=0 x11=0 d0=112233445566778d d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 330 word=0820a0af rc=0 x10=0 x11=0 d0=1122334400000005 d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 331 word=0010a52f rc=0 x10=55667788 x11=0 d0=11223344d5667888 d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 332 word=0e20a52f rc=0 x10=55667788 x11=0 d0=1122334400000099 d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 333 word=4020a52f rc=0 x10=ffffffffddeeff00 x11=0 d0=1122334455667788 d1=99aabbccddeeffff res=0:0 mcause=0 mtval=0 pass=true
+xcase 334 word=2020a52f rc=3 x10=0 x11=0 d0=1122334455667788 d1=99aabbccddeeff00 res=0:0 mcause=6 mtval=80000102 pass=true
+xcase 335 word=6020a52f rc=3 x10=0 x11=0 d0=1122334455667788 d1=99aabbccddeeff00 res=0:0 mcause=7 mtval=80000200 pass=true
+xcase 336 word=0820a52f rc=3 x10=0 x11=0 d0=1122334455667788 d1=99aabbccddeeff00 res=0:0 mcause=7 mtval=10000000 pass=true
+xcase 337 word=0820a52f rc=0 x10=55667788 x11=badf00d d0=1122334455667788 d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 338 word=0020a52f rc=0 x10=55667788 x11=0 d0=1122334455667789 d1=99aabbccddeeff00 res=8:80000100 mcause=0 mtval=0 pass=true
+xcase 339 word=0820b52f rc=0 x10=1122334455667788 x11=0 d0=f0f0f0f33335555 d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 340 word=0820b52f rc=0 x10=ffffffffffffffff x11=0 d0=1 d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 341 word=0820b52f rc=0 x10=1 x11=0 d0=ffffffffffffffff d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 342 word=0820b52f rc=0 x10=8000000000000000 x11=0 d0=7fffffffffffffff d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 343 word=0020b52f rc=0 x10=1122334455667788 x11=0 d0=203142538899ccdd d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 344 word=0020b52f rc=0 x10=ffffffffffffffff x11=0 d0=0 d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 345 word=0020b52f rc=0 x10=1 x11=0 d0=0 d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 346 word=0020b52f rc=0 x10=8000000000000000 x11=0 d0=ffffffffffffffff d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 347 word=2020b52f rc=0 x10=1122334455667788 x11=0 d0=1e2d3c4b665522dd d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 348 word=2020b52f rc=0 x10=ffffffffffffffff x11=0 d0=fffffffffffffffe d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 349 word=2020b52f rc=0 x10=1 x11=0 d0=fffffffffffffffe d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 350 word=2020b52f rc=0 x10=8000000000000000 x11=0 d0=ffffffffffffffff d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 351 word=6020b52f rc=0 x10=1122334455667788 x11=0 d0=102030411225500 d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 352 word=6020b52f rc=0 x10=ffffffffffffffff x11=0 d0=1 d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 353 word=6020b52f rc=0 x10=1 x11=0 d0=1 d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 354 word=6020b52f rc=0 x10=8000000000000000 x11=0 d0=0 d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 355 word=4020b52f rc=0 x10=1122334455667788 x11=0 d0=1f2f3f4f777777dd d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 356 word=4020b52f rc=0 x10=ffffffffffffffff x11=0 d0=ffffffffffffffff d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 357 word=4020b52f rc=0 x10=1 x11=0 d0=ffffffffffffffff d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 358 word=4020b52f rc=0 x10=8000000000000000 x11=0 d0=ffffffffffffffff d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 359 word=8020b52f rc=0 x10=1122334455667788 x11=0 d0=f0f0f0f33335555 d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 360 word=8020b52f rc=0 x10=ffffffffffffffff x11=0 d0=ffffffffffffffff d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 361 word=8020b52f rc=0 x10=1 x11=0 d0=ffffffffffffffff d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 362 word=8020b52f rc=0 x10=8000000000000000 x11=0 d0=8000000000000000 d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 363 word=a020b52f rc=0 x10=1122334455667788 x11=0 d0=1122334455667788 d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 364 word=a020b52f rc=0 x10=ffffffffffffffff x11=0 d0=1 d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 365 word=a020b52f rc=0 x10=1 x11=0 d0=1 d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 366 word=a020b52f rc=0 x10=8000000000000000 x11=0 d0=7fffffffffffffff d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 367 word=c020b52f rc=0 x10=1122334455667788 x11=0 d0=f0f0f0f33335555 d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 368 word=c020b52f rc=0 x10=ffffffffffffffff x11=0 d0=1 d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 369 word=c020b52f rc=0 x10=1 x11=0 d0=1 d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 370 word=c020b52f rc=0 x10=8000000000000000 x11=0 d0=7fffffffffffffff d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 371 word=e020b52f rc=0 x10=1122334455667788 x11=0 d0=1122334455667788 d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 372 word=e020b52f rc=0 x10=ffffffffffffffff x11=0 d0=ffffffffffffffff d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 373 word=e020b52f rc=0 x10=1 x11=0 d0=ffffffffffffffff d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 374 word=e020b52f rc=0 x10=8000000000000000 x11=0 d0=8000000000000000 d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 375 word=0020b02f rc=0 x10=0 x11=0 d0=112233445566778d d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 376 word=0020b12f rc=0 x10=0 x11=0 d0=112233445566778d d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 377 word=0820b0af rc=0 x10=0 x11=0 d0=5 d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 378 word=0010b52f rc=0 x10=1122334455667788 x11=0 d0=11223344d5667888 d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 379 word=0e20b52f rc=0 x10=1122334455667788 x11=0 d0=99 d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 380 word=4020b52f rc=0 x10=99aabbccddeeff00 x11=0 d0=1122334455667788 d1=99aabbccddeeffff res=0:0 mcause=0 mtval=0 pass=true
+xcase 381 word=2020b52f rc=3 x10=0 x11=0 d0=1122334455667788 d1=99aabbccddeeff00 res=0:0 mcause=6 mtval=80000102 pass=true
+xcase 382 word=6020b52f rc=3 x10=0 x11=0 d0=1122334455667788 d1=99aabbccddeeff00 res=0:0 mcause=7 mtval=80000200 pass=true
+xcase 383 word=0820b52f rc=3 x10=0 x11=0 d0=1122334455667788 d1=99aabbccddeeff00 res=0:0 mcause=7 mtval=10000000 pass=true
+xcase 384 word=0820b52f rc=0 x10=1122334455667788 x11=badf00d0badf00d d0=1122334455667788 d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 385 word=0020b52f rc=0 x10=1122334455667788 x11=0 d0=1122334455667789 d1=99aabbccddeeff00 res=8:80000100 mcause=0 mtval=0 pass=true
+xcase 386 word=0020a52f rc=0 x10=11223344 x11=0 d0=1122335455667788 d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 387 word=0020b52f rc=3 x10=0 x11=0 d0=1122334455667788 d1=99aabbccddeeff00 res=0:0 mcause=6 mtval=80000104 pass=true
+xcase 388 word=0020a52f rc=0 x10=ffffffffffffffff x11=0 d0=700000000 d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 389 word=1000b52f rc=0 x10=1f4 x11=0 d0=1122334455667788 d1=99aabbccddeeff00 res=8:200bff8 mcause=0 mtval=0 pass=true
+xcase 390 word=1000a52f rc=0 x10=ffffffff80000001 x11=0 d0=1122334455667788 d1=99aabbccddeeff00 res=4:200bffc mcause=0 mtval=0 pass=true
+xcase 391 word=1000a52f rc=3 x10=0 x11=0 d0=1122334455667788 d1=99aabbccddeeff00 res=0:0 mcause=4 mtval=200bffa pass=true
+xcase 392 word=0020b52f rc=0 x10=3e8 x11=0 d0=1122334455667788 d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 393 word=0820a52f rc=0 x10=ffffffffffffffff x11=0 d0=1122334455667788 d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 394 word=1000b52f rc=0 x10=1f4 x11=0 d0=1122334455667788 d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 395 word=e020b52f rc=3 x10=0 x11=0 d0=1122334455667788 d1=99aabbccddeeff00 res=0:0 mcause=7 mtval=2004008 pass=true
+xcase 396 word=30102573 rc=0 x10=8000000000001101 x11=0 d0=1122334455667788 d1=99aabbccddeeff00 res=0:0 mcause=0 mtval=0 pass=true
+xcase 397 word=022081b3 report profile rc=-1 pc=80000000 pass=true
+xcase 398 word=0020a1af report profile rc=-1 pc=80000000 pass=true
+xcases: 398 run, 0 fail, first failure 0

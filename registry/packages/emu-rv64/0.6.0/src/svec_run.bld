@@ -249,6 +249,8 @@ fn sv_matrix(st: &mut XSt) ~ Console {
     sv_p2_5(st);
     sv_p3_1(st);
     sv_p3_2(st);
+    sv_p3_3(st);
+    sv_p3_4(st);
 }
 
 // The words and numbers the matrix runner needs, from the encoder of the
