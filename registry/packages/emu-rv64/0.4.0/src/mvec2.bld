@@ -1,0 +1,148 @@
+// Hand-computed cases for the trap profile of emu-rv64, second part: CSRRC,
+// the immediate forms, every trap cause, MRET and the report profile. The
+// harness and the word layout are in mvec.bld.
+
+// Cases 23 to 26: CSRRC, f3 = 3. The bits set in x1 are cleared in the CSR.
+fn mv_rc(st: &mut MSt) ~ Console {
+    // 23: CSRRC x3, mscratch, x1 with x1 = 0xFFFFFFFF clears the low half.
+    let low = 0xFFFFFFFF_u64;
+    mv_one(st, 0x3400B1F3_u64, low, 0_u64, &mx_with(&mx_ok(low, MV_SCR), CSR_MSCRATCH, 0x1111222200000000_u64));
+    // 24: rs1 = x0 only reads.
+    mv_one(st, 0x340031F3_u64, 9_u64, 0_u64, &mx_ok(9_u64, MV_SCR));
+    // 25: CSRRC x3, mstatus, x1 with all ones clears MIE; MPP stays 3.
+    mv_one(st, 0x3000B1F3_u64, V_ONES, 0_u64, &mx_with(&mx_ok(V_ONES, MV_ST), CSR_MSTATUS, 0x1800_u64));
+    // 26: CSRRC x3, mhartid, x0 reads a read-only CSR: legal, gives 0.
+    mv_one(st, 0xF14031F3_u64, 9_u64, 0_u64, &mx_ok(9_u64, 0_u64));
+}
+
+// Cases 27 to 35: the immediate forms. The rs1 field is a 5-bit value,
+// zero-extended. 21 << 15 = 0xA8000, 31 << 15 = 0xF8000, 8 << 15 = 0x40000.
+fn mv_imm(st: &mut MSt) ~ Console {
+    // 27: CSRRWI x3, mscratch, 21. 28: immediate 0 still writes. 29: rd = x0.
+    mv_one(st, 0x340AD1F3_u64, 9_u64, 0_u64, &mx_with(&mx_ok(9_u64, MV_SCR), CSR_MSCRATCH, 21_u64));
+    mv_one(st, 0x340051F3_u64, 9_u64, 0_u64, &mx_with(&mx_ok(9_u64, MV_SCR), CSR_MSCRATCH, 0_u64));
+    mv_one(st, 0x340FD073_u64, 9_u64, 0_u64, &mx_with(&mx_ok(9_u64, 0_u64), CSR_MSCRATCH, 31_u64));
+    // 30: CSRRSI x3, mie, 8: 0x80 | 8 = 0x88.
+    mv_one(st, 0x304461F3_u64, 9_u64, 0_u64, &mx_with(&mx_ok(9_u64, 0x80_u64), CSR_MIE, 0x88_u64));
+    // 31: CSRRSI x3, mhartid, 0 only reads: legal on a read-only CSR.
+    mv_one(st, 0xF14061F3_u64, 9_u64, 0_u64, &mx_ok(9_u64, 0_u64));
+    // 32: CSRRCI x3, mstatus, 8 clears MIE. 33: immediate 0 changes nothing.
+    mv_one(st, 0x300471F3_u64, 9_u64, 0_u64, &mx_with(&mx_ok(9_u64, MV_ST), CSR_MSTATUS, 0x1800_u64));
+    mv_one(st, 0x300071F3_u64, 9_u64, 0_u64, &mx_ok(9_u64, MV_ST));
+    // 34: CSRRCI x3, mhartid, 1 writes a read-only CSR: illegal instruction.
+    mv_one(st, 0xF140F1F3_u64, 9_u64, 0_u64, &mx_trap(9_u64, 2_u64, 0xF140F1F3_u64));
+    // 35: CSRRWI x0, mhartid, 0 always writes: illegal instruction.
+    mv_one(st, 0xF1405073_u64, 9_u64, 0_u64, &mx_trap(9_u64, 2_u64, 0xF1405073_u64));
+}
+
+// Cases 36 to 47: one trap of each cause from an instruction.
+fn mv_traps(st: &mut MSt) ~ Console {
+    // 36: ECALL, cause 11, mtval 0. 37: EBREAK, cause 3, mtval 0.
+    mv_one(st, 0x00000073_u64, 9_u64, 0_u64, &mx_trap(9_u64, 11_u64, 0_u64));
+    mv_one(st, 0x00100073_u64, 9_u64, 0_u64, &mx_trap(9_u64, 3_u64, 0_u64));
+    // 38, 39: two words that are no instruction: cause 2, mtval = the word.
+    mv_one(st, 0x00000000_u64, 9_u64, 0_u64, &mx_trap(9_u64, 2_u64, 0_u64));
+    mv_one(st, 0xFFFFFFFF_u64, 9_u64, 0_u64, &mx_trap(9_u64, 2_u64, 0xFFFFFFFF_u64));
+    // 40: LD x3, 0(x1) = 0x8000 + 0x3000 + 0x180 + 0x03. Eight bytes from
+    // 0x800001FC run past the end of memory at 0x80000200: cause 5, and
+    // mtval is the first byte outside memory.
+    mv_one(st, 0x0000B183_u64, 0x800001FC_u64, 0_u64, &mx_trap(0x800001FC_u64, 5_u64, 0x80000200_u64));
+    // 41: LB x3, 0(x1) from address 0: cause 5, mtval 0.
+    mv_one(st, 0x00008183_u64, 0_u64, 0_u64, &mx_trap(0_u64, 5_u64, 0_u64));
+    // 42: SD x2, 8(x1) = 0x200000 + 0x8000 + 0x3000 + 0x400 + 0x23, to
+    // 0x80000200: cause 7. 43: to 0x800001FC, half inside memory: cause 7,
+    // mtval 0x80000200 and no byte is written.
+    mv_one(st, 0x0020B423_u64, 0x800001F8_u64, V_ONES, &mx_trap(0x800001F8_u64, 7_u64, 0x80000200_u64));
+    mv_one(st, 0x0020B423_u64, 0x800001F4_u64, V_ONES, &mx_trap(0x800001F4_u64, 7_u64, 0x80000200_u64));
+    // 44: SH x2, 8(x1) to 0x10000000: the serial device takes one byte at a
+    // time, so a two-byte store is refused: cause 7, nothing is sent.
+    mv_one(st, 0x00209423_u64, 0x0FFFFFF8_u64, V_ONES, &mx_trap(0x0FFFFFF8_u64, 7_u64, 0x10000000_u64));
+    // 45: JALR x3, 5(x1) = 0x500000 + 0x8000 + 0x180 + 0x67. Target
+    // (0x80000101 + 5) with bit 0 cleared = 0x80000106, not a multiple of 4:
+    // cause 0, mtval = the target, mepc = the jump, x3 not written.
+    mv_one(st, 0x005081E7_u64, 0x80000101_u64, 0_u64, &mx_trap(0x80000101_u64, 0_u64, 0x80000106_u64));
+    // 46: BEQ x1, x2, +6 = 0x200000 + 0x8000 + 0x300 + 0x63, taken: cause 0,
+    // mtval 0x80000006. 47: not taken, so no trap.
+    mv_one(st, 0x00208363_u64, 5_u64, 5_u64, &mx_trap(5_u64, 0_u64, 0x80000006_u64));
+    mv_one(st, 0x00208363_u64, 5_u64, 6_u64, &mx_ok(5_u64, 0_u64));
+}
+
+// Cases 48 to 52: traps that depend on the starting pc, mtvec or mstatus.
+fn mv_entry(st: &mut MSt) ~ Console {
+    // 48: pc at the first address past memory: cause 1, mtval = mepc = pc.
+    st.pc0 = 0x80000200_u64;
+    mv_one(st, 0x00000013_u64, 9_u64, 0_u64, &mx_with(&mx_trap(9_u64, 1_u64, 0x80000200_u64), CSR_MEPC, 0x80000200_u64));
+    // 49: pc not a multiple of 4: cause 0, mtval = pc, mepc = pc with bits 1
+    // and 0 cleared.
+    st.pc0 = 0x80000002_u64;
+    mv_one(st, 0x00000013_u64, 9_u64, 0_u64, &mx_trap(9_u64, 0_u64, 0x80000002_u64));
+    // 50: mtvec in vectored mode (bit 0 set). A synchronous trap still goes
+    // to the base address, and mtvec keeps its value.
+    st.mtvec0 = 0x80000101_u64;
+    mv_one(st, 0x00000073_u64, 9_u64, 0_u64, &mx_with(&mx_trap(9_u64, 11_u64, 0_u64), CSR_MTVEC, 0x80000101_u64));
+    // 51: MIE = 0 before the trap gives MPIE = 0. 52: MIE = 1 and MPIE = 1
+    // before the trap gives MPIE = 1, MIE = 0.
+    st.mstatus0 = 0x1800_u64;
+    mv_one(st, 0x00000073_u64, 9_u64, 0_u64, &mx_with(&mx_trap(9_u64, 11_u64, 0_u64), CSR_MSTATUS, 0x1800_u64));
+    st.mstatus0 = 0x1888_u64;
+    mv_one(st, 0x00000073_u64, 9_u64, 0_u64, &mx_trap(9_u64, 11_u64, 0_u64));
+}
+
+// The expected state after MRET: pc = mepc, mstatus as given, one step.
+fn mx_mret(status: u64) -> MExp {
+    mx_with(&mx_with(&mx_ok(9_u64, 0_u64), 2_u64, MV_EPC), CSR_MSTATUS, status)
+}
+
+// Cases 53 to 56: MRET = 0x30200073. MIE takes MPIE, MPIE becomes 1, MPP
+// stays 3 and pc takes mepc. One case for each value of (MPIE, MIE).
+fn mv_mret(st: &mut MSt) ~ Console {
+    mv_one(st, 0x30200073_u64, 9_u64, 0_u64, &mx_mret(0x1880_u64));
+    st.mstatus0 = 0x1880_u64;
+    mv_one(st, 0x30200073_u64, 9_u64, 0_u64, &mx_mret(0x1888_u64));
+    st.mstatus0 = 0x1888_u64;
+    mv_one(st, 0x30200073_u64, 9_u64, 0_u64, &mx_mret(0x1888_u64));
+    st.mstatus0 = 0x1800_u64;
+    mv_one(st, 0x30200073_u64, 9_u64, 0_u64, &mx_mret(0x1880_u64));
+}
+
+// Cases 57 and 58: the report profile of 0.1.0 does not know the new
+// instructions. The step reports -1 and changes nothing.
+fn mv_report(st: &mut MSt, word: u64) ~ Console {
+    st.count = st.count + 1_u64;
+    let mut m = emu_new();
+    let mut x: [u64; 32] = [0_u64; 32];
+    let mut ram: [u8; 512] = [0_u8; 512];
+    let mut out: [u8; 8] = [0_u8; 8];
+    x[1] = 9_u64;
+    m.mscratch = MV_SCR;
+    let status = m.mstatus;
+    emu_poke(&mut ram, V_B, 4_u64, word);
+    let got = emu_step(&mut m, &mut x, &mut ram, &mut out);
+    let same = m.pc == V_B && m.steps == 0_u64 && m.traps == 0_u64 && m.mscratch == MV_SCR &&
+               m.mstatus == status && m.mepc == 0_u64 && m.mcause == 0_u64 && m.mtval == 0_u64;
+    let ok = got == EMU_ILLEGAL && same && x[1] == 9_u64 && x[3] == 0_u64 && m.out_len == 0_u64;
+    if st.show {
+        println!("mcase {} word={:08x} report profile rc={} pc={:08x} pass={}", st.count, word, got, m.pc, ok);
+    }
+    if !ok && st.fail == 0_u64 { st.fail = st.count; }
+}
+
+// Runs every case through variant v. Returns the number of the first
+// failing case, or 0.
+fn mvec_run(v: u64, show: bool) -> u64 ~ Console {
+    let mut st = MSt { v: v, show: show, fail: 0_u64, count: 0_u64, pc0: V_B, mtvec0: MV_TVEC, mstatus0: MV_ST };
+    mv_rw(&mut st);
+    mv_rs(&mut st);
+    mv_rc(&mut st);
+    mv_imm(&mut st);
+    mv_traps(&mut st);
+    mv_entry(&mut st);
+    mv_mret(&mut st);
+    mv_report(&mut st, 0x340091F3_u64);
+    mv_report(&mut st, 0x30200073_u64);
+    // 59: WFI = 0x10500073 retires as a no-op since version 0.3.0. In
+    // version 0.2.0 it was an illegal instruction, cause 2.
+    mv_one(&mut st, 0x10500073_u64, 9_u64, 0_u64, &mx_ok(9_u64, 0_u64));
+    if show { println!("mcases: {} run, first failure {}", st.count, st.fail); }
+    st.fail
+}

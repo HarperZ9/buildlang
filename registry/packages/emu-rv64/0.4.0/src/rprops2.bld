@@ -1,0 +1,104 @@
+// Property rules of emu-rv64 that run an image: kinds 54 to 57 of
+// tests/props.txt, and the round that applies every rule. All runs of all
+// rounds share one set of arrays, so each run starts in what the run
+// before left.
+
+// Runs the plan and returns the last recorded hash, the hash of the end
+// state.
+fn rp_go(p: &Plan, img: &[u8], n: usize, m: &mut Machine, x: &mut [u64], ram: &mut [u8], out: &mut [u8], t: &mut Tape) -> u64 {
+    let mut ck: Vec<u64> = Vec::new();
+    rr_run(p, img, n, m, x, ram, out, t, &mut ck);
+    rv_last(&ck)
+}
+
+// Kinds 56 and 57. One bit of one image byte, at index p, is flipped. On
+// entry the arrays hold the end of a run of `steps` steps of the unchanged
+// image, whose hash is ha.
+// Kind 56: the loaded state of the changed image hashes differently from
+// the loaded state of the unchanged one.
+// Kind 57: after `steps` steps the two end states hash differently, unless
+// the program overwrote the byte: memory byte p of one of the two end
+// states no longer holds what was loaded. An accepted round returns 1 in
+// `got` when that happened. The image is restored before the return.
+fn rp_flip(v: u64, pick: u64, round: u64, steps: u64, ha: u64, img: &mut [u8], n: usize, m: &mut Machine, x: &mut [u64], ram: &mut [u8], out: &mut [u8], t: &mut Tape) -> Refusal {
+    let p = (pick % (n as u64)) as usize;
+    let bit = (1_u64 << ((pick >> 32_u64) % 8_u64)) as u8;
+    let orig = img[p];
+    let kept = ram[p] == orig;
+    let zero = plan_new(v, 0_u64, 0_u64, 0_u64);
+    let h0 = rp_go(&zero, img, n, m, x, ram, out, t);
+    img[p] = orig ^ bit;
+    let h1 = rp_go(&zero, img, n, m, x, ram, out, t);
+    let hd = rp_go(&plan_new(v, 0_u64, steps, 0_u64), img, n, m, x, ram, out, t);
+    let kept2 = ram[p] == img[p];
+    img[p] = orig;
+    if h0 == h1 { return fz_refuse(56, round, p as u64, n as u64); }
+    if hd == ha && kept && kept2 { return fz_refuse(57, round, p as u64, hd); }
+    let mut over: u64 = 0_u64;
+    if !kept || !kept2 { over = 1_u64; }
+    fz_refuse(0, round, over, 0_u64)
+}
+
+// The checkpoint interval of a round: 1, 7, 100 or 1000 steps.
+fn rp_every(pick: u64) -> u64 {
+    let sel = pick % 4_u64;
+    if sel == 0_u64 { return 1_u64; }
+    if sel == 1_u64 { return 7_u64; }
+    if sel == 2_u64 { return 100_u64; }
+    RR_EVERY
+}
+
+// One round on one image.
+// Kind 54: two runs from scratch give equal checkpoint lists.
+// Kind 55: a run that records no hash before the end ends in the state of
+// the run that recorded them, so taking a hash changes nothing.
+// Then kinds 59, 56, 57 and 58.
+fn rp_round(v: u64, r: &mut Rng, round: u64, img: &mut [u8], n: usize, m: &mut Machine, x: &mut [u64], ram: &mut [u8], out: &mut [u8], t: &mut Tape, ct: &mut [u64]) -> Refusal {
+    let pick = rng_next(r);
+    let mut steps = 1_u64 + pick % 400_u64;
+    if ((pick >> 16_u64) & 7_u64) == 0_u64 { steps = 1_u64 + (pick >> 20_u64) % 2500_u64; }
+    let every = rp_every(pick >> 40_u64);
+    let mut a: Vec<u64> = Vec::new();
+    let mut b: Vec<u64> = Vec::new();
+    rr_run(&plan_new(v, 0_u64, steps, every), img, n, m, x, ram, out, t, &mut a);
+    ct[1] = ct[1] + steps;
+    ct[2] = ct[2] + m.steps;
+    ct[3] = ct[3] + m.traps;
+    ct[4] = ct[4] + a.len() as u64;
+    ct[7] = ct[7] + t.irqs;
+    rr_run(&plan_new(v, 1_u64, steps, every), img, n, m, x, ram, out, t, &mut b);
+    if !rctl_same(v, &a, &b) { return fz_refuse(54, round, rctl_diff(v, &a, &b), a.len() as u64); }
+    let ha = rv_last(&a);
+    let hc = rp_go(&plan_new(v, 0_u64, steps, 0_u64), img, n, m, x, ram, out, t);
+    if hc != ha { return fz_refuse(55, round, hc, ha); }
+    let f = rp_lists(v, r, round, &a);
+    if f.kind != 0 { return f; }
+    let g = rp_flip(v, rng_next(r), round, steps, ha, img, n, m, x, ram, out, t);
+    if g.kind != 0 { return g; }
+    ct[5] = ct[5] + g.got;
+    rp_parts(v, r, round, m, x, ram, out, t)
+}
+
+// Every rule, round after round, until the first runs of the rounds add up
+// to at least `steps` steps. Returns the first refusal; its step is the
+// round.
+fn rprop_run(v: u64, seed: u64, steps: u64, ct: &mut [u64]) -> Refusal {
+    let mut r = Rng { s: seed };
+    let mut img: [u8; 257] = [0_u8; 257];
+    let mut m = emu_new_machine();
+    let mut x: [u64; 32] = [0_u64; 32];
+    let mut ram: [u8; 256] = [0xAA_u8; 256];
+    let mut out: [u8; 128] = [0_u8; 128];
+    let mut t = tape_new();
+    let mut round: u64 = 0_u64;
+    while ct[1] < steps {
+        let n = rp_image(&mut r, &mut img, ct);
+        let f = rp_loads(v, round, &img, n, &mut ram);
+        if f.kind != 0 { return f; }
+        let g = rp_round(v, &mut r, round, &mut img, n, &mut m, &mut x, &mut ram, &mut out, &mut t, ct);
+        if g.kind != 0 { return g; }
+        round = round + 1_u64;
+        ct[0] = round;
+    }
+    fz_refuse(0, round, 0_u64, 0_u64)
+}

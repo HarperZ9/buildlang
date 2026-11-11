@@ -1,0 +1,2 @@
+mprops seed=1 steps=20000
+  accepted, 59 cases, 20000 round trips, 20000 raw words

@@ -1,0 +1,3 @@
+iprops seed=1 steps=20000
+  accepted, 59 and 56 cases, 20000 round trips, 20000 raw words, 20000 timer round trips
+  20000 stream steps, 1116 interrupts judged, timer program 99 interrupts

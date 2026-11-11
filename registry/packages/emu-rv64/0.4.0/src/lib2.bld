@@ -1,0 +1,125 @@
+// emu-rv64 core, second part: the decoder entry, the arithmetic unit, memory
+// and the step function.
+
+// Decodes one instruction word. w holds 32 bits. The result has op 0 when
+// the word is not an RV64I, Zicsr or MRET instruction.
+fn emu_decode(w: u64) -> Insn {
+    let opc = w & 0x7F_u64;
+    let f3 = (w >> 12_u64) & 7_u64;
+    let f7 = w >> 25_u64;
+    let mut d = Insn { op: 0_u64, rd: (w >> 7_u64) & 31_u64, rs1: (w >> 15_u64) & 31_u64,
+                       rs2: (w >> 20_u64) & 31_u64, imm: emu_imm_i(w) };
+    if opc == 0x37_u64 { d.op = OP_LUI; d.imm = emu_imm_u(w); }
+    if opc == 0x17_u64 { d.op = OP_AUIPC; d.imm = emu_imm_u(w); }
+    if opc == 0x6F_u64 { d.op = OP_JAL; d.imm = emu_imm_j(w); }
+    if opc == 0x67_u64 && f3 == 0_u64 { d.op = OP_JALR; }
+    if opc == 0x63_u64 { d.op = emu_dec_branch(f3); d.imm = emu_imm_b(w); }
+    if opc == 0x03_u64 && f3 != 7_u64 { d.op = OP_LB + f3; }
+    if opc == 0x23_u64 && f3 <= 3_u64 { d.op = OP_SB + f3; d.imm = emu_imm_s(w); }
+    if opc == 0x13_u64 { d.op = emu_dec_opimm(w, f3); }
+    if opc == 0x33_u64 { d.op = emu_dec_op(f3, f7); }
+    if opc == 0x1B_u64 { d.op = emu_dec_w(true, f3, f7); }
+    if opc == 0x3B_u64 { d.op = emu_dec_w(false, f3, f7); }
+    if opc == 0x0F_u64 && f3 == 0_u64 { d.op = OP_FENCE; }
+    if w == 0x73_u64 { d.op = OP_ECALL; }
+    if w == 0x00100073_u64 { d.op = OP_EBREAK; }
+    if w == 0x30200073_u64 { d.op = OP_MRET; }
+    if w == 0x10500073_u64 { d.op = OP_WFI; }
+    if opc == 0x73_u64 && f3 != 0_u64 && f3 != 4_u64 { d.op = emu_dec_csr(f3); d.imm = w >> 20_u64; }
+    if d.op == OP_SLLI || d.op == OP_SRLI || d.op == OP_SRAI { d.imm = d.imm & 63_u64; }
+    if d.op >= OP_SLLIW && d.op <= OP_SRAIW { d.imm = d.imm & 31_u64; }
+    emu_canon(&d)
+}
+
+// Zicsr: f3 1, 2, 3 are CSRRW, CSRRS, CSRRC; f3 5, 6, 7 are the immediate
+// forms. The caller has excluded f3 0 and 4.
+fn emu_dec_csr(f3: u64) -> u64 {
+    if f3 <= 3_u64 { return OP_CSRRW + f3 - 1_u64; }
+    OP_CSRRWI + f3 - 5_u64
+}
+
+// Arithmetic shift right: the sign bit fills the vacated bits. n is 0 to 63.
+fn emu_sra(a: u64, n: u64) -> u64 {
+    if n == 0_u64 { return a; }
+    if (a >> 63_u64) == 1_u64 { return (a >> n) | (!0_u64 << (64_u64 - n)); }
+    a >> n
+}
+
+// kind: 0 add, 1 sub, 2 shift left, 3 less-than signed, 4 less-than unsigned,
+// 5 xor, 6 shift right, 7 arithmetic shift right, 8 or, 9 and.
+fn emu_alu(kind: u64, a: u64, b: u64) -> u64 {
+    if kind == 0_u64 { return a.wrapping_add(b); }
+    if kind == 1_u64 { return a.wrapping_sub(b); }
+    if kind == 2_u64 { return a << (b & 63_u64); }
+    if kind == 3_u64 { if (a ^ EMU_SIGN) < (b ^ EMU_SIGN) { return 1_u64; } return 0_u64; }
+    if kind == 4_u64 { if a < b { return 1_u64; } return 0_u64; }
+    if kind == 5_u64 { return a ^ b; }
+    if kind == 6_u64 { return a >> (b & 63_u64); }
+    if kind == 7_u64 { return emu_sra(a, b & 63_u64); }
+    if kind == 8_u64 { return a | b; }
+    a & b
+}
+
+// The 32-bit forms work on the low 32 bits and sign-extend the result.
+fn emu_alu_w(kind: u64, a: u64, b: u64) -> u64 {
+    let n = b & 31_u64;
+    let lo = a & 0xFFFFFFFF_u64;
+    if kind == 0_u64 { return emu_sext(a.wrapping_add(b), 32_u64); }
+    if kind == 1_u64 { return emu_sext(a.wrapping_sub(b), 32_u64); }
+    if kind == 2_u64 { return emu_sext(lo << n, 32_u64); }
+    if kind == 6_u64 { return emu_sext(lo >> n, 32_u64); }
+    emu_sext(emu_sra(emu_sext(lo, 32_u64), n), 32_u64)
+}
+
+// Maps an arithmetic operation number to its emu_alu kind.
+fn emu_alu_kind(op: u64) -> u64 {
+    if op >= OP_ADD && op <= OP_AND { return op - OP_ADD; }
+    if op == OP_ADDI || op == OP_ADDIW || op == OP_ADDW { return 0_u64; }
+    if op == 46_u64 { return 1_u64; }
+    if op == OP_SLLI || op == OP_SLLIW || op == 47_u64 { return 2_u64; }
+    if op == 23_u64 { return 3_u64; }
+    if op == 24_u64 { return 4_u64; }
+    if op == 25_u64 { return 5_u64; }
+    if op == OP_SRLI || op == 43_u64 || op == 48_u64 { return 6_u64; }
+    if op == OP_SRAI || op == OP_SRAIW || op == OP_SRAW { return 7_u64; }
+    if op == 26_u64 { return 8_u64; }
+    9_u64
+}
+
+fn emu_in_ram(len: u64, addr: u64, n: u64) -> bool {
+    if addr < EMU_RAM_BASE { return false; }
+    let off = addr - EMU_RAM_BASE;
+    off < len && len - off >= n
+}
+
+fn emu_in_uart(addr: u64, n: u64) -> bool {
+    n == 1_u64 && addr >= EMU_UART_BASE && addr < EMU_UART_BASE + 8_u64
+}
+
+// Reads n bytes, least significant first. The caller has checked the range.
+fn emu_peek(ram: &[u8], addr: u64, n: u64) -> u64 {
+    let off = addr - EMU_RAM_BASE;
+    let mut v: u64 = 0_u64;
+    let mut i: u64 = 0_u64;
+    while i < n {
+        v = v | ((ram[(off + i) as usize] as u64) << (8_u64 * i));
+        i = i + 1_u64;
+    }
+    v
+}
+
+fn emu_poke(ram: &mut [u8], addr: u64, n: u64, v: u64) {
+    let off = addr - EMU_RAM_BASE;
+    let mut i: u64 = 0_u64;
+    while i < n {
+        ram[(off + i) as usize] = ((v >> (8_u64 * i)) & 0xFF_u64) as u8;
+        i = i + 1_u64;
+    }
+}
+
+// Checks that an instruction can be read at pc.
+fn emu_fetch_check(m: &Machine, ram: &[u8]) -> i64 {
+    if (m.pc & 3_u64) != 0_u64 { return EMU_ALIGN; }
+    if !emu_in_ram(ram.len() as u64, m.pc, 4_u64) { return EMU_BUS; }
+    EMU_OK
+}

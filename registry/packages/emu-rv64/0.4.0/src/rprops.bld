@@ -1,0 +1,165 @@
+// Property rules for the image loader and replay of emu-rv64, with no
+// model: seeded random images run through the loader and the run of
+// rctl.bld, and each rule is judged from what the runs leave. Kinds 52 to
+// 59 of tests/props.txt. This file makes the images and holds the rules
+// that need no run; rprops2.bld holds the rules that run an image.
+//
+// Counters in ct: 0 rounds, 1 steps of the first run of each round,
+// 2 instructions retired in those runs, 3 traps, 4 checkpoints compared,
+// 5 flipped bytes that the program overwrote, 6 images of the full 256
+// bytes, 7 interrupts, 8 to 11 images of kinds 0 to 3.
+
+// Fills a whole word of the image buffer.
+fn rp_word(img: &mut [u8], off: u64, w: u64) {
+    emu_poke(img, EMU_RAM_BASE + off, 4_u64, w);
+}
+
+// Kind 2: three words that install a trap handler at 0x80000080, stream
+// words up to there, and a handler that steps over the trapping
+// instruction and returns, so a run goes on after a trap.
+//   00  0x00000297  auipc x5, 0
+//   04  0x08028293  addi x5, x5, 0x80    0x080 << 20 + 5 << 15 + 5 << 7 + 0x13
+//   08  0x30529073  csrrw x0, mtvec, x5
+//   80  0x34102E73  csrrs x28, mepc, x0
+//   84  0x004E0E13  addi x28, x28, 4
+//   88  0x341E1073  csrrw x0, mepc, x28
+//   8C  0x30200073  mret
+fn rp_handler(r: &mut Rng, img: &mut [u8]) {
+    rp_word(img, 0_u64, 0x00000297_u64);
+    rp_word(img, 4_u64, 0x08028293_u64);
+    rp_word(img, 8_u64, 0x30529073_u64);
+    let mut off: u64 = 12_u64;
+    while off < 0x80_u64 {
+        rp_word(img, off, mfz_word(r));
+        off = off + 4_u64;
+    }
+    rp_word(img, 0x80_u64, 0x34102E73_u64);
+    rp_word(img, 0x84_u64, 0x004E0E13_u64);
+    rp_word(img, 0x88_u64, 0x341E1073_u64);
+    rp_word(img, 0x8C_u64, 0x30200073_u64);
+}
+
+// Makes a random image in the first 256 bytes of img and returns its
+// length, 1 to 256. Kind 0 is random bytes, kind 1 words of the mfuzz
+// stream, kind 2 the handler layout above, kind 3 the timer image with a
+// random tail. One image in eight of kinds 0 and 1 has the full size.
+fn rp_image(r: &mut Rng, img: &mut [u8], ct: &mut [u64]) -> usize {
+    let pick = rng_next(r);
+    let kind = pick % 4_u64;
+    let mut i: usize = 0;
+    while i < 256 {
+        img[i] = (rng_next(r) & 0xFF_u64) as u8;
+        i = i + 1;
+    }
+    let mut n = 1_u64 + (pick >> 8_u64) % 256_u64;
+    if ((pick >> 20_u64) & 7_u64) == 0_u64 { n = 256_u64; }
+    if kind == 1_u64 {
+        let mut off: u64 = 0_u64;
+        while off < 256_u64 {
+            rp_word(img, off, mfz_word(r));
+            off = off + 4_u64;
+        }
+    }
+    if kind == 2_u64 {
+        rp_handler(r, img);
+        n = 0x90_u64 + (pick >> 8_u64) % 113_u64;
+    }
+    if kind == 3_u64 {
+        iprog_load(img);
+        n = 88_u64 + (pick >> 8_u64) % 169_u64;
+    }
+    if n == 256_u64 { ct[6] = ct[6] + 1_u64; }
+    ct[8 + kind as usize] = ct[8 + kind as usize] + 1_u64;
+    n as usize
+}
+
+// Kinds 52 and 53. Memory still holds the end of the round before. Kind
+// 52: after a load, byte i of memory is byte i of the image for i < n and
+// zero from n on. Kind 53, one round in eight: an image of 0 bytes and one
+// of 257 bytes are refused with the right code and memory is unchanged.
+fn rp_loads(v: u64, round: u64, img: &[u8], n: usize, ram: &mut [u8]) -> Refusal {
+    let rc = rctl_load(v, img, n, ram);
+    if rc != IMG_OK { return fz_refuse(52, round, rc, IMG_OK); }
+    let mut i: usize = 0;
+    while i < ram.len() {
+        let mut want: u8 = 0_u8;
+        if i < n { want = img[i]; }
+        if ram[i] != want { return fz_refuse(52, round, i as u64, n as u64); }
+        i = i + 1;
+    }
+    if round % 8_u64 != 3_u64 { return fz_refuse(0, round, 0_u64, 0_u64); }
+    let e = rctl_load(v, img, 0, ram);
+    let b = rctl_load(v, img, 257, ram);
+    if e != IMG_EMPTY { return fz_refuse(53, round, e, IMG_EMPTY); }
+    if b != IMG_BIG { return fz_refuse(53, round, b, IMG_BIG); }
+    i = 0;
+    while i < ram.len() {
+        let mut want: u8 = 0_u8;
+        if i < n { want = img[i]; }
+        if ram[i] != want { return fz_refuse(53, round, i as u64, n as u64); }
+        i = i + 1;
+    }
+    fz_refuse(0, round, 0_u64, 0_u64)
+}
+
+// A copy of list a with bit 0 of entry j flipped; j past the end copies.
+fn rp_copy(a: &Vec<u64>, j: usize) -> Vec<u64> {
+    let mut e: Vec<u64> = Vec::new();
+    let mut i: usize = 0;
+    while i < a.len() {
+        if i == j { e.push(a[i] ^ 1_u64); } else { e.push(a[i]); }
+        i = i + 1;
+    }
+    e
+}
+
+// Kind 59: a checkpoint list compared with a copy of itself shows no
+// difference, and compared with a copy that has one changed entry shows the
+// first difference at that entry.
+fn rp_lists(v: u64, r: &mut Rng, round: u64, a: &Vec<u64>) -> Refusal {
+    let len = a.len();
+    let same = rp_copy(a, len);
+    if !rctl_same(v, a, &same) { return fz_refuse(59, round, rctl_diff(v, a, &same), len as u64); }
+    let j = (rng_next(r) % (len as u64)) as usize;
+    let other = rp_copy(a, j);
+    let d = rctl_diff(v, a, &other);
+    if d != j as u64 || rctl_same(v, a, &other) { return fz_refuse(59, round, d, j as u64); }
+    fz_refuse(0, round, 0_u64, 0_u64)
+}
+
+// Changes one part of the state. part: 0 a register, 1 mtime, 2 another
+// field of the machine, 3 a byte of memory, 4 a byte of the output buffer,
+// 5 the count of emptied output bytes.
+fn rp_change(part: u64, pick: u64, m: &mut Machine, x: &mut [u64], ram: &mut [u8], out: &mut [u8], t: &mut Tape) {
+    let bit = 1_u64 << ((pick >> 8_u64) % 64_u64);
+    let low = (1_u64 << ((pick >> 8_u64) % 8_u64)) as u8;
+    let sel = (pick >> 16_u64) % 8_u64;
+    let xi = (1_u64 + (pick >> 24_u64) % 31_u64) as usize;
+    let ri = ((pick >> 24_u64) % (ram.len() as u64)) as usize;
+    let oi = ((pick >> 24_u64) % (out.len() as u64)) as usize;
+    if part == 0_u64 { x[xi] = x[xi] ^ bit; }
+    if part == 1_u64 { m.mtime = m.mtime ^ bit; }
+    if part == 2_u64 && sel == 0_u64 { m.pc = m.pc ^ bit; }
+    if part == 2_u64 && sel == 1_u64 { m.mepc = m.mepc ^ bit; }
+    if part == 2_u64 && sel == 2_u64 { m.mcause = m.mcause ^ bit; }
+    if part == 2_u64 && sel == 3_u64 { m.mtval = m.mtval ^ bit; }
+    if part == 2_u64 && sel == 4_u64 { m.mscratch = m.mscratch ^ bit; }
+    if part == 2_u64 && sel == 5_u64 { m.mtimecmp = m.mtimecmp ^ bit; }
+    if part == 2_u64 && sel == 6_u64 { m.steps = m.steps ^ bit; }
+    if part == 2_u64 && sel == 7_u64 { m.traps = m.traps ^ bit; }
+    if part == 3_u64 { ram[ri] = ram[ri] ^ low; }
+    if part == 4_u64 { out[oi] = out[oi] ^ low; }
+    if part == 5_u64 { t.sent = t.sent + 1_u64; }
+}
+
+// Kind 58: a change to one part of the state an image run left changes the
+// hash. got is the part.
+fn rp_parts(v: u64, r: &mut Rng, round: u64, m: &mut Machine, x: &mut [u64], ram: &mut [u8], out: &mut [u8], t: &mut Tape) -> Refusal {
+    let pick = rng_next(r);
+    let part = pick % 6_u64;
+    let h = rctl_hash(v, m, x, ram, out, t);
+    rp_change(part, pick, m, x, ram, out, t);
+    let g = rctl_hash(v, m, x, ram, out, t);
+    if g == h { return fz_refuse(58, round, part, h); }
+    fz_refuse(0, round, 0_u64, 0_u64)
+}

@@ -1,0 +1,75 @@
+// Planted controls for the timer and the interrupts of emu-rv64, variants
+// 13 to 19. Each is the core with one defect put in on purpose. The checks
+// must refuse every one; `emu-rv64 icontrols` shows the refusals. Nothing
+// outside the checks calls these.
+//
+//   13  an interrupt is taken while mstatus.MIE is 0
+//   14  an interrupt leaves bit 63 of mcause clear
+//   15  an interrupt saves pc + 4 in mepc instead of pc
+//   16  the vectored handler address is BASE + cause, not BASE + 4 * cause
+//   17  the timer interrupt is pending while mtime > mtimecmp, so it is one
+//       step late
+//   18  the timer interrupt is taken before the software interrupt
+//   19  mtime rises before the interrupt check of a step, not after the step
+
+// mip as variant v computes it.
+fn ictl_mip(v: u64, m: &Machine) -> u64 {
+    let mut p = m.mip & (MI_MSIP | MI_MEIP);
+    if m.mtime > m.mtimecmp { p = p | MI_MTIP; }
+    if v != 17_u64 && m.mtime == m.mtimecmp { p = p | MI_MTIP; }
+    p
+}
+
+// The interrupt variant v takes now, or 0.
+fn ictl_pick(v: u64, m: &Machine) -> u64 {
+    if v != 13_u64 && (m.mstatus & MS_MIE) == 0_u64 { return 0_u64; }
+    let p = ictl_mip(v, m) & m.mie;
+    if (p & MI_MEIP) != 0_u64 { return IRQ_EXT; }
+    if v == 18_u64 && (p & MI_MTIP) != 0_u64 { return IRQ_TIMER; }
+    if (p & MI_MSIP) != 0_u64 { return IRQ_SOFT; }
+    if (p & MI_MTIP) != 0_u64 { return IRQ_TIMER; }
+    0_u64
+}
+
+// Interrupt entry as variant v performs it.
+fn ictl_take(v: u64, m: &mut Machine, cause: u64) -> i64 {
+    let pc = m.pc;
+    let vec = m.mtvec;
+    let rc = emu_irq_take(m, cause);
+    if v == 14_u64 { m.mcause = cause; }
+    if v == 15_u64 { m.mepc = (pc & !3_u64).wrapping_add(4_u64); }
+    if v == 16_u64 && (vec & 1_u64) != 0_u64 { m.pc = (vec & !3_u64).wrapping_add(cause); }
+    rc
+}
+
+// The fetch and execute part of a step of variant v. Variant 17 also reads
+// mip with its late timer bit: when mtime equals mtimecmp, a CSR instruction
+// that read mip gets bit 7 clear in its destination register.
+fn ictl_run(v: u64, m: &mut Machine, x: &mut [u64], ram: &mut [u8], out: &mut [u8]) -> i64 {
+    let mut rd: u64 = 0_u64;
+    let late = v == 17_u64 && m.mtime == m.mtimecmp;
+    if late && (m.pc & 3_u64) == 0_u64 && emu_in_ram(ram.len() as u64, m.pc, 4_u64) {
+        let d = emu_decode(emu_peek(ram, m.pc, 4_u64));
+        if emu_class(d.op) == CL_CSR && d.imm == CSR_MIP { rd = d.rd; }
+    }
+    let rc = emu_mstep_run(m, x, ram, out);
+    if rc == EMU_OK && rd != 0_u64 { x[rd as usize] = x[rd as usize] & !MI_MTIP; }
+    rc
+}
+
+// One step of variant v in the trap profile. Variants below 13 are those of
+// mcontrols.bld.
+fn istep_v(v: u64, m: &mut Machine, x: &mut [u64], ram: &mut [u8], out: &mut [u8]) -> i64 {
+    if v < ICTL_FIRST { return mstep_v(v, m, x, ram, out); }
+    if x.len() < 32 { return EMU_SMALL; }
+    if v == 19_u64 { m.mtime = m.mtime.wrapping_add(1_u64); }
+    let cause = ictl_pick(v, m);
+    let mut rc: i64 = EMU_TRAP;
+    if cause != 0_u64 {
+        rc = ictl_take(v, m, cause);
+    } else {
+        rc = ictl_run(v, m, x, ram, out);
+    }
+    if v != 19_u64 { emu_tick(m, rc); }
+    rc
+}

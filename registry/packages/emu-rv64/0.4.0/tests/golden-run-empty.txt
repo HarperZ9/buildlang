@@ -1,0 +1,1 @@
+error: image tests/empty.img is empty

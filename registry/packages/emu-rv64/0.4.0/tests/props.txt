@@ -1,0 +1,45 @@
+# kind | what is compared or required
+1 | differential: result code of the step
+2 | differential: pc after the step
+3 | differential: one of the 32 registers
+4 | differential: one byte of memory
+5 | differential: one byte of serial output
+6 | differential: register 0 is 0
+7 | differential: step count and serial output length
+41 | property: decode(encode(i)) equals i for every generated instruction i
+42 | property: for any 32-bit word w, decode(w) is "not RV64I" or encode(decode(w)) equals w
+43 | property: every hand-computed case passes (step is the number of the first failing case)
+# trap profile (commands mfuzz, mprops, mcontrols): kinds 1 to 7 as above, and
+8 | differential: trap count
+11 | differential: mstatus
+12 | differential: mtvec
+13 | differential: mepc
+14 | differential: mcause
+15 | differential: mtval
+16 | differential: mie
+17 | differential: mip
+18 | differential: mscratch
+41 | property: decode(encode(i)) equals i for every generated Zicsr instruction and MRET
+42 | property: for any 32-bit word w with opcode 0x73, decode(w) is "no instruction" or encode(decode(w)) equals w
+43 | property: every hand-computed trap-profile case passes (step is the number of the first failing case)
+# timer and interrupts (commands ifuzz, iprops, icontrols): kinds 1 to 18 as above, and
+19 | differential: mtime
+20 | differential: mtimecmp
+41 | property: as above; the generator now includes WFI
+44 | property: every hand-computed timer and interrupt case passes (step is the number of the first failing case)
+45 | property: a store of 1, 2, 4 or 8 bytes at any offset inside a timer register, then an unsigned load of the same width and offset, reads the stored bytes (for mtime, after the one tick of the store step)
+46 | property: no interrupt is taken that the state before the step did not permit, and the cause is the highest-priority one
+47 | property: an interrupt that the state before the step required is taken
+48 | property: after an interrupt, mepc is the old pc, mtval is 0, MIE is 0 and MPIE is 1
+49 | property: after an interrupt, pc is BASE, or BASE + 4 * cause when the old mtvec had bit 0 set
+50 | property: mtime rises by exactly one in a step that stored nothing
+51 | property: the timer program takes 99 interrupts in 10000 steps and two runs give one state hash
+# image loader and replay (commands rprops, rcontrols): step is the round, one random image per round
+52 | property: after a load into memory that held other bytes, byte i of memory is byte i of the image below the image length and zero from there on (got is the first wrong index, want the image length)
+53 | property: an image of 0 bytes and an image of 257 bytes are refused with the codes 1 and 2, and memory is unchanged
+54 | property: two runs of one image from scratch in the same arrays give equal checkpoint lists (got is the first index that differs)
+55 | property: a run that records no hash before the end reaches the end hash of the run that recorded one at every interval
+56 | property: one flipped bit in one image byte changes the hash of the loaded state
+57 | property: the same flipped bit changes the hash of the end state, unless memory at that byte no longer holds what was loaded in one of the two end states
+58 | property: a change to one part of an end state (0 a register, 1 mtime, 2 another machine field, 3 a memory byte, 4 an output byte, 5 the count of emptied output bytes) changes the hash (got is the part)
+59 | property: a checkpoint list compared with a copy shows no difference, and compared with a copy with one changed entry shows the first difference at that entry (got is the index found, want the index changed)

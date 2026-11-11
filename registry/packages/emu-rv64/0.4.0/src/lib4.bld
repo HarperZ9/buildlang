@@ -1,0 +1,134 @@
+// emu-rv64 core, fourth part: the trap profile. Control and status registers
+// (CSRs), the six Zicsr instructions, synchronous traps and MRET.
+//
+// A CSR is a register of the machine itself, numbered 0 to 4095 and reached
+// only through the Zicsr instructions. A trap is the transfer of control to
+// a handler when an instruction cannot complete. The machine has one
+// privilege mode, machine mode (M-mode), so every trap comes from M-mode and
+// is taken in M-mode. Rules: SPEC.md, "Control and status registers" and
+// "Traps".
+
+// 0: no such CSR. 1: read/write. 2: read-only.
+fn emu_csr_kind(n: u64) -> u64 {
+    if n == CSR_MSTATUS || n == CSR_MISA || n == CSR_MIE || n == CSR_MTVEC { return 1_u64; }
+    if n >= CSR_MSCRATCH && n <= CSR_MIP { return 1_u64; }
+    if n >= CSR_MVENDORID && n <= CSR_MCONFIGPTR { return 2_u64; }
+    0_u64
+}
+
+// The value a CSR instruction reads. The caller has checked emu_csr_kind.
+fn emu_csr_read(m: &Machine, n: u64) -> u64 {
+    if n == CSR_MSTATUS { return m.mstatus; }
+    if n == CSR_MISA { return MISA_VALUE; }
+    if n == CSR_MIE { return m.mie; }
+    if n == CSR_MTVEC { return m.mtvec; }
+    if n == CSR_MSCRATCH { return m.mscratch; }
+    if n == CSR_MEPC { return m.mepc; }
+    if n == CSR_MCAUSE { return m.mcause; }
+    if n == CSR_MTVAL { return m.mtval; }
+    if n == CSR_MIP { return emu_mip_now(m); }
+    0_u64
+}
+
+// Writes a read/write CSR. Each register keeps only the bits it implements:
+// a field that is not writable keeps its value whatever is written.
+fn emu_csr_write(m: &mut Machine, n: u64, v: u64) {
+    if n == CSR_MSTATUS { m.mstatus = (v & (MS_MIE | MS_MPIE)) | MS_MPP; }
+    if n == CSR_MIE { m.mie = v & MI_BITS; }
+    if n == CSR_MTVEC { m.mtvec = v & !2_u64; }
+    if n == CSR_MSCRATCH { m.mscratch = v; }
+    if n == CSR_MEPC { m.mepc = v & !3_u64; }
+    if n == CSR_MCAUSE { m.mcause = v; }
+    if n == CSR_MTVAL { m.mtval = v; }
+}
+
+// Takes a synchronous trap: records where and why, stacks the interrupt
+// enable, and continues at the handler. Returns EMU_TRAP.
+fn emu_trap(m: &mut Machine, cause: u64, tval: u64) -> i64 {
+    m.mepc = m.pc & !3_u64;
+    m.mcause = cause;
+    m.mtval = tval;
+    let mut s = MS_MPP;
+    if (m.mstatus & MS_MIE) != 0_u64 { s = s | MS_MPIE; }
+    m.mstatus = s;
+    m.pc = m.mtvec & !3_u64;
+    m.traps = m.traps + 1_u64;
+    EMU_TRAP
+}
+
+// MRET: pops the interrupt-enable stack and continues at mepc.
+fn emu_mret(m: &mut Machine) -> i64 {
+    let mut s = MS_MPP | MS_MPIE;
+    if (m.mstatus & MS_MPIE) != 0_u64 { s = s | MS_MIE; }
+    m.mstatus = s;
+    m.pc = m.mepc;
+    m.steps = m.steps + 1_u64;
+    EMU_OK
+}
+
+// One Zicsr instruction. d.imm is the CSR number. w is the instruction word,
+// which mtval receives when the instruction is illegal.
+fn emu_csr_exec(m: &mut Machine, x: &mut [u64], d: &Insn, w: u64) -> i64 {
+    let kind = emu_csr_kind(d.imm);
+    let swap = d.op == OP_CSRRW || d.op == OP_CSRRWI;
+    let writes = swap || d.rs1 != 0_u64;
+    if kind == 0_u64 || (kind == 2_u64 && writes) { return emu_trap(m, EXC_ILLEGAL, w); }
+    let old = emu_csr_read(m, d.imm);
+    let mut src = d.rs1;
+    if d.op <= OP_CSRRC { src = x[d.rs1 as usize]; }
+    let mut value = src;
+    if d.op == OP_CSRRS || d.op == OP_CSRRSI { value = old | src; }
+    if d.op == OP_CSRRC || d.op == OP_CSRRCI { value = old & !src; }
+    if writes { emu_csr_write(m, d.imm, value); }
+    if d.rd != 0_u64 { x[d.rd as usize] = old; }
+    m.pc = m.pc.wrapping_add(4_u64);
+    m.steps = m.steps + 1_u64;
+    EMU_OK
+}
+
+// The address mtval receives for a load or store that EMU_BUS refused: the
+// first byte of the access, in increasing address order, that is not in
+// memory.
+fn emu_fault_addr(len: u64, addr: u64) -> u64 {
+    if !emu_in_ram(len, addr, 1_u64) { return addr; }
+    EMU_RAM_BASE + len
+}
+
+// Turns the report-profile code of an RV64I instruction into a trap.
+fn emu_trap_for(m: &mut Machine, x: &[u64], len: u64, d: &Insn, w: u64, rc: i64) -> i64 {
+    let a = x[d.rs1 as usize];
+    let b = x[d.rs2 as usize];
+    if rc == EMU_ECALL { return emu_trap(m, EXC_ECALL_M, 0_u64); }
+    if rc == EMU_BREAK { return emu_trap(m, EXC_BREAK, 0_u64); }
+    if rc == EMU_ALIGN { return emu_trap(m, EXC_INSN_ALIGN, emu_eff_flow(m.pc, d, a, b).next); }
+    let at = emu_fault_addr(len, a.wrapping_add(d.imm));
+    if d.op >= OP_SB { return emu_trap(m, EXC_STORE_ACCESS, at); }
+    emu_trap(m, EXC_LOAD_ACCESS, at)
+}
+
+// Applies one decoded instruction in the trap profile. w is the instruction
+// word. EMU_SMALL changes nothing; EMU_TRAP means a trap was taken.
+fn emu_mexec(m: &mut Machine, x: &mut [u64], ram: &mut [u8], out: &mut [u8], d: &Insn, w: u64) -> i64 {
+    if x.len() < 32 { return EMU_SMALL; }
+    if emu_class(d.op) == 0_u64 || d.rd > 31_u64 || d.rs1 > 31_u64 || d.rs2 > 31_u64 {
+        return emu_trap(m, EXC_ILLEGAL, w);
+    }
+    if d.op == OP_MRET { return emu_mret(m); }
+    if d.op == OP_WFI { return emu_wfi(m); }
+    if emu_class(d.op) == CL_CSR { return emu_csr_exec(m, x, d, w); }
+    if emu_timer_hit(x, d) != 0_u64 { return emu_timer_exec(m, x, d); }
+    let rc = emu_exec(m, x, ram, out, d);
+    if rc == EMU_OK || rc == EMU_SMALL { return rc; }
+    emu_trap_for(m, x, ram.len() as u64, d, w, rc)
+}
+
+// The fetch and execute part of a step in the trap profile: fetch, decode,
+// apply, or trap. emu_mstep (lib5.bld) runs it when no interrupt is taken.
+fn emu_mstep_run(m: &mut Machine, x: &mut [u64], ram: &mut [u8], out: &mut [u8]) -> i64 {
+    if x.len() < 32 { return EMU_SMALL; }
+    if (m.pc & 3_u64) != 0_u64 { return emu_trap(m, EXC_INSN_ALIGN, m.pc); }
+    if !emu_in_ram(ram.len() as u64, m.pc, 4_u64) { return emu_trap(m, EXC_INSN_ACCESS, m.pc); }
+    let w = emu_peek(ram, m.pc, 4_u64);
+    let d = emu_decode(w);
+    emu_mexec(m, x, ram, out, &d, w)
+}

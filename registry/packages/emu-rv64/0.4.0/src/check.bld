@@ -1,0 +1,157 @@
+// Differential check for emu-rv64: the same seeded instruction stream goes to
+// a core variant and to the reference model, and the full machine state is
+// compared after every step.
+
+// The generator is splitmix64, so one seed gives one stream on every host,
+// because every step is wrapping 64-bit integer arithmetic.
+struct Rng { s: u64 }
+
+fn rng_next(r: &mut Rng) -> u64 {
+    r.s = r.s.wrapping_add(0x9E3779B97F4A7C15_u64);
+    let mut z = r.s;
+    z = (z ^ (z >> 30_u64)).wrapping_mul(0xBF58476D1CE4E5B9_u64);
+    z = (z ^ (z >> 27_u64)).wrapping_mul(0x94D049BB133111EB_u64);
+    z ^ (z >> 31_u64)
+}
+
+// kind 0 means "accepted". step, got and want locate a refusal.
+struct Refusal { kind: i64, step: u64, got: u64, want: u64 }
+
+// Counts of what the stream did, so a reader can see the run was not empty.
+struct Stats { ok: u64, illegal: u64, bus: u64, align: u64, loads: u64, stores: u64, jumps: u64 }
+
+
+// A random immediate that fits the field class. Half are small, so that
+// loads, stores and jumps often land inside memory.
+fn gen_imm(r: &mut Rng, c: u64, op: u64) -> u64 {
+    let pick = rng_next(r);
+    let mut raw = rng_next(r);
+    if (pick & 1_u64) == 0_u64 { raw = (raw % 64_u64).wrapping_sub(32_u64); }
+    let mut keep: u64 = !0_u64;
+    if (pick & 6_u64) != 0_u64 { keep = !2_u64; }
+    if c == CL_U { return emu_sext((raw << 12_u64) & 0xFFFFF000_u64, 32_u64); }
+    if c == CL_J { return emu_sext(raw & 0x1FFFFE_u64, 21_u64) & keep; }
+    if c == CL_B { return emu_sext(raw & 0x1FFE_u64, 13_u64) & keep; }
+    if c == CL_S { return emu_sext(raw & 0xFFF_u64, 12_u64); }
+    if c != CL_I { return 0_u64; }
+    if op == OP_SLLI || op == OP_SRLI || op == OP_SRAI { return raw & 63_u64; }
+    if op >= OP_SLLIW && op <= OP_SRAIW { return raw & 31_u64; }
+    emu_sext(raw & 0xFFF_u64, 12_u64)
+}
+
+// A random instruction in canonical form: every unused field is 0.
+fn gen_insn(r: &mut Rng) -> Insn {
+    let op = 1_u64 + rng_next(r) % 52_u64;
+    let regs = rng_next(r);
+    let imm = gen_imm(r, emu_class(op), op);
+    let d = Insn { op: op, rd: regs & 31_u64, rs1: (regs >> 8_u64) & 31_u64,
+                   rs2: (regs >> 16_u64) & 31_u64, imm: imm };
+    emu_canon(&d)
+}
+
+// A register value drawn from the cases that matter: edges of the integer
+// range, addresses inside memory, serial device addresses, and noise.
+fn gen_value(r: &mut Rng) -> u64 {
+    let sel = rng_next(r) % 16_u64;
+    let v = rng_next(r);
+    if sel == 0_u64 { return 0_u64; }
+    if sel == 1_u64 { return 1_u64; }
+    if sel == 2_u64 { return !0_u64; }
+    if sel == 3_u64 { return EMU_SIGN; }
+    if sel <= 10_u64 { return v % FZ_RAM + EMU_RAM_BASE; }
+    if sel <= 12_u64 { return v % 8_u64 + EMU_UART_BASE; }
+    v
+}
+
+// Gives four registers new values in both machines.
+fn fz_seed(r: &mut Rng, xa: &mut [u64], xb: &mut [u64]) {
+    let mut k: u64 = 0_u64;
+    while k < 4_u64 {
+        let reg = 1_u64 + rng_next(r) % 31_u64;
+        let v = gen_value(r);
+        xa[reg as usize] = v;
+        xb[reg as usize] = v;
+        k = k + 1_u64;
+    }
+}
+
+fn fz_refuse(kind: i64, step: u64, got: u64, want: u64) -> Refusal {
+    Refusal { kind: kind, step: step, got: got, want: want }
+}
+
+// Compares registers, memory and serial output. Kinds 3, 4, 5, 6.
+fn fz_cmp(step: u64, xa: &[u64], xb: &[u64], ra: &[u8], rb: &[u8], oa: &[u8], ob: &[u8]) -> Refusal {
+    if xa[0] != 0_u64 { return fz_refuse(6, step, xa[0], 0_u64); }
+    let mut i: usize = 0;
+    while i < 32 {
+        if xa[i] != xb[i] { return fz_refuse(3, step, xa[i], xb[i]); }
+        i = i + 1;
+    }
+    i = 0;
+    while i < ra.len() {
+        if ra[i] != rb[i] { return fz_refuse(4, step, ra[i] as u64, rb[i] as u64); }
+        i = i + 1;
+    }
+    i = 0;
+    while i < oa.len() {
+        if oa[i] != ob[i] { return fz_refuse(5, step, oa[i] as u64, ob[i] as u64); }
+        i = i + 1;
+    }
+    fz_refuse(0, step, 0_u64, 0_u64)
+}
+
+fn fz_count(st: &mut Stats, rc: i64, w: u64) {
+    if rc == EMU_ILLEGAL { st.illegal = st.illegal + 1_u64; }
+    if rc == EMU_BUS { st.bus = st.bus + 1_u64; }
+    if rc == EMU_ALIGN { st.align = st.align + 1_u64; }
+    if rc != EMU_OK { return; }
+    st.ok = st.ok + 1_u64;
+    let op = emu_decode(w).op;
+    if op >= OP_LB && op <= OP_LWU { st.loads = st.loads + 1_u64; }
+    if op >= OP_SB && op <= OP_SD { st.stores = st.stores + 1_u64; }
+    if op >= OP_JAL && op <= OP_BGEU { st.jumps = st.jumps + 1_u64; }
+}
+
+// Picks the next word: three in four are valid instructions, one is noise.
+fn fz_word(r: &mut Rng) -> u64 {
+    if rng_next(r) % 4_u64 == 0_u64 { return rng_next(r) & 0xFFFFFFFF_u64; }
+    let d = gen_insn(r);
+    emu_encode(&d)
+}
+
+// Runs `steps` instructions through variant v and the model.
+// Kinds: 1 result code, 2 pc, 3 register, 4 memory, 5 serial output,
+// 6 register 0 not zero, 7 step or output count.
+fn fuzz_run(v: u64, seed: u64, steps: u64, st: &mut Stats) -> Refusal {
+    let mut r = Rng { s: seed };
+    let mut xa: [u64; 32] = [0_u64; 32];
+    let mut xb: [u64; 32] = [0_u64; 32];
+    let mut ra: [u8; 1024] = [0_u8; 1024];
+    let mut rb: [u8; 1024] = [0_u8; 1024];
+    let mut oa: [u8; 64] = [0_u8; 64];
+    let mut ob: [u8; 64] = [0_u8; 64];
+    let mut ma = emu_new();
+    let mut mb = emu_new();
+    let mut i: u64 = 0_u64;
+    while i < steps {
+        if i % 4_u64 == 0_u64 { fz_seed(&mut r, &mut xa, &mut xb); }
+        if ma.out_len == FZ_OUT { ma.out_len = 0_u64; mb.out_len = 0_u64; }
+        if emu_fetch_check(&ma, &ra) != EMU_OK {
+            ma.pc = 4_u64 * (rng_next(&mut r) % 256_u64) + EMU_RAM_BASE;
+            mb.pc = ma.pc;
+        }
+        let w = fz_word(&mut r);
+        emu_poke(&mut ra, ma.pc, 4_u64, w);
+        emu_poke(&mut rb, mb.pc, 4_u64, w);
+        let ca = step_v(v, &mut ma, &mut xa, &mut ra, &mut oa);
+        let cb = ref_step(&mut mb, &mut xb, &mut rb, &mut ob);
+        if ca != cb { return fz_refuse(1, i, ca as u64, cb as u64); }
+        if ma.pc != mb.pc { return fz_refuse(2, i, ma.pc, mb.pc); }
+        if ma.steps != mb.steps || ma.out_len != mb.out_len { return fz_refuse(7, i, ma.steps, mb.steps); }
+        let c = fz_cmp(i, &xa, &xb, &ra, &rb, &oa, &ob);
+        if c.kind != 0 { return c; }
+        fz_count(st, ca, w);
+        i = i + 1_u64;
+    }
+    fz_refuse(0, steps, 0_u64, 0_u64)
+}

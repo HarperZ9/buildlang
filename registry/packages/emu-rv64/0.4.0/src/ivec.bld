@@ -1,0 +1,187 @@
+// Hand-computed cases for the timer and the interrupts of emu-rv64, first
+// part: the harness and the timer register cases. Every word below was
+// assembled by hand and every expected value was worked out on paper. No
+// emulator and no assembler produced them.
+//
+// A load word is   imm << 20 | rs1 << 15 | f3 << 12 | rd << 7 | 0x03, with
+// f3: 0 LB, 1 LH, 2 LW, 3 LD, 4 LBU, 5 LHU, 6 LWU.
+// A store word is  imm[11:5] << 25 | rs2 << 20 | rs1 << 15 | f3 << 12 |
+// imm[4:0] << 7 | 0x23, with f3: 0 SB, 1 SH, 2 SW, 3 SD.
+// Field values used below: rs1 = x1 is 0x8000, rd = x3 is 0x180, rs2 = x2 is
+// 0x200000. So LD x3, 0(x1) is 0x8000 + 0x3000 + 0x180 + 0x03 = 0x0000B183
+// and SD x2, 0(x1) is 0x200000 + 0x8000 + 0x3000 + 0x23 = 0x0020B023.
+//
+// A case starts from: the word at pc, x1 and x2 as given, x3 = 0, mepc =
+// 0x80000040, mcause = 0x55, mtval = 0x66, mscratch = 0x1111222233334444,
+// 512 bytes of memory, all 0 but the word. Unless a case says otherwise,
+// pc = 0x80000000, mstatus = 0x1800 (MIE = 0), mie = 0, mip = 0, mtvec =
+// 0x80000100. One step runs. The case passes when the result code, x0 to
+// x3, pc, the step and trap counts, every CSR, mtime and mtimecmp equal the
+// expected values, the last eight bytes of memory are still 0 and nothing
+// reached the serial output. mtime is one higher after every case, because
+// every step here returns 0 or 3.
+
+// v: the variant under test. fail: number of the first failing case, or 0.
+// bad: bit k is set when case k failed.
+struct ISt { v: u64, show: bool, fail: u64, count: u64, bad: u64 }
+
+// The start of a case.
+struct IIn {
+    word: u64, pc: u64, x1: u64, x2: u64, mstatus: u64, mie: u64, mip: u64,
+    mtvec: u64, mtime: u64, mtimecmp: u64
+}
+
+// The expected state after the step.
+struct IExp {
+    rc: i64, x3: u64, pc: u64, mstatus: u64, mepc: u64, mcause: u64, mtval: u64,
+    mtime: u64, mtimecmp: u64
+}
+
+// A start with interrupts disabled.
+fn ii_new(word: u64, x1: u64, x2: u64, mtime: u64, mtimecmp: u64) -> IIn {
+    IIn { word: word, pc: V_B, x1: x1, x2: x2, mstatus: 0x1800_u64, mie: 0_u64, mip: 0_u64,
+          mtvec: MV_TVEC, mtime: mtime, mtimecmp: mtimecmp }
+}
+
+// Expected: the instruction retired with MIE = 0 before it.
+fn ie_ok(x3: u64, mtime: u64, mtimecmp: u64) -> IExp {
+    IExp { rc: 0, x3: x3, pc: V_N, mstatus: 0x1800_u64, mepc: MV_EPC, mcause: 0x55_u64,
+           mtval: 0x66_u64, mtime: mtime, mtimecmp: mtimecmp }
+}
+
+// Expected: a synchronous trap from pc 0x80000000 with MIE = 0 before it,
+// so mstatus stays 0x1800.
+fn ie_trap(cause: u64, tval: u64, mtime: u64, mtimecmp: u64) -> IExp {
+    IExp { rc: 3, x3: 0_u64, pc: MV_TVEC, mstatus: 0x1800_u64, mepc: V_B, mcause: cause,
+           mtval: tval, mtime: mtime, mtimecmp: mtimecmp }
+}
+
+fn iv_machine(i: &IIn) -> Machine {
+    let mut m = emu_new_machine();
+    m.pc = i.pc;
+    m.mstatus = i.mstatus;
+    m.mtvec = i.mtvec;
+    m.mepc = MV_EPC;
+    m.mcause = 0x55_u64;
+    m.mtval = 0x66_u64;
+    m.mie = i.mie;
+    m.mip = i.mip;
+    m.mscratch = MV_SCR;
+    m.mtime = i.mtime;
+    m.mtimecmp = i.mtimecmp;
+    m
+}
+
+fn iv_csr_ok(m: &Machine, i: &IIn, e: &IExp) -> bool {
+    m.mstatus == e.mstatus && m.mtvec == i.mtvec && m.mepc == e.mepc && m.mcause == e.mcause &&
+    m.mtval == e.mtval && m.mie == i.mie && m.mip == i.mip && m.mscratch == MV_SCR &&
+    m.mtime == e.mtime && m.mtimecmp == e.mtimecmp
+}
+
+fn iv_rest_ok(m: &Machine, x: &[u64], i: &IIn, e: &IExp, rc: i64) -> bool {
+    let mut steps: u64 = 0_u64;
+    let mut traps: u64 = 0_u64;
+    if e.rc == 0 { steps = 1_u64; }
+    if e.rc == 3 { traps = 1_u64; }
+    rc == e.rc && x[0] == 0_u64 && x[1] == i.x1 && x[2] == i.x2 && x[3] == e.x3 && m.pc == e.pc &&
+    m.steps == steps && m.traps == traps && m.out_len == 0_u64
+}
+
+fn iv_note(st: &mut ISt, ok: bool) {
+    if !ok && st.fail == 0_u64 { st.fail = st.count; }
+    if !ok { st.bad = st.bad | (1_u64 << st.count); }
+}
+
+fn iv_one(st: &mut ISt, i: &IIn, e: &IExp) ~ Console {
+    st.count = st.count + 1_u64;
+    let mut m = iv_machine(i);
+    let mut x: [u64; 32] = [0_u64; 32];
+    let mut ram: [u8; 512] = [0_u8; 512];
+    let mut out: [u8; 8] = [0_u8; 8];
+    x[1] = i.x1;
+    x[2] = i.x2;
+    emu_poke(&mut ram, i.pc, 4_u64, i.word);
+    let got = istep_v(st.v, &mut m, &mut x, &mut ram, &mut out);
+    let tail = emu_peek(&ram, 0x800001F8_u64, 8_u64);
+    let ok = iv_rest_ok(&m, &x, i, e, got) && iv_csr_ok(&m, i, e) && tail == 0_u64;
+    if st.show {
+        println!("icase {} word={:08x} rc={} x3={:x} pc={:08x} mstatus={:x} mepc={:x} mcause={:x} mtval={:x}",
+            st.count, i.word, got, x[3], m.pc, m.mstatus, m.mepc, m.mcause, m.mtval);
+        println!("  mtime={:x} mtimecmp={:x} pass={}", m.mtime, m.mtimecmp, ok);
+    }
+    iv_note(st, ok);
+}
+
+// Cases 1 to 10: loads from the timer registers. x1 holds the address of
+// the register. With mtimecmp = 0x1122334455667788 the bytes at offsets 0
+// to 7 are 88 77 66 55 44 33 22 11.
+fn iv_loads(st: &mut ISt) ~ Console {
+    let cmp = 0x02004000_u64;
+    let a = 0x1122334455667788_u64;
+    // 1: LD x3, 0(x1) = 0x0000B183 reads all eight bytes.
+    iv_one(st, &ii_new(0x0000B183_u64, cmp, 0_u64, 0_u64, a), &ie_ok(a, 1_u64, a));
+    // 2: LW x3, 4(x1) = 0x00400000 + 0x8000 + 0x2000 + 0x183: bytes 4 to 7,
+    // 44 33 22 11, bit 31 clear.
+    iv_one(st, &ii_new(0x0040A183_u64, cmp, 0_u64, 0_u64, a), &ie_ok(0x11223344_u64, 1_u64, a));
+    // 3: LW x3, 0(x1) = 0x0000A183 with low word 0xF5667788: bit 31 is set,
+    // so the upper half fills with ones. 4: LWU = 0x0000E183 does not fill.
+    let b = 0x11223344F5667788_u64;
+    iv_one(st, &ii_new(0x0000A183_u64, cmp, 0_u64, 0_u64, b), &ie_ok(0xFFFFFFFFF5667788_u64, 1_u64, b));
+    iv_one(st, &ii_new(0x0000E183_u64, cmp, 0_u64, 0_u64, b), &ie_ok(0xF5667788_u64, 1_u64, b));
+    // 5: LH x3, 3(x1) = 0x00300000 + 0x8000 + 0x1000 + 0x183: bytes 3 and 4,
+    // 55 44, a partial offset inside the register.
+    iv_one(st, &ii_new(0x00309183_u64, cmp, 0_u64, 0_u64, a), &ie_ok(0x4455_u64, 1_u64, a));
+    // 6: LHU x3, 6(x1) = 0x00600000 + 0x8000 + 0x5000 + 0x183: bytes 6 and
+    // 7 of 0x9122334455667788 are 22 91. No sign fill.
+    let c = 0x9122334455667788_u64;
+    iv_one(st, &ii_new(0x0060D183_u64, cmp, 0_u64, 0_u64, c), &ie_ok(0x9122_u64, 1_u64, c));
+    // 7: LB x3, 7(x1) = 0x00700000 + 0x8000 + 0x183: byte 7 is 0x91, bit 7
+    // set. 8: LBU = 0x0070C183.
+    iv_one(st, &ii_new(0x00708183_u64, cmp, 0_u64, 0_u64, c), &ie_ok(0xFFFFFFFFFFFFFF91_u64, 1_u64, c));
+    iv_one(st, &ii_new(0x0070C183_u64, cmp, 0_u64, 0_u64, c), &ie_ok(0x91_u64, 1_u64, c));
+    // 9, 10: mtime at 0x0200BFF8. The load reads the time before the tick
+    // of its own step: x3 ends in ...CDEF and mtime ends in ...CDF0.
+    let t = 0x0123456789ABCDEF_u64;
+    let t1 = 0x0123456789ABCDF0_u64;
+    iv_one(st, &ii_new(0x0000B183_u64, EMU_MTIME, 0_u64, t, V_ONES), &ie_ok(t, t1, V_ONES));
+    iv_one(st, &ii_new(0x0040A183_u64, EMU_MTIME, 0_u64, t, V_ONES), &ie_ok(0x01234567_u64, t1, V_ONES));
+}
+
+// Cases 11 to 14: accesses that leave a timer register take the ordinary
+// access fault, and mtval holds the first byte outside memory, which is the
+// first byte of the access.
+fn iv_faults(st: &mut ISt) ~ Console {
+    let cmp = 0x02004000_u64;
+    // 11: LD x3, 1(x1) = 0x0010B183 would need bytes 1 to 8. Cause 5.
+    iv_one(st, &ii_new(0x0010B183_u64, cmp, 0_u64, 0_u64, V_ONES), &ie_trap(5_u64, 0x02004001_u64, 1_u64, V_ONES));
+    // 12: LB x3, -1(x1) = 0xFFF00000 + 0x8000 + 0x183: one byte below.
+    iv_one(st, &ii_new(0xFFF08183_u64, cmp, 0_u64, 0_u64, V_ONES), &ie_trap(5_u64, 0x02003FFF_u64, 1_u64, V_ONES));
+    // 13: LB x3, 8(x1) = 0x00808183 from mtime: one byte above, 0x0200C000.
+    iv_one(st, &ii_new(0x00808183_u64, EMU_MTIME, 0_u64, 0_u64, V_ONES), &ie_trap(5_u64, 0x0200C000_u64, 1_u64, V_ONES));
+    // 14: SD x2, 4(x1) = 0x200000 + 0x8000 + 0x3000 + 0x200 + 0x23 would
+    // need bytes 4 to 11. Cause 7, and mtimecmp keeps every byte.
+    iv_one(st, &ii_new(0x0020B223_u64, cmp, 0x55_u64, 0_u64, V_ONES), &ie_trap(7_u64, 0x02004004_u64, 1_u64, V_ONES));
+}
+
+// Cases 15 to 20: stores to the timer registers. x2 holds the value.
+fn iv_stores(st: &mut ISt) ~ Console {
+    let cmp = 0x02004000_u64;
+    let a = 0x1122334455667788_u64;
+    // 15: SD x2, 0(x1) = 0x0020B023 replaces all eight bytes.
+    iv_one(st, &ii_new(0x0020B023_u64, cmp, a, 0_u64, V_ONES), &ie_ok(0_u64, 1_u64, a));
+    // 16: SW x2, 4(x1) = 0x200000 + 0x8000 + 0x2000 + 0x200 + 0x23: the low
+    // word of x2, 0x11223344, lands in bytes 4 to 7. Bytes 0 to 3 stay FF.
+    let b = 0xAABBCCDD11223344_u64;
+    iv_one(st, &ii_new(0x0020A223_u64, cmp, b, 0_u64, V_ONES), &ie_ok(0_u64, 1_u64, 0x11223344FFFFFFFF_u64));
+    // 17: SH x2, 3(x1) = 0x200000 + 0x8000 + 0x1000 + 0x180 + 0x23 into a
+    // register of 0: byte 3 = EF, byte 4 = BE. MIE is 0, so the pending
+    // timer interrupt (0 >= 0) is not taken.
+    iv_one(st, &ii_new(0x002091A3_u64, cmp, 0xBEEF_u64, 0_u64, 0_u64), &ie_ok(0_u64, 1_u64, 0x000000BEEF000000_u64));
+    // 18: SB x2, 7(x1) = 0x200000 + 0x8000 + 0x380 + 0x23: byte 7 only.
+    iv_one(st, &ii_new(0x002083A3_u64, cmp, 0x12_u64, 0_u64, V_ONES), &ie_ok(0_u64, 1_u64, 0x12FFFFFFFFFFFFFF_u64));
+    // 19: SD to mtime. The store writes 0x1000, then the step ticks: 0x1001.
+    iv_one(st, &ii_new(0x0020B023_u64, EMU_MTIME, 0x1000_u64, 5_u64, V_ONES), &ie_ok(0_u64, 0x1001_u64, V_ONES));
+    // 20: SB x2, 1(x1) = 0x200000 + 0x8000 + 0x80 + 0x23 to mtime = 0xFF
+    // with x2 = 7: 0x07FF, then the tick carries into byte 1: 0x0800.
+    iv_one(st, &ii_new(0x002080A3_u64, EMU_MTIME, 7_u64, 0xFF_u64, V_ONES), &ie_ok(0_u64, 0x0800_u64, V_ONES));
+}

@@ -1,0 +1,95 @@
+variant 0: the core
+ cases:
+  accepted, 27 cases
+ properties:
+  accepted, 68 images, 20031 steps, 9033 retired, 10998 traps, 49 interrupts, 4712 checkpoints
+  images: 13 random bytes, 16 stream words, 21 with a handler, 18 timer; 8 of 256 bytes; 0 flipped bytes overwritten
+control 20: the loader drops the last byte of the image
+ cases:
+  hand-computed case 1 fails
+  hand-computed case 3 fails
+  hand-computed case 4 fails
+  hand-computed case 7 fails
+  hand-computed case 8 fails
+  hand-computed case 9 fails
+  hand-computed case 10 fails
+  hand-computed case 20 fails
+  hand-computed case 21 fails
+  hand-computed case 22 fails
+  hand-computed case 23 fails
+  hand-computed case 24 fails
+  hand-computed case 25 fails
+  hand-computed case 26 fails
+  hand-computed case 27 fails
+ properties:
+  REFUSED kind=52 step=0 got=ff want=100
+control 21: the loader places the image one byte late
+ cases:
+  hand-computed case 1 fails
+  hand-computed case 2 fails
+  hand-computed case 3 fails
+  hand-computed case 4 fails
+  hand-computed case 7 fails
+  hand-computed case 8 fails
+  hand-computed case 9 fails
+  hand-computed case 10 fails
+  hand-computed case 20 fails
+  hand-computed case 21 fails
+  hand-computed case 22 fails
+  hand-computed case 23 fails
+  hand-computed case 24 fails
+  hand-computed case 25 fails
+  hand-computed case 26 fails
+  hand-computed case 27 fails
+ properties:
+  REFUSED kind=52 step=0 got=0 want=100
+control 22: the loader leaves memory of an earlier run in place
+ cases:
+  hand-computed case 2 fails
+  hand-computed case 3 fails
+  hand-computed case 7 fails
+  hand-computed case 20 fails
+  hand-computed case 21 fails
+  hand-computed case 22 fails
+  hand-computed case 23 fails
+  hand-computed case 24 fails
+  hand-computed case 26 fails
+ properties:
+  REFUSED kind=52 step=1 got=70 want=70
+control 23: the state hash leaves mtime out
+ cases:
+  hand-computed case 12 fails
+  hand-computed case 20 fails
+  hand-computed case 21 fails
+  hand-computed case 22 fails
+  hand-computed case 23 fails
+  hand-computed case 24 fails
+ properties:
+  REFUSED kind=58 step=24 got=1 want=bb767a76a1455696
+control 24: the state hash leaves the serial output out
+ cases:
+  hand-computed case 13 fails
+  hand-computed case 14 fails
+  hand-computed case 20 fails
+  hand-computed case 21 fails
+  hand-computed case 22 fails
+  hand-computed case 23 fails
+  hand-computed case 24 fails
+  hand-computed case 26 fails
+ properties:
+  REFUSED kind=58 step=1 got=4 want=8dd51354e5671420
+control 25: the second run starts with mtime = 1
+ cases:
+  hand-computed case 10 fails
+  hand-computed case 21 fails
+  hand-computed case 23 fails
+  hand-computed case 25 fails
+ properties:
+  REFUSED kind=54 step=0 got=0 want=2
+control 26: the checkpoint compare looks only at the last hash
+ cases:
+  hand-computed case 17 fails
+  hand-computed case 23 fails
+ properties:
+  REFUSED kind=59 step=1 got=21 want=1c
+result: core accepted, 7 of 7 controls refused by both checks
