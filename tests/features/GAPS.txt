@@ -2,6 +2,10 @@
 # rejected: `buildc check` refuses the program. broken: the check passes and the program then
 # fails to build or prints something else. The test fails when a line here stops being true,
 # so a fixed feature has to be moved out of this file.
+#
+# Not expressible as a row here, because the program is wrong and the check should refuse it:
+# a function with a value whose body ends in a `while`, or in a `loop` left by a plain `break`,
+# passes the check and then fails in the C compiler. Found 2026-11-12, open.
 async_await rejected
 closure_as_argument rejected
 closure_returned rejected
@@ -10,11 +14,13 @@ drop_trait broken
 effect_resume_value broken
 fixed_array_and_slice rejected
 float_exponent_format rejected
+loop_as_function_tail broken
 macro_rules rejected
 option_combinators rejected
 string_parse_and_to_string rejected
 trait_default_method rejected
 trait_object_dyn rejected
 type_alias rejected
-vec_string_pop rejected
 user_fn_named_exit rejected
+vec_of_strings_slice_len rejected
+vec_string_pop rejected
