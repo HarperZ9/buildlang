@@ -1,0 +1,102 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install ruff
+      - run: python -m ruff check .
+      - run: python -m ruff format --check .
+      - run: git diff --check
+      - name: Reject private-key material
+        shell: bash
+        run: |
+          if git grep -n -I -E 'BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY'; then
+            exit 1
+          fi
+
+  pure:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: python -m pip install -e ".[test]" "packaging>=24,<26"
+      - name: Test binding-free surfaces
+        run: |
+          python -m pytest -q \
+            tests/test_theme.py::TestColorConstants \
+            tests/test_theme.py::TestStylesheet \
+            tests/test_packaging_contract.py::test_version_is_dynamic_and_authoritative \
+            tests/test_packaging_contract.py::test_qtpy_core_and_binding_extras_are_disjoint \
+            tests/test_packaging_contract.py::test_package_source_has_no_direct_qt_binding_imports \
+            tests/test_packaging_contract.py::test_package_source_uses_binding_neutral_signal_names
+          python scripts/verify_wheel.py --expect-no-binding
+          python -m pip check
+
+  compatibility:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        qt-api: [pyqt6, pyside6]
+    env:
+      QT_API: ${{ matrix.qt-api }}
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Linux Qt runtime libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libegl1 libxkbcommon0
+      - run: python -m pip install -e ".[test,${{ matrix.qt-api }}]"
+      - run: python -m pytest tests -q --cov=build_ui --cov-report=term-missing --cov-fail-under=70
+      - run: python tests/qt_binding_probe.py
+      - run: python tests/qt_selection_mismatch_probe.py --installed-api ${{ matrix.qt-api }}
+      - run: python -m pip check
+
+  typecheck:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        qt-api: [pyqt6, pyside6]
+    env:
+      QT_API: ${{ matrix.qt-api }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install -e ".[dev,${{ matrix.qt-api }}]"
+      - name: Type check selected QtPy branch
+        run: >-
+          python -c "import subprocess, sys;
+          flags=subprocess.check_output([sys.executable, '-m', 'qtpy', 'mypy-args'], text=True).split();
+          raise SystemExit(subprocess.call([sys.executable, '-m', 'mypy', *flags, 'build_ui']))"
+  art-receipts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Verify art receipt digests
+        run: python3 scripts/check_art_receipts.py

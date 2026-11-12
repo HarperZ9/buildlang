@@ -1,0 +1,71 @@
+{
+  "commands": [
+    {
+      "command": "ruff check .",
+      "name": "ruff check",
+      "observed": "All checks passed!",
+      "result": "PASS"
+    },
+    {
+      "command": "ruff format --check . and ruff format --preview --check for markdown files flagged by CI ruff",
+      "name": "ruff format check",
+      "observed": "64 files already formatted; 3 markdown files already formatted with preview-mode local ruff.",
+      "result": "PASS"
+    },
+    {
+      "command": "mypy",
+      "name": "mypy",
+      "observed": "Success: no issues found in 39 source files.",
+      "result": "PASS"
+    },
+    {
+      "command": "pytest tests/ -q --cov=build_finance --cov-report=term-missing --cov-fail-under=50",
+      "name": "pytest full repository",
+      "observed": "514 passed in 181.78s; total coverage 77.34%; required coverage 50% reached.",
+      "result": "PASS"
+    },
+    {
+      "attachment_bundle_sha256": "3fda46cef5f269f4c1b5c79afebb2b9aa9e1df5a8c386b5503f56f1923b67723",
+      "binary_formula_bundle_sha256": "2e61e1c5c170d13cf5cb089eea56ea39b238994dcd7d2bb1412e40d9f5c8af86",
+      "command": "python -m build --no-isolation --outdir <artifact>/dist; python scripts/verify_crypto_replay_artifacts.py --wheel <exact wheel> --sdist <exact sdist>",
+      "generated_json_schema_count": 48,
+      "name": "exact artifact verification",
+      "observed": "Verified exactly one wheel and one sdist from the isolated artifact directory; exact hashes are recorded below.",
+      "primary_bundle_sha256": "3996eb230f078f5a34d295208974afe8131439ccd7bbb87da8dfa94631148ff8",
+      "result": "PASS",
+      "schema_bundle_sha256": "2ae775112ca71cf95c233468529289af3ea04c284dda3da8d4452e9156cec1b9",
+      "sdist_member_count": 110,
+      "sdist_sha256": "a9425a2314523dd97c06e927cc14f59aa133b9de259b6bdbb5abbf9e902ea5c1",
+      "supporting_bundle_sha256": "2a195b664870aba87eb946d113dbbdb8c836e04535fa5c7d3b653745e06d6987",
+      "total_authority_contract_count": 49,
+      "wheel_member_count": 100,
+      "wheel_sha256": "37e88dac8f7d13d61ca1462a16b124b2f28afd59cc109a1ad1c1565424e28c1b"
+    },
+    {
+      "command": "<venv>/python -m pip install --no-index --no-deps <exact wheel>; <venv>/python -I -m build_finance.crypto_replay.schema_codegen --scope full --check; import every build_finance.crypto_replay submodule",
+      "module_count": 15,
+      "name": "exact offline wheel import",
+      "observed": "Installed exact wheel into a clean import venv and imported all 15 build_finance.crypto_replay submodules from site-packages.",
+      "result": "PASS"
+    },
+    {
+      "command": "python -m build_finance.crypto_replay.schema_codegen --scope full --check; python -m pytest -p no:cacheprovider tests/crypto_replay -q",
+      "name": "linux crypto replay package slice",
+      "observed": "365 passed, 7 skipped in 148.24s under WSL Linux Python 3.12 with pytest/jsonschema test dependencies.",
+      "result": "PASS"
+    }
+  ],
+  "does_not_prove": [
+    "real fixture admission",
+    "T04 or live/paper engine behavior",
+    "profitability",
+    "publication approval",
+    "trading authority"
+  ],
+  "head_under_review_before_p5_fix": "31d9df88bd4c423849c8de6569f673dd920d8f35",
+  "outcome": "pass",
+  "receipt": "crypto-replay-p5-whole-repository",
+  "schema_version": 1,
+  "scope": "offline T01-T03 package and whole-repository software gate only",
+  "repository": "HarperZ9/build-finance"
+}

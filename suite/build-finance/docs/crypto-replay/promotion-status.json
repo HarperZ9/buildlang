@@ -1,0 +1,10 @@
+{
+  "p0": "BLOCKED",
+  "p1": "PASS",
+  "p2": "FAIL_ZERO_ADMITTED_FIXTURE",
+  "p5": "PASS",
+  "p5_receipt": "docs/crypto-replay/evidence/P5-whole-repository-pass.json",
+  "replay_subpackage_confinement": "PASS",
+  "real_fixture_manifest_sha256": null,
+  "next_authorized_node": null
+}

@@ -1,0 +1,1 @@
+SHA256(UTF8("trading.adverse-fill-draw/v1") || 0x00 || seed_bytes[32] || decode_hex(draw_key_sha256)[32] || uint64_be(0))

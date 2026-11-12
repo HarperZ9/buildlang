@@ -1,0 +1,42 @@
+name: suite
+# The Build suite: the Python products that moved into this repository from their own.
+# Each package installs on its own and runs its own tests.
+on:
+  push:
+    branches: [main]
+    paths: ['suite/**', '.github/workflows/suite.yml']
+  pull_request:
+    paths: ['suite/**', '.github/workflows/suite.yml']
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        package: [build-engine, build-ui, build-finance, build-oracle, build-ecosystem]
+    defaults:
+      run:
+        working-directory: suite/${{ matrix.package }}
+    env:
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Qt runtime libraries
+        run: sudo apt-get update && sudo apt-get install -y libegl1 libxkbcommon0
+      # The packages depend on each other and are not all on a package index, so each job installs
+      # the whole suite from this checkout. build-ecosystem also names packages that live outside
+      # this repository, so it installs without resolving its dependency list.
+      - name: Install
+        working-directory: suite
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest pytest-cov jsonschema "tomli>=2,<3" "packaging>=24,<26" "PyQt6>=6.5,<7"
+          python -m pip install -e ./build-ui -e ./build-oracle -e ./build-finance -e ./build-engine
+          python -m pip install --no-deps -e ./build-ecosystem
+      - name: Test
+        run: python -m pytest -q -p no:cacheprovider

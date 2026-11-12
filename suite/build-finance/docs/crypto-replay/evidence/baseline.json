@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "receipt": "crypto-replay-implementation-baseline",
+  "outcome": "pass",
+  "baseline_commit": "9c9f5c2f15ee037d450bacc3e6a8f8be704d507e",
+  "branch": "feat/crypto-replay-t01-t03",
+  "plan": "docs/superpowers/plans/2026-07-11-crypto-replay-kernel-t01-t03.md",
+  "environment": {
+    "PYTHONDONTWRITEBYTECODE": "1"
+  },
+  "commands": [
+    {
+      "command": "python -m pytest -p no:cacheprovider tests -q",
+      "exit_code": 0,
+      "result": {
+        "passed": 142,
+        "failed": 0
+      }
+    },
+    {
+      "command": "python -m pip check",
+      "exit_code": 0,
+      "result": {
+        "broken_requirements": 0,
+        "summary": "No broken requirements found.",
+        "warnings": [
+          "The interpreter reported invalid-distribution entries in global site-packages; host-specific details were omitted."
+        ]
+      }
+    },
+    {
+      "command": "git status --short",
+      "exit_code": 0,
+      "result": {
+        "clean": true
+      }
+    }
+  ]
+}

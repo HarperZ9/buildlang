@@ -1,0 +1,59 @@
+{
+  "schema": "trading.portfolio-state/v1",
+  "portfolio_state_id": "7d7cfca65be5bd2230ea32618231c5d98653365261d8d3f4a1d5f825fe84c15d",
+  "state_sequence": "2",
+  "as_of_ingest_sequence": "2",
+  "equal_time_group": "2",
+  "replay_clock_ns": "1000000000",
+  "previous_portfolio_state_id": "dededededededededededededededededededededededededededededededede",
+  "causation_schema": "trading.simulated-fill-receipt/v1",
+  "causation_id": "55a2fd87c3956c10f42b936d940e0b1824df9772ba3d814ca0a40a959dc11f0a",
+  "fixture_manifest_sha256": "c703d899025a85704ae5e5e1da8244b070aa5b6e33b71b9e0484f73e4770e0cc",
+  "config_admission_receipt_id": "bd92cef509e7a0f5804e1ce6559ab7276f6701b65bf17e042c8ab326a6fca4fe",
+  "validated_config_sha256": "457cd0d75b6d9d86b967a4cce655960112c96cc57008feb09e6d9bd090af31d3",
+  "quote_mint": "fixture-quote-mint",
+  "quote_decimals": 6,
+  "balances": [
+    {
+      "mint": "fixture-base-mint",
+      "decimals": 9,
+      "available_atoms": "100000000",
+      "reserved_atoms": "0",
+      "total_atoms": "100000000"
+    },
+    {
+      "mint": "fixture-quote-mint",
+      "decimals": 6,
+      "available_atoms": "899650",
+      "reserved_atoms": "0",
+      "total_atoms": "899650"
+    }
+  ],
+  "positions": [
+    {
+      "market_id": "fixture-base-mint/fixture-quote-mint:jupiter",
+      "base_mint": "fixture-base-mint",
+      "base_decimals": 9,
+      "quantity_base_atoms": "100000000",
+      "reserved_base_atoms": "0",
+      "cost_basis_quote_atoms": "100350",
+      "mark_price_q18": "1000000000000000000",
+      "market_value_quote_atoms": "100000",
+      "unrealized_pnl_quote_atoms": "-350",
+      "stop_price_q18": "950000000000000000",
+      "take_price_q18": "1100000000000000000"
+    }
+  ],
+  "summary": {
+    "realized_pnl_quote_atoms": "0",
+    "unrealized_pnl_quote_atoms": "-350",
+    "cumulative_fees_quote_atoms": "250",
+    "session_pnl_quote_atoms": "-350",
+    "equity_quote_atoms": "999650",
+    "peak_equity_quote_atoms": "1000000",
+    "drawdown_bps": 4
+  },
+  "kill_latched": false,
+  "kill_reason_codes": [],
+  "open_intent_ids": []
+}

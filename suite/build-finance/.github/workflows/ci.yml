@@ -1,0 +1,86 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install ruff + mypy
+        run: pip install ruff mypy
+      - name: Lint
+        run: ruff check .
+      - name: Format check
+        run: ruff format --check .
+      - name: Type check (mypy)
+        run: mypy
+
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[all,test]"
+      - name: Run tests with coverage
+        run: pytest tests/ -q --cov=build_finance --cov-report=term-missing --cov-fail-under=50
+
+  crypto-replay-package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install replay test and build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install build "setuptools>=68.0" wheel
+          python -m pip install -e ".[all,test]"
+      - name: Check generated resources and replay confinement
+        run: |
+          python -m build_finance.crypto_replay.schema_codegen --scope full --check
+          python -m pytest -p no:cacheprovider tests/crypto_replay -q
+      - name: Build exactly one artifact pair
+        run: |
+          mkdir -p .artifacts/crypto-replay/dist
+          PIP_NO_INDEX=1 PIP_DISABLE_PIP_VERSION_CHECK=1 python -m build --no-isolation --outdir .artifacts/crypto-replay/dist
+      - name: Freeze artifact paths
+        id: replay_artifacts
+        run: >-
+          python -c "import os; from pathlib import Path; d=Path('.artifacts/crypto-replay/dist');
+          w=list(d.glob('*.whl')); s=list(d.glob('*.tar.gz'));
+          assert len(w)==len(s)==1, (w,s);
+          open(os.environ['GITHUB_OUTPUT'],'a',encoding='utf-8').write(f'wheel={w[0]}\nsdist={s[0]}\n')"
+      - name: Verify the exact artifact pair
+        run: >-
+          python scripts/verify_crypto_replay_artifacts.py
+          --wheel "${{ steps.replay_artifacts.outputs.wheel }}"
+          --sdist "${{ steps.replay_artifacts.outputs.sdist }}"
+      - name: Import the same wheel without dependencies
+        run: |
+          python -m venv .artifacts/crypto-replay/import-venv
+          .artifacts/crypto-replay/import-venv/bin/python -m pip install --no-index --no-deps "${{ steps.replay_artifacts.outputs.wheel }}"
+          .artifacts/crypto-replay/import-venv/bin/python -I -c "import importlib,pkgutil,build_finance.crypto_replay as p; [importlib.import_module(m.name) for m in pkgutil.walk_packages(p.__path__,p.__name__+'.')]"
+  art-receipts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify art receipt digests
+        run: python3 scripts/check_art_receipts.py

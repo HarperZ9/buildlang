@@ -1,0 +1,10 @@
+/build_finance/crypto_replay/** text eol=lf
+/tests/crypto_replay/** text eol=lf
+/docs/crypto-replay/** text eol=lf
+/scripts/capture_crypto_replay_gate.py text eol=lf
+/scripts/verify_crypto_replay_artifacts.py text eol=lf
+
+# Repo art receipts (docs/art/receipts.json) record the SHA-256 of each output's
+# stored bytes, so Git must not rewrite line endings on checkout. Without this, a
+# Windows clone with core.autocrlf=true fails the SVG digests.
+docs/art/** -text

@@ -1,0 +1,52 @@
+{
+  "schema": "trading.raw-event/v1",
+  "event_id": "d2dd6182525cc6a1c10c2a8d21a69e1ac81464547fcefa16bfad46fce43a5d2b",
+  "fixture_manifest_sha256": "c703d899025a85704ae5e5e1da8244b070aa5b6e33b71b9e0484f73e4770e0cc",
+  "raw_payload_sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+  "source_admission_receipt_id": "85a025739917c6b5547cee575d7dbd43d46be34d96aa28922ac3ad47dfb6f79f",
+  "source_id": "solana-jupiter-local-fixture",
+  "source_kind": "JUPITER_ROUTE_QUOTE_FIXTURE",
+  "source_revision": "fixture-revision-1",
+  "network": "solana-mainnet",
+  "venue_profile": "solana-jupiter-fixture/v1",
+  "market_id": "fixture-base-mint/fixture-quote-mint:jupiter",
+  "base_mint": "fixture-base-mint",
+  "quote_mint": "fixture-quote-mint",
+  "base_decimals": 9,
+  "quote_decimals": 6,
+  "event_kind": "ROUTE_QUOTE",
+  "source_position": {
+    "slot": "1",
+    "transaction_index": 0,
+    "instruction_index": 0,
+    "event_index": 0,
+    "source_native_event_id": "fixture-quote-request-1",
+    "source_subsequence": "0"
+  },
+  "revision": {
+    "kind": "ORIGINAL",
+    "supersedes_event_id": null,
+    "retracts_event_id": null,
+    "availability_slot": "1",
+    "availability_admission_sequence": "1"
+  },
+  "event_time": "2026-01-01T00:00:00.000000000Z",
+  "observed_at": "2026-01-02T00:00:00.000000000Z",
+  "ingested_at": "2026-01-02T00:00:00.000000001Z",
+  "admission_sequence": "1",
+  "source_sequence": "1",
+  "ingest_sequence": "1",
+  "equal_time_group": "1",
+  "replay_clock_ns": "0",
+  "executable": true,
+  "market": {
+    "base_amount_atoms": "1000000000",
+    "quote_amount_atoms": "1000000",
+    "route_capacity_base_atoms": "5000000000",
+    "liquidity_quote_atoms": "10000000",
+    "venue_fee_quote_atoms": "2500",
+    "priority_fee_quote_atoms": "0",
+    "route_impact_bps": 25
+  },
+  "quality_flags": []
+}

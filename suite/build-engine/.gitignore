@@ -1,0 +1,41 @@
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# PyInstaller
+*.spec
+
+# Eggs
+.eggs/
+
+# Coverage
+htmlcov/
+.coverage
+
+# Compiled BuildLang
+*.obj
+
+# Executables
+*.exe
+
+# Claude
+.claude/settings.local.json
+CLAUDE.local.md
+
+# Node
+node_modules/
+
+# direnv environment files (can hold exported secrets)
+.envrc
+.envrc.local

@@ -1,0 +1,110 @@
+{
+  "schema": "trading.ledger-record/v1",
+  "ledger_record_id": "8f90c76cfda09725468ae3ee2fcff4f43714c4e19bc14a336b7b42c7cb5ef841",
+  "ledger_sequence": "9",
+  "previous_ledger_record_id": "3579bdf13579bdf13579bdf13579bdf13579bdf13579bdf13579bdf13579bdf1",
+  "run_receipt_id": "e83fb84a07bd6cf5968a6cc74e2512d29397b6b67402021966078d3ff1d4d71b",
+  "fixture_manifest_sha256": "c703d899025a85704ae5e5e1da8244b070aa5b6e33b71b9e0484f73e4770e0cc",
+  "config_admission_receipt_id": "bd92cef509e7a0f5804e1ce6559ab7276f6701b65bf17e042c8ab326a6fca4fe",
+  "validated_config_sha256": "457cd0d75b6d9d86b967a4cce655960112c96cc57008feb09e6d9bd090af31d3",
+  "record_type": "SIMULATED_FILL",
+  "object_schema": "trading.simulated-fill-receipt/v1",
+  "object_id": "55a2fd87c3956c10f42b936d940e0b1824df9772ba3d814ca0a40a959dc11f0a",
+  "object_sha256": "55a2fd87c3956c10f42b936d940e0b1824df9772ba3d814ca0a40a959dc11f0a",
+  "decision_sequence": "1",
+  "ingest_sequence": "2",
+  "equal_time_group": "2",
+  "replay_clock_ns": "1000000000",
+  "causation_ids": [
+    "abababababababababababababababababababababababababababababababab",
+    "dededededededededededededededededededededededededededededededede",
+    "e22ceda9999b8dc8a4f67126968f52ffe375ff4ea4dfad9b3fbf2c59ac732448"
+  ],
+  "entries": [
+    {
+      "account": "POSITION_AVAILABLE",
+      "asset_mint": "fixture-base-mint",
+      "decimals": 9,
+      "amount_atoms": "100000000"
+    },
+    {
+      "account": "TRADE_CLEARING",
+      "asset_mint": "fixture-base-mint",
+      "decimals": 9,
+      "amount_atoms": "-100000000"
+    },
+    {
+      "account": "CASH_AVAILABLE",
+      "asset_mint": "fixture-quote-mint",
+      "decimals": 6,
+      "amount_atoms": "650"
+    },
+    {
+      "account": "CASH_RESERVED",
+      "asset_mint": "fixture-quote-mint",
+      "decimals": 6,
+      "amount_atoms": "-101000"
+    },
+    {
+      "account": "EQUITY_CONTROL",
+      "asset_mint": "fixture-quote-mint",
+      "decimals": 6,
+      "amount_atoms": "350"
+    },
+    {
+      "account": "FEE_EXPENSE",
+      "asset_mint": "fixture-quote-mint",
+      "decimals": 6,
+      "amount_atoms": "250"
+    },
+    {
+      "account": "TRADE_CLEARING",
+      "asset_mint": "fixture-quote-mint",
+      "decimals": 6,
+      "amount_atoms": "100100"
+    },
+    {
+      "account": "UNREALIZED_PNL",
+      "asset_mint": "fixture-quote-mint",
+      "decimals": 6,
+      "amount_atoms": "-350"
+    }
+  ],
+  "reconciliation": {
+    "portfolio_state_id": "7d7cfca65be5bd2230ea32618231c5d98653365261d8d3f4a1d5f825fe84c15d",
+    "asset_residuals": [
+      {
+        "asset_mint": "fixture-base-mint",
+        "residual_atoms": "0"
+      },
+      {
+        "asset_mint": "fixture-quote-mint",
+        "residual_atoms": "0"
+      }
+    ],
+    "equity_residual_quote_atoms": "0",
+    "unmatched_reservation_count": "0",
+    "account_residuals": [
+      {
+        "asset_mint": "fixture-base-mint",
+        "account": "POSITION_AVAILABLE",
+        "residual_atoms": "0"
+      },
+      {
+        "asset_mint": "fixture-quote-mint",
+        "account": "CASH_AVAILABLE",
+        "residual_atoms": "0"
+      },
+      {
+        "asset_mint": "fixture-quote-mint",
+        "account": "CASH_RESERVED",
+        "residual_atoms": "0"
+      }
+    ],
+    "realized_pnl_residual_quote_atoms": "0",
+    "unrealized_pnl_residual_quote_atoms": "0",
+    "fee_residual_quote_atoms": "0",
+    "peak_equity_residual_quote_atoms": "0",
+    "drawdown_residual_bps": "0"
+  }
+}
