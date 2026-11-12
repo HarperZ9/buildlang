@@ -62,7 +62,7 @@ program in BuildLang.
 ## Where this goes
 
 The plan and the order of languages are in `docs/design/LANGUAGE-MIGRATION.md`. Next for C:
-structs, pointers that are really references or arrays, `switch`, strings and `#define`
+structs, pointers used as references or arrays, `switch`, strings and `#define`
 constants. Then Python, JavaScript and TypeScript, Rust, Go, Java and Ruby, each with its own
 corpus and the same check against the source language's own toolchain.
 
