@@ -4497,6 +4497,17 @@ impl<'ctx> MirLowerer<'ctx> {
                 _ => {}
             }
         }
+        // A callee that is a value (`(ops.loader)(x)`, a destructured field, an
+        // element): its function type carries the return type.
+        let mut callee = func;
+        while let ExprKind::Paren(inner) = &callee.kind {
+            callee = inner;
+        }
+        if !matches!(callee.kind, ExprKind::Ident(_) | ExprKind::Path(_)) {
+            if let MirType::FnPtr(sig) = self.infer_expr_type(callee) {
+                return sig.ret.clone();
+            }
+        }
         // Use expected type from let binding annotation if available,
         // otherwise fall back to i32.  This makes constructor calls like
         // HashMap::new() return the correct type when used in an annotated

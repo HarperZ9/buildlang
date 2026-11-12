@@ -1,0 +1,11 @@
+struct Ops { apply: fn(i32) -> i32, name: fn(i32) -> String }
+struct Outer { ops: Ops }
+fn double(x: i32) -> i32 { x * 2 }
+fn label(x: i32) -> String { format!("n{}", x) }
+fn main() ~ Console {
+    let ops = Ops { apply: double, name: label };
+    println!("{}", (ops.apply)(21));
+    println!("{}", (ops.name)(7));
+    let Outer { ops: inner } = Outer { ops };
+    println!("{}", (inner.apply)(4) + 1);
+}
