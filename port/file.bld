@@ -5,17 +5,56 @@
 use types::*;
 use state::*;
 use exprs::*;
+use decls::*;
 use stmts::*;
+use lex::*;
 
 // ------------------------------------------------------------------ the file
 
+// `#define NAME 10` becomes a constant. The value has to be one number, with an optional minus
+// and optional parentheses; a macro with parameters or any other text is refused. A `#define`
+// with no value (an include guard) carries nothing and is dropped.
+fn c_define(t: Toks, st: Vec<i32>, sy: Syms, out: Vec<String>, w: String) ~ Console {
+    let d: Toks = Toks { kind: Vec::new(), text: Vec::new(), line: Vec::new() };
+    lex(w.substring(7, w.len() - 7), d.kind, d.text, d.line);
+    if d.kind.len() < 2 || d.kind[0] != 1 { refuse(t, st, String::from("a #define without a name")); return; }
+    let name: String = d.text[0];
+    let after: usize = 7 + w.substring(7, w.len() - 7).len() - w.substring(7, w.len() - 7).trim().len() + name.len();
+    if after < w.len() && w.substring(after, 1) == "(" { refuse(t, st, String::from("a macro with parameters")); return; }
+    let mut a: usize = 1;
+    let mut b: usize = d.kind.len() - 1;
+    if a == b { return; }
+    if b - a >= 2 && d.text[a] == "(" && d.text[b - 1] == ")" { a = a + 1; b = b - 1; }
+    let mut sign: String = String::new();
+    if b - a == 2 && d.text[a] == "-" { sign = String::from("-"); a = a + 1; }
+    let k: i32 = d.kind[a];
+    let mut ty: i32 = 0;
+    if k == 2 { ty = 1; }
+    if k == 8 { ty = 2; }
+    if k == 9 { ty = 6; }
+    if k == 10 { ty = 4; }
+    if k == 3 { ty = 3; }
+    if b - a != 1 || ty == 0 || (ty == 6 && sign.len() > 0) { refuse(t, st, String::from("a #define whose value is not one number")); return; }
+    // The lexer writes a suffixed literal as a cast, `((10) as i64)`; a constant states its type
+    // itself, so the bare number goes in.
+    let mut num: String = d.text[a];
+    if num.starts_with("((") {
+        let mut e: usize = 2;
+        while e < num.len() && num.substring(e, 1) != ")" { e = e + 1; }
+        num = num.substring(2, e - 2);
+    }
+    emit(out, st, "const " + name + ": " + tname(ty) + " = " + sign + num + ";");
+    add_sym(sy, st, name, ty);
+}
+
 pub fn translate(t: Toks, f: Fns, out: Vec<String>) -> i32 ~ Console {
-    let st: Vec<i32> = vec![0, 0, 0, 0, 0, 0, 0, 0, 0];
+    let st: Vec<i32> = vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
     let sy: Syms = Syms { names: Vec::new(), types: Vec::new() };
     while cur_kind(t, st) != 0 {
         let w: String = cur(t, st);
         if cur_kind(t, st) == 7 {
             if w.starts_with("#include") { advance(st); continue; }
+            if w.starts_with("#define") { c_define(t, st, sy, out, w); advance(st); continue; }
             refuse(t, st, String::from("a preprocessor line other than #include"));
             advance(st);
             continue;
@@ -78,6 +117,13 @@ pub fn translate(t: Toks, f: Fns, out: Vec<String>) -> i32 ~ Console {
         st[3] = 0;
         let steps: Vec<String> = Vec::new();
         body(t, st, sy, f, out, steps);
+        // C leaves the result undefined when a function with a value runs off its end;
+        // here that path stops the program.
+        if ret > 0 && name != "main" && !out[out.len() - 1].trim().starts_with("return ") {
+            st[3] = 1;
+            emit(out, st, "panic!(\"" + name + " reached its end without a return value\");");
+            st[3] = 0;
+        }
         emit(out, st, String::from("}"));
         emit(out, st, String::new());
         // the function's locals go out of scope; file-level constants stay

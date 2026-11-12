@@ -19,6 +19,7 @@ mod types;
 mod lex;
 mod state;
 mod exprs;
+mod decls;
 mod stmts;
 mod file;
 
@@ -26,6 +27,7 @@ use types::*;
 use lex::*;
 use state::*;
 use exprs::*;
+use decls::*;
 use stmts::*;
 use file::*;
 

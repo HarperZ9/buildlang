@@ -7,7 +7,8 @@ use types::*;
 // ------------------------------------------------------------------ parser state
 // st[0] position, st[1] type of the last expression, st[2] refusals, st[3] indent,
 // st[4] return type of the function being written, st[5] 1 inside main,
-// st[6] live symbols (Vec<String> has no pop yet, so the count is kept here), st[7] loop depth.
+// st[6] live symbols (Vec<String> has no pop yet, so the count is kept here), st[7] loop depth,
+// st[8] line of the last refusal, st[9] count of switches written (names their values).
 
 pub struct Toks { kind: Vec<i32>, text: Vec<String>, line: Vec<i32> }
 pub struct Syms { names: Vec<String>, types: Vec<i32> }
