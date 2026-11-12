@@ -23,7 +23,7 @@
   Calibrate accepts the exact candidate wheel hash.
 - Implementation must occur, after explicit user approval, on
   `feat/build-ui-2-qt-bridge` in
-  `C:\dev\worktrees\build-ui-2-qt-bridge`, created from a
+  `worktrees/build-ui-2-qt-bridge`, created from a
   coordinator-recorded reviewed plan tip that descends from `f842789`. Never
   execute on detached HEAD or in the normal `main` checkout.
 - Build metadata uses setuptools `>=77.0.0`, SPDX `FSL-1.1-MIT`, and ships
@@ -66,7 +66,7 @@
 **Interfaces:**
 - Consumes: explicit user approval and `BUILD_UI_REVIEWED_PLAN_TIP`, supplied by
   the coordinator after reviewing the committed design and plan.
-- Produces: `C:\dev\worktrees\build-ui-2-qt-bridge` on
+- Produces: `worktrees/build-ui-2-qt-bridge` on
   `feat/build-ui-2-qt-bridge` at that exact reviewed commit.
 
 - [ ] **Step 1: Fail closed unless the reviewed tip and normal checkout are exact**
@@ -74,8 +74,8 @@
 Run from PowerShell only after the user approves worktree creation:
 
 ```powershell
-$sourceRoot = "C:\dev\public\build-ui"
-$worktreeRoot = "C:\dev\worktrees"
+$sourceRoot = "build-ui"
+$worktreeRoot = "worktrees"
 $worktree = Join-Path $worktreeRoot "build-ui-2-qt-bridge"
 $featureBranch = "feat/build-ui-2-qt-bridge"
 

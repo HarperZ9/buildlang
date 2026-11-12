@@ -11,9 +11,9 @@
 ## Global Constraints
 
 - Scope is exactly T01, T02, and T03 from the approved specification. Stop after T03.
-- Normative source: C:\dev\project-docs\specs\SPEC-CRYPTO-REPLAY-KERNEL-V0-20260711.md at project-docs commit 1b5f90a.
+- Normative source: project-docs/specs/SPEC-CRYPTO-REPLAY-KERNEL-V0-20260711.md at project-docs commit 1b5f90a.
 - Normative source SHA-256: 243e2ab607b010cc2ae3bcc6c669562c40e7cdff28e7fa36f5d72212804f1b39.
-- Implement in the isolated worktree C:\dev\worktrees\build-finance-crypto-replay-t01-t03 on branch feat/crypto-replay-t01-t03. Do not implement on Build Finance main.
+- Implement in the isolated worktree worktrees/build-finance-crypto-replay-t01-t03 on branch feat/crypto-replay-t01-t03. Do not implement on Build Finance main.
 - Do not inspect .env files, credentials, wallet material, account data, or the previously exposed Jupiter credential. No secret belongs in source, tests, fixtures, logs, evidence, or commits.
 - Do not call a provider or network. Do not download a dataset. Do not create or import a broker, wallet, signer, transaction, paper-trading adapter, live adapter, model runtime, or inference endpoint.
 - Do not install from a package index during execution. The current environment already has jsonschema 4.26.0 for the independent test oracle; if that verified local dependency disappears, stop rather than fetching it.
@@ -516,12 +516,12 @@ Lock trading.adverse-fill-draw/v1 separately as the one binary formula resource 
 
 - [ ] Create the authorized worktree.
 
-  Run from C:\dev\public\build-finance:
+  Run from build-finance:
 
   ~~~powershell
   git ls-files --error-unmatch docs/superpowers/plans/2026-07-11-crypto-replay-kernel-t01-t03.md
   $planCommit = git rev-parse HEAD
-  git worktree add C:\dev\worktrees\build-finance-crypto-replay-t01-t03 -b feat/crypto-replay-t01-t03 $planCommit
+  git worktree add worktrees/build-finance-crypto-replay-t01-t03 -b feat/crypto-replay-t01-t03 $planCommit
   ~~~
 
   Expected: a new branch rooted at the plan commit.

@@ -104,7 +104,7 @@ ensuring Calibrate Pro's frozen graph contains only PySide6.
   request, so Build UI 2 does not silently run through PyQt5, PySide2, or
   QtPy's supported-binding fallback.
 - **B14 — Branch-bearing execution:** After explicit user approval,
-  implementation runs only in `C:\dev\worktrees\build-ui-2-qt-bridge` on
+  implementation runs only in `worktrees/build-ui-2-qt-bridge` on
   `feat/build-ui-2-qt-bridge`, from a coordinator-recorded reviewed plan tip
   that descends from `f842789`; detached HEAD execution is rejected.
 - **B15 — Non-publishing candidate:** The candidate workflow contains no PyPI
