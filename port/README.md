@@ -55,9 +55,9 @@ Functions that print, or call something that prints, get the `Console` effect in
 Programs in `corpus/c/refused` must be refused at exactly the lines recorded beside them. A control
 compares one program's output with another program's reference and must find a difference.
 
-Current result: 4 of 4 corpus programs identical to gcc, 2 of 2 refusals as recorded. The corpus is
+Current result: 5 of 5 corpus programs identical to gcc, 2 of 2 refusals as recorded. The corpus is
 small. It covers integer and floating arithmetic with mixed types, loops with `continue`,
-recursion, arrays, `switch`, defined constants and formatted output.
+recursion, arrays, `switch`, defined constants, constant expressions and formatted output.
 
 Two differences are kept on purpose, both where C leaves the result undefined: signed overflow
 stops the program in BuildLang, and so does a function with a value that runs off its end.
