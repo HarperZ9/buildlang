@@ -210,6 +210,15 @@ impl<'ctx> MirLowerer<'ctx> {
     }
 
     fn lower_type_path(&self, path: &ast::Path) -> MirType {
+        // `type Meters = f64;`: the name stands for the type it names.
+        if path.segments.len() == 1 && path.last_generics().is_none_or(|g| g.is_empty()) {
+            if let Some(aliased) = path
+                .last_ident()
+                .and_then(|i| self.type_aliases.get(&i.name))
+            {
+                return self.lower_type_from_ast(aliased);
+            }
+        }
         if let Some(ident) = path.last_ident() {
             // Check for generic type arguments: Option<i32>, Result<i32, str>, Pair<f64>
             if let Some(generic_args) = path.last_generics() {

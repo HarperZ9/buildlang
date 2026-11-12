@@ -869,7 +869,8 @@ impl<'ctx> MirLowerer<'ctx> {
             } => self.lower_closure(params, return_type.as_deref(), body),
 
             ExprKind::Struct { path, fields, rest } => {
-                self.lower_struct_expr(path, fields, rest.as_deref())
+                let path = self.aliased_path(path).clone();
+                self.lower_struct_expr(&path, fields, rest.as_deref())
             }
 
             ExprKind::Handle {
@@ -1034,6 +1035,28 @@ impl<'ctx> MirLowerer<'ctx> {
             Literal::ByteStr { value, .. } => Ok(MirValue::Const(MirConst::ByteStr(value.clone()))),
             Literal::Byte(b) => Ok(MirValue::Const(MirConst::Uint(*b as u128, MirType::u8()))),
         }
+    }
+
+    /// The path a type alias stands for, when `path` is one name that a
+    /// `type Name = Other;` declares; otherwise `path` itself.
+    pub(super) fn aliased_path<'a>(&'a self, path: &'a ast::Path) -> &'a ast::Path {
+        let mut current = path;
+        for _ in 0..8 {
+            if current.segments.len() != 1 {
+                break;
+            }
+            let Some(aliased) = current
+                .last_ident()
+                .and_then(|i| self.type_aliases.get(&i.name))
+            else {
+                break;
+            };
+            match &aliased.kind {
+                ast::TypeKind::Path(next) => current = next,
+                _ => break,
+            }
+        }
+        current
     }
 
     /// `func` with its name replaced, when it names a shadowing user function
@@ -4419,7 +4442,8 @@ impl<'ctx> MirLowerer<'ctx> {
                 self.lower_type_from_ast(ty)
             }
             ExprKind::Struct { path, .. } => {
-                let name = path
+                let name = self
+                    .aliased_path(path)
                     .last_ident()
                     .map(|i| i.name.clone())
                     .unwrap_or_else(|| Arc::from(""));
