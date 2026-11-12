@@ -1,0 +1,1 @@
+fn main() ~ Console { let mut n: i32 = 0; for c in "a1b2c3".chars() { if c >= '0' && c <= '9' { n = n + 1; } } println!("{}", n); }

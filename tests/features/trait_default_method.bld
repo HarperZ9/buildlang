@@ -1,0 +1,4 @@
+trait Named { fn base(self) -> i32; fn twice(self) -> i32 { self.base() * 2 } }
+struct A { v: i32 }
+impl Named for A { fn base(self) -> i32 { self.v } }
+fn main() ~ Console { println!("{}", A { v: 5 }.twice()); }

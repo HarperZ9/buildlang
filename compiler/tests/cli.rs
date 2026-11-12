@@ -3436,17 +3436,15 @@ fn main() ~ FileSystem {
 
     let _ = fs::remove_file(&fixture);
 
-    // Function values held in variables, fields or collections do not
-    // compile to C yet, so `check` rejects this program (a passing check
-    // means it compiles). The receipt still records the effect
-    // provenance this test is about.
+    // A function value read out of a destructured field compiles to C and
+    // runs, so `check` accepts this program.
     assert!(
-        !output.status.success(),
-        "destructured nested struct update effect receipt check is rejected by the C backend gate\nstdout:\n{}\nstderr:\n{}",
+        output.status.success(),
+        "destructured nested struct update effect receipt check passes the check\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(receipt_from_stdout(&output)["status"], "failed");
+    assert_eq!(receipt_from_stdout(&output)["status"], "passed");
 
     let receipt = receipt_from_stdout(&output);
     assert_eq!(
@@ -3502,17 +3500,15 @@ fn main() ~ FileSystem {
 
     let _ = fs::remove_file(&fixture);
 
-    // Function values held in variables, fields or collections do not
-    // compile to C yet, so `check` rejects this program (a passing check
-    // means it compiles). The receipt still records the effect
-    // provenance this test is about.
+    // A function value read out of a destructured field compiles to C and
+    // runs, so `check` accepts this program.
     assert!(
-        !output.status.success(),
-        "struct update expression destructured effect receipt check is rejected by the C backend gate\nstdout:\n{}\nstderr:\n{}",
+        output.status.success(),
+        "struct update expression destructured effect receipt check passes the check\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(receipt_from_stdout(&output)["status"], "failed");
+    assert_eq!(receipt_from_stdout(&output)["status"], "passed");
 
     let receipt = receipt_from_stdout(&output);
     assert_eq!(
@@ -3569,17 +3565,15 @@ fn main() ~ FileSystem {
 
     let _ = fs::remove_file(&fixture);
 
-    // Function values held in variables, fields or collections do not
-    // compile to C yet, so `check` rejects this program (a passing check
-    // means it compiles). The receipt still records the effect
-    // provenance this test is about.
+    // A function value read out of a destructured field compiles to C and
+    // runs, so `check` accepts this program.
     assert!(
-        !output.status.success(),
-        "struct update expression explicit field destructured receipt check is rejected by the C backend gate\nstdout:\n{}\nstderr:\n{}",
+        output.status.success(),
+        "struct update expression explicit field destructured receipt check passes the check\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(receipt_from_stdout(&output)["status"], "failed");
+    assert_eq!(receipt_from_stdout(&output)["status"], "passed");
 
     let receipt = receipt_from_stdout(&output);
     assert_eq!(
@@ -3964,17 +3958,15 @@ fn main() ~ FileSystem {
 
     let _ = fs::remove_file(&fixture);
 
-    // Function values held in variables, fields or collections do not
-    // compile to C yet, so `check` rejects this program (a passing check
-    // means it compiles). The receipt still records the effect
-    // provenance this test is about.
+    // A function value read out of a destructured field compiles to C and
+    // runs, so `check` accepts this program.
     assert!(
-        !output.status.success(),
-        "destructured nested if-let selected aggregate receipt check is rejected by the C backend gate\nstdout:\n{}\nstderr:\n{}",
+        output.status.success(),
+        "destructured nested if-let selected aggregate receipt check passes the check\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(receipt_from_stdout(&output)["status"], "failed");
+    assert_eq!(receipt_from_stdout(&output)["status"], "passed");
 
     let receipt = receipt_from_stdout(&output);
     assert_eq!(
@@ -4091,17 +4083,15 @@ fn main() ~ FileSystem {
 
     let _ = fs::remove_file(&fixture);
 
-    // Function values held in variables, fields or collections do not
-    // compile to C yet, so `check` rejects this program (a passing check
-    // means it compiles). The receipt still records the effect
-    // provenance this test is about.
+    // A function value read out of a destructured field compiles to C and
+    // runs, so `check` accepts this program.
     assert!(
-        !output.status.success(),
-        "direct shorthand aggregate destructuring receipt check is rejected by the C backend gate\nstdout:\n{}\nstderr:\n{}",
+        output.status.success(),
+        "direct shorthand aggregate destructuring receipt check passes the check\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(receipt_from_stdout(&output)["status"], "failed");
+    assert_eq!(receipt_from_stdout(&output)["status"], "passed");
 
     let receipt = receipt_from_stdout(&output);
     assert_eq!(

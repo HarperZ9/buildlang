@@ -1,0 +1,3 @@
+effect Greeting { fn greet(name: str) -> (), }
+fn welcome() ~ Greeting { perform Greeting.greet("Alice"); }
+fn main() ~ Console { handle { welcome() } with { Greeting.greet(name) => { println!("Hello, {}!", name) }, } }

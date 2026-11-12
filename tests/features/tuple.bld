@@ -1,0 +1,2 @@
+fn two() -> (i32, f64) { (3, 4.5) }
+fn main() ~ Console { let (a, b) = two(); println!("{} {}", a, b); }

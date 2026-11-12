@@ -1,0 +1,1 @@
+fn main() ~ Console { let k: i32 = 10; let add = |x: i32| -> i32 { x + k }; println!("{}", add(5)); }

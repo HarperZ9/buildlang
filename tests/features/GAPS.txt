@@ -1,0 +1,22 @@
+# Features the compiler does not handle yet. One line each: name, class, what happens.
+# rejected: `buildc check` refuses the program. broken: the check passes and the program then
+# fails to build or prints something else. The test fails when a line here stops being true,
+# so a fixed feature has to be moved out of this file.
+associated_const_and_fn broken
+async_await rejected
+closure_as_argument rejected
+closure_returned rejected
+const_generic rejected
+drop_trait broken
+effect_resume_value broken
+enum_method_and_eq broken
+fixed_array_and_slice rejected
+float_exponent_format rejected
+macro_rules rejected
+option_combinators rejected
+string_parse_and_to_string rejected
+trait_default_method rejected
+trait_object_dyn rejected
+type_alias rejected
+vec_string_pop rejected
+user_fn_named_like_libc broken

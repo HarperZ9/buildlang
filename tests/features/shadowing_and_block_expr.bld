@@ -1,0 +1,1 @@
+fn main() ~ Console { let x: i32 = 5; let x: i32 = { let y: i32 = x + 1; y * 2 }; println!("{}", x); }

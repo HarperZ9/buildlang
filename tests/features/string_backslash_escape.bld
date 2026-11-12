@@ -1,0 +1,1 @@
+fn main() ~ Console { println!("{}", "a\\n"); }

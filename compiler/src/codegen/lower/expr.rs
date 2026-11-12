@@ -172,6 +172,115 @@ impl<'ctx> MirLowerer<'ctx> {
         }
     }
 
+    /// The named fields of a user struct, when `ty` is one.
+    fn struct_fields_of(&self, ty: &MirType) -> Option<Vec<(Arc<str>, MirType)>> {
+        let MirType::Struct(name) = ty else {
+            return None;
+        };
+        let td = self.module.find_type(name.as_ref())?;
+        let TypeDefKind::Struct { fields, .. } = &td.kind else {
+            return None;
+        };
+        fields
+            .iter()
+            .map(|(n, t)| n.clone().map(|n| (n, t.clone())))
+            .collect()
+    }
+
+    /// True when every field of the struct `ty` can be compared: scalars,
+    /// strings and structs of those.
+    fn struct_eq_supported(&self, ty: &MirType) -> bool {
+        let Some(fields) = self.struct_fields_of(ty) else {
+            return false;
+        };
+        fields.iter().all(|(_, t)| match t {
+            MirType::Bool | MirType::Int(..) | MirType::Float(_) => true,
+            MirType::Struct(n) if n.as_ref() == "BuildString" => true,
+            MirType::Struct(_) => self.struct_eq_supported(t),
+            _ => false,
+        })
+    }
+
+    /// Field-by-field equality of two values of the struct type `ty`. The caller
+    /// has checked `struct_eq_supported`.
+    fn lower_struct_eq(
+        &mut self,
+        left: MirValue,
+        right: MirValue,
+        ty: &MirType,
+    ) -> CodegenResult<MirValue> {
+        let fields = self.struct_fields_of(ty).unwrap_or_default();
+        let mut all: MirValue = MirValue::Const(MirConst::Bool(true));
+        for (fname, fty) in fields {
+            let builder = self
+                .current_fn
+                .as_mut()
+                .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
+            let l = builder.create_local(fty.clone());
+            builder.assign(
+                l,
+                MirRValue::FieldAccess {
+                    base: left.clone(),
+                    field_name: fname.clone(),
+                    field_ty: fty.clone(),
+                },
+            );
+            let r = builder.create_local(fty.clone());
+            builder.assign(
+                r,
+                MirRValue::FieldAccess {
+                    base: right.clone(),
+                    field_name: fname,
+                    field_ty: fty.clone(),
+                },
+            );
+            let one = match &fty {
+                MirType::Struct(n) if n.as_ref() == "BuildString" => {
+                    let eq = builder.create_local(MirType::Bool);
+                    let cont = builder.create_block();
+                    builder.call(
+                        MirValue::Function(Arc::from("build_string_eq")),
+                        vec![values::local(l), values::local(r)],
+                        Some(eq),
+                        cont,
+                    );
+                    builder.switch_to_block(cont);
+                    values::local(eq)
+                }
+                MirType::Struct(_) => {
+                    self.lower_struct_eq(values::local(l), values::local(r), &fty)?
+                }
+                _ => {
+                    let eq = builder.create_local(MirType::Bool);
+                    builder.assign(
+                        eq,
+                        MirRValue::BinaryOp {
+                            op: BinOp::Eq,
+                            left: values::local(l),
+                            right: values::local(r),
+                        },
+                    );
+                    values::local(eq)
+                }
+            };
+            let builder = self
+                .current_fn
+                .as_mut()
+                .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
+            let both = builder.create_local(MirType::Bool);
+            builder.assign(
+                both,
+                MirRValue::BinaryOp {
+                    op: BinOp::BitAnd,
+                    left: all,
+                    right: one,
+                },
+            );
+            all = values::local(both);
+        }
+        Ok(all)
+    }
+
     fn lower_local(&mut self, local: &ast::Local) -> CodegenResult<()> {
         // Handle tuple destructuring: `let (a, b) = (expr1, expr2);`
         // We handle this before the general init lowering because we want to
@@ -231,6 +340,30 @@ impl<'ctx> MirLowerer<'ctx> {
                     }
                 }
                 return Ok(());
+            }
+            return Ok(());
+        }
+
+        // Struct destructuring: `let P { x, y } = p;`. The match lowering already
+        // binds a struct pattern's fields from a scrutinee local; a `let` uses the
+        // same binder. Without this the names were never declared and the C
+        // output did not compile although the check passed.
+        if matches!(&local.pattern.kind, ast::PatternKind::Struct { .. }) {
+            if let Some(init) = &local.init {
+                let init_v = self.lower_expr(&init.expr)?;
+                let init_ty = self.type_of_value(&init_v);
+                let scrutinee = match init_v {
+                    MirValue::Local(id) => id,
+                    other => {
+                        let builder = self.current_fn.as_mut().ok_or_else(|| {
+                            CodegenError::Internal("No current function".to_string())
+                        })?;
+                        let tmp = builder.create_local(init_ty.clone());
+                        builder.assign(tmp, MirRValue::Use(other));
+                        tmp
+                    }
+                };
+                self.bind_struct_pattern_vars(&local.pattern, scrutinee, &init_ty)?;
             }
             return Ok(());
         }
@@ -1148,6 +1281,27 @@ impl<'ctx> MirLowerer<'ctx> {
             let neg_result = builder.create_local(MirType::Bool);
             builder.unary_op(neg_result, UnaryOp::Not, values::local(eq_result));
             return Ok(values::local(neg_result));
+        }
+
+        // Struct equality: `a == b` and `a != b` on a user struct compare field by
+        // field. C has no `==` on structs, so emitting the operator directly did
+        // not compile although the check passed.
+        if matches!(op, AstBinOp::Eq | AstBinOp::Ne) {
+            if let MirType::Struct(name) = &left_ty {
+                if Self::vec_component_count(name).is_none() && self.struct_eq_supported(&left_ty) {
+                    let eq = self.lower_struct_eq(left_val, right_val, &left_ty)?;
+                    if op == AstBinOp::Eq {
+                        return Ok(eq);
+                    }
+                    let builder = self
+                        .current_fn
+                        .as_mut()
+                        .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
+                    let neg = builder.create_local(MirType::Bool);
+                    builder.unary_op(neg, UnaryOp::Not, eq);
+                    return Ok(values::local(neg));
+                }
+            }
         }
 
         // Broadcasting operators (I4): `.+ .- .* ./` over fixed-size `Array<T,N>`.
@@ -3965,6 +4119,21 @@ impl<'ctx> MirLowerer<'ctx> {
                 receiver, method, ..
             } => {
                 let recv = self.infer_expr_type(receiver);
+                // A user method `impl S { fn m(..) -> R }` is lowered as `S_m`.
+                // It is looked up first, so a user method named like a built-in
+                // (`get`, `len`, `first`) keeps its own return type.
+                {
+                    let base = match &recv {
+                        MirType::Ptr(inner) => inner.as_ref(),
+                        other => other,
+                    };
+                    if let MirType::Struct(sname) = base {
+                        let mangled = format!("{}_{}", sname, method.name);
+                        if let Some(f) = self.module.find_function(mangled.as_str()) {
+                            return f.sig.ret.clone();
+                        }
+                    }
+                }
                 match method.name.as_ref() {
                     "len" | "count" | "capacity" => MirType::usize(),
                     "is_some" | "is_none" | "is_ok" | "is_err" | "is_empty" | "contains"
@@ -3981,8 +4150,59 @@ impl<'ctx> MirLowerer<'ctx> {
                             _ => MirType::i32(),
                         }
                     }
+                    // Float methods that return the receiver's type.
+                    "min" | "max" | "abs" | "sqrt" | "floor" | "ceil" | "round" | "trunc"
+                    | "fract" | "signum" | "sin" | "cos" | "tan" | "exp" | "ln" | "powf"
+                    | "powi" | "mul_add" | "clamp"
+                        if matches!(recv, MirType::Float(_)) =>
+                    {
+                        recv
+                    }
+                    // Integer methods that return the receiver's type.
+                    "wrapping_add" | "wrapping_sub" | "wrapping_mul" | "min" | "max" | "abs"
+                    | "pow" | "clamp"
+                        if matches!(recv, MirType::Int(..)) =>
+                    {
+                        recv
+                    }
                     _ => MirType::i32(),
                 }
+            }
+            ExprKind::Binary { op, left, right } => match op {
+                ast::BinOp::Eq
+                | ast::BinOp::Ne
+                | ast::BinOp::Lt
+                | ast::BinOp::Le
+                | ast::BinOp::Gt
+                | ast::BinOp::Ge
+                | ast::BinOp::And
+                | ast::BinOp::Or => MirType::Bool,
+                _ => {
+                    // Both sides of an arithmetic operator have one type; an
+                    // unsuffixed integer literal reads as the `i32` sentinel, so
+                    // the other side decides when one side is not known.
+                    let lt = self.infer_expr_type(left);
+                    if lt != MirType::i32() {
+                        lt
+                    } else {
+                        self.infer_expr_type(right)
+                    }
+                }
+            },
+            ExprKind::Unary { op, expr: inner } => match op {
+                ast::UnaryOp::Neg | ast::UnaryOp::Not | ast::UnaryOp::BitNot => {
+                    self.infer_expr_type(inner)
+                }
+                ast::UnaryOp::Deref => match self.infer_expr_type(inner) {
+                    MirType::Ptr(t) => *t,
+                    other => other,
+                },
+                ast::UnaryOp::Ref | ast::UnaryOp::RefMut => {
+                    MirType::Ptr(Box::new(self.infer_expr_type(inner)))
+                }
+            },
+            ExprKind::Cast { ty, .. } | ExprKind::TypeAscription { ty, .. } => {
+                self.lower_type_from_ast(ty)
             }
             ExprKind::Struct { path, .. } => {
                 let name = path
@@ -4275,6 +4495,17 @@ impl<'ctx> MirLowerer<'ctx> {
                 "map_contains_i64" | "map_remove_i64" => return MirType::Bool,
                 "map_insert_i64" => return MirType::Void,
                 _ => {}
+            }
+        }
+        // A callee that is a value (`(ops.loader)(x)`, a destructured field, an
+        // element): its function type carries the return type.
+        let mut callee = func;
+        while let ExprKind::Paren(inner) = &callee.kind {
+            callee = inner;
+        }
+        if !matches!(callee.kind, ExprKind::Ident(_) | ExprKind::Path(_)) {
+            if let MirType::FnPtr(sig) = self.infer_expr_type(callee) {
+                return sig.ret.clone();
             }
         }
         // Use expected type from let binding annotation if available,

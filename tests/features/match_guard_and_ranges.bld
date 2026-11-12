@@ -1,0 +1,2 @@
+fn kind(x: i32) -> str { match x { n if n < 0 => "neg", 0..=9 => "small", _ => "big" } }
+fn main() ~ Console { println!("{} {} {}", kind(3), kind(50), kind(-2)); }

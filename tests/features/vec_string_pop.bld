@@ -1,0 +1,1 @@
+fn main() ~ Console { let v: Vec<String> = Vec::new(); v.push(String::from("a")); v.push(String::from("b")); let _ = v.pop(); println!("{}", v.len()); }

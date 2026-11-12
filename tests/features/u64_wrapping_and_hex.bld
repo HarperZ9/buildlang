@@ -1,0 +1,6 @@
+fn main() ~ Console {
+    let b: u32 = (0.7555893531601992 as f32).to_bits();
+    let mut h: u64 = 1469598103934665603; let mut k: u32 = 0;
+    while k < 4 { h = (h ^ (((b >> (8 * k)) & 255) as u64)).wrapping_mul(1099511628211); k = k + 1; }
+    println!("{:x}", h);
+}

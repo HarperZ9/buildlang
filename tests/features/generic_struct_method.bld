@@ -1,0 +1,3 @@
+struct W<T> { v: T }
+impl<T> W<T> { fn get(self) -> T { self.v } }
+fn main() ~ Console { let w: W<i32> = W { v: 7 }; println!("{}", w.get()); }
