@@ -1,0 +1,103 @@
+// SPDX-License-Identifier: MIT
+//
+// port/decls.bld: Output lines, simple statements and declarations.
+
+use types::*;
+use state::*;
+use exprs::*;
+
+// ------------------------------------------------------------------ statements
+
+pub fn emit(out: Vec<String>, st: Vec<i32>, s: String) {
+    let mut pad: String = String::new();
+    let mut i: i32 = 0;
+    while i < st[3] { pad = pad + "    "; i = i + 1; }
+    out.push(pad + s);
+}
+
+// An assignment, an increment or a call, without its semicolon.
+pub fn simple(t: Toks, st: Vec<i32>, sy: Syms, f: Fns) -> String ~ Console {
+    let mut w: String = cur(t, st);
+    let mut pre: String = String::new();
+    if w == "++" || w == "--" { pre = w; advance(st); w = cur(t, st); }
+    if cur_kind(t, st) != 1 { refuse(t, st, String::from("a statement form outside the subset")); advance(st); return String::new(); }
+    if peek(t, st, 1) == "(" {
+        advance(st); advance(st);
+        if w == "printf" { return c_printf(t, st, sy, f); }
+        let c: String = call(t, st, sy, f, w);
+        if st[1] == 0 { return c; }
+        return "let _ = " + c;
+    }
+    advance(st);
+    let mut ty: i32 = find_var(sy, st, w);
+    if ty < 0 { refuse(t, st, "assignment to `" + w + "`, which is not a local or a parameter"); ty = 1; }
+    let mut lv: String = w;
+    if cur(t, st) == "[" {
+        advance(st);
+        let ix: String = expr(t, st, sy, f, 0);
+        let it: i32 = st[1];
+        expect(t, st, String::from("]"));
+        lv = w + "[" + conv(ix, it, 1) + " as usize]";
+        ty = ty - 100;
+    }
+    let mut op: String = cur(t, st);
+    if pre.len() > 0 { op = pre; } else { advance(st); }
+    if op == "++" { return lv + " = " + lv + " + " + conv(String::from("1"), 1, ty); }
+    if op == "--" { return lv + " = " + lv + " - " + conv(String::from("1"), 1, ty); }
+    let rhs: String = expr(t, st, sy, f, 0);
+    let rt: i32 = st[1];
+    if op == "=" { return lv + " = " + conv(rhs, rt, ty); }
+    if op == "+=" || op == "-=" || op == "*=" || op == "/=" || op == "%=" {
+        let bop: String = op.substring(0, 1);
+        let both: String = binary(lv, ty, bop, rhs, rt, st);
+        return lv + " = " + conv(both, st[1], ty);
+    }
+    refuse(t, st, "the operator `" + op + "` as a statement");
+    String::new()
+}
+
+pub fn declaration(t: Toks, st: Vec<i32>, sy: Syms, f: Fns, out: Vec<String>) ~ Console {
+    let ty: i32 = parse_type(t, st);
+    if ty <= 0 { refuse(t, st, String::from("a declaration with a type outside the subset")); }
+    loop {
+        let name: String = cur(t, st);
+        advance(st);
+        if cur(t, st) == "[" {
+            advance(st);
+            let size: String = cur(t, st);
+            advance(st);
+            expect(t, st, String::from("]"));
+            let mut init: String = "[" + zero_of(ty) + "; " + size + "]";
+            if cur(t, st) == "=" {
+                advance(st);
+                expect(t, st, String::from("{"));
+                init = String::from("[");
+                let mut count: i32 = 0;
+                while cur(t, st) != "}" && cur_kind(t, st) != 0 {
+                    if count > 0 { init = init + ", "; }
+                    let e: String = expr(t, st, sy, f, 0);
+                    init = init + conv(e, st[1], ty);
+                    count = count + 1;
+                    if cur(t, st) == "," { advance(st); }
+                }
+                advance(st);
+                if count.to_string() != size { refuse(t, st, String::from("an array initialiser shorter than the array")); }
+                init = init + "]";
+            }
+            emit(out, st, "let mut " + name + ": [" + tname(ty) + "; " + size + "] = " + init + ";");
+            add_sym(sy, st, name, 100 + ty);
+        } else {
+            let mut init: String = zero_of(ty);
+            if cur(t, st) == "=" {
+                advance(st);
+                let e: String = expr(t, st, sy, f, 0);
+                init = conv(e, st[1], ty);
+            }
+            emit(out, st, "let mut " + name + ": " + tname(ty) + " = " + init + ";");
+            add_sym(sy, st, name, ty);
+        }
+        if cur(t, st) == "," { advance(st); continue; }
+        break;
+    }
+    expect(t, st, String::from(";"));
+}
