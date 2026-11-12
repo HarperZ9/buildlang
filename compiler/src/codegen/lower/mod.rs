@@ -106,6 +106,15 @@ pub struct MirLowerer<'ctx> {
     /// Top-level user functions lowered under `user_fn_c_name` because their
     /// names collide with a C library or runtime name.
     pub(crate) shadow_fns: std::collections::HashSet<Arc<str>>,
+    /// Constants and statics declared `char`. A char is an integer in MIR, so
+    /// printing one as a character needs to know where it came from.
+    pub(crate) char_globals: std::collections::HashSet<Arc<str>>,
+    /// Constants and statics declared `&str` with a literal. The global holds
+    /// the string; a use of the name is a reference to it.
+    pub(crate) str_ref_globals: std::collections::HashSet<Arc<str>>,
+    /// Locals declared `&str` or `&String`: a parameter, an annotated `let`, or
+    /// a use of a `&str` constant. A string method on one reads through it.
+    pub(crate) str_ref_locals: std::collections::HashSet<LocalId>,
     /// Unannotated `vec_new()` bindings whose element type waits for the first
     /// push: binding local -> every local to retype (constructor temp, binding).
     pub(crate) pending_untyped_vecs: HashMap<LocalId, Vec<LocalId>>,
@@ -309,6 +318,9 @@ impl<'ctx> MirLowerer<'ctx> {
             ref_locals: std::collections::HashSet::new(),
             char_vec_locals: std::collections::HashSet::new(),
             shadow_fns: std::collections::HashSet::new(),
+            char_globals: std::collections::HashSet::new(),
+            str_ref_globals: std::collections::HashSet::new(),
+            str_ref_locals: std::collections::HashSet::new(),
             pending_untyped_vecs: HashMap::new(),
             untyped_vec_new_binding: false,
             untyped_vec_new_dest: None,
@@ -364,6 +376,9 @@ impl<'ctx> MirLowerer<'ctx> {
             ref_locals: std::collections::HashSet::new(),
             char_vec_locals: std::collections::HashSet::new(),
             shadow_fns: std::collections::HashSet::new(),
+            char_globals: std::collections::HashSet::new(),
+            str_ref_globals: std::collections::HashSet::new(),
+            str_ref_locals: std::collections::HashSet::new(),
             pending_untyped_vecs: HashMap::new(),
             untyped_vec_new_binding: false,
             untyped_vec_new_dest: None,
@@ -1726,6 +1741,7 @@ impl<'ctx> MirLowerer<'ctx> {
                     let saved_vars = std::mem::take(&mut self.var_map);
                     let saved_chars = std::mem::take(&mut self.char_locals);
                     let saved_refs = std::mem::take(&mut self.ref_locals);
+                    let saved_str_refs = std::mem::take(&mut self.str_ref_locals);
                     let saved_char_vecs = std::mem::take(&mut self.char_vec_locals);
                     let saved_pending_vecs = std::mem::take(&mut self.pending_untyped_vecs);
 
@@ -1735,6 +1751,7 @@ impl<'ctx> MirLowerer<'ctx> {
                     self.var_map = saved_vars;
                     self.char_locals = saved_chars;
                     self.ref_locals = saved_refs;
+                    self.str_ref_locals = saved_str_refs;
                     self.char_vec_locals = saved_char_vecs;
                     self.pending_untyped_vecs = saved_pending_vecs;
                 }
@@ -2541,6 +2558,7 @@ impl<'ctx> MirLowerer<'ctx> {
             let saved_vars = std::mem::take(&mut self.var_map);
             let saved_chars = std::mem::take(&mut self.char_locals);
             let saved_refs = std::mem::take(&mut self.ref_locals);
+            let saved_str_refs = std::mem::take(&mut self.str_ref_locals);
             let saved_char_vecs = std::mem::take(&mut self.char_vec_locals);
             let saved_pending_vecs = std::mem::take(&mut self.pending_untyped_vecs);
 
@@ -2582,6 +2600,9 @@ impl<'ctx> MirLowerer<'ctx> {
                     self.var_map.insert(name.name.clone(), local_id);
                     if matches!(param.ty.kind, ast::TypeKind::Ref { .. }) {
                         self.ref_locals.insert(local_id);
+                    }
+                    if Self::ast_type_is_str_ref(&param.ty) {
+                        self.str_ref_locals.insert(local_id);
                     }
                     if Self::ast_type_is_char(&param.ty) {
                         self.char_locals.insert(local_id);
@@ -2660,6 +2681,7 @@ impl<'ctx> MirLowerer<'ctx> {
             self.var_map = saved_vars;
             self.char_locals = saved_chars;
             self.ref_locals = saved_refs;
+            self.str_ref_locals = saved_str_refs;
             self.char_vec_locals = saved_char_vecs;
             self.pending_untyped_vecs = saved_pending_vecs;
         } else {
@@ -2849,6 +2871,7 @@ impl<'ctx> MirLowerer<'ctx> {
             let saved_vars = std::mem::take(&mut self.var_map);
             let saved_chars = std::mem::take(&mut self.char_locals);
             let saved_refs = std::mem::take(&mut self.ref_locals);
+            let saved_str_refs = std::mem::take(&mut self.str_ref_locals);
             let saved_char_vecs = std::mem::take(&mut self.char_vec_locals);
             let saved_pending_vecs = std::mem::take(&mut self.pending_untyped_vecs);
 
@@ -2866,6 +2889,9 @@ impl<'ctx> MirLowerer<'ctx> {
                     self.var_map.insert(name.name.clone(), local_id);
                     if matches!(param.ty.kind, ast::TypeKind::Ref { .. }) {
                         self.ref_locals.insert(local_id);
+                    }
+                    if Self::ast_type_is_str_ref(&param.ty) {
+                        self.str_ref_locals.insert(local_id);
                     }
                     if Self::ast_type_is_char(&param.ty) {
                         self.char_locals.insert(local_id);
@@ -2897,6 +2923,7 @@ impl<'ctx> MirLowerer<'ctx> {
             self.var_map = saved_vars;
             self.char_locals = saved_chars;
             self.ref_locals = saved_refs;
+            self.str_ref_locals = saved_str_refs;
             self.char_vec_locals = saved_char_vecs;
             self.pending_untyped_vecs = saved_pending_vecs;
         }
@@ -2946,6 +2973,7 @@ impl<'ctx> MirLowerer<'ctx> {
             let saved_vars = std::mem::take(&mut self.var_map);
             let saved_chars = std::mem::take(&mut self.char_locals);
             let saved_refs = std::mem::take(&mut self.ref_locals);
+            let saved_str_refs = std::mem::take(&mut self.str_ref_locals);
             let saved_char_vecs = std::mem::take(&mut self.char_vec_locals);
             let saved_pending_vecs = std::mem::take(&mut self.pending_untyped_vecs);
 
@@ -2962,6 +2990,9 @@ impl<'ctx> MirLowerer<'ctx> {
                     self.var_map.insert(name.name.clone(), local_id);
                     if matches!(param.ty.kind, ast::TypeKind::Ref { .. }) {
                         self.ref_locals.insert(local_id);
+                    }
+                    if Self::ast_type_is_str_ref(&param.ty) {
+                        self.str_ref_locals.insert(local_id);
                     }
                     if Self::ast_type_is_char(&param.ty) {
                         self.char_locals.insert(local_id);
@@ -2992,6 +3023,7 @@ impl<'ctx> MirLowerer<'ctx> {
             self.var_map = saved_vars;
             self.char_locals = saved_chars;
             self.ref_locals = saved_refs;
+            self.str_ref_locals = saved_str_refs;
             self.char_vec_locals = saved_char_vecs;
             self.pending_untyped_vecs = saved_pending_vecs;
         }
@@ -3041,6 +3073,23 @@ impl<'ctx> MirLowerer<'ctx> {
 
     fn lower_static(&mut self, s: &ast::StaticDef) -> CodegenResult<()> {
         let ty = self.lower_type_from_ast(&s.ty);
+        if Self::ast_type_is_char(&s.ty) {
+            self.char_globals.insert(s.name.name.clone());
+        }
+        // `&str` with a literal: the global holds the string itself.
+        let ty = match (
+            &ty,
+            s.value
+                .as_ref()
+                .and_then(|e| global_init::string_literal(e)),
+        ) {
+            (MirType::Ptr(inner), Some(_)) if matches!(inner.as_ref(), MirType::Struct(n) if n.as_ref() == "BuildString") =>
+            {
+                self.str_ref_globals.insert(s.name.name.clone());
+                (**inner).clone()
+            }
+            _ => ty,
+        };
         let init = match s.value.as_ref() {
             Some(e) => self.global_initializer(&s.name.name, e, &ty)?,
             None => None,
@@ -3056,6 +3105,23 @@ impl<'ctx> MirLowerer<'ctx> {
 
     fn lower_const(&mut self, c: &ast::ConstDef) -> CodegenResult<()> {
         let ty = self.lower_type_from_ast(&c.ty);
+        if Self::ast_type_is_char(&c.ty) {
+            self.char_globals.insert(c.name.name.clone());
+        }
+        // `&str` with a literal: the global holds the string itself.
+        let ty = match (
+            &ty,
+            c.value
+                .as_ref()
+                .and_then(|e| global_init::string_literal(e)),
+        ) {
+            (MirType::Ptr(inner), Some(_)) if matches!(inner.as_ref(), MirType::Struct(n) if n.as_ref() == "BuildString") =>
+            {
+                self.str_ref_globals.insert(c.name.name.clone());
+                (**inner).clone()
+            }
+            _ => ty,
+        };
         let init = match c.value.as_ref() {
             Some(e) => self.global_initializer(&c.name.name, e, &ty)?,
             None => None,

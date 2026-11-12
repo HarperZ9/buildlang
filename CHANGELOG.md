@@ -12,6 +12,10 @@ tracked in `STATUS.md`, `README.md`, and
 
 ### Fixes
 
+- A constant or static whose initializer is an expression now holds its value. Before, only a literal, a negated literal or another constant's name was evaluated; anything else left the C global at zero with no diagnostic, so `const N: i32 = 3 + 4;` read as `0`, as did `1 << 40`, `3 as f64`, `(4)`, `17 % 5` and `0xF0 | 0x0F`. Arithmetic, bit operations, shifts, comparisons, `!`, parentheses and `as` casts between number types are now evaluated at compile time, in a `const`, a `static` and an associated constant. An initializer that cannot be evaluated, such as a function call or a division by zero, is a compile error that names the constant. Tests: `tests/features/const_expressions.bld`.
+- A string constant holds its text: `const NAME: &str = "abc";`, and the same with `String` or `static`. Before, the global was a null string, and printing it crashed or printed `(null)`. Tests: `tests/features/const_strings.bld`.
+- A `bool` constant prints `true` or `false` and a `char` constant prints its character. Before, `println!("{}", B)` with `const B: bool = true;` crashed, and a `char` constant printed its code.
+- String methods work on a borrowed string: `fn n(s: &str) -> usize { s.len() }`, and `trim`, `starts_with`, `ends_with`, `contains` and the rest. Before, the check refused them. `r + s` with `r` a borrowed string joins the two.
 - A generic function called with a computed argument now gets that argument's type. Before, `pick(1.0 + 0.5, 2.5, true)` passed the check, built, and printed `1`: an argument that was a call, a field, an index, a negation, a cast or a method result was typed `i32` and truncated. Tests: `tests/features/generic_*.bld`.
 - `let P { x, y } = p;` builds and runs. Before, a struct pattern in `let` passed the check and failed in the C compiler.
 - `==` and `!=` on a struct compare field by field, with string fields compared by contents. On an enum they compare the tag and then the data of the variant both values hold. Both passed the check before and failed in the C compiler. Limit: an enum variant that holds a string, a struct or a collection is not covered yet.
