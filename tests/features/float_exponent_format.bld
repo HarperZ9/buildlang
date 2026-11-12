@@ -1,0 +1,1 @@
+fn main() ~ Console { println!("{:e}", 1000.0); }

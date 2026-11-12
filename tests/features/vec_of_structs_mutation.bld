@@ -1,0 +1,2 @@
+struct P { x: i32 }
+fn main() ~ Console { let v: Vec<P> = Vec::new(); v.push(P { x: 4 }); v[0].x = v[0].x + 5; println!("{}", v[0].x); }

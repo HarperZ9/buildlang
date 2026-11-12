@@ -1,0 +1,2 @@
+enum Maybe<T> { Just(T), Nothing }
+fn main() ~ Console { let m: Maybe<i32> = Maybe::Just(5); match m { Maybe::Just(v) => println!("{}", v), Maybe::Nothing => println!("no") } }

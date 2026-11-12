@@ -1,0 +1,7 @@
+trait Area { fn area(self) -> i32; }
+struct R { w: i32, h: i32 }
+struct S { s: i32 }
+impl Area for R { fn area(self) -> i32 { self.w * self.h } }
+impl Area for S { fn area(self) -> i32 { self.s * self.s } }
+fn show<T: Area>(t: T) -> i32 { t.area() }
+fn main() ~ Console { println!("{} {}", show(R { w: 3, h: 4 }), R { w: 1, h: 3 }.area()); }

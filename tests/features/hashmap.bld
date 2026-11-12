@@ -1,0 +1,1 @@
+fn main() ~ Console { let m: HashMap<str, i32> = HashMap::new(); m.insert("a", 3); m.insert("b", 4); println!("{} {}", m.len(), m.get("a") + m.get("b")); }

@@ -1,0 +1,2 @@
+struct Pair<T> { a: T, b: T }
+fn main() ~ Console { let p: Pair<i32> = Pair { a: 3, b: 4 }; println!("{} {}", p.a, p.b); }

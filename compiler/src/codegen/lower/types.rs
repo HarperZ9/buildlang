@@ -908,7 +908,10 @@ impl<'ctx> MirLowerer<'ctx> {
                 expr: inner,
             } => MirType::Ptr(Box::new(self.infer_single_arg_type(inner))),
             ExprKind::Paren(inner) => self.infer_single_arg_type(inner),
-            _ => MirType::i32(),
+            // Everything else (struct literals, calls, fields, indexing, arithmetic,
+            // casts) goes through the general inference. Falling back to `i32` here
+            // instantiated `pick(1.0 + 0.5, 2.5, true)` at `i32` and printed 1.
+            _ => self.infer_expr_type(expr),
         }
     }
 

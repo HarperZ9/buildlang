@@ -1,0 +1,2 @@
+fn pick<T>(a: T, b: T, first: bool) -> T { if first { a } else { b } }
+fn main() ~ Console { println!("{} {}", pick(7, 9, true), pick(1.5, 2.5, false)); }

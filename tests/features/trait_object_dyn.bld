@@ -1,0 +1,11 @@
+trait Area { fn area(&self) -> i32; }
+struct R { w: i32, h: i32 }
+struct S { s: i32 }
+impl Area for R { fn area(&self) -> i32 { self.w * self.h } }
+impl Area for S { fn area(&self) -> i32 { self.s * self.s } }
+fn main() ~ Console {
+    let shapes: Vec<Box<dyn Area>> = Vec::new();
+    shapes.push(Box::new(R { w: 3, h: 4 }));
+    shapes.push(Box::new(S { s: 3 }));
+    println!("{} {}", shapes[0].area(), shapes[1].area());
+}
