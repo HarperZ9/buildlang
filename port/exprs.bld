@@ -1,0 +1,261 @@
+// SPDX-License-Identifier: MIT
+//
+// port/exprs.bld: Expressions and printf: C expression to BuildLang text and its type.
+
+use types::*;
+use state::*;
+
+// ------------------------------------------------------------------ expressions
+
+pub fn char_code(lit: String) -> String {
+    let b = lit.as_bytes();
+    if b[1] != 92 { return (b[1] as i32).to_string(); }
+    let e: u8 = b[2];
+    if e == 110 { return String::from("10"); }
+    if e == 116 { return String::from("9"); }
+    if e == 48 { return String::from("0"); }
+    if e == 114 { return String::from("13"); }
+    (e as i32).to_string()
+}
+
+pub fn binary(l: String, lt: i32, op: String, r: String, rt: i32, st: Vec<i32>) -> String {
+    if op == "&&" || op == "||" {
+        st[1] = 7;
+        return "(" + conv(l, lt, 7) + " " + op + " " + conv(r, rt, 7) + ")";
+    }
+    let mut a: i32 = lt;
+    let mut c: i32 = rt;
+    if a == 7 || a == 5 { a = 1; }
+    if c == 7 || c == 5 { c = 1; }
+    let mut r1: i32 = rank(a);
+    if rank(c) > r1 { r1 = rank(c); }
+    let ty: i32 = of_rank(r1);
+    let body: String = "(" + conv(l, lt, ty) + " " + op + " " + conv(r, rt, ty) + ")";
+    if op == "==" || op == "!=" || op == "<" || op == ">" || op == "<=" || op == ">=" { st[1] = 7; } else { st[1] = ty; }
+    body
+}
+
+pub fn prec(op: String) -> i32 {
+    if op == "||" { return 1; }
+    if op == "&&" { return 2; }
+    if op == "|" { return 3; }
+    if op == "^" { return 4; }
+    if op == "&" { return 5; }
+    if op == "==" || op == "!=" { return 6; }
+    if op == "<" || op == ">" || op == "<=" || op == ">=" { return 7; }
+    if op == "<<" || op == ">>" { return 8; }
+    if op == "+" || op == "-" { return 9; }
+    if op == "*" || op == "/" || op == "%" { return 10; }
+    0
+}
+
+pub fn call(t: Toks, st: Vec<i32>, sy: Syms, f: Fns, name: String) -> String ~ Console {
+    // the cursor is just past `(`
+    let args: Vec<String> = Vec::new();
+    let types: Vec<i32> = Vec::new();
+    while cur(t, st) != ")" && cur_kind(t, st) != 0 {
+        args.push(expr(t, st, sy, f, 0));
+        types.push(st[1]);
+        if cur(t, st) == "," { advance(st); }
+    }
+    advance(st);
+    let one: bool = args.len() == 1;
+    if one && (name == "sqrt" || name == "sin" || name == "cos" || name == "tan" || name == "exp" || name == "floor" || name == "log") {
+        st[1] = 3;
+        let mut n2: String = name;
+        if name == "log" { n2 = String::from("ln"); }
+        if name == "floor" || name == "log" { return "(" + conv(args[0], types[0], 3) + ")." + n2 + "()"; }
+        return n2 + "(" + conv(args[0], types[0], 3) + ")";
+    }
+    if one && (name == "fabs" || name == "ceil") {
+        st[1] = 3;
+        let mut m: String = String::from("abs");
+        if name == "ceil" { m = String::from("ceil"); }
+        return "(" + conv(args[0], types[0], 3) + ")." + m + "()";
+    }
+    if one && name == "abs" { st[1] = 1; return "(" + conv(args[0], types[0], 1) + ").abs()"; }
+    if args.len() == 2 && name == "pow" {
+        st[1] = 3;
+        return "pow(" + conv(args[0], types[0], 3) + ", " + conv(args[1], types[1], 3) + ")";
+    }
+    let idx: i32 = find_fn(f, name);
+    if idx < 0 {
+        refuse(t, st, "call to `" + name + "`, which this file does not define and the subset does not know");
+        st[1] = 1;
+        return String::from("0");
+    }
+    let u: usize = idx as usize;
+    let mut out: String = name + "(";
+    let mut i: usize = 0;
+    while i < args.len() {
+        if i > 0 { out = out + ", "; }
+        let mut want: i32 = types[i];
+        if (i as i32) < f.count[u] { want = f.ptypes[(f.first[u] + (i as i32)) as usize]; }
+        out = out + conv(args[i], types[i], want);
+        i = i + 1;
+    }
+    st[1] = f.ret[u];
+    out + ")"
+}
+
+pub fn primary(t: Toks, st: Vec<i32>, sy: Syms, f: Fns) -> String ~ Console {
+    let k: i32 = cur_kind(t, st);
+    let w: String = cur(t, st);
+    if k == 2 { advance(st); st[1] = 1; return w; }
+    if k == 8 { advance(st); st[1] = 2; return w; }
+    if k == 9 { advance(st); st[1] = 6; return w; }
+    if k == 10 { advance(st); st[1] = 4; return w; }
+    if k == 3 { advance(st); st[1] = 3; return w; }
+    if k == 5 { advance(st); st[1] = 1; return char_code(w); }
+    if w == "(" {
+        advance(st);
+        if cur_kind(t, st) == 1 && is_type_word(cur(t, st)) {
+            let to: i32 = parse_type(t, st);
+            expect(t, st, String::from(")"));
+            let inner: String = unary(t, st, sy, f);
+            if to <= 0 { refuse(t, st, String::from("a cast to a type outside the subset")); return inner; }
+            let from: i32 = st[1];
+            st[1] = to;
+            return conv(inner, from, to);
+        }
+        let inner: String = expr(t, st, sy, f, 0);
+        expect(t, st, String::from(")"));
+        return "(" + inner + ")";
+    }
+    if k == 1 {
+        advance(st);
+        if cur(t, st) == "(" { advance(st); return call(t, st, sy, f, w); }
+        let ty: i32 = find_var(sy, st, w);
+        if ty < 0 { refuse(t, st, "the name `" + w + "` is not a local, a parameter or a constant of this file"); st[1] = 1; return w; }
+        if cur(t, st) == "[" {
+            advance(st);
+            let ix: String = expr(t, st, sy, f, 0);
+            let it: i32 = st[1];
+            expect(t, st, String::from("]"));
+            st[1] = ty - 100;
+            return w + "[" + conv(ix, it, 1) + " as usize]";
+        }
+        st[1] = ty;
+        return w;
+    }
+    refuse(t, st, String::from("an expression form outside the subset"));
+    advance(st);
+    st[1] = 1;
+    String::from("0")
+}
+
+pub fn unary(t: Toks, st: Vec<i32>, sy: Syms, f: Fns) -> String ~ Console {
+    let w: String = cur(t, st);
+    if cur_kind(t, st) == 6 && w == "-" {
+        advance(st);
+        let v: String = unary(t, st, sy, f);
+        if st[1] == 7 || st[1] == 5 { let from: i32 = st[1]; st[1] = 1; return "(-" + conv(v, from, 1) + ")"; }
+        return "(-" + v + ")";
+    }
+    if cur_kind(t, st) == 6 && w == "+" { advance(st); return unary(t, st, sy, f); }
+    if cur_kind(t, st) == 6 && w == "!" {
+        advance(st);
+        let v: String = unary(t, st, sy, f);
+        let from: i32 = st[1];
+        st[1] = 7;
+        return "(!" + conv(v, from, 7) + ")";
+    }
+    if cur_kind(t, st) == 6 && w == "~" { advance(st); let v: String = unary(t, st, sy, f); return "(!" + v + ")"; }
+    if cur_kind(t, st) == 6 && (w == "&" || w == "*") { refuse(t, st, String::from("pointers are outside the subset")); advance(st); }
+    primary(t, st, sy, f)
+}
+
+pub fn expr(t: Toks, st: Vec<i32>, sy: Syms, f: Fns, min: i32) -> String ~ Console {
+    let mut left: String = unary(t, st, sy, f);
+    let mut lt: i32 = st[1];
+    loop {
+        let op: String = cur(t, st);
+        let p: i32 = prec(op);
+        if cur_kind(t, st) != 6 || p == 0 || p < min { break; }
+        advance(st);
+        let right: String = expr(t, st, sy, f, p + 1);
+        let rt: i32 = st[1];
+        left = binary(left, lt, op, right, rt, st);
+        lt = st[1];
+    }
+    if min == 0 && cur(t, st) == "?" {
+        advance(st);
+        let a: String = expr(t, st, sy, f, 0);
+        let at: i32 = st[1];
+        expect(t, st, String::from(":"));
+        let b: String = expr(t, st, sy, f, 0);
+        let bt: i32 = st[1];
+        let mut r1: i32 = rank(at);
+        if rank(bt) > r1 { r1 = rank(bt); }
+        let ty: i32 = of_rank(r1);
+        left = "(if " + conv(left, lt, 7) + " { " + conv(a, at, ty) + " } else { " + conv(b, bt, ty) + " })";
+        lt = ty;
+    }
+    st[1] = lt;
+    left
+}
+
+// ------------------------------------------------------------------ printf
+
+pub fn c_printf(t: Toks, st: Vec<i32>, sy: Syms, f: Fns) -> String ~ Console {
+    // the cursor is on the format string
+    if cur_kind(t, st) != 4 { refuse(t, st, String::from("printf with a format that is not a string literal")); }
+    let lit: String = cur(t, st);
+    advance(st);
+    let b = lit.as_bytes();
+    let n: usize = lit.len() - 1;
+    let mut fmt: String = String::new();
+    let wants: Vec<i32> = Vec::new();
+    let mut i: usize = 1;
+    let mut newline: bool = false;
+    while i < n {
+        let c: u8 = b[i];
+        if c == 92 && i + 2 == n && b[i + 1] == 110 { newline = true; i = i + 2; continue; }
+        if c == 123 { fmt = fmt + "{{"; i = i + 1; continue; }
+        if c == 125 { fmt = fmt + "}}"; i = i + 1; continue; }
+        if c != 37 { fmt.push(c as char); i = i + 1; continue; }
+        i = i + 1;
+        if b[i] == 37 { fmt.push(37 as char); i = i + 1; continue; }
+        let mut precision: String = String::new();
+        if b[i] == 46 {
+            i = i + 1;
+            while is_digit(b[i]) { precision.push(b[i] as char); i = i + 1; }
+        }
+        let mut longs: i32 = 0;
+        while b[i] == 108 { longs = longs + 1; i = i + 1; }
+        let d: u8 = b[i];
+        i = i + 1;
+        if d == 100 || d == 105 { fmt = fmt + "{}"; if longs > 0 { wants.push(2); } else { wants.push(1); } continue; }
+        if d == 117 { fmt = fmt + "{}"; if longs > 0 { wants.push(2); } else { wants.push(6); } continue; }
+        if d == 102 {
+            if precision.len() == 0 { precision = String::from("6"); }
+            fmt = fmt + "{:." + precision + "}";
+            wants.push(3);
+            continue;
+        }
+        if d == 99 { fmt = fmt + "{}"; wants.push(5); continue; }
+        if d == 115 { fmt = fmt + "{}"; wants.push(-4); continue; }
+        refuse(t, st, String::from("a printf conversion outside the subset (d, i, u, ld, f, .Nf, c, s, %)"));
+    }
+    let mut out: String = String::from("print!(\"");
+    if newline { out = String::from("println!(\""); }
+    out = out + fmt + "\"";
+    let mut k: usize = 0;
+    while cur(t, st) == "," {
+        advance(st);
+        let mut want: i32 = 1;
+        if k < wants.len() { want = wants[k]; }
+        if want == -4 {
+            if cur_kind(t, st) != 4 { refuse(t, st, String::from("%s with an argument that is not a string literal")); }
+            out = out + ", " + cur(t, st);
+            advance(st);
+        } else {
+            let a: String = expr(t, st, sy, f, 0);
+            let at: i32 = st[1];
+            if want == 5 { out = out + ", (" + conv(a, at, 5) + " as char)"; } else { out = out + ", " + conv(a, at, want); }
+        }
+        k = k + 1;
+    }
+    expect(t, st, String::from(")"));
+    out + ")"
+}

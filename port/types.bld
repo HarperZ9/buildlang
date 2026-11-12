@@ -1,0 +1,46 @@
+// SPDX-License-Identifier: MIT
+//
+// port/types.bld: Type codes and the conversions C makes between number types.
+
+// ------------------------------------------------------------------ type codes
+// 0 void, 1 i32, 2 i64, 3 f64, 4 f32, 5 u8, 6 u32, 7 bool. An array of T is 100 + T.
+
+pub fn tname(t: i32) -> String {
+    if t == 1 { return String::from("i32"); }
+    if t == 2 { return String::from("i64"); }
+    if t == 3 { return String::from("f64"); }
+    if t == 4 { return String::from("f32"); }
+    if t == 5 { return String::from("u8"); }
+    if t == 6 { return String::from("u32"); }
+    if t == 7 { return String::from("bool"); }
+    String::from("()")
+}
+
+pub fn zero_of(t: i32) -> String {
+    if t == 3 || t == 4 { return String::from("0.0"); }
+    if t == 7 { return String::from("false"); }
+    String::from("0")
+}
+
+// C's usual arithmetic conversions, as a rank: the wider type wins.
+pub fn rank(t: i32) -> i32 {
+    if t == 3 { return 6; }
+    if t == 4 { return 5; }
+    if t == 2 { return 4; }
+    if t == 6 { return 3; }
+    2
+}
+
+pub fn of_rank(r: i32) -> i32 {
+    if r == 6 { return 3; }
+    if r == 5 { return 4; }
+    if r == 4 { return 2; }
+    if r == 3 { return 6; }
+    1
+}
+
+pub fn conv(text: String, from: i32, to: i32) -> String {
+    if from == to { return text; }
+    if to == 7 { return "(" + text + " != " + zero_of(from) + ")"; }
+    "((" + text + ") as " + tname(to) + ")"
+}

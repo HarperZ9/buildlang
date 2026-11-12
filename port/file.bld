@@ -1,0 +1,87 @@
+// SPDX-License-Identifier: MIT
+//
+// port/file.bld: The whole file: globals, functions and the output text.
+
+use types::*;
+use state::*;
+use exprs::*;
+use stmts::*;
+
+// ------------------------------------------------------------------ the file
+
+pub fn translate(t: Toks, f: Fns, out: Vec<String>) -> i32 ~ Console {
+    let st: Vec<i32> = vec![0, 0, 0, 0, 0, 0, 0, 0, 0];
+    let sy: Syms = Syms { names: Vec::new(), types: Vec::new() };
+    while cur_kind(t, st) != 0 {
+        let w: String = cur(t, st);
+        if cur_kind(t, st) == 7 {
+            if w.starts_with("#include") { advance(st); continue; }
+            refuse(t, st, String::from("a preprocessor line other than #include"));
+            advance(st);
+            continue;
+        }
+        if !(cur_kind(t, st) == 1 && is_type_word(w)) {
+            refuse(t, st, "`" + w + "` at file level is outside the subset");
+            skip_construct(t, st);
+            continue;
+        }
+        let ret: i32 = parse_type(t, st);
+        let name: String = cur(t, st);
+        advance(st);
+        if cur(t, st) != "(" {
+            // a file-level constant: `const int N = 10;`
+            if cur(t, st) == "=" && ret > 0 && cur_kind(t, st) != 0 {
+                advance(st);
+                let e: String = expr(t, st, sy, f, 0);
+                emit(out, st, "const " + name + ": " + tname(ret) + " = " + conv(e, st[1], ret) + ";");
+                add_sym(sy, st, name, ret);
+                expect(t, st, String::from(";"));
+                continue;
+            }
+            refuse(t, st, String::from("a file-level variable without a constant value"));
+            while cur(t, st) != ";" && cur_kind(t, st) != 0 { advance(st); }
+            advance(st);
+            continue;
+        }
+        if ret < 0 { refuse(t, st, String::from("a function returning a type outside the subset")); }
+        advance(st);
+        let base: i32 = st[6];
+        let before: i32 = st[2];
+        let mut sig: String = String::new();
+        let shadow: Vec<String> = Vec::new();
+        while cur(t, st) != ")" && cur_kind(t, st) != 0 {
+            let pt: i32 = parse_type(t, st);
+            if pt == 0 && cur(t, st) == ")" { break; }
+            if pt <= 0 { refuse(t, st, String::from("a parameter with a type outside the subset")); }
+            let pn: String = cur(t, st);
+            advance(st);
+            if cur(t, st) == "[" { refuse(t, st, String::from("an array parameter")); }
+            if sig.len() > 0 { sig = sig + ", "; }
+            sig = sig + pn + ": " + tname(pt);
+            shadow.push("let mut " + pn + ": " + tname(pt) + " = " + pn + ";");
+            add_sym(sy, st, pn, pt);
+            if cur(t, st) == "," { advance(st); }
+        }
+        advance(st);
+        if st[2] > before { skip_construct(t, st); st[6] = base; continue; }
+        if cur(t, st) == ";" { advance(st); st[6] = base; continue; }
+        let idx: i32 = find_fn(f, name);
+        let mut head: String = "fn " + name + "(" + sig + ")";
+        if name == "main" { head = String::from("fn main()"); st[5] = 1; } else { st[5] = 0; }
+        if ret > 0 && name != "main" { head = head + " -> " + tname(ret); }
+        if idx >= 0 && f.prints[idx as usize] == 1 { head = head + " ~ Console"; }
+        st[4] = ret;
+        emit(out, st, head + " {");
+        st[3] = 1;
+        let mut i: usize = 0;
+        while i < shadow.len() { emit(out, st, shadow[i]); i = i + 1; }
+        st[3] = 0;
+        let steps: Vec<String> = Vec::new();
+        body(t, st, sy, f, out, steps);
+        emit(out, st, String::from("}"));
+        emit(out, st, String::new());
+        // the function's locals go out of scope; file-level constants stay
+        st[6] = base;
+    }
+    st[2]
+}
