@@ -1,0 +1,80 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "build-engine"
+version = "1.0.1"
+description = "Self-improving adaptive prediction and paper-trading engine — bridges forecasting models to execution with an accuracy feedback loop"
+readme = "README.md"
+license = { text = "FSL-1.1-MIT" }
+authors = [{name = "Zain Dana Harper"}]
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.24", "scipy>=1.10"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Office/Business :: Financial :: Investment",
+]
+
+[project.urls]
+Homepage = "https://github.com/HarperZ9/build-engine"
+Repository = "https://github.com/HarperZ9/build-engine"
+Issues = "https://github.com/HarperZ9/build-engine/issues"
+
+[project.scripts]
+build-engine = "build_engine.cli:main"
+
+[project.optional-dependencies]
+test = ["pytest>=8.0", "pytest-cov>=5"]
+dev = ["pytest>=8.0", "pytest-cov>=5", "ruff>=0.6", "mypy>=1.10", "build>=1.2"]
+
+[tool.setuptools.packages.find]
+include = ["build_engine*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.coverage.run]
+source = ["build_engine"]
+omit = ["*/gui/*"]  # GUI is exercised manually, not in headless CI
+
+[tool.coverage.report]
+show_missing = true
+
+[tool.mypy]
+python_version = "3.10"
+files = ["build_engine"]
+# build-oracle/build-finance/build-ui are sibling packages installed as editable
+# installs; their modern finder-hook .pth mechanism is invisible to mypy's static
+# import resolution, and they ship no stubs of their own.
+ignore_missing_imports = true
+
+# The PyQt6 GUI layer is a thin adapter over an untyped Qt binding; it is checked at its
+# public boundary but not strict-typed internally. The adaptive-engine core is type-clean.
+[[tool.mypy.overrides]]
+module = ["build_engine.gui.*"]
+ignore_errors = true
+
+[tool.ruff]
+target-version = "py310"
+line-length = 120
+
+[tool.ruff.lint]
+select = [
+    "E",     # pycodestyle errors
+    "W",     # pycodestyle warnings
+    "F",     # pyflakes
+    "B",     # flake8-bugbear
+    "SIM",   # flake8-simplify
+    "UP",    # pyupgrade
+    "I",     # isort
+]
+ignore = ["E501", "E701", "E702", "E741", "B905", "SIM102", "SIM105", "SIM108", "SIM112", "SIM117", "E402", "SIM113", "SIM115"]
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["F401"]  # re-exports are intentional in __init__ files
+
+[tool.ruff.format]
+quote-style = "double"

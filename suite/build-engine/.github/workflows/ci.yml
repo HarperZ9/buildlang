@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install ruff + mypy
+        run: pip install ruff mypy
+      - name: Lint
+        run: ruff check .
+      - name: Format check
+        run: ruff format --check .
+      - name: Type check (mypy)
+        run: mypy
+
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[all]"
+          pip install pytest pytest-cov
+      - name: Create cross-project stubs for CI
+        shell: bash
+        run: |
+          mkdir -p build_finance build_oracle
+          printf 'class Candle:\n    def __init__(self, **kw): self.__dict__.update(kw)\nclass Signal:\n    def __init__(self, **kw): self.__dict__.update(kw)\n' > build_finance/data.py
+          printf '' > build_finance/__init__.py
+          printf '' > build_oracle/__init__.py
+          printf 'class BaseForecaster:\n    def __init__(self, **kw): self.__dict__.update(kw)\n    def fit(self, *a, **kw): return self\n    def predict(self, *a, **kw): return []\n' > build_oracle/forecasting.py
+          printf 'class ARIMA:\n    def __init__(self, *a, **kw): pass\n    def fit(self, *a, **kw): return self\n    def predict(self, *a, **kw): return [0.0]\n' > build_oracle/arima.py
+          printf 'class Prophet:\n    def __init__(self, *a, **kw): pass\n    def fit(self, *a, **kw): return self\n    def predict(self, *a, **kw): return [0.0]\n' > build_oracle/prophet.py
+          printf 'class SimpleForecaster:\n    def __init__(self, *a, **kw): pass\n    def fit(self, *a, **kw): return self\n    def predict(self, *a, **kw): return [0.0]\n' > build_oracle/neural.py
+      - name: Run tests with coverage (skip cross-project integration tests)
+        run: pytest tests/ -q --ignore=tests/test_prediction_strategy.py --ignore=tests/test_model_trainer.py --ignore=tests/test_engine.py --cov=build_engine --cov-report=term-missing --cov-fail-under=48
+  art-receipts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify art receipt digests
+        run: python3 scripts/check_art_receipts.py
