@@ -1,0 +1,842 @@
+static mut G_u8_1: [u8; 1] = [76_u8];
+struct R_u8_1 { a: u8, w: [u8; 1], z: i64 }
+impl R_u8_1 { fn set(&mut self, k: usize, v: u8) { self.w[k] = v; self.a = self.a ^ 1_u8; } }
+static mut S_u8_1: R_u8_1 = R_u8_1 { z: (-3000009_i64), w: [32_u8], a: 3_u8 };
+fn pa_u8_1(p: &mut [u8; 1], k: usize, v: u8) { p[k] = v; }
+fn ps_u8_1(p: &mut [u8], k: usize, v: u8) { p[k] = v; }
+static mut G_u8_2: [u8; 2] = [0_u8, 255_u8];
+struct R_u8_2 { a: u8, w: [u8; 2], z: i64 }
+impl R_u8_2 { fn set(&mut self, k: usize, v: u8) { self.w[k] = v; self.a = self.a ^ 1_u8; } }
+static mut S_u8_2: R_u8_2 = R_u8_2 { z: (-14000042_i64), w: [187_u8, 0_u8], a: 14_u8 };
+fn pa_u8_2(p: &mut [u8; 2], k: usize, v: u8) { p[k] = v; }
+fn ps_u8_2(p: &mut [u8], k: usize, v: u8) { p[k] = v; }
+static mut G_u8_3: [u8; 3] = [130_u8, 51_u8, 228_u8];
+struct R_u8_3 { a: u8, w: [u8; 3], z: i64 }
+impl R_u8_3 { fn set(&mut self, k: usize, v: u8) { self.w[k] = v; self.a = self.a ^ 1_u8; } }
+static mut S_u8_3: R_u8_3 = R_u8_3 { z: (-25000075_i64), w: [86_u8, 7_u8, 184_u8], a: 25_u8 };
+fn pa_u8_3(p: &mut [u8; 3], k: usize, v: u8) { p[k] = v; }
+fn ps_u8_3(p: &mut [u8], k: usize, v: u8) { p[k] = v; }
+static mut G_u8_5: [u8; 5] = [255_u8, 206_u8, 127_u8, 48_u8, 225_u8];
+struct R_u8_5 { a: u8, w: [u8; 5], z: i64 }
+impl R_u8_5 { fn set(&mut self, k: usize, v: u8) { self.w[k] = v; self.a = self.a ^ 1_u8; } }
+static mut S_u8_5: R_u8_5 = R_u8_5 { z: (-36000108_i64), w: [0_u8, 255_u8, 83_u8, 4_u8, 181_u8], a: 36_u8 };
+fn pa_u8_5(p: &mut [u8; 5], k: usize, v: u8) { p[k] = v; }
+fn ps_u8_5(p: &mut [u8], k: usize, v: u8) { p[k] = v; }
+static mut G_u8_8: [u8; 8] = [184_u8, 105_u8, 0_u8, 255_u8, 124_u8, 45_u8, 222_u8, 143_u8];
+struct R_u8_8 { a: u8, w: [u8; 8], z: i64 }
+impl R_u8_8 { fn set(&mut self, k: usize, v: u8) { self.w[k] = v; self.a = self.a ^ 1_u8; } }
+static mut S_u8_8: R_u8_8 = R_u8_8 { z: (-47000141_i64), w: [140_u8, 61_u8, 238_u8, 0_u8, 255_u8, 1_u8, 178_u8, 99_u8], a: 47_u8 };
+fn pa_u8_8(p: &mut [u8; 8], k: usize, v: u8) { p[k] = v; }
+fn ps_u8_8(p: &mut [u8], k: usize, v: u8) { p[k] = v; }
+static mut G_i8_1: [i8; 1] = [(-45_i8)];
+struct R_i8_1 { a: u8, w: [i8; 1], z: i64 }
+impl R_i8_1 { fn set(&mut self, k: usize, v: i8) { self.w[k] = v; self.a = self.a ^ 1_u8; } }
+static mut S_i8_1: R_i8_1 = R_i8_1 { z: (-58000174_i64), w: [127_i8], a: 58_u8 };
+fn pa_i8_1(p: &mut [i8; 1], k: usize, v: i8) { p[k] = v; }
+fn ps_i8_1(p: &mut [i8], k: usize, v: i8) { p[k] = v; }
+static mut G_i8_2: [i8; 2] = [110_i8, (-128_i8)];
+struct R_i8_2 { a: u8, w: [i8; 2], z: i64 }
+impl R_i8_2 { fn set(&mut self, k: usize, v: i8) { self.w[k] = v; self.a = self.a ^ 1_u8; } }
+static mut S_i8_2: R_i8_2 = R_i8_2 { z: (-69000207_i64), w: [66_i8, (-13_i8)], a: 69_u8 };
+fn pa_i8_2(p: &mut [i8; 2], k: usize, v: i8) { p[k] = v; }
+fn ps_i8_2(p: &mut [i8], k: usize, v: i8) { p[k] = v; }
+static mut G_i8_3: [i8; 3] = [9_i8, (-70_i8), 107_i8];
+struct R_i8_3 { a: u8, w: [i8; 3], z: i64 }
+impl R_i8_3 { fn set(&mut self, k: usize, v: i8) { self.w[k] = v; self.a = self.a ^ 1_u8; } }
+static mut S_i8_3: R_i8_3 = R_i8_3 { z: (-80000240_i64), w: [(-35_i8), (-114_i8), 63_i8], a: 80_u8 };
+fn pa_i8_3(p: &mut [i8; 3], k: usize, v: i8) { p[k] = v; }
+fn ps_i8_3(p: &mut [i8], k: usize, v: i8) { p[k] = v; }
+static mut G_i8_5: [i8; 5] = [(-128_i8), 127_i8, 6_i8, (-73_i8), 104_i8];
+struct R_i8_5 { a: u8, w: [i8; 5], z: i64 }
+impl R_i8_5 { fn set(&mut self, k: usize, v: i8) { self.w[k] = v; self.a = self.a ^ 1_u8; } }
+static mut S_i8_5: R_i8_5 = R_i8_5 { z: (-91000273_i64), w: [120_i8, (-128_i8), 127_i8, (-117_i8), 60_i8], a: 91_u8 };
+fn pa_i8_5(p: &mut [i8; 5], k: usize, v: i8) { p[k] = v; }
+fn ps_i8_5(p: &mut [i8], k: usize, v: i8) { p[k] = v; }
+static mut G_i8_8: [i8; 8] = [63_i8, (-16_i8), (-95_i8), (-128_i8), 127_i8, (-76_i8), 101_i8, 22_i8];
+struct R_i8_8 { a: u8, w: [i8; 8], z: i64 }
+impl R_i8_8 { fn set(&mut self, k: usize, v: i8) { self.w[k] = v; self.a = self.a ^ 1_u8; } }
+static mut S_i8_8: R_i8_8 = R_i8_8 { z: (-102000306_i64), w: [19_i8, (-60_i8), 117_i8, 38_i8, (-128_i8), 127_i8, 57_i8, (-22_i8)], a: 102_u8 };
+fn pa_i8_8(p: &mut [i8; 8], k: usize, v: i8) { p[k] = v; }
+fn ps_i8_8(p: &mut [i8], k: usize, v: i8) { p[k] = v; }
+static mut G_u16_1: [u16; 1] = [65535_u16];
+struct R_u16_1 { a: u8, w: [u16; 1], z: i64 }
+impl R_u16_1 { fn set(&mut self, k: usize, v: u16) { self.w[k] = v; self.a = self.a ^ 1_u8; } }
+static mut S_u16_1: R_u16_1 = R_u16_1 { z: (-113000339_i64), w: [0_u16], a: 113_u8 };
+fn pa_u16_1(p: &mut [u16; 1], k: usize, v: u16) { p[k] = v; }
+fn ps_u16_1(p: &mut [u16], k: usize, v: u16) { p[k] = v; }
+static mut G_u16_2: [u16; 2] = [8693_u16, 39846_u16];
+struct R_u16_2 { a: u8, w: [u16; 2], z: i64 }
+impl R_u16_2 { fn set(&mut self, k: usize, v: u16) { self.w[k] = v; self.a = self.a ^ 1_u8; } }
+static mut S_u16_2: R_u16_2 = R_u16_2 { z: (-124000372_i64), w: [41929_u16, 7546_u16], a: 124_u8 };
+fn pa_u16_2(p: &mut [u16; 2], k: usize, v: u16) { p[k] = v; }
+fn ps_u16_2(p: &mut [u16], k: usize, v: u16) { p[k] = v; }
+static mut G_u16_3: [u16; 3] = [23696_u16, 54849_u16, 20466_u16];
+struct R_u16_3 { a: u8, w: [u16; 3], z: i64 }
+impl R_u16_3 { fn set(&mut self, k: usize, v: u16) { self.w[k] = v; self.a = self.a ^ 1_u8; } }
+static mut S_u16_3: R_u16_3 = R_u16_3 { z: (-135000405_i64), w: [65535_u16, 22549_u16, 53702_u16], a: 135_u8 };
+fn pa_u16_3(p: &mut [u16; 3], k: usize, v: u16) { p[k] = v; }
+fn ps_u16_3(p: &mut [u16], k: usize, v: u16) { p[k] = v; }
+static mut G_u16_5: [u16; 5] = [38699_u16, 0_u16, 65535_u16, 1086_u16, 32239_u16];
+struct R_u16_5 { a: u8, w: [u16; 5], z: i64 }
+impl R_u16_5 { fn set(&mut self, k: usize, v: u16) { self.w[k] = v; self.a = self.a ^ 1_u8; } }
+static mut S_u16_5: R_u16_5 = R_u16_5 { z: (-146000438_i64), w: [6399_u16, 37552_u16, 0_u16, 65535_u16, 65475_u16], a: 146_u8 };
+fn pa_u16_5(p: &mut [u16; 5], k: usize, v: u16) { p[k] = v; }
+fn ps_u16_5(p: &mut [u16], k: usize, v: u16) { p[k] = v; }
+static mut G_u16_8: [u16; 8] = [53702_u16, 19319_u16, 50472_u16, 16089_u16, 0_u16, 65535_u16, 44012_u16, 9629_u16];
+struct R_u16_8 { a: u8, w: [u16; 8], z: i64 }
+impl R_u16_8 { fn set(&mut self, k: usize, v: u16) { self.w[k] = v; self.a = self.a ^ 1_u8; } }
+static mut S_u16_8: R_u16_8 = R_u16_8 { z: (-157000471_i64), w: [21402_u16, 52555_u16, 18172_u16, 49325_u16, 14942_u16, 0_u16, 65535_u16, 42865_u16], a: 157_u8 };
+fn pa_u16_8(p: &mut [u16; 8], k: usize, v: u16) { p[k] = v; }
+fn ps_u16_8(p: &mut [u16], k: usize, v: u16) { p[k] = v; }
+static mut G_i16_1: [i16; 1] = [(-32768_i16)];
+struct R_i16_1 { a: u8, w: [i16; 1], z: i64 }
+impl R_i16_1 { fn set(&mut self, k: usize, v: i16) { self.w[k] = v; self.a = self.a ^ 1_u8; } }
+static mut S_i16_1: R_i16_1 = R_i16_1 { z: (-168000504_i64), w: [3637_i16], a: 168_u8 };
+fn pa_i16_1(p: &mut [i16; 1], k: usize, v: i16) { p[k] = v; }
+fn ps_i16_1(p: &mut [i16], k: usize, v: i16) { p[k] = v; }
+static mut G_i16_2: [i16; 2] = [(-14596_i16), 16557_i16];
+struct R_i16_2 { a: u8, w: [i16; 2], z: i64 }
+impl R_i16_2 { fn set(&mut self, k: usize, v: i16) { self.w[k] = v; self.a = self.a ^ 1_u8; } }
+static mut S_i16_2: R_i16_2 = R_i16_2 { z: (-179000537_i64), w: [18640_i16, (-15743_i16)], a: 179_u8 };
+fn pa_i16_2(p: &mut [i16; 2], k: usize, v: i16) { p[k] = v; }
+fn ps_i16_2(p: &mut [i16], k: usize, v: i16) { p[k] = v; }
+static mut G_i16_3: [i16; 3] = [32767_i16, 31560_i16, (-2823_i16)];
+struct R_i16_3 { a: u8, w: [i16; 3], z: i64 }
+impl R_i16_3 { fn set(&mut self, k: usize, v: i16) { self.w[k] = v; self.a = self.a ^ 1_u8; } }
+static mut S_i16_3: R_i16_3 = R_i16_3 { z: (-190000570_i64), w: [(-32768_i16), 32767_i16, 30413_i16], a: 190_u8 };
+fn pa_i16_3(p: &mut [i16; 3], k: usize, v: i16) { p[k] = v; }
+fn ps_i16_3(p: &mut [i16], k: usize, v: i16) { p[k] = v; }
+static mut G_i16_5: [i16; 5] = [15410_i16, (-18973_i16), (-32768_i16), 32767_i16, 8950_i16];
+struct R_i16_5 { a: u8, w: [i16; 5], z: i64 }
+impl R_i16_5 { fn set(&mut self, k: usize, v: i16) { self.w[k] = v; self.a = self.a ^ 1_u8; } }
+static mut S_i16_5: R_i16_5 = R_i16_5 { z: (-201000603_i64), w: [(-16890_i16), 14263_i16, (-20120_i16), (-32768_i16), 32767_i16], a: 1_u8 };
+fn pa_i16_5(p: &mut [i16; 5], k: usize, v: i16) { p[k] = v; }
+fn ps_i16_5(p: &mut [i16], k: usize, v: i16) { p[k] = v; }
+static mut G_i16_8: [i16; 8] = [30413_i16, (-3970_i16), 27183_i16, (-7200_i16), 23953_i16, (-32768_i16), 32767_i16, (-13660_i16)];
+struct R_i16_8 { a: u8, w: [i16; 8], z: i64 }
+impl R_i16_8 { fn set(&mut self, k: usize, v: i16) { self.w[k] = v; self.a = self.a ^ 1_u8; } }
+static mut S_i16_8: R_i16_8 = R_i16_8 { z: (-212000636_i64), w: [32767_i16, 29266_i16, (-5117_i16), 26036_i16, (-8347_i16), 22806_i16, (-32768_i16), 32767_i16], a: 12_u8 };
+fn pa_i16_8(p: &mut [i16; 8], k: usize, v: i16) { p[k] = v; }
+fn ps_i16_8(p: &mut [i16], k: usize, v: i16) { p[k] = v; }
+static mut G_u32_1: [u32; 1] = [3528667496_u32];
+struct R_u32_1 { a: u8, w: [u32; 1], z: i64 }
+impl R_u32_1 { fn set(&mut self, k: usize, v: u32) { self.w[k] = v; self.a = self.a ^ 1_u8; } }
+static mut S_u32_1: R_u32_1 = R_u32_1 { z: (-223000669_i64), w: [782807868_u32], a: 23_u8 };
+fn pa_u32_1(p: &mut [u32; 1], k: usize, v: u32) { p[k] = v; }
+fn ps_u32_1(p: &mut [u32], k: usize, v: u32) { p[k] = v; }
+static mut G_u32_2: [u32; 2] = [2662689795_u32, 1022158260_u32];
+struct R_u32_2 { a: u8, w: [u32; 2], z: i64 }
+impl R_u32_2 { fn set(&mut self, k: usize, v: u32) { self.w[k] = v; self.a = self.a ^ 1_u8; } }
+static mut S_u32_2: R_u32_2 = R_u32_2 { z: (-234000702_i64), w: [4211797463_u32, 2571265928_u32], a: 34_u8 };
+fn pa_u32_2(p: &mut [u32; 2], k: usize, v: u32) { p[k] = v; }
+fn ps_u32_2(p: &mut [u32], k: usize, v: u32) { p[k] = v; }
+static mut G_u32_3: [u32; 3] = [0_u32, 4294967295_u32, 2810616320_u32];
+struct R_u32_3 { a: u8, w: [u32; 3], z: i64 }
+impl R_u32_3 { fn set(&mut self, k: usize, v: u32) { self.w[k] = v; self.a = self.a ^ 1_u8; } }
+static mut S_u32_3: R_u32_3 = R_u32_3 { z: (-245000735_i64), w: [3345819762_u32, 0_u32, 4294967295_u32], a: 45_u8 };
+fn pa_u32_3(p: &mut [u32; 3], k: usize, v: u32) { p[k] = v; }
+fn ps_u32_3(p: &mut [u32], k: usize, v: u32) { p[k] = v; }
+static mut G_u32_5: [u32; 5] = [930734393_u32, 3585170154_u32, 1944638619_u32, 0_u32, 4294967295_u32];
+struct R_u32_5 { a: u8, w: [u32; 5], z: i64 }
+impl R_u32_5 { fn set(&mut self, k: usize, v: u32) { self.w[k] = v; self.a = self.a ^ 1_u8; } }
+static mut S_u32_5: R_u32_5 = R_u32_5 { z: (-256000768_i64), w: [2479842061_u32, 839310526_u32, 3493746287_u32, 1853214752_u32, 0_u32], a: 56_u8 };
+fn pa_u32_5(p: &mut [u32; 5], k: usize, v: u32) { p[k] = v; }
+fn ps_u32_5(p: &mut [u32], k: usize, v: u32) { p[k] = v; }
+static mut G_u32_8: [u32; 8] = [4294967295_u32, 2719192453_u32, 1078660918_u32, 3733096679_u32, 2092565144_u32, 452033609_u32, 0_u32, 4294967295_u32];
+struct R_u32_8 { a: u8, w: [u32; 8], z: i64 }
+impl R_u32_8 { fn set(&mut self, k: usize, v: u32) { self.w[k] = v; self.a = self.a ^ 1_u8; } }
+static mut S_u32_8: R_u32_8 = R_u32_8 { z: (-267000801_i64), w: [0_u32, 4294967295_u32, 2627768586_u32, 987237051_u32, 3641672812_u32, 2001141277_u32, 360609742_u32, 0_u32], a: 67_u8 };
+fn pa_u32_8(p: &mut [u32; 8], k: usize, v: u32) { p[k] = v; }
+fn ps_u32_8(p: &mut [u32], k: usize, v: u32) { p[k] = v; }
+static mut G_i32_1: [i32; 1] = [1346262639_i32];
+struct R_i32_1 { a: u8, w: [i32; 1], z: i64 }
+impl R_i32_1 { fn set(&mut self, k: usize, v: i32) { self.w[k] = v; self.a = self.a ^ 1_u8; } }
+static mut S_i32_1: R_i32_1 = R_i32_1 { z: (-278000834_i64), w: [(-1399596989_i32)], a: 78_u8 };
+fn pa_i32_1(p: &mut [i32; 1], k: usize, v: i32) { p[k] = v; }
+fn ps_i32_1(p: &mut [i32], k: usize, v: i32) { p[k] = v; }
+static mut G_i32_2: [i32; 2] = [480284938_i32, (-1160246597_i32)];
+struct R_i32_2 { a: u8, w: [i32; 2], z: i64 }
+impl R_i32_2 { fn set(&mut self, k: usize, v: i32) { self.w[k] = v; self.a = self.a ^ 1_u8; } }
+static mut S_i32_2: R_i32_2 = R_i32_2 { z: (-289000867_i64), w: [2147483647_i32, 388861071_i32], a: 89_u8 };
+fn pa_i32_2(p: &mut [i32; 2], k: usize, v: i32) { p[k] = v; }
+fn ps_i32_2(p: &mut [i32], k: usize, v: i32) { p[k] = v; }
+static mut G_i32_3: [i32; 3] = [(-385692763_i32), (-2147483648_i32), 2147483647_i32];
+struct R_i32_3 { a: u8, w: [i32; 3], z: i64 }
+impl R_i32_3 { fn set(&mut self, k: usize, v: i32) { self.w[k] = v; self.a = self.a ^ 1_u8; } }
+static mut S_i32_3: R_i32_3 = R_i32_3 { z: (-300000900_i64), w: [1163414905_i32, (-477116630_i32), (-2147483648_i32)], a: 100_u8 };
+fn pa_i32_3(p: &mut [i32; 3], k: usize, v: i32) { p[k] = v; }
+fn ps_i32_3(p: &mut [i32], k: usize, v: i32) { p[k] = v; }
+static mut G_i32_5: [i32; 5] = [(-1251670464_i32), 1402765297_i32, (-237766238_i32), (-1878297773_i32), (-2147483648_i32)];
+struct R_i32_5 { a: u8, w: [i32; 5], z: i64 }
+impl R_i32_5 { fn set(&mut self, k: usize, v: i32) { self.w[k] = v; self.a = self.a ^ 1_u8; } }
+static mut S_i32_5: R_i32_5 = R_i32_5 { z: (-311000933_i64), w: [297437204_i32, (-1343094331_i32), 1311341430_i32, (-329190105_i32), (-1969721640_i32)], a: 111_u8 };
+fn pa_i32_5(p: &mut [i32; 5], k: usize, v: i32) { p[k] = v; }
+fn ps_i32_5(p: &mut [i32], k: usize, v: i32) { p[k] = v; }
+static mut G_i32_8: [i32; 8] = [(-2147483648_i32), 2147483647_i32, (-1103743939_i32), 1550691822_i32, (-89839713_i32), (-1730371248_i32), 924064513_i32, (-2147483648_i32)];
+struct R_i32_8 { a: u8, w: [i32; 8], z: i64 }
+impl R_i32_8 { fn set(&mut self, k: usize, v: i32) { self.w[k] = v; self.a = self.a ^ 1_u8; } }
+static mut S_i32_8: R_i32_8 = R_i32_8 { z: (-322000966_i64), w: [(-568540497_i32), (-2147483648_i32), 2147483647_i32, (-1195167806_i32), 1459267955_i32, (-181263580_i32), (-1821795115_i32), 832640646_i32], a: 122_u8 };
+fn pa_i32_8(p: &mut [i32; 8], k: usize, v: i32) { p[k] = v; }
+fn ps_i32_8(p: &mut [i32], k: usize, v: i32) { p[k] = v; }
+static mut G_u64_1: [u64; 1] = [883927120758_u64];
+struct R_u64_1 { a: u8, w: [u64; 1], z: i64 }
+impl R_u64_1 { fn set(&mut self, k: usize, v: u64) { self.w[k] = v; self.a = self.a ^ 1_u8; } }
+static mut S_u64_1: R_u64_1 = R_u64_1 { z: (-333000999_i64), w: [937015835978_u64], a: 133_u8 };
+fn pa_u64_1(p: &mut [u64; 1], k: usize, v: u64) { p[k] = v; }
+fn ps_u64_1(p: &mut [u64], k: usize, v: u64) { p[k] = v; }
+static mut G_u64_2: [u64; 2] = [18446744073709551615_u64, 915780349890_u64];
+struct R_u64_2 { a: u8, w: [u64; 2], z: i64 }
+impl R_u64_2 { fn set(&mut self, k: usize, v: u64) { self.w[k] = v; self.a = self.a ^ 1_u8; } }
+static mut S_u64_2: R_u64_2 = R_u64_2 { z: (-344001032_i64), w: [0_u64, 18446744073709551615_u64], a: 144_u8 };
+fn pa_u64_2(p: &mut [u64; 2], k: usize, v: u64) { p[k] = v; }
+fn ps_u64_2(p: &mut [u64], k: usize, v: u64) { p[k] = v; }
+static mut G_u64_3: [u64; 3] = [942324707500_u64, 944979143261_u64, 0_u64];
+struct R_u64_3 { a: u8, w: [u64; 3], z: i64 }
+impl R_u64_3 { fn set(&mut self, k: usize, v: u64) { self.w[k] = v; self.a = self.a ^ 1_u8; } }
+static mut S_u64_3: R_u64_3 = R_u64_3 { z: (-355001065_i64), w: [995413422720_u64, 998067858481_u64, 1000722294242_u64], a: 155_u8 };
+fn pa_u64_3(p: &mut [u64; 3], k: usize, v: u64) { p[k] = v; }
+fn ps_u64_3(p: &mut [u64], k: usize, v: u64) { p[k] = v; }
+static mut G_u64_5: [u64; 5] = [971523500871_u64, 974177936632_u64, 976832372393_u64, 979486808154_u64, 982141243915_u64];
+struct R_u64_5 { a: u8, w: [u64; 5], z: i64 }
+impl R_u64_5 { fn set(&mut self, k: usize, v: u64) { self.w[k] = v; self.a = self.a ^ 1_u8; } }
+static mut S_u64_5: R_u64_5 = R_u64_5 { z: (-366001098_i64), w: [18446744073709551615_u64, 1027266651852_u64, 1029921087613_u64, 1032575523374_u64, 1035229959135_u64], a: 166_u8 };
+fn pa_u64_5(p: &mut [u64; 5], k: usize, v: u64) { p[k] = v; }
+fn ps_u64_5(p: &mut [u64], k: usize, v: u64) { p[k] = v; }
+static mut G_u64_8: [u64; 8] = [1000722294242_u64, 0_u64, 18446744073709551615_u64, 1008685601525_u64, 1011340037286_u64, 1013994473047_u64, 1016648908808_u64, 1019303344569_u64];
+struct R_u64_8 { a: u8, w: [u64; 8], z: i64 }
+impl R_u64_8 { fn set(&mut self, k: usize, v: u64) { self.w[k] = v; self.a = self.a ^ 1_u8; } }
+static mut S_u64_8: R_u64_8 = R_u64_8 { z: (-377001131_i64), w: [1053811009462_u64, 1056465445223_u64, 0_u64, 18446744073709551615_u64, 1064428752506_u64, 1067083188267_u64, 1069737624028_u64, 1072392059789_u64], a: 177_u8 };
+fn pa_u64_8(p: &mut [u64; 8], k: usize, v: u64) { p[k] = v; }
+fn ps_u64_8(p: &mut [u64], k: usize, v: u64) { p[k] = v; }
+static mut G_i64_1: [i64; 1] = [(-9223371006933688195_i64)];
+struct R_i64_1 { a: u8, w: [i64; 1], z: i64 }
+impl R_i64_1 { fn set(&mut self, k: usize, v: i64) { self.w[k] = v; self.a = self.a ^ 1_u8; } }
+static mut S_i64_1: R_i64_1 = R_i64_1 { z: (-388001164_i64), w: [(-9223370953844972975_i64)], a: 188_u8 };
+fn pa_i64_1(p: &mut [i64; 1], k: usize, v: i64) { p[k] = v; }
+fn ps_i64_1(p: &mut [i64], k: usize, v: i64) { p[k] = v; }
+static mut G_i64_2: [i64; 2] = [(-9223372036854775808_i64), 9223372036854775807_i64];
+struct R_i64_2 { a: u8, w: [i64; 2], z: i64 }
+impl R_i64_2 { fn set(&mut self, k: usize, v: i64) { self.w[k] = v; self.a = self.a ^ 1_u8; } }
+static mut S_i64_2: R_i64_2 = R_i64_2 { z: (-399001197_i64), w: [(-9223370924646179604_i64), (-9223372036854775808_i64)], a: 199_u8 };
+fn pa_i64_2(p: &mut [i64; 2], k: usize, v: i64) { p[k] = v; }
+fn ps_i64_2(p: &mut [i64], k: usize, v: i64) { p[k] = v; }
+static mut G_i64_3: [i64; 3] = [(-9223370948536101453_i64), (-9223370945881665692_i64), (-9223370943227229931_i64)];
+struct R_i64_3 { a: u8, w: [i64; 3], z: i64 }
+impl R_i64_3 { fn set(&mut self, k: usize, v: i64) { self.w[k] = v; self.a = self.a ^ 1_u8; } }
+static mut S_i64_3: R_i64_3 = R_i64_3 { z: (-410001230_i64), w: [(-9223370895447386233_i64), (-9223370892792950472_i64), (-9223370890138514711_i64)], a: 10_u8 };
+fn pa_i64_3(p: &mut [i64; 3], k: usize, v: i64) { p[k] = v; }
+fn ps_i64_3(p: &mut [i64], k: usize, v: i64) { p[k] = v; }
+static mut G_i64_5: [i64; 5] = [9223372036854775807_i64, (-9223370916682872321_i64), (-9223370914028436560_i64), (-9223370911374000799_i64), (-9223370908719565038_i64)];
+struct R_i64_5 { a: u8, w: [i64; 5], z: i64 }
+impl R_i64_5 { fn set(&mut self, k: usize, v: i64) { self.w[k] = v; self.a = self.a ^ 1_u8; } }
+static mut S_i64_5: R_i64_5 = R_i64_5 { z: (-421001263_i64), w: [(-9223372036854775808_i64), 9223372036854775807_i64, (-9223370860939721340_i64), (-9223370858285285579_i64), (-9223370855630849818_i64)], a: 21_u8 };
+fn pa_i64_5(p: &mut [i64; 5], k: usize, v: i64) { p[k] = v; }
+fn ps_i64_5(p: &mut [i64], k: usize, v: i64) { p[k] = v; }
+static mut G_i64_8: [i64; 8] = [(-9223370890138514711_i64), (-9223370887484078950_i64), (-9223372036854775808_i64), 9223372036854775807_i64, (-9223370879520771667_i64), (-9223370876866335906_i64), (-9223370874211900145_i64), (-9223370871557464384_i64)];
+struct R_i64_8 { a: u8, w: [i64; 8], z: i64 }
+impl R_i64_8 { fn set(&mut self, k: usize, v: i64) { self.w[k] = v; self.a = self.a ^ 1_u8; } }
+static mut S_i64_8: R_i64_8 = R_i64_8 { z: (-432001296_i64), w: [(-9223370837049799491_i64), (-9223370834395363730_i64), (-9223370831740927969_i64), (-9223372036854775808_i64), 9223372036854775807_i64, (-9223370823777620686_i64), (-9223370821123184925_i64), (-9223370818468749164_i64)], a: 32_u8 };
+fn pa_i64_8(p: &mut [i64; 8], k: usize, v: i64) { p[k] = v; }
+fn ps_i64_8(p: &mut [i64], k: usize, v: i64) { p[k] = v; }
+fn main() ~ Console {
+    unsafe { println!("{} {} {} {}", G_u8_1[0], S_u8_1.a, S_u8_1.w[0], S_u8_1.z); }
+    unsafe {
+        G_u8_1[0] = 0_u8;
+        let j_u8_1 = 0_usize;
+        G_u8_1[j_u8_1] ^= 255_u8;
+        pa_u8_1(&mut G_u8_1, 0_usize, 42_u8);
+        S_u8_1.w[0] = 219_u8;
+        S_u8_1.z = (-3000002_i64);
+        ps_u8_1(&mut S_u8_1.w, 0_usize, 140_u8);
+        S_u8_1.set(0_usize, 61_u8);
+        S_u8_1.w[j_u8_1] |= 238_u8;
+        println!("{} {} {} {}", G_u8_1[0], S_u8_1.a, S_u8_1.w[0], S_u8_1.z);
+        G_u8_1 = [32_u8];
+        println!("{}", G_u8_1[0]);
+    }
+    unsafe { println!("{} {} {} {} {} {}", G_u8_2[0], G_u8_2[1], S_u8_2.a, S_u8_2.w[0], S_u8_2.w[1], S_u8_2.z); }
+    unsafe {
+        G_u8_2[0] = 99_u8;
+        let j_u8_2 = 1_usize;
+        G_u8_2[j_u8_2] ^= 20_u8;
+        pa_u8_2(&mut G_u8_2, 1_usize, 197_u8);
+        S_u8_2.w[1] = 0_u8;
+        S_u8_2.z = (-14000035_i64);
+        ps_u8_2(&mut S_u8_2.w, 0_usize, 255_u8);
+        S_u8_2.set(1_usize, 216_u8);
+        S_u8_2.w[j_u8_2] |= 137_u8;
+        println!("{} {} {} {} {} {}", G_u8_2[0], G_u8_2[1], S_u8_2.a, S_u8_2.w[0], S_u8_2.w[1], S_u8_2.z);
+        G_u8_2 = [187_u8, 0_u8];
+        println!("{} {}", G_u8_2[0], G_u8_2[1]);
+    }
+    unsafe { println!("{} {} {} {} {} {} {} {}", G_u8_3[0], G_u8_3[1], G_u8_3[2], S_u8_3.a, S_u8_3.w[0], S_u8_3.w[1], S_u8_3.w[2], S_u8_3.z); }
+    unsafe {
+        G_u8_3[0] = 255_u8;
+        let j_u8_3 = 2_usize;
+        G_u8_3[j_u8_3] ^= 175_u8;
+        pa_u8_3(&mut G_u8_3, 1_usize, 96_u8);
+        S_u8_3.w[2] = 17_u8;
+        S_u8_3.z = (-25000068_i64);
+        ps_u8_3(&mut S_u8_3.w, 0_usize, 194_u8);
+        S_u8_3.set(1_usize, 115_u8);
+        S_u8_3.w[j_u8_3] |= 0_u8;
+        println!("{} {} {} {} {} {} {} {}", G_u8_3[0], G_u8_3[1], G_u8_3[2], S_u8_3.a, S_u8_3.w[0], S_u8_3.w[1], S_u8_3.w[2], S_u8_3.z);
+        G_u8_3 = [86_u8, 7_u8, 184_u8];
+        println!("{} {} {}", G_u8_3[0], G_u8_3[1], G_u8_3[2]);
+    }
+    unsafe { println!("{} {} {} {} {} {} {} {} {} {} {} {}", G_u8_5[0], G_u8_5[1], G_u8_5[2], G_u8_5[3], G_u8_5[4], S_u8_5.a, S_u8_5.w[0], S_u8_5.w[1], S_u8_5.w[2], S_u8_5.w[3], S_u8_5.w[4], S_u8_5.z); }
+    unsafe {
+        G_u8_5[0] = 153_u8;
+        let j_u8_5 = 4_usize;
+        G_u8_5[j_u8_5] ^= 74_u8;
+        pa_u8_5(&mut G_u8_5, 2_usize, 0_u8);
+        S_u8_5.w[4] = 255_u8;
+        S_u8_5.z = (-36000101_i64);
+        ps_u8_5(&mut S_u8_5.w, 0_usize, 93_u8);
+        S_u8_5.set(2_usize, 14_u8);
+        S_u8_5.w[j_u8_5] |= 191_u8;
+        println!("{} {} {} {} {} {} {} {} {} {} {} {}", G_u8_5[0], G_u8_5[1], G_u8_5[2], G_u8_5[3], G_u8_5[4], S_u8_5.a, S_u8_5.w[0], S_u8_5.w[1], S_u8_5.w[2], S_u8_5.w[3], S_u8_5.w[4], S_u8_5.z);
+        G_u8_5 = [0_u8, 255_u8, 83_u8, 4_u8, 181_u8];
+        println!("{} {} {} {} {}", G_u8_5[0], G_u8_5[1], G_u8_5[2], G_u8_5[3], G_u8_5[4]);
+    }
+    unsafe { println!("{} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {}", G_u8_8[0], G_u8_8[1], G_u8_8[2], G_u8_8[3], G_u8_8[4], G_u8_8[5], G_u8_8[6], G_u8_8[7], S_u8_8.a, S_u8_8.w[0], S_u8_8.w[1], S_u8_8.w[2], S_u8_8.w[3], S_u8_8.w[4], S_u8_8.w[5], S_u8_8.w[6], S_u8_8.w[7], S_u8_8.z); }
+    unsafe {
+        G_u8_8[0] = 52_u8;
+        let j_u8_8 = 7_usize;
+        G_u8_8[j_u8_8] ^= 229_u8;
+        pa_u8_8(&mut G_u8_8, 4_usize, 150_u8);
+        S_u8_8.w[7] = 71_u8;
+        S_u8_8.z = (-47000134_i64);
+        ps_u8_8(&mut S_u8_8.w, 0_usize, 248_u8);
+        S_u8_8.set(4_usize, 0_u8);
+        S_u8_8.w[j_u8_8] |= 255_u8;
+        println!("{} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {}", G_u8_8[0], G_u8_8[1], G_u8_8[2], G_u8_8[3], G_u8_8[4], G_u8_8[5], G_u8_8[6], G_u8_8[7], S_u8_8.a, S_u8_8.w[0], S_u8_8.w[1], S_u8_8.w[2], S_u8_8.w[3], S_u8_8.w[4], S_u8_8.w[5], S_u8_8.w[6], S_u8_8.w[7], S_u8_8.z);
+        G_u8_8 = [140_u8, 61_u8, 238_u8, 0_u8, 255_u8, 1_u8, 178_u8, 99_u8];
+        println!("{} {} {} {} {} {} {} {}", G_u8_8[0], G_u8_8[1], G_u8_8[2], G_u8_8[3], G_u8_8[4], G_u8_8[5], G_u8_8[6], G_u8_8[7]);
+    }
+    unsafe { println!("{} {} {} {}", G_i8_1[0], S_i8_1.a, S_i8_1.w[0], S_i8_1.z); }
+    unsafe {
+        G_i8_1[0] = 79_i8;
+        let j_i8_1 = 0_usize;
+        G_i8_1[j_i8_1] ^= (-128_i8);
+        pa_i8_1(&mut G_i8_1, 0_usize, 127_i8);
+        S_i8_1.w[0] = 98_i8;
+        S_i8_1.z = (-58000167_i64);
+        ps_i8_1(&mut S_i8_1.w, 0_usize, 19_i8);
+        S_i8_1.set(0_usize, (-60_i8));
+        S_i8_1.w[j_i8_1] |= 117_i8;
+        println!("{} {} {} {}", G_i8_1[0], S_i8_1.a, S_i8_1.w[0], S_i8_1.z);
+        G_i8_1 = [127_i8];
+        println!("{}", G_i8_1[0]);
+    }
+    unsafe { println!("{} {} {} {} {} {}", G_i8_2[0], G_i8_2[1], S_i8_2.a, S_i8_2.w[0], S_i8_2.w[1], S_i8_2.z); }
+    unsafe {
+        G_i8_2[0] = (-22_i8);
+        let j_i8_2 = 1_usize;
+        G_i8_2[j_i8_2] ^= (-101_i8);
+        pa_i8_2(&mut G_i8_2, 1_usize, 76_i8);
+        S_i8_2.w[1] = (-3_i8);
+        S_i8_2.z = (-69000200_i64);
+        ps_i8_2(&mut S_i8_2.w, 0_usize, (-128_i8));
+        S_i8_2.set(1_usize, 127_i8);
+        S_i8_2.w[j_i8_2] |= 16_i8;
+        println!("{} {} {} {} {} {}", G_i8_2[0], G_i8_2[1], S_i8_2.a, S_i8_2.w[0], S_i8_2.w[1], S_i8_2.z);
+        G_i8_2 = [66_i8, (-13_i8)];
+        println!("{} {}", G_i8_2[0], G_i8_2[1]);
+    }
+    unsafe { println!("{} {} {} {} {} {} {} {}", G_i8_3[0], G_i8_3[1], G_i8_3[2], S_i8_3.a, S_i8_3.w[0], S_i8_3.w[1], S_i8_3.w[2], S_i8_3.z); }
+    unsafe {
+        G_i8_3[0] = (-128_i8);
+        let j_i8_3 = 2_usize;
+        G_i8_3[j_i8_3] ^= 127_i8;
+        pa_i8_3(&mut G_i8_3, 1_usize, (-25_i8));
+        S_i8_3.w[2] = (-104_i8);
+        S_i8_3.z = (-80000233_i64);
+        ps_i8_3(&mut S_i8_3.w, 0_usize, 73_i8);
+        S_i8_3.set(1_usize, (-6_i8));
+        S_i8_3.w[j_i8_3] |= (-85_i8);
+        println!("{} {} {} {} {} {} {} {}", G_i8_3[0], G_i8_3[1], G_i8_3[2], S_i8_3.a, S_i8_3.w[0], S_i8_3.w[1], S_i8_3.w[2], S_i8_3.z);
+        G_i8_3 = [(-35_i8), (-114_i8), 63_i8];
+        println!("{} {} {}", G_i8_3[0], G_i8_3[1], G_i8_3[2]);
+    }
+    unsafe { println!("{} {} {} {} {} {} {} {} {} {} {} {}", G_i8_5[0], G_i8_5[1], G_i8_5[2], G_i8_5[3], G_i8_5[4], S_i8_5.a, S_i8_5.w[0], S_i8_5.w[1], S_i8_5.w[2], S_i8_5.w[3], S_i8_5.w[4], S_i8_5.z); }
+    unsafe {
+        G_i8_5[0] = 32_i8;
+        let j_i8_5 = 4_usize;
+        G_i8_5[j_i8_5] ^= (-47_i8);
+        pa_i8_5(&mut G_i8_5, 2_usize, (-126_i8));
+        S_i8_5.w[4] = (-128_i8);
+        S_i8_5.z = (-91000266_i64);
+        ps_i8_5(&mut S_i8_5.w, 0_usize, 127_i8);
+        S_i8_5.set(2_usize, (-107_i8));
+        S_i8_5.w[j_i8_5] |= 70_i8;
+        println!("{} {} {} {} {} {} {} {} {} {} {} {}", G_i8_5[0], G_i8_5[1], G_i8_5[2], G_i8_5[3], G_i8_5[4], S_i8_5.a, S_i8_5.w[0], S_i8_5.w[1], S_i8_5.w[2], S_i8_5.w[3], S_i8_5.w[4], S_i8_5.z);
+        G_i8_5 = [120_i8, (-128_i8), 127_i8, (-117_i8), 60_i8];
+        println!("{} {} {} {} {}", G_i8_5[0], G_i8_5[1], G_i8_5[2], G_i8_5[3], G_i8_5[4]);
+    }
+    unsafe { println!("{} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {}", G_i8_8[0], G_i8_8[1], G_i8_8[2], G_i8_8[3], G_i8_8[4], G_i8_8[5], G_i8_8[6], G_i8_8[7], S_i8_8.a, S_i8_8.w[0], S_i8_8.w[1], S_i8_8.w[2], S_i8_8.w[3], S_i8_8.w[4], S_i8_8.w[5], S_i8_8.w[6], S_i8_8.w[7], S_i8_8.z); }
+    unsafe {
+        G_i8_8[0] = 127_i8;
+        let j_i8_8 = 7_usize;
+        G_i8_8[j_i8_8] ^= 108_i8;
+        pa_i8_8(&mut G_i8_8, 4_usize, 29_i8);
+        S_i8_8.w[7] = (-50_i8);
+        S_i8_8.z = (-102000299_i64);
+        ps_i8_8(&mut S_i8_8.w, 0_usize, 127_i8);
+        S_i8_8.set(4_usize, 48_i8);
+        S_i8_8.w[j_i8_8] |= (-128_i8);
+        println!("{} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {}", G_i8_8[0], G_i8_8[1], G_i8_8[2], G_i8_8[3], G_i8_8[4], G_i8_8[5], G_i8_8[6], G_i8_8[7], S_i8_8.a, S_i8_8.w[0], S_i8_8.w[1], S_i8_8.w[2], S_i8_8.w[3], S_i8_8.w[4], S_i8_8.w[5], S_i8_8.w[6], S_i8_8.w[7], S_i8_8.z);
+        G_i8_8 = [19_i8, (-60_i8), 117_i8, 38_i8, (-128_i8), 127_i8, 57_i8, (-22_i8)];
+        println!("{} {} {} {} {} {} {} {}", G_i8_8[0], G_i8_8[1], G_i8_8[2], G_i8_8[3], G_i8_8[4], G_i8_8[5], G_i8_8[6], G_i8_8[7]);
+    }
+    unsafe { println!("{} {} {} {}", G_u16_1[0], S_u16_1.a, S_u16_1.w[0], S_u16_1.z); }
+    unsafe {
+        G_u16_1[0] = 27862_u16;
+        let j_u16_1 = 0_usize;
+        G_u16_1[j_u16_1] ^= 59015_u16;
+        pa_u16_1(&mut G_u16_1, 0_usize, 0_u16);
+        S_u16_1.w[0] = 65535_u16;
+        S_u16_1.z = (-113000332_i64);
+        ps_u16_1(&mut S_u16_1.w, 0_usize, 21402_u16);
+        S_u16_1.set(0_usize, 52555_u16);
+        S_u16_1.w[j_u16_1] |= 18172_u16;
+        println!("{} {} {} {}", G_u16_1[0], S_u16_1.a, S_u16_1.w[0], S_u16_1.z);
+        G_u16_1 = [0_u16];
+        println!("{}", G_u16_1[0]);
+    }
+    unsafe { println!("{} {} {} {} {} {}", G_u16_2[0], G_u16_2[1], S_u16_2.a, S_u16_2.w[0], S_u16_2.w[1], S_u16_2.z); }
+    unsafe {
+        G_u16_2[0] = 42865_u16;
+        let j_u16_2 = 1_usize;
+        G_u16_2[j_u16_2] ^= 8482_u16;
+        pa_u16_2(&mut G_u16_2, 1_usize, 39635_u16);
+        S_u16_2.w[1] = 5252_u16;
+        S_u16_2.z = (-124000365_i64);
+        ps_u16_2(&mut S_u16_2.w, 0_usize, 36405_u16);
+        S_u16_2.set(1_usize, 0_u16);
+        S_u16_2.w[j_u16_2] |= 65535_u16;
+        println!("{} {} {} {} {} {}", G_u16_2[0], G_u16_2[1], S_u16_2.a, S_u16_2.w[0], S_u16_2.w[1], S_u16_2.z);
+        G_u16_2 = [41929_u16, 7546_u16];
+        println!("{} {}", G_u16_2[0], G_u16_2[1]);
+    }
+    unsafe { println!("{} {} {} {} {} {} {} {}", G_u16_3[0], G_u16_3[1], G_u16_3[2], S_u16_3.a, S_u16_3.w[0], S_u16_3.w[1], S_u16_3.w[2], S_u16_3.z); }
+    unsafe {
+        G_u16_3[0] = 57868_u16;
+        let j_u16_3 = 2_usize;
+        G_u16_3[j_u16_3] ^= 0_u16;
+        pa_u16_3(&mut G_u16_3, 1_usize, 65535_u16);
+        S_u16_3.w[2] = 20255_u16;
+        S_u16_3.z = (-135000398_i64);
+        ps_u16_3(&mut S_u16_3.w, 0_usize, 51408_u16);
+        S_u16_3.set(1_usize, 17025_u16);
+        S_u16_3.w[j_u16_3] |= 48178_u16;
+        println!("{} {} {} {} {} {} {} {}", G_u16_3[0], G_u16_3[1], G_u16_3[2], S_u16_3.a, S_u16_3.w[0], S_u16_3.w[1], S_u16_3.w[2], S_u16_3.z);
+        G_u16_3 = [65535_u16, 22549_u16, 53702_u16];
+        println!("{} {} {}", G_u16_3[0], G_u16_3[1], G_u16_3[2]);
+    }
+    unsafe { println!("{} {} {} {} {} {} {} {} {} {} {} {}", G_u16_5[0], G_u16_5[1], G_u16_5[2], G_u16_5[3], G_u16_5[4], S_u16_5.a, S_u16_5.w[0], S_u16_5.w[1], S_u16_5.w[2], S_u16_5.w[3], S_u16_5.w[4], S_u16_5.z); }
+    unsafe {
+        G_u16_5[0] = 7335_u16;
+        let j_u16_5 = 4_usize;
+        G_u16_5[j_u16_5] ^= 38488_u16;
+        pa_u16_5(&mut G_u16_5, 2_usize, 4105_u16);
+        S_u16_5.w[4] = 35258_u16;
+        S_u16_5.z = (-146000431_i64);
+        ps_u16_5(&mut S_u16_5.w, 0_usize, 0_u16);
+        S_u16_5.set(2_usize, 65535_u16);
+        S_u16_5.w[j_u16_5] |= 63181_u16;
+        println!("{} {} {} {} {} {} {} {} {} {} {} {}", G_u16_5[0], G_u16_5[1], G_u16_5[2], G_u16_5[3], G_u16_5[4], S_u16_5.a, S_u16_5.w[0], S_u16_5.w[1], S_u16_5.w[2], S_u16_5.w[3], S_u16_5.w[4], S_u16_5.z);
+        G_u16_5 = [6399_u16, 37552_u16, 0_u16, 65535_u16, 65475_u16];
+        println!("{} {} {} {} {}", G_u16_5[0], G_u16_5[1], G_u16_5[2], G_u16_5[3], G_u16_5[4]);
+    }
+    unsafe { println!("{} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {}", G_u16_8[0], G_u16_8[1], G_u16_8[2], G_u16_8[3], G_u16_8[4], G_u16_8[5], G_u16_8[6], G_u16_8[7], S_u16_8.a, S_u16_8.w[0], S_u16_8.w[1], S_u16_8.w[2], S_u16_8.w[3], S_u16_8.w[4], S_u16_8.w[5], S_u16_8.w[6], S_u16_8.w[7], S_u16_8.z); }
+    unsafe {
+        G_u16_8[0] = 0_u16;
+        let j_u16_8 = 7_usize;
+        G_u16_8[j_u16_8] ^= 65535_u16;
+        pa_u16_8(&mut G_u16_8, 4_usize, 19108_u16);
+        S_u16_8.w[7] = 50261_u16;
+        S_u16_8.z = (-157000464_i64);
+        ps_u16_8(&mut S_u16_8.w, 0_usize, 15878_u16);
+        S_u16_8.set(4_usize, 47031_u16);
+        S_u16_8.w[j_u16_8] |= 12648_u16;
+        println!("{} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {}", G_u16_8[0], G_u16_8[1], G_u16_8[2], G_u16_8[3], G_u16_8[4], G_u16_8[5], G_u16_8[6], G_u16_8[7], S_u16_8.a, S_u16_8.w[0], S_u16_8.w[1], S_u16_8.w[2], S_u16_8.w[3], S_u16_8.w[4], S_u16_8.w[5], S_u16_8.w[6], S_u16_8.w[7], S_u16_8.z);
+        G_u16_8 = [21402_u16, 52555_u16, 18172_u16, 49325_u16, 14942_u16, 0_u16, 65535_u16, 42865_u16];
+        println!("{} {} {} {} {} {} {} {}", G_u16_8[0], G_u16_8[1], G_u16_8[2], G_u16_8[3], G_u16_8[4], G_u16_8[5], G_u16_8[6], G_u16_8[7]);
+    }
+    unsafe { println!("{} {} {} {}", G_i16_1[0], S_i16_1.a, S_i16_1.w[0], S_i16_1.z); }
+    unsafe {
+        G_i16_1[0] = 4573_i16;
+        let j_i16_1 = 0_usize;
+        G_i16_1[j_i16_1] ^= (-29810_i16);
+        pa_i16_1(&mut G_i16_1, 0_usize, 1343_i16);
+        S_i16_1.w[0] = (-32768_i16);
+        S_i16_1.z = (-168000497_i64);
+        ps_i16_1(&mut S_i16_1.w, 0_usize, 32767_i16);
+        S_i16_1.set(0_usize, 29266_i16);
+        S_i16_1.w[j_i16_1] |= (-5117_i16);
+        println!("{} {} {} {}", G_i16_1[0], S_i16_1.a, S_i16_1.w[0], S_i16_1.z);
+        G_i16_1 = [3637_i16];
+        println!("{}", G_i16_1[0]);
+    }
+    unsafe { println!("{} {} {} {} {} {}", G_i16_2[0], G_i16_2[1], S_i16_2.a, S_i16_2.w[0], S_i16_2.w[1], S_i16_2.z); }
+    unsafe {
+        G_i16_2[0] = 32767_i16;
+        let j_i16_2 = 1_usize;
+        G_i16_2[j_i16_2] ^= (-14807_i16);
+        pa_i16_2(&mut G_i16_2, 1_usize, 16346_i16);
+        S_i16_2.w[1] = (-18037_i16);
+        S_i16_2.z = (-179000530_i64);
+        ps_i16_2(&mut S_i16_2.w, 0_usize, 13116_i16);
+        S_i16_2.set(1_usize, (-21267_i16));
+        S_i16_2.w[j_i16_2] |= (-32768_i16);
+        println!("{} {} {} {} {} {}", G_i16_2[0], G_i16_2[1], S_i16_2.a, S_i16_2.w[0], S_i16_2.w[1], S_i16_2.z);
+        G_i16_2 = [18640_i16, (-15743_i16)];
+        println!("{} {}", G_i16_2[0], G_i16_2[1]);
+    }
+    unsafe { println!("{} {} {} {} {} {} {} {}", G_i16_3[0], G_i16_3[1], G_i16_3[2], S_i16_3.a, S_i16_3.w[0], S_i16_3.w[1], S_i16_3.w[2], S_i16_3.z); }
+    unsafe {
+        G_i16_3[0] = (-30957_i16);
+        let j_i16_3 = 2_usize;
+        G_i16_3[j_i16_3] ^= 196_i16;
+        pa_i16_3(&mut G_i16_3, 1_usize, (-32768_i16));
+        S_i16_3.w[2] = 32767_i16;
+        S_i16_3.z = (-190000563_i64);
+        ps_i16_3(&mut S_i16_3.w, 0_usize, 28119_i16);
+        S_i16_3.set(1_usize, (-6264_i16));
+        S_i16_3.w[j_i16_3] |= 24889_i16;
+        println!("{} {} {} {} {} {} {} {}", G_i16_3[0], G_i16_3[1], G_i16_3[2], S_i16_3.a, S_i16_3.w[0], S_i16_3.w[1], S_i16_3.w[2], S_i16_3.z);
+        G_i16_3 = [(-32768_i16), 32767_i16, 30413_i16];
+        println!("{} {} {}", G_i16_3[0], G_i16_3[1], G_i16_3[2]);
+    }
+    unsafe { println!("{} {} {} {} {} {} {} {} {} {} {} {}", G_i16_5[0], G_i16_5[1], G_i16_5[2], G_i16_5[3], G_i16_5[4], S_i16_5.a, S_i16_5.w[0], S_i16_5.w[1], S_i16_5.w[2], S_i16_5.w[3], S_i16_5.w[4], S_i16_5.z); }
+    unsafe {
+        G_i16_5[0] = (-15954_i16);
+        let j_i16_5 = 4_usize;
+        G_i16_5[j_i16_5] ^= 15199_i16;
+        pa_i16_5(&mut G_i16_5, 2_usize, (-19184_i16));
+        S_i16_5.w[4] = 11969_i16;
+        S_i16_5.z = (-201000596_i64);
+        ps_i16_5(&mut S_i16_5.w, 0_usize, (-22414_i16));
+        S_i16_5.set(2_usize, (-32768_i16));
+        S_i16_5.w[j_i16_5] |= 32767_i16;
+        println!("{} {} {} {} {} {} {} {} {} {} {} {}", G_i16_5[0], G_i16_5[1], G_i16_5[2], G_i16_5[3], G_i16_5[4], S_i16_5.a, S_i16_5.w[0], S_i16_5.w[1], S_i16_5.w[2], S_i16_5.w[3], S_i16_5.w[4], S_i16_5.z);
+        G_i16_5 = [(-16890_i16), 14263_i16, (-20120_i16), (-32768_i16), 32767_i16];
+        println!("{} {} {} {} {}", G_i16_5[0], G_i16_5[1], G_i16_5[2], G_i16_5[3], G_i16_5[4]);
+    }
+    unsafe { println!("{} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {}", G_i16_8[0], G_i16_8[1], G_i16_8[2], G_i16_8[3], G_i16_8[4], G_i16_8[5], G_i16_8[6], G_i16_8[7], S_i16_8.a, S_i16_8.w[0], S_i16_8.w[1], S_i16_8.w[2], S_i16_8.w[3], S_i16_8.w[4], S_i16_8.w[5], S_i16_8.w[6], S_i16_8.w[7], S_i16_8.z); }
+    unsafe {
+        G_i16_8[0] = (-951_i16);
+        let j_i16_8 = 7_usize;
+        G_i16_8[j_i16_8] ^= (-32768_i16);
+        pa_i16_8(&mut G_i16_8, 4_usize, 32767_i16);
+        S_i16_8.w[7] = 26972_i16;
+        S_i16_8.z = (-212000629_i64);
+        ps_i16_8(&mut S_i16_8.w, 0_usize, (-7411_i16));
+        S_i16_8.set(4_usize, 23742_i16);
+        S_i16_8.w[j_i16_8] |= (-10641_i16);
+        println!("{} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {}", G_i16_8[0], G_i16_8[1], G_i16_8[2], G_i16_8[3], G_i16_8[4], G_i16_8[5], G_i16_8[6], G_i16_8[7], S_i16_8.a, S_i16_8.w[0], S_i16_8.w[1], S_i16_8.w[2], S_i16_8.w[3], S_i16_8.w[4], S_i16_8.w[5], S_i16_8.w[6], S_i16_8.w[7], S_i16_8.z);
+        G_i16_8 = [32767_i16, 29266_i16, (-5117_i16), 26036_i16, (-8347_i16), 22806_i16, (-32768_i16), 32767_i16];
+        println!("{} {} {} {} {} {} {} {}", G_i16_8[0], G_i16_8[1], G_i16_8[2], G_i16_8[3], G_i16_8[4], G_i16_8[5], G_i16_8[6], G_i16_8[7]);
+    }
+    unsafe { println!("{} {} {} {}", G_u32_1[0], S_u32_1.a, S_u32_1.w[0], S_u32_1.z); }
+    unsafe {
+        G_u32_1[0] = 3881023204_u32;
+        let j_u32_1 = 0_usize;
+        G_u32_1[j_u32_1] ^= 2240491669_u32;
+        pa_u32_1(&mut G_u32_1, 0_usize, 599960134_u32);
+        S_u32_1.w[0] = 3254395895_u32;
+        S_u32_1.z = (-223000662_i64);
+        ps_u32_1(&mut S_u32_1.w, 0_usize, 0_u32);
+        S_u32_1.set(0_usize, 4294967295_u32);
+        S_u32_1.w[j_u32_1] |= 2627768586_u32;
+        println!("{} {} {} {}", G_u32_1[0], S_u32_1.a, S_u32_1.w[0], S_u32_1.z);
+        G_u32_1 = [782807868_u32];
+        println!("{}", G_u32_1[0]);
+    }
+    unsafe { println!("{} {} {} {} {} {}", G_u32_2[0], G_u32_2[1], S_u32_2.a, S_u32_2.w[0], S_u32_2.w[1], S_u32_2.z); }
+    unsafe {
+        G_u32_2[0] = 0_u32;
+        let j_u32_2 = 1_usize;
+        G_u32_2[j_u32_2] ^= 4294967295_u32;
+        pa_u32_2(&mut G_u32_2, 1_usize, 4028949729_u32);
+        S_u32_2.w[1] = 2388418194_u32;
+        S_u32_2.z = (-234000695_i64);
+        ps_u32_2(&mut S_u32_2.w, 0_usize, 747886659_u32);
+        S_u32_2.set(1_usize, 3402322420_u32);
+        S_u32_2.w[j_u32_2] |= 1761790885_u32;
+        println!("{} {} {} {} {} {}", G_u32_2[0], G_u32_2[1], S_u32_2.a, S_u32_2.w[0], S_u32_2.w[1], S_u32_2.z);
+        G_u32_2 = [4211797463_u32, 2571265928_u32];
+        println!("{} {}", G_u32_2[0], G_u32_2[1]);
+    }
+    unsafe { println!("{} {} {} {} {} {} {} {}", G_u32_3[0], G_u32_3[1], G_u32_3[2], S_u32_3.a, S_u32_3.w[0], S_u32_3.w[1], S_u32_3.w[2], S_u32_3.z); }
+    unsafe {
+        G_u32_3[0] = 2149067802_u32;
+        let j_u32_3 = 2_usize;
+        G_u32_3[j_u32_3] ^= 508536267_u32;
+        pa_u32_3(&mut G_u32_3, 1_usize, 3162972028_u32);
+        S_u32_3.w[2] = 0_u32;
+        S_u32_3.z = (-245000728_i64);
+        ps_u32_3(&mut S_u32_3.w, 0_usize, 4294967295_u32);
+        S_u32_3.set(1_usize, 2536344719_u32);
+        S_u32_3.w[j_u32_3] |= 895813184_u32;
+        println!("{} {} {} {} {} {} {} {}", G_u32_3[0], G_u32_3[1], G_u32_3[2], S_u32_3.a, S_u32_3.w[0], S_u32_3.w[1], S_u32_3.w[2], S_u32_3.z);
+        G_u32_3 = [3345819762_u32, 0_u32, 4294967295_u32];
+        println!("{} {} {}", G_u32_3[0], G_u32_3[1], G_u32_3[2]);
+    }
+    unsafe { println!("{} {} {} {} {} {} {} {} {} {} {} {}", G_u32_5[0], G_u32_5[1], G_u32_5[2], G_u32_5[3], G_u32_5[4], S_u32_5.a, S_u32_5.w[0], S_u32_5.w[1], S_u32_5.w[2], S_u32_5.w[3], S_u32_5.w[4], S_u32_5.z); }
+    unsafe {
+        G_u32_5[0] = 4294967295_u32;
+        let j_u32_5 = 4_usize;
+        G_u32_5[j_u32_5] ^= 3937525862_u32;
+        pa_u32_5(&mut G_u32_5, 2_usize, 2296994327_u32);
+        S_u32_5.w[4] = 656462792_u32;
+        S_u32_5.z = (-256000761_i64);
+        ps_u32_5(&mut S_u32_5.w, 0_usize, 3310898553_u32);
+        S_u32_5.set(2_usize, 1670367018_u32);
+        S_u32_5.w[j_u32_5] |= 0_u32;
+        println!("{} {} {} {} {} {} {} {} {} {} {} {}", G_u32_5[0], G_u32_5[1], G_u32_5[2], G_u32_5[3], G_u32_5[4], S_u32_5.a, S_u32_5.w[0], S_u32_5.w[1], S_u32_5.w[2], S_u32_5.w[3], S_u32_5.w[4], S_u32_5.z);
+        G_u32_5 = [2479842061_u32, 839310526_u32, 3493746287_u32, 1853214752_u32, 0_u32];
+        println!("{} {} {} {} {}", G_u32_5[0], G_u32_5[1], G_u32_5[2], G_u32_5[3], G_u32_5[4]);
+    }
+    unsafe { println!("{} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {}", G_u32_8[0], G_u32_8[1], G_u32_8[2], G_u32_8[3], G_u32_8[4], G_u32_8[5], G_u32_8[6], G_u32_8[7], S_u32_8.a, S_u32_8.w[0], S_u32_8.w[1], S_u32_8.w[2], S_u32_8.w[3], S_u32_8.w[4], S_u32_8.w[5], S_u32_8.w[6], S_u32_8.w[7], S_u32_8.z); }
+    unsafe {
+        G_u32_8[0] = 417112400_u32;
+        let j_u32_8 = 7_usize;
+        G_u32_8[j_u32_8] ^= 3071548161_u32;
+        pa_u32_8(&mut G_u32_8, 4_usize, 0_u32);
+        S_u32_8.w[7] = 4294967295_u32;
+        S_u32_8.z = (-267000794_i64);
+        ps_u32_8(&mut S_u32_8.w, 0_usize, 2444920852_u32);
+        S_u32_8.set(4_usize, 804389317_u32);
+        S_u32_8.w[j_u32_8] |= 3458825078_u32;
+        println!("{} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {}", G_u32_8[0], G_u32_8[1], G_u32_8[2], G_u32_8[3], G_u32_8[4], G_u32_8[5], G_u32_8[6], G_u32_8[7], S_u32_8.a, S_u32_8.w[0], S_u32_8.w[1], S_u32_8.w[2], S_u32_8.w[3], S_u32_8.w[4], S_u32_8.w[5], S_u32_8.w[6], S_u32_8.w[7], S_u32_8.z);
+        G_u32_8 = [0_u32, 4294967295_u32, 2627768586_u32, 987237051_u32, 3641672812_u32, 2001141277_u32, 360609742_u32, 0_u32];
+        println!("{} {} {} {} {} {} {} {}", G_u32_8[0], G_u32_8[1], G_u32_8[2], G_u32_8[3], G_u32_8[4], G_u32_8[5], G_u32_8[6], G_u32_8[7]);
+    }
+    unsafe { println!("{} {} {} {}", G_i32_1[0], S_i32_1.a, S_i32_1.w[0], S_i32_1.z); }
+    unsafe {
+        G_i32_1[0] = 1698618347_i32;
+        let j_i32_1 = 0_usize;
+        G_i32_1[j_i32_1] ^= 58086812_i32;
+        pa_i32_1(&mut G_i32_1, 0_usize, (-1582444723_i32));
+        S_i32_1.w[0] = 1071991038_i32;
+        S_i32_1.z = (-278000827_i64);
+        ps_i32_1(&mut S_i32_1.w, 0_usize, (-568540497_i32));
+        S_i32_1.set(0_usize, (-2147483648_i32));
+        S_i32_1.w[j_i32_1] |= 2147483647_i32;
+        println!("{} {} {} {}", G_i32_1[0], S_i32_1.a, S_i32_1.w[0], S_i32_1.z);
+        G_i32_1 = [(-1399596989_i32)];
+        println!("{}", G_i32_1[0]);
+    }
+    unsafe { println!("{} {} {} {} {} {}", G_i32_2[0], G_i32_2[1], S_i32_2.a, S_i32_2.w[0], S_i32_2.w[1], S_i32_2.z); }
+    unsafe {
+        G_i32_2[0] = 832640646_i32;
+        let j_i32_2 = 1_usize;
+        G_i32_2[j_i32_2] ^= (-2147483648_i32);
+        pa_i32_2(&mut G_i32_2, 1_usize, 2147483647_i32);
+        S_i32_2.w[1] = 206013337_i32;
+        S_i32_2.z = (-289000860_i64);
+        ps_i32_2(&mut S_i32_2.w, 0_usize, (-1434518198_i32));
+        S_i32_2.set(1_usize, 1219917563_i32);
+        S_i32_2.w[j_i32_2] |= (-420613972_i32);
+        println!("{} {} {} {} {} {}", G_i32_2[0], G_i32_2[1], S_i32_2.a, S_i32_2.w[0], S_i32_2.w[1], S_i32_2.z);
+        G_i32_2 = [2147483647_i32, 388861071_i32];
+        println!("{} {}", G_i32_2[0], G_i32_2[1]);
+    }
+    unsafe { println!("{} {} {} {} {} {} {} {}", G_i32_3[0], G_i32_3[1], G_i32_3[2], S_i32_3.a, S_i32_3.w[0], S_i32_3.w[1], S_i32_3.w[2], S_i32_3.z); }
+    unsafe {
+        G_i32_3[0] = (-33337055_i32);
+        let j_i32_3 = 2_usize;
+        G_i32_3[j_i32_3] ^= (-1673868590_i32);
+        pa_i32_3(&mut G_i32_3, 1_usize, 980567171_i32);
+        S_i32_3.w[2] = (-659964364_i32);
+        S_i32_3.z = (-300000893_i64);
+        ps_i32_3(&mut S_i32_3.w, 0_usize, (-2147483648_i32));
+        S_i32_3.set(1_usize, 2147483647_i32);
+        S_i32_3.w[j_i32_3] |= (-1286591673_i32);
+        println!("{} {} {} {} {} {} {} {}", G_i32_3[0], G_i32_3[1], G_i32_3[2], S_i32_3.a, S_i32_3.w[0], S_i32_3.w[1], S_i32_3.w[2], S_i32_3.z);
+        G_i32_3 = [1163414905_i32, (-477116630_i32), (-2147483648_i32)];
+        println!("{} {} {}", G_i32_3[0], G_i32_3[1], G_i32_3[2]);
+    }
+    unsafe { println!("{} {} {} {} {} {} {} {} {} {} {} {}", G_i32_5[0], G_i32_5[1], G_i32_5[2], G_i32_5[3], G_i32_5[4], S_i32_5.a, S_i32_5.w[0], S_i32_5.w[1], S_i32_5.w[2], S_i32_5.w[3], S_i32_5.w[4], S_i32_5.z); }
+    unsafe {
+        G_i32_5[0] = (-2147483648_i32);
+        let j_i32_5 = 4_usize;
+        G_i32_5[j_i32_5] ^= 2147483647_i32;
+        pa_i32_5(&mut G_i32_5, 2_usize, 114589470_i32);
+        S_i32_5.w[4] = (-1525942065_i32);
+        S_i32_5.z = (-311000926_i64);
+        ps_i32_5(&mut S_i32_5.w, 0_usize, 1128493696_i32);
+        S_i32_5.set(2_usize, (-512037839_i32));
+        S_i32_5.w[j_i32_5] |= 2142397922_i32;
+        println!("{} {} {} {} {} {} {} {} {} {} {} {}", G_i32_5[0], G_i32_5[1], G_i32_5[2], G_i32_5[3], G_i32_5[4], S_i32_5.a, S_i32_5.w[0], S_i32_5.w[1], S_i32_5.w[2], S_i32_5.w[3], S_i32_5.w[4], S_i32_5.z);
+        G_i32_5 = [297437204_i32, (-1343094331_i32), 1311341430_i32, (-329190105_i32), (-1969721640_i32)];
+        println!("{} {} {} {} {}", G_i32_5[0], G_i32_5[1], G_i32_5[2], G_i32_5[3], G_i32_5[4]);
+    }
+    unsafe { println!("{} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {}", G_i32_8[0], G_i32_8[1], G_i32_8[2], G_i32_8[3], G_i32_8[4], G_i32_8[5], G_i32_8[6], G_i32_8[7], S_i32_8.a, S_i32_8.w[0], S_i32_8.w[1], S_i32_8.w[2], S_i32_8.w[3], S_i32_8.w[4], S_i32_8.w[5], S_i32_8.w[6], S_i32_8.w[7], S_i32_8.z); }
+    unsafe {
+        G_i32_8[0] = (-1765292457_i32);
+        let j_i32_8 = 7_usize;
+        G_i32_8[j_i32_8] ^= 889143304_i32;
+        pa_i32_8(&mut G_i32_8, 4_usize, (-751388231_i32));
+        S_i32_8.w[7] = (-2147483648_i32);
+        S_i32_8.z = (-322000959_i64);
+        ps_i32_8(&mut S_i32_8.w, 0_usize, 2147483647_i32);
+        S_i32_8.set(4_usize, (-1378015540_i32));
+        S_i32_8.w[j_i32_8] |= 1276420221_i32;
+        println!("{} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {}", G_i32_8[0], G_i32_8[1], G_i32_8[2], G_i32_8[3], G_i32_8[4], G_i32_8[5], G_i32_8[6], G_i32_8[7], S_i32_8.a, S_i32_8.w[0], S_i32_8.w[1], S_i32_8.w[2], S_i32_8.w[3], S_i32_8.w[4], S_i32_8.w[5], S_i32_8.w[6], S_i32_8.w[7], S_i32_8.z);
+        G_i32_8 = [(-568540497_i32), (-2147483648_i32), 2147483647_i32, (-1195167806_i32), 1459267955_i32, (-181263580_i32), (-1821795115_i32), 832640646_i32];
+        println!("{} {} {} {} {} {} {} {}", G_i32_8[0], G_i32_8[1], G_i32_8[2], G_i32_8[3], G_i32_8[4], G_i32_8[5], G_i32_8[6], G_i32_8[7]);
+    }
+    unsafe { println!("{} {} {} {}", G_u64_1[0], S_u64_1.a, S_u64_1.w[0], S_u64_1.z); }
+    unsafe {
+        G_u64_1[0] = 18446744073709551615_u64;
+        let j_u64_1 = 0_usize;
+        G_u64_1[j_u64_1] ^= 1045847702179_u64;
+        pa_u64_1(&mut G_u64_1, 0_usize, 1048502137940_u64);
+        S_u64_1.w[0] = 1051156573701_u64;
+        S_u64_1.z = (-333000992_i64);
+        ps_u64_1(&mut S_u64_1.w, 0_usize, 1053811009462_u64);
+        S_u64_1.set(0_usize, 1056465445223_u64);
+        S_u64_1.w[j_u64_1] |= 0_u64;
+        println!("{} {} {} {}", G_u64_1[0], S_u64_1.a, S_u64_1.w[0], S_u64_1.z);
+        G_u64_1 = [937015835978_u64];
+        println!("{}", G_u64_1[0]);
+    }
+    unsafe { println!("{} {} {} {} {} {}", G_u64_2[0], G_u64_2[1], S_u64_2.a, S_u64_2.w[0], S_u64_2.w[1], S_u64_2.z); }
+    unsafe {
+        G_u64_2[0] = 1072392059789_u64;
+        let j_u64_2 = 1_usize;
+        G_u64_2[j_u64_2] ^= 1075046495550_u64;
+        pa_u64_2(&mut G_u64_2, 1_usize, 0_u64);
+        S_u64_2.w[1] = 18446744073709551615_u64;
+        S_u64_2.z = (-344001025_i64);
+        ps_u64_2(&mut S_u64_2.w, 0_usize, 1083009802833_u64);
+        S_u64_2.set(1_usize, 1085664238594_u64);
+        S_u64_2.w[j_u64_2] |= 1088318674355_u64;
+        println!("{} {} {} {} {} {}", G_u64_2[0], G_u64_2[1], S_u64_2.a, S_u64_2.w[0], S_u64_2.w[1], S_u64_2.z);
+        G_u64_2 = [0_u64, 18446744073709551615_u64];
+        println!("{} {}", G_u64_2[0], G_u64_2[1]);
+    }
+    unsafe { println!("{} {} {} {} {} {} {} {}", G_u64_3[0], G_u64_3[1], G_u64_3[2], S_u64_3.a, S_u64_3.w[0], S_u64_3.w[1], S_u64_3.w[2], S_u64_3.z); }
+    unsafe {
+        G_u64_3[0] = 1101590853160_u64;
+        let j_u64_3 = 2_usize;
+        G_u64_3[j_u64_3] ^= 1104245288921_u64;
+        pa_u64_3(&mut G_u64_3, 1_usize, 1106899724682_u64);
+        S_u64_3.w[2] = 1109554160443_u64;
+        S_u64_3.z = (-355001058_i64);
+        ps_u64_3(&mut S_u64_3.w, 0_usize, 1112208596204_u64);
+        S_u64_3.set(1_usize, 0_u64);
+        S_u64_3.w[j_u64_3] |= 18446744073709551615_u64;
+        println!("{} {} {} {} {} {} {} {}", G_u64_3[0], G_u64_3[1], G_u64_3[2], S_u64_3.a, S_u64_3.w[0], S_u64_3.w[1], S_u64_3.w[2], S_u64_3.z);
+        G_u64_3 = [995413422720_u64, 998067858481_u64, 1000722294242_u64];
+        println!("{} {} {}", G_u64_3[0], G_u64_3[1], G_u64_3[2]);
+    }
+    unsafe { println!("{} {} {} {} {} {} {} {} {} {} {} {}", G_u64_5[0], G_u64_5[1], G_u64_5[2], G_u64_5[3], G_u64_5[4], S_u64_5.a, S_u64_5.w[0], S_u64_5.w[1], S_u64_5.w[2], S_u64_5.w[3], S_u64_5.w[4], S_u64_5.z); }
+    unsafe {
+        G_u64_5[0] = 1130789646531_u64;
+        let j_u64_5 = 4_usize;
+        G_u64_5[j_u64_5] ^= 0_u64;
+        pa_u64_5(&mut G_u64_5, 2_usize, 18446744073709551615_u64);
+        S_u64_5.w[4] = 1138752953814_u64;
+        S_u64_5.z = (-366001091_i64);
+        ps_u64_5(&mut S_u64_5.w, 0_usize, 1141407389575_u64);
+        S_u64_5.set(2_usize, 1144061825336_u64);
+        S_u64_5.w[j_u64_5] |= 1146716261097_u64;
+        println!("{} {} {} {} {} {} {} {} {} {} {} {}", G_u64_5[0], G_u64_5[1], G_u64_5[2], G_u64_5[3], G_u64_5[4], S_u64_5.a, S_u64_5.w[0], S_u64_5.w[1], S_u64_5.w[2], S_u64_5.w[3], S_u64_5.w[4], S_u64_5.z);
+        G_u64_5 = [18446744073709551615_u64, 1027266651852_u64, 1029921087613_u64, 1032575523374_u64, 1035229959135_u64];
+        println!("{} {} {} {} {}", G_u64_5[0], G_u64_5[1], G_u64_5[2], G_u64_5[3], G_u64_5[4]);
+    }
+    unsafe { println!("{} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {}", G_u64_8[0], G_u64_8[1], G_u64_8[2], G_u64_8[3], G_u64_8[4], G_u64_8[5], G_u64_8[6], G_u64_8[7], S_u64_8.a, S_u64_8.w[0], S_u64_8.w[1], S_u64_8.w[2], S_u64_8.w[3], S_u64_8.w[4], S_u64_8.w[5], S_u64_8.w[6], S_u64_8.w[7], S_u64_8.z); }
+    unsafe {
+        G_u64_8[0] = 1159988439902_u64;
+        let j_u64_8 = 7_usize;
+        G_u64_8[j_u64_8] ^= 1162642875663_u64;
+        pa_u64_8(&mut G_u64_8, 4_usize, 1165297311424_u64);
+        S_u64_8.w[7] = 1167951747185_u64;
+        S_u64_8.z = (-377001124_i64);
+        ps_u64_8(&mut S_u64_8.w, 0_usize, 0_u64);
+        S_u64_8.set(4_usize, 18446744073709551615_u64);
+        S_u64_8.w[j_u64_8] |= 1175915054468_u64;
+        println!("{} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {}", G_u64_8[0], G_u64_8[1], G_u64_8[2], G_u64_8[3], G_u64_8[4], G_u64_8[5], G_u64_8[6], G_u64_8[7], S_u64_8.a, S_u64_8.w[0], S_u64_8.w[1], S_u64_8.w[2], S_u64_8.w[3], S_u64_8.w[4], S_u64_8.w[5], S_u64_8.w[6], S_u64_8.w[7], S_u64_8.z);
+        G_u64_8 = [1053811009462_u64, 1056465445223_u64, 0_u64, 18446744073709551615_u64, 1064428752506_u64, 1067083188267_u64, 1069737624028_u64, 1072392059789_u64];
+        println!("{} {} {} {} {} {} {} {}", G_u64_8[0], G_u64_8[1], G_u64_8[2], G_u64_8[3], G_u64_8[4], G_u64_8[5], G_u64_8[6], G_u64_8[7]);
+    }
+    unsafe { println!("{} {} {} {}", G_i64_1[0], S_i64_1.a, S_i64_1.w[0], S_i64_1.z); }
+    unsafe {
+        G_i64_1[0] = (-9223372036854775808_i64);
+        let j_i64_1 = 0_usize;
+        G_i64_1[j_i64_1] ^= 9223372036854775807_i64;
+        pa_i64_1(&mut G_i64_1, 0_usize, (-9223370842358671013_i64));
+        S_i64_1.w[0] = (-9223370839704235252_i64);
+        S_i64_1.z = (-388001157_i64);
+        ps_i64_1(&mut S_i64_1.w, 0_usize, (-9223370837049799491_i64));
+        S_i64_1.set(0_usize, (-9223370834395363730_i64));
+        S_i64_1.w[j_i64_1] |= (-9223370831740927969_i64);
+        println!("{} {} {} {}", G_i64_1[0], S_i64_1.a, S_i64_1.w[0], S_i64_1.z);
+        G_i64_1 = [(-9223370953844972975_i64)];
+        println!("{}", G_i64_1[0]);
+    }
+    unsafe { println!("{} {} {} {} {} {}", G_i64_2[0], G_i64_2[1], S_i64_2.a, S_i64_2.w[0], S_i64_2.w[1], S_i64_2.z); }
+    unsafe {
+        G_i64_2[0] = (-9223370818468749164_i64);
+        let j_i64_2 = 1_usize;
+        G_i64_2[j_i64_2] ^= (-9223370815814313403_i64);
+        pa_i64_2(&mut G_i64_2, 1_usize, (-9223370813159877642_i64));
+        S_i64_2.w[1] = (-9223372036854775808_i64);
+        S_i64_2.z = (-399001190_i64);
+        ps_i64_2(&mut S_i64_2.w, 0_usize, 9223372036854775807_i64);
+        S_i64_2.set(1_usize, (-9223370805196570359_i64));
+        S_i64_2.w[j_i64_2] |= (-9223370802542134598_i64);
+        println!("{} {} {} {} {} {}", G_i64_2[0], G_i64_2[1], S_i64_2.a, S_i64_2.w[0], S_i64_2.w[1], S_i64_2.z);
+        G_i64_2 = [(-9223370924646179604_i64), (-9223372036854775808_i64)];
+        println!("{} {}", G_i64_2[0], G_i64_2[1]);
+    }
+    unsafe { println!("{} {} {} {} {} {} {} {}", G_i64_3[0], G_i64_3[1], G_i64_3[2], S_i64_3.a, S_i64_3.w[0], S_i64_3.w[1], S_i64_3.w[2], S_i64_3.z); }
+    unsafe {
+        G_i64_3[0] = 9223372036854775807_i64;
+        let j_i64_3 = 2_usize;
+        G_i64_3[j_i64_3] ^= (-9223370786615520032_i64);
+        pa_i64_3(&mut G_i64_3, 1_usize, (-9223370783961084271_i64));
+        S_i64_3.w[2] = (-9223370781306648510_i64);
+        S_i64_3.z = (-410001223_i64);
+        ps_i64_3(&mut S_i64_3.w, 0_usize, (-9223370778652212749_i64));
+        S_i64_3.set(1_usize, (-9223370775997776988_i64));
+        S_i64_3.w[j_i64_3] |= (-9223372036854775808_i64);
+        println!("{} {} {} {} {} {} {} {}", G_i64_3[0], G_i64_3[1], G_i64_3[2], S_i64_3.a, S_i64_3.w[0], S_i64_3.w[1], S_i64_3.w[2], S_i64_3.z);
+        G_i64_3 = [(-9223370895447386233_i64), (-9223370892792950472_i64), (-9223370890138514711_i64)];
+        println!("{} {} {}", G_i64_3[0], G_i64_3[1], G_i64_3[2]);
+    }
+    unsafe { println!("{} {} {} {} {} {} {} {} {} {} {} {}", G_i64_5[0], G_i64_5[1], G_i64_5[2], G_i64_5[3], G_i64_5[4], S_i64_5.a, S_i64_5.w[0], S_i64_5.w[1], S_i64_5.w[2], S_i64_5.w[3], S_i64_5.w[4], S_i64_5.z); }
+    unsafe {
+        G_i64_5[0] = (-9223370760071162422_i64);
+        let j_i64_5 = 4_usize;
+        G_i64_5[j_i64_5] ^= (-9223370757416726661_i64);
+        pa_i64_5(&mut G_i64_5, 2_usize, (-9223372036854775808_i64));
+        S_i64_5.w[4] = 9223372036854775807_i64;
+        S_i64_5.z = (-421001256_i64);
+        ps_i64_5(&mut S_i64_5.w, 0_usize, (-9223370749453419378_i64));
+        S_i64_5.set(2_usize, (-9223370746798983617_i64));
+        S_i64_5.w[j_i64_5] |= (-9223370744144547856_i64);
+        println!("{} {} {} {} {} {} {} {} {} {} {} {}", G_i64_5[0], G_i64_5[1], G_i64_5[2], G_i64_5[3], G_i64_5[4], S_i64_5.a, S_i64_5.w[0], S_i64_5.w[1], S_i64_5.w[2], S_i64_5.w[3], S_i64_5.w[4], S_i64_5.z);
+        G_i64_5 = [(-9223372036854775808_i64), 9223372036854775807_i64, (-9223370860939721340_i64), (-9223370858285285579_i64), (-9223370855630849818_i64)];
+        println!("{} {} {} {} {}", G_i64_5[0], G_i64_5[1], G_i64_5[2], G_i64_5[3], G_i64_5[4]);
+    }
+    unsafe { println!("{} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {}", G_i64_8[0], G_i64_8[1], G_i64_8[2], G_i64_8[3], G_i64_8[4], G_i64_8[5], G_i64_8[6], G_i64_8[7], S_i64_8.a, S_i64_8.w[0], S_i64_8.w[1], S_i64_8.w[2], S_i64_8.w[3], S_i64_8.w[4], S_i64_8.w[5], S_i64_8.w[6], S_i64_8.w[7], S_i64_8.z); }
+    unsafe {
+        G_i64_8[0] = (-9223370730872369051_i64);
+        let j_i64_8 = 7_usize;
+        G_i64_8[j_i64_8] ^= (-9223370728217933290_i64);
+        pa_i64_8(&mut G_i64_8, 4_usize, (-9223370725563497529_i64));
+        S_i64_8.w[7] = (-9223370722909061768_i64);
+        S_i64_8.z = (-432001289_i64);
+        ps_i64_8(&mut S_i64_8.w, 0_usize, (-9223370720254626007_i64));
+        S_i64_8.set(4_usize, (-9223372036854775808_i64));
+        S_i64_8.w[j_i64_8] |= 9223372036854775807_i64;
+        println!("{} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {}", G_i64_8[0], G_i64_8[1], G_i64_8[2], G_i64_8[3], G_i64_8[4], G_i64_8[5], G_i64_8[6], G_i64_8[7], S_i64_8.a, S_i64_8.w[0], S_i64_8.w[1], S_i64_8.w[2], S_i64_8.w[3], S_i64_8.w[4], S_i64_8.w[5], S_i64_8.w[6], S_i64_8.w[7], S_i64_8.z);
+        G_i64_8 = [(-9223370837049799491_i64), (-9223370834395363730_i64), (-9223370831740927969_i64), (-9223372036854775808_i64), 9223372036854775807_i64, (-9223370823777620686_i64), (-9223370821123184925_i64), (-9223370818468749164_i64)];
+        println!("{} {} {} {} {} {} {} {}", G_i64_8[0], G_i64_8[1], G_i64_8[2], G_i64_8[3], G_i64_8[4], G_i64_8[5], G_i64_8[6], G_i64_8[7]);
+    }
+}

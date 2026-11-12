@@ -1,0 +1,1501 @@
+free 484 -> -3
+alloc -> 0
+free 505 -> -3
+free 148 -> -3
+alloc_run 2 -> 1
+alloc -> 3
+free_run 54 3 -> -3
+alloc_run 5 -> 4
+alloc -> 9
+reserve 232 1 -> 0
+alloc -> 10
+reserve 111 0 -> -2
+alloc -> 11
+alloc_run 3 -> 12
+free 102 -> -3
+free 38 -> -3
+alloc -> 15
+free 384 -> -3
+alloc -> 16
+free 433 -> -3
+free 339 -> -3
+free 512 -> -2
+alloc -> 17
+free_run 404 3 -> -3
+free 400 -> -3
+free_run 245 2 -> -3
+alloc -> 18
+free 354 -> -3
+alloc -> 19
+free 430 -> -3
+free_run 357 2 -> -3
+alloc -> 20
+alloc_run 4 -> 21
+alloc_run 0 -> -2
+free 307 -> -3
+free 93 -> -3
+alloc -> 25
+free 313 -> -3
+reserve 16 4 -> -3
+free 34 -> -3
+alloc -> 26
+reserve 48 1 -> 0
+free 1 -> 0
+alloc -> 1
+reserve 273 3 -> 0
+alloc_run 4 -> 27
+alloc_run 5 -> 31
+free_run 92 0 -> -2
+alloc -> 36
+alloc -> 37
+reserve 450 3 -> 0
+alloc_run 2 -> 38
+free 75 -> -3
+free 507 -> -3
+reserve 275 2 -> -3
+alloc_run 0 -> -2
+alloc -> 40
+alloc -> 41
+alloc -> 42
+alloc_run 0 -> -2
+reserve 119 3 -> 0
+reserve 342 2 -> 0
+free 158 -> -3
+free_run 245 1 -> -3
+alloc_run 2 -> 43
+free_run 223 0 -> -2
+alloc -> 45
+alloc -> 46
+alloc_run 0 -> -2
+reserve 42 3 -> -3
+free_run 435 3 -> -3
+free 503 -> -3
+alloc -> 47
+alloc_run 1 -> 49
+free 496 -> -3
+alloc_run 2 -> 50
+alloc -> 52
+free_run 332 0 -> -2
+alloc_run 5 -> 53
+alloc -> 58
+alloc -> 59
+alloc -> 60
+alloc -> 61
+alloc_run 0 -> -2
+alloc -> 62
+free 463 -> -3
+free 187 -> -3
+alloc_run 2 -> 63
+free 511 -> -3
+free_run 457 0 -> -2
+alloc_run 4 -> 65
+free_run 316 3 -> -3
+free_run 18 3 -> 0
+free 367 -> -3
+alloc -> 18
+alloc -> 19
+alloc -> 20
+reserve 105 1 -> 0
+free 106 -> -3
+free 434 -> -3
+free_run 361 1 -> -3
+free_run 397 3 -> -3
+reserve 65 2 -> -3
+free_run 249 3 -> -3
+alloc_run 1 -> 69
+reserve 176 0 -> -2
+alloc -> 70
+free_run 133 0 -> -2
+alloc_run 1 -> 71
+alloc_run 4 -> 72
+free 326 -> -3
+alloc -> 76
+alloc_run 0 -> -2
+free 313 -> -3
+alloc -> 77
+reserve 449 0 -> -2
+reserve 165 1 -> 0
+free 180 -> -3
+reserve 467 3 -> 0
+free 113 -> -3
+reserve 272 1 -> 0
+alloc -> 78
+alloc -> 79
+alloc -> 80
+reserve 63 0 -> -2
+alloc -> 81
+alloc -> 82
+reserve 284 0 -> -2
+reserve 64 1 -> -3
+free 466 -> -3
+free_run 111 0 -> -2
+free 47 -> 0
+alloc -> 47
+reserve 38 4 -> -3
+reserve 401 3 -> 0
+alloc -> 83
+reserve 82 0 -> -2
+free 227 -> -3
+alloc_run 5 -> 84
+free 83 -> 0
+reserve 140 2 -> 0
+free 416 -> -3
+free 51 -> 0
+alloc -> 51
+free 455 -> -3
+free 92 -> -3
+free 389 -> -3
+alloc -> 83
+free 481 -> -3
+alloc -> 89
+free 126 -> -3
+alloc -> 90
+alloc -> 91
+free_run 186 3 -> -3
+free 140 -> 0
+free_run 31 3 -> 0
+free 285 -> -3
+alloc -> 31
+free_run 435 3 -> -3
+reserve 338 2 -> 0
+free_run 121 4 -> -3
+alloc -> 32
+free 316 -> -3
+free 15 -> 0
+free 377 -> -3
+free_run 349 0 -> -2
+free 513 -> -2
+alloc -> 15
+free 502 -> -3
+alloc_run 4 -> 92
+free_run 329 3 -> -3
+free_run 308 0 -> -2
+free 310 -> -3
+reserve 96 4 -> 0
+free 245 -> -3
+free 276 -> -3
+free 86 -> 0
+alloc -> 33
+alloc -> 86
+free 341 -> -3
+free 365 -> -3
+free 121 -> 0
+alloc -> 100
+free 423 -> -3
+alloc -> 101
+free 89 -> 0
+alloc -> 89
+free 387 -> -3
+free 282 -> -3
+free 272 -> 0
+free 296 -> -3
+alloc -> 102
+free 162 -> -3
+free 401 -> 0
+free_run 116 1 -> -3
+alloc -> 103
+free 479 -> -3
+free_run 146 4 -> -3
+free_run 471 4 -> -3
+free 338 -> 0
+free_run 511 0 -> -2
+alloc -> 104
+free 348 -> -3
+free 484 -> -3
+reserve 274 2 -> -3
+free 92 -> 0
+free 452 -> 0
+reserve 328 3 -> 0
+alloc -> 92
+free_run 361 0 -> -2
+free 194 -> -3
+free_run 134 0 -> -2
+alloc_run 1 -> 106
+alloc -> 107
+alloc_run 2 -> 108
+alloc -> 110
+free 422 -> -3
+free_run 42 2 -> 0
+reserve 165 2 -> -3
+free 224 -> -3
+alloc -> 42
+free 186 -> -3
+alloc -> 43
+alloc_run 4 -> 111
+alloc_run 0 -> -2
+free_run 508 4 -> -3
+reserve 301 1 -> 0
+free 400 -> -3
+alloc_run 1 -> 115
+alloc -> 116
+free 236 -> -3
+free 201 -> -3
+reserve 40 0 -> -2
+free 279 -> -3
+alloc -> 117
+free 376 -> -3
+alloc -> 118
+alloc -> 121
+alloc -> 122
+free 398 -> -3
+reserve 300 0 -> -2
+free 109 -> 0
+alloc -> 109
+alloc -> 123
+alloc -> 124
+free 202 -> -3
+alloc -> 125
+free 276 -> -3
+free 307 -> -3
+free 97 -> 0
+free 226 -> -3
+free 436 -> -3
+alloc -> 97
+free 206 -> -3
+free 467 -> 0
+alloc_run 4 -> 126
+alloc -> 130
+alloc -> 131
+alloc -> 132
+free 467 -> -3
+free 110 -> 0
+alloc -> 110
+free 328 -> 0
+alloc -> 133
+free 252 -> -3
+alloc -> 134
+alloc -> 135
+reserve 387 2 -> 0
+alloc -> 136
+free 158 -> -3
+alloc -> 137
+alloc -> 138
+alloc_run 3 -> 142
+reserve 336 2 -> 0
+free 66 -> 0
+alloc -> 66
+alloc_run 4 -> 145
+alloc -> 139
+reserve 108 2 -> -3
+free 488 -> -3
+reserve 309 2 -> 0
+alloc -> 140
+alloc -> 149
+reserve 476 4 -> 0
+free 416 -> -3
+alloc -> 150
+reserve 366 0 -> -2
+free_run 165 2 -> -3
+reserve 453 2 -> 0
+alloc -> 151
+alloc -> 152
+alloc -> 153
+reserve 187 2 -> 0
+free 249 -> -3
+alloc -> 154
+alloc -> 155
+alloc_run 5 -> 156
+reserve 346 0 -> -2
+alloc -> 161
+free 240 -> -3
+free 63 -> 0
+free 315 -> -3
+alloc_run 0 -> -2
+alloc -> 63
+alloc -> 162
+free 391 -> -3
+alloc_run 1 -> 163
+alloc -> 164
+free 153 -> 0
+alloc -> 153
+alloc -> 166
+alloc -> 167
+free_run 454 1 -> 0
+free 34 -> 0
+free 465 -> -3
+reserve 275 2 -> -3
+alloc -> 34
+alloc_run 5 -> 168
+free_run 422 0 -> -2
+free_run 466 0 -> -2
+free 167 -> 0
+free_run 387 0 -> -2
+reserve 146 0 -> -2
+alloc -> 167
+alloc -> 173
+free 437 -> -3
+alloc -> 174
+alloc -> 175
+reserve 470 3 -> 0
+alloc_run 3 -> 176
+reserve 192 1 -> 0
+alloc -> 179
+free 34 -> 0
+free 301 -> 0
+reserve 63 4 -> -3
+free_run 147 1 -> 0
+reserve 246 1 -> 0
+alloc -> 34
+free 19 -> 0
+alloc_run 1 -> 19
+free 374 -> -3
+alloc -> 147
+alloc -> 180
+reserve 270 4 -> -3
+alloc -> 181
+alloc -> 182
+free_run 60 2 -> 0
+alloc_run 2 -> 60
+alloc -> 183
+free 119 -> 0
+free 352 -> -3
+alloc_run 1 -> 119
+alloc -> 184
+alloc_run 4 -> 193
+free_run 198 4 -> -3
+free_run 219 2 -> -3
+free 356 -> -3
+reserve 424 3 -> 0
+alloc_run 2 -> 185
+alloc -> 189
+free 123 -> 0
+alloc -> 123
+free 437 -> -3
+alloc -> 190
+free 108 -> 0
+free_run 340 4 -> -3
+alloc -> 108
+alloc_run 5 -> 197
+free_run 38 0 -> -2
+alloc -> 191
+free 232 -> 0
+free 30 -> 0
+reserve 455 2 -> 0
+alloc -> 30
+alloc -> 202
+alloc_run 3 -> 203
+alloc -> 206
+free 187 -> 0
+reserve 194 3 -> -3
+reserve 427 2 -> 0
+alloc -> 187
+alloc_run 1 -> 207
+reserve 57 4 -> -3
+reserve 358 4 -> 0
+alloc -> 208
+alloc -> 209
+reserve 147 3 -> -3
+free_run 36 4 -> 0
+reserve 70 0 -> -2
+free 402 -> 0
+free_run 97 1 -> 0
+alloc_run 4 -> 36
+free_run 352 1 -> -3
+alloc_run 1 -> 97
+free_run 24 1 -> 0
+reserve 151 3 -> -3
+free 452 -> -3
+alloc -> 24
+free_run 361 2 -> -3
+free 55 -> 0
+free_run 28 3 -> 0
+free_run 188 3 -> 0
+alloc -> 28
+alloc_run 0 -> -2
+alloc -> 29
+free_run 86 3 -> 0
+alloc -> 30
+alloc -> 55
+free 69 -> 0
+alloc -> 69
+alloc_run 4 -> 210
+alloc_run 2 -> 86
+reserve 249 1 -> 0
+free 479 -> 0
+alloc_run 3 -> 188
+alloc -> 88
+alloc -> 214
+alloc_run 0 -> -2
+alloc -> 215
+alloc -> 216
+reserve 476 3 -> -3
+free 214 -> 0
+free 74 -> 0
+free_run 166 0 -> -2
+alloc -> 74
+free 252 -> -3
+alloc_run 3 -> 217
+free 10 -> 0
+free 384 -> -3
+alloc_run 0 -> -2
+alloc_run 0 -> -2
+alloc -> 10
+alloc_run 0 -> -2
+free_run 51 4 -> 0
+alloc -> 51
+free 455 -> 0
+reserve 166 0 -> -2
+free 343 -> 0
+free 267 -> -3
+free_run 437 4 -> -3
+free 158 -> 0
+reserve 205 0 -> -2
+free 504 -> -3
+free 441 -> -3
+alloc -> 52
+alloc -> 53
+free 51 -> 0
+alloc_run 3 -> 220
+free_run 397 1 -> -3
+alloc_run 1 -> 51
+reserve 477 3 -> -3
+free 225 -> -3
+free 164 -> 0
+alloc -> 54
+free 78 -> 0
+alloc_run 2 -> 223
+free 21 -> 0
+alloc_run 2 -> 225
+free_run 221 2 -> 0
+alloc -> 21
+free_run 206 0 -> -2
+alloc_run 1 -> 78
+alloc -> 158
+free 167 -> 0
+reserve 469 4 -> -3
+free 109 -> 0
+alloc_run 3 -> 227
+free 45 -> 0
+reserve 371 2 -> 0
+reserve 160 0 -> -2
+alloc_run 5 -> 230
+free 149 -> 0
+alloc -> 45
+alloc_run 3 -> 235
+free 445 -> -3
+free 60 -> 0
+free 325 -> -3
+alloc -> 60
+free_run 12 4 -> 0
+free 512 -> -2
+alloc_run 1 -> 12
+free 297 -> -3
+free 110 -> 0
+alloc_run 0 -> -2
+free 497 -> -3
+alloc -> 13
+alloc -> 14
+reserve 140 2 -> -3
+free_run 362 4 -> -3
+reserve 273 1 -> -3
+alloc -> 15
+free 107 -> 0
+alloc -> 107
+reserve 31 3 -> -3
+free 139 -> 0
+alloc -> 109
+alloc -> 110
+free 363 -> -3
+alloc -> 139
+alloc -> 149
+alloc -> 164
+alloc -> 167
+free_run 307 1 -> -3
+reserve 503 3 -> 0
+free 500 -> -3
+free_run 495 2 -> -3
+alloc_run 2 -> 221
+free 429 -> -3
+reserve 299 0 -> -2
+free 310 -> 0
+free 96 -> 0
+alloc -> 96
+reserve 221 2 -> -3
+free 197 -> 0
+free_run 387 4 -> -3
+alloc -> 197
+alloc_run 1 -> 214
+reserve 186 1 -> -3
+reserve 112 0 -> -2
+free 433 -> -3
+alloc -> 238
+alloc -> 239
+alloc -> 240
+alloc -> 241
+alloc -> 242
+alloc_run 2 -> 243
+free 233 -> 0
+alloc_run 3 -> 250
+alloc_run 1 -> 233
+free_run 168 4 -> 0
+alloc -> 168
+free_run 216 0 -> -2
+alloc -> 169
+alloc -> 170
+alloc -> 171
+free 389 -> -3
+alloc -> 245
+free_run 260 3 -> -3
+free_run 227 2 -> 0
+reserve 410 4 -> 0
+free 76 -> 0
+alloc -> 76
+alloc -> 227
+alloc -> 228
+alloc_run 4 -> 253
+alloc -> 247
+reserve 119 1 -> -3
+free 8 -> 0
+free 66 -> 0
+alloc -> 8
+free_run 4 3 -> 0
+reserve 422 4 -> -3
+alloc -> 4
+free 27 -> 0
+alloc -> 5
+free 341 -> -3
+alloc -> 6
+free 475 -> -3
+alloc -> 27
+alloc -> 66
+alloc -> 248
+free 469 -> 0
+alloc -> 257
+alloc -> 258
+free_run 413 2 -> -3
+free_run 476 0 -> -2
+alloc -> 259
+free 510 -> -3
+alloc -> 260
+alloc_run 0 -> -2
+free 235 -> 0
+alloc -> 235
+alloc -> 261
+free 291 -> -3
+alloc -> 262
+free_run 350 4 -> -3
+alloc_run 1 -> 263
+free 378 -> -3
+free 263 -> 0
+alloc -> 263
+alloc -> 264
+free_run 478 0 -> -2
+free 325 -> -3
+free 212 -> 0
+free_run 364 4 -> -3
+alloc -> 212
+alloc_run 3 -> 265
+alloc_run 4 -> 268
+free 299 -> -3
+free 435 -> -3
+free 105 -> 0
+alloc -> 105
+free 182 -> 0
+free 281 -> -3
+alloc -> 182
+free 156 -> 0
+alloc -> 156
+free_run 286 1 -> -3
+alloc -> 272
+alloc_run 0 -> -2
+alloc_run 4 -> 276
+free_run 130 3 -> 0
+free_run 405 4 -> -3
+free_run 200 3 -> 0
+alloc -> 130
+reserve 364 4 -> 0
+alloc_run 1 -> 131
+free_run 425 4 -> 0
+free 430 -> -3
+alloc -> 132
+free_run 13 3 -> 0
+alloc -> 13
+alloc -> 14
+alloc -> 15
+free_run 393 3 -> -3
+free 105 -> 0
+free_run 439 1 -> -3
+alloc -> 105
+free 122 -> 0
+free_run 239 2 -> 0
+alloc_run 4 -> 280
+alloc -> 122
+alloc -> 200
+free 382 -> -3
+reserve 127 0 -> -2
+alloc -> 201
+alloc_run 4 -> 284
+alloc -> 202
+alloc -> 239
+reserve 486 1 -> 0
+free_run 487 4 -> -3
+alloc -> 240
+free_run 220 0 -> -2
+free 108 -> 0
+free_run 240 1 -> 0
+alloc_run 1 -> 108
+alloc -> 240
+free 359 -> 0
+alloc -> 288
+alloc -> 289
+alloc -> 290
+free 333 -> -3
+alloc -> 291
+free 84 -> 0
+alloc -> 84
+free 236 -> 0
+alloc -> 236
+free 182 -> 0
+alloc_run 0 -> -2
+free 338 -> -3
+alloc_run 1 -> 182
+free 14 -> 0
+free 95 -> 0
+reserve 395 3 -> 0
+reserve 325 4 -> 0
+reserve 22 3 -> -3
+alloc -> 14
+free_run 455 3 -> -3
+free 288 -> 0
+reserve 481 3 -> 0
+alloc -> 95
+free 352 -> -3
+free 100 -> 0
+reserve 84 0 -> -2
+free_run 79 3 -> 0
+free_run 220 3 -> 0
+reserve 40 2 -> -3
+alloc -> 79
+alloc_run 3 -> 220
+free_run 498 2 -> -3
+free 109 -> 0
+free 204 -> 0
+alloc -> 80
+alloc -> 81
+alloc -> 100
+alloc -> 109
+alloc -> 204
+reserve 222 1 -> -3
+reserve 469 4 -> -3
+free 436 -> -3
+free 309 -> 0
+alloc -> 288
+free 281 -> 0
+free_run 439 0 -> -2
+reserve 230 2 -> -3
+free 301 -> -3
+alloc -> 281
+free 314 -> -3
+free 508 -> -3
+free 46 -> 0
+free_run 132 1 -> 0
+alloc -> 46
+alloc -> 132
+reserve 437 4 -> 0
+free 39 -> 0
+alloc_run 1 -> 39
+alloc -> 292
+alloc -> 293
+free 265 -> 0
+free 423 -> -3
+free 480 -> -3
+alloc -> 265
+free 129 -> 0
+alloc -> 129
+free_run 9 1 -> 0
+alloc -> 9
+alloc_run 0 -> -2
+reserve 397 2 -> -3
+free 273 -> 0
+alloc_run 5 -> 294
+free 295 -> 0
+free 110 -> 0
+alloc -> 110
+free 174 -> 0
+alloc -> 174
+free 229 -> 0
+free 472 -> 0
+alloc -> 229
+free 274 -> 0
+reserve 269 4 -> -3
+free 238 -> 0
+free 272 -> 0
+alloc_run 2 -> 272
+alloc -> 238
+free_run 279 0 -> -2
+alloc -> 274
+free 460 -> -3
+alloc -> 295
+reserve 223 1 -> -3
+alloc_run 5 -> 299
+alloc -> 304
+alloc -> 305
+alloc -> 306
+free 27 -> 0
+free 307 -> -3
+reserve 100 1 -> -3
+reserve 366 4 -> -3
+free_run 423 2 -> -3
+free 313 -> -3
+free 190 -> 0
+alloc -> 27
+free 69 -> 0
+alloc_run 5 -> 307
+alloc -> 69
+free 373 -> -3
+alloc -> 190
+alloc -> 312
+free 325 -> 0
+alloc -> 313
+reserve 320 0 -> -2
+free_run 207 0 -> -2
+reserve 26 0 -> -2
+free_run 43 3 -> 0
+free 373 -> -3
+free 452 -> -3
+alloc_run 3 -> 43
+free 110 -> 0
+free 11 -> 0
+free 278 -> 0
+reserve 93 0 -> -2
+free 227 -> 0
+free_run 176 2 -> 0
+reserve 222 3 -> -3
+free 430 -> -3
+alloc -> 11
+free 297 -> 0
+alloc_run 5 -> 314
+alloc -> 110
+free 50 -> 0
+alloc -> 50
+reserve 450 4 -> -3
+free 80 -> 0
+alloc -> 80
+free 5 -> 0
+alloc -> 5
+alloc -> 176
+free 77 -> 0
+free 363 -> -3
+free_run 187 0 -> -2
+alloc -> 77
+alloc -> 177
+alloc -> 227
+alloc -> 278
+free 436 -> -3
+free 93 -> 0
+alloc -> 93
+free_run 205 4 -> 0
+free 38 -> 0
+alloc_run 1 -> 38
+free 303 -> 0
+reserve 287 4 -> -3
+free 188 -> 0
+free 396 -> 0
+free 260 -> 0
+free_run 161 1 -> 0
+alloc -> 161
+alloc -> 188
+alloc -> 205
+free 301 -> 0
+free_run 214 3 -> 0
+free_run 250 4 -> 0
+alloc -> 206
+alloc -> 207
+free 453 -> 0
+alloc -> 208
+alloc -> 214
+reserve 387 2 -> -3
+alloc -> 215
+free_run 114 4 -> 0
+free 368 -> -3
+free 256 -> 0
+free_run 348 1 -> -3
+alloc -> 114
+free_run 38 3 -> 0
+reserve 40 4 -> -3
+alloc -> 38
+alloc_run 2 -> 39
+alloc_run 5 -> 319
+alloc_run 0 -> -2
+alloc_run 5 -> 331
+alloc -> 115
+alloc -> 116
+alloc_run 2 -> 250
+free_run 375 4 -> -3
+alloc_run 1 -> 117
+free 46 -> 0
+alloc -> 46
+alloc -> 216
+free_run 93 1 -> 0
+alloc_run 3 -> 343
+alloc_run 5 -> 346
+free 301 -> -3
+alloc -> 93
+free 417 -> -3
+free_run 90 1 -> 0
+alloc_run 2 -> 252
+alloc -> 90
+reserve 57 1 -> -3
+alloc_run 4 -> 351
+free_run 436 0 -> -2
+alloc_run 1 -> 256
+alloc -> 260
+free 273 -> 0
+alloc_run 1 -> 273
+free_run 296 4 -> -3
+reserve 46 0 -> -2
+free_run 61 0 -> -2
+free_run 389 3 -> -3
+reserve 481 1 -> -3
+alloc -> 297
+reserve 239 3 -> -3
+alloc -> 301
+free_run 229 1 -> 0
+free_run 50 4 -> 0
+free_run 452 2 -> -3
+alloc_run 1 -> 50
+free 153 -> 0
+free 318 -> 0
+alloc_run 5 -> 373
+alloc -> 51
+alloc -> 52
+reserve 180 0 -> -2
+alloc_run 1 -> 53
+alloc -> 153
+free_run 403 2 -> -3
+alloc -> 229
+alloc -> 303
+free 400 -> -3
+free 383 -> -3
+free 352 -> 0
+alloc -> 318
+free 419 -> -3
+alloc -> 324
+free 182 -> 0
+alloc -> 182
+free_run 232 2 -> 0
+free_run 164 3 -> 0
+alloc -> 164
+free 318 -> 0
+free_run 239 1 -> 0
+alloc -> 165
+alloc -> 166
+alloc -> 232
+free 398 -> -3
+alloc -> 233
+free_run 102 4 -> 0
+alloc_run 0 -> -2
+free 482 -> 0
+alloc -> 102
+free 427 -> -3
+alloc -> 103
+free_run 246 2 -> 0
+alloc -> 104
+reserve 66 4 -> -3
+alloc -> 105
+free 108 -> 0
+alloc -> 108
+free 447 -> -3
+free 165 -> 0
+alloc -> 165
+free 343 -> 0
+free 130 -> 0
+free 62 -> 0
+free_run 125 1 -> 0
+alloc_run 2 -> 246
+alloc -> 62
+free_run 229 1 -> 0
+reserve 174 4 -> -3
+free_run 338 0 -> -2
+reserve 165 3 -> -3
+free 233 -> 0
+free 364 -> 0
+reserve 192 1 -> -3
+free 121 -> 0
+alloc_run 2 -> 340
+free 225 -> 0
+alloc -> 121
+alloc -> 125
+free 145 -> 0
+alloc_run 0 -> -2
+free 350 -> 0
+alloc -> 130
+alloc_run 1 -> 145
+free 168 -> 0
+alloc -> 168
+free_run 166 4 -> 0
+free 373 -> 0
+free 99 -> 0
+free 415 -> -3
+free 446 -> -3
+free_run 105 3 -> 0
+reserve 327 1 -> -3
+alloc_run 3 -> 105
+alloc -> 99
+free 83 -> 0
+free 241 -> 0
+free 383 -> -3
+free 197 -> 0
+free_run 62 0 -> -2
+free 407 -> -3
+alloc_run 0 -> -2
+free 409 -> -3
+alloc -> 83
+alloc -> 166
+alloc_run 3 -> 167
+free 251 -> 0
+alloc_run 5 -> 378
+free 320 -> 0
+free_run 357 0 -> -2
+free 462 -> -3
+alloc_run 2 -> 355
+alloc_run 5 -> 389
+free 275 -> 0
+free_run 502 0 -> -2
+reserve 502 3 -> -3
+free 369 -> -3
+free_run 513 3 -> -2
+alloc_run 3 -> 362
+free_run 319 3 -> -3
+free 311 -> 0
+alloc -> 197
+alloc_run 4 -> 383
+free 10 -> 0
+reserve 106 3 -> -3
+free_run 437 0 -> -2
+alloc_run 4 -> 398
+alloc -> 10
+reserve 327 1 -> -3
+free 383 -> 0
+reserve 69 4 -> -3
+alloc -> 225
+alloc_run 1 -> 229
+reserve 261 3 -> -3
+alloc -> 233
+free 194 -> 0
+alloc -> 194
+reserve 341 0 -> -2
+free 109 -> 0
+free 116 -> 0
+alloc -> 109
+alloc_run 4 -> 404
+free 475 -> -3
+reserve 110 2 -> -3
+free_run 106 4 -> 0
+free 41 -> 0
+free 64 -> 0
+alloc -> 41
+alloc -> 64
+reserve 44 3 -> -3
+alloc_run 5 -> 414
+alloc_run 1 -> 106
+free_run 125 1 -> 0
+free 416 -> 0
+free 270 -> 0
+free_run 391 0 -> -2
+free 478 -> 0
+free 382 -> 0
+reserve 421 0 -> -2
+alloc -> 107
+free 294 -> 0
+free_run 179 0 -> -2
+alloc_run 2 -> 108
+free 61 -> 0
+alloc_run 1 -> 61
+reserve 321 2 -> -3
+alloc_run 4 -> 419
+alloc_run 3 -> 368
+reserve 135 2 -> -3
+free 289 -> 0
+free 109 -> 0
+alloc -> 109
+free 57 -> 0
+free 438 -> 0
+reserve 369 2 -> -3
+free 50 -> 0
+alloc -> 50
+alloc -> 57
+alloc_run 1 -> 116
+free_run 420 3 -> 0
+free 191 -> 0
+free 216 -> 0
+reserve 283 0 -> -2
+free 128 -> 0
+free 208 -> 0
+alloc -> 125
+free 376 -> 0
+alloc -> 128
+alloc_run 2 -> 382
+reserve 226 1 -> -3
+reserve 358 3 -> -3
+alloc -> 191
+alloc -> 208
+reserve 344 1 -> -3
+alloc -> 216
+alloc_run 0 -> -2
+alloc -> 239
+alloc -> 241
+alloc -> 251
+alloc -> 270
+free 492 -> -3
+free 285 -> 0
+alloc -> 275
+free 301 -> 0
+free 267 -> 0
+alloc -> 267
+reserve 410 3 -> -3
+free 126 -> 0
+free 210 -> 0
+free 455 -> -3
+alloc -> 126
+free 362 -> 0
+alloc -> 210
+free 57 -> 0
+free 401 -> 0
+free 456 -> 0
+alloc_run 2 -> 401
+reserve 166 3 -> -3
+alloc -> 57
+reserve 326 1 -> -3
+free 243 -> 0
+alloc -> 243
+alloc -> 285
+free 193 -> 0
+free 507 -> -3
+alloc -> 193
+reserve 207 4 -> -3
+free 221 -> 0
+alloc_run 5 -> 425
+reserve 366 4 -> -3
+free 51 -> 0
+alloc -> 51
+free_run 69 2 -> 0
+free 345 -> 0
+free_run 338 3 -> -3
+free 128 -> 0
+free 80 -> 0
+free_run 9 2 -> 0
+alloc -> 9
+alloc -> 10
+alloc -> 69
+alloc -> 70
+free 450 -> 0
+free_run 237 2 -> 0
+alloc -> 80
+alloc_run 5 -> 430
+alloc -> 128
+free_run 251 3 -> 0
+free 370 -> 0
+free 505 -> 0
+reserve 139 3 -> -3
+free_run 479 1 -> -3
+alloc_run 0 -> -2
+free 134 -> 0
+alloc_run 2 -> 237
+alloc_run 1 -> 134
+free 354 -> 0
+free 414 -> 0
+free 444 -> -3
+alloc -> 221
+free 299 -> 0
+free 471 -> 0
+alloc -> 251
+alloc -> 252
+alloc -> 253
+reserve 354 4 -> -3
+free 309 -> 0
+free_run 193 0 -> -2
+free 243 -> 0
+free 252 -> 0
+reserve 488 3 -> 0
+alloc_run 0 -> -2
+alloc_run 0 -> -2
+alloc -> 243
+free_run 198 4 -> 0
+alloc_run 1 -> 198
+free 413 -> 0
+alloc -> 199
+alloc_run 2 -> 200
+alloc_run 3 -> 420
+free_run 33 2 -> 0
+free 320 -> -3
+free 263 -> 0
+alloc_run 0 -> -2
+free 399 -> 0
+free 263 -> -3
+alloc_run 3 -> 441
+alloc_run 1 -> 33
+reserve 140 1 -> -3
+alloc -> 34
+alloc -> 252
+reserve 335 1 -> -3
+alloc -> 263
+alloc -> 289
+alloc -> 294
+reserve 19 1 -> -3
+free_run 45 1 -> 0
+reserve 377 0 -> -2
+alloc -> 45
+free 133 -> 0
+alloc -> 133
+reserve 69 4 -> -3
+free_run 139 4 -> 0
+free 192 -> 0
+alloc -> 139
+free_run 194 4 -> 0
+alloc -> 140
+alloc_run 1 -> 141
+alloc_run 3 -> 194
+alloc -> 142
+alloc -> 192
+free_run 391 1 -> 0
+free 213 -> 0
+alloc -> 197
+free_run 49 2 -> 0
+free 211 -> 0
+free 75 -> 0
+free 52 -> 0
+free_run 265 3 -> 0
+free 375 -> 0
+free 327 -> 0
+free 488 -> 0
+free_run 229 2 -> 0
+free 145 -> 0
+alloc -> 49
+free 497 -> -3
+free 121 -> 0
+free 0 -> 0
+alloc -> 0
+free_run 166 2 -> 0
+free 163 -> 0
+alloc -> 50
+reserve 152 3 -> -3
+free 334 -> 0
+free 470 -> 0
+free 223 -> 0
+free 33 -> 0
+alloc -> 33
+alloc -> 52
+free 269 -> 0
+free 141 -> 0
+free 335 -> 0
+alloc_run 3 -> 265
+free 40 -> 0
+alloc -> 40
+free 230 -> -3
+alloc_run 2 -> 166
+reserve 360 3 -> -3
+free 296 -> 0
+free_run 113 2 -> 0
+alloc -> 75
+free 127 -> 0
+reserve 208 4 -> -3
+free 137 -> 0
+free 321 -> 0
+free 182 -> 0
+reserve 305 3 -> -3
+alloc -> 113
+alloc_run 5 -> 444
+reserve 288 3 -> -3
+alloc -> 114
+free 358 -> 0
+alloc_run 3 -> 357
+reserve 497 0 -> -2
+reserve 12 4 -> -3
+free 352 -> -3
+free 56 -> 0
+alloc -> 56
+alloc -> 121
+free 288 -> 0
+alloc_run 5 -> 452
+free 144 -> 0
+free 117 -> 0
+free_run 494 3 -> -3
+free_run 342 0 -> -2
+free 149 -> 0
+free 98 -> 0
+free 36 -> 0
+free 384 -> 0
+reserve 326 2 -> -3
+reserve 279 1 -> -3
+alloc -> 36
+alloc_run 1 -> 98
+free 51 -> 0
+alloc_run 5 -> 457
+free 435 -> -3
+alloc -> 51
+free_run 173 4 -> 0
+reserve 504 3 -> -3
+free_run 377 0 -> -2
+alloc_run 3 -> 173
+reserve 340 1 -> -3
+free_run 379 0 -> -2
+free 216 -> 0
+alloc_run 2 -> 144
+alloc_run 2 -> 229
+free 409 -> -3
+free_run 257 2 -> 0
+reserve 344 2 -> -3
+free 367 -> 0
+free 485 -> -3
+alloc -> 117
+free 218 -> 0
+free 308 -> 0
+free_run 457 4 -> 0
+alloc_run 3 -> 457
+free 464 -> -3
+free 212 -> 0
+reserve 254 2 -> -3
+free 41 -> 0
+alloc -> 41
+free 357 -> 0
+alloc_run 0 -> -2
+alloc -> 127
+alloc_run 0 -> -2
+alloc -> 137
+free 245 -> 0
+reserve 484 3 -> -3
+free 309 -> -3
+free 74 -> 0
+reserve 407 4 -> -3
+free 399 -> -3
+free 62 -> 0
+free 510 -> -3
+free 441 -> 0
+free_run 324 0 -> -2
+free 109 -> 0
+free 453 -> 0
+reserve 461 1 -> -3
+reserve 385 0 -> -2
+reserve 109 0 -> -2
+alloc -> 62
+free 450 -> -3
+free_run 210 2 -> -3
+free 189 -> 0
+reserve 364 3 -> -3
+free 4 -> 0
+free_run 11 3 -> 0
+alloc_run 4 -> 462
+free 397 -> 0
+free_run 373 4 -> -3
+reserve 341 4 -> -3
+alloc -> 4
+reserve 388 0 -> -2
+alloc -> 11
+alloc -> 12
+alloc_run 2 -> 211
+free_run 251 4 -> 0
+alloc -> 13
+alloc_run 1 -> 74
+alloc -> 109
+alloc -> 141
+alloc -> 149
+free_run 63 1 -> 0
+alloc -> 63
+alloc -> 163
+alloc -> 176
+alloc_run 4 -> 251
+alloc -> 182
+free_run 31 0 -> -2
+free 496 -> -3
+alloc -> 189
+alloc_run 3 -> 469
+free_run 365 1 -> 0
+alloc_run 3 -> 472
+free_run 65 4 -> 0
+alloc -> 65
+free_run 497 2 -> -3
+free 60 -> 0
+reserve 20 0 -> -2
+alloc_run 0 -> -2
+reserve 382 4 -> -3
+alloc -> 60
+alloc_run 2 -> 66
+free_run 505 3 -> -3
+free 132 -> 0
+alloc_run 5 -> 491
+alloc -> 68
+alloc_run 0 -> -2
+free_run 117 1 -> 0
+reserve 7 2 -> -3
+alloc -> 117
+alloc_run 2 -> 257
+free 81 -> 0
+alloc_run 0 -> -2
+alloc -> 81
+free 385 -> 0
+alloc -> 132
+free 410 -> 0
+alloc -> 213
+free 477 -> 0
+alloc_run 4 -> 477
+free 21 -> 0
+alloc_run 0 -> -2
+alloc -> 21
+alloc -> 216
+alloc_run 4 -> 496
+reserve 126 0 -> -2
+alloc -> 218
+alloc -> 223
+free 378 -> 0
+free 84 -> 0
+alloc -> 84
+free 135 -> 0
+alloc_run 1 -> 135
+alloc -> 245
+reserve 448 1 -> -3
+alloc -> 269
+alloc -> 288
+reserve 272 3 -> -3
+free_run 252 2 -> 0
+free_run 253 1 -> -3
+alloc -> 252
+alloc -> 253
+free_run 290 0 -> -2
+alloc -> 296
+alloc_run 0 -> -2
+free 101 -> 0
+free_run 122 3 -> 0
+alloc_run 5 -> 505
+free_run 146 0 -> -2
+alloc -> 101
+alloc_run 3 -> 122
+alloc -> 299
+alloc -> 301
+free 8 -> 0
+free 487 -> -3
+free 330 -> 0
+alloc -> 8
+free 230 -> 0
+free_run 234 3 -> 0
+alloc -> 230
+free 12 -> 0
+free 218 -> 0
+alloc -> 12
+alloc -> 218
+alloc -> 234
+free 202 -> 0
+alloc -> 202
+free 96 -> 0
+alloc -> 96
+alloc -> 235
+alloc_run 5 -> -1
+free_run 371 0 -> -2
+alloc_run 5 -> -1
+reserve 440 2 -> -3
+reserve 113 2 -> -3
+free 436 -> -3
+alloc -> 236
+reserve 230 0 -> -2
+reserve 273 2 -> -3
+free 245 -> 0
+free_run 226 1 -> 0
+free 473 -> 0
+alloc -> 226
+alloc_run 5 -> -1
+alloc -> 245
+alloc -> 308
+free 449 -> -3
+free 300 -> 0
+alloc_run 5 -> -1
+alloc_run 0 -> -2
+free_run 457 4 -> -3
+alloc -> 300
+alloc -> 309
+alloc -> 311
+reserve 376 3 -> -3
+alloc -> 318
+free_run 259 4 -> 0
+free_run 187 2 -> 0
+reserve 513 2 -> -2
+free 88 -> 0
+free 372 -> 0
+free 294 -> 0
+reserve 342 3 -> -3
+alloc -> 88
+alloc -> 187
+free_run 171 3 -> 0
+free_run 126 1 -> 0
+reserve 90 3 -> -3
+alloc -> 126
+free_run 292 3 -> -3
+free 324 -> 0
+alloc_run 4 -> 259
+free 2 -> 0
+reserve 488 3 -> -3
+alloc -> 2
+reserve 329 0 -> -2
+alloc_run 4 -> -1
+alloc_run 1 -> 171
+free 466 -> -3
+free 212 -> 0
+free 153 -> 0
+alloc -> 153
+free 312 -> 0
+free 271 -> 0
+alloc -> 172
+free 191 -> 0
+free 3 -> 0
+alloc -> 3
+reserve 223 0 -> -2
+alloc -> 173
+free 115 -> 0
+alloc -> 115
+free 66 -> 0
+reserve 150 1 -> -3
+reserve 71 2 -> -3
+free_run 137 4 -> 0
+alloc -> 66
+free 507 -> 0
+free 59 -> 0
+free 379 -> 0
+free 394 -> -3
+alloc -> 59
+free 42 -> 0
+free_run 443 3 -> 0
+free_run 33 0 -> -2
+free 245 -> 0
+alloc_run 5 -> -1
+free 139 -> -3
+reserve 218 2 -> -3
+alloc -> 42
+free 338 -> -3
+free 316 -> 0
+free 469 -> 0
+reserve 128 4 -> -3
+alloc -> 137
+alloc -> 138
+free_run 23 3 -> 0
+alloc -> 23
+alloc -> 24
+alloc -> 25
+alloc -> 139
+reserve 303 4 -> -3
+free 252 -> 0
+alloc_run 4 -> -1
+free_run 238 1 -> 0
+reserve 82 3 -> -3
+alloc_run 2 -> 320
+free 158 -> 0
+alloc -> 140
+free_run 169 0 -> -2
+free_run 107 2 -> 0
+free_run 287 3 -> 0
+reserve 351 1 -> -3
+free 447 -> 0
+alloc -> 107
+free 70 -> 0
+free_run 69 1 -> 0
+alloc -> 69
+free 358 -> 0
+free 92 -> 0
+alloc -> 70
+free 431 -> 0
+reserve 61 4 -> -3
+free 289 -> -3
+alloc_run 5 -> -1
+alloc -> 92
+free 227 -> 0
+free 110 -> 0
+free_run 177 1 -> 0
+frames=512 free=85 digest=71c7e3c6e95dd4e2

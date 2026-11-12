@@ -1,0 +1,150 @@
+// cg-rv64: reading the JSON tree. Every function takes CG_NONE for a
+// node and answers "nothing there", so a caller may chain lookups and
+// test the last result only.
+
+fn cj_ok(d: &CjDoc, n: u64) -> bool {
+    n != CG_NONE && ((n + CJ_STRIDE) as usize) <= d.n.len()
+}
+
+fn cj_kind(d: &CjDoc, n: u64) -> u64 {
+    if !cj_ok(d, n) { return CJ_NULL; }
+    d.n[n as usize]
+}
+
+// The first child of an array or an object.
+fn cj_first(d: &CjDoc, n: u64) -> u64 {
+    let k = cj_kind(d, n);
+    if k != CJ_ARR && k != CJ_OBJ { return CG_NONE; }
+    d.n[(n + 1_u64) as usize]
+}
+
+fn cj_next(d: &CjDoc, n: u64) -> u64 {
+    if !cj_ok(d, n) { return CG_NONE; }
+    d.n[(n + 3_u64) as usize]
+}
+
+// The number of children.
+fn cj_count(d: &CjDoc, n: u64) -> u64 {
+    let mut c = cj_first(d, n);
+    let mut k: u64 = 0_u64;
+    while c != CG_NONE {
+        k = k + 1_u64;
+        c = cj_next(d, c);
+    }
+    k
+}
+
+// Child number i, from 0.
+fn cj_at(d: &CjDoc, n: u64, i: u64) -> u64 {
+    let mut c = cj_first(d, n);
+    let mut k: u64 = 0_u64;
+    while c != CG_NONE && k < i {
+        k = k + 1_u64;
+        c = cj_next(d, c);
+    }
+    c
+}
+
+// True when the bytes at start, len of the source are the text s.
+fn cj_text_is(d: &CjDoc, start: u64, len: u64, s: str) -> bool {
+    if len != s.len() as u64 { return false; }
+    let b = s.as_bytes();
+    let mut same = true;
+    let mut i: usize = 0;
+    while i < s.len() {
+        if d.src[start as usize + i] != b[i] { same = false; }
+        i = i + 1;
+    }
+    same
+}
+
+// True when the member n of an object has the key s.
+fn cj_key_is(d: &CjDoc, n: u64, s: str) -> bool {
+    if !cj_ok(d, n) { return false; }
+    cj_text_is(d, d.n[(n + 4_u64) as usize], d.n[(n + 5_u64) as usize], s)
+}
+
+// True when n is a string with the text s.
+fn cj_str_is(d: &CjDoc, n: u64, s: str) -> bool {
+    if cj_kind(d, n) != CJ_STR { return false; }
+    cj_text_is(d, d.n[(n + 1_u64) as usize], d.n[(n + 2_u64) as usize], s)
+}
+
+// The member of an object with the key s.
+fn cj_get(d: &CjDoc, n: u64, s: str) -> u64 {
+    if cj_kind(d, n) != CJ_OBJ { return CG_NONE; }
+    let mut c = cj_first(d, n);
+    while c != CG_NONE && !cj_key_is(d, c, s) { c = cj_next(d, c); }
+    c
+}
+
+// The MIR writes a variant with data as an object of one member whose key
+// is the variant name, and a variant with no data as a string. cj_tag_is
+// is true for either form; cj_body is the data, the one member.
+fn cj_tag_is(d: &CjDoc, n: u64, s: str) -> bool {
+    if cj_kind(d, n) == CJ_STR { return cj_str_is(d, n, s); }
+    let m = cj_first(d, n);
+    cj_kind(d, n) == CJ_OBJ && cj_key_is(d, m, s) && cj_next(d, m) == CG_NONE
+}
+
+fn cj_body(d: &CjDoc, n: u64) -> u64 {
+    if cj_kind(d, n) != CJ_OBJ { return CG_NONE; }
+    cj_first(d, n)
+}
+
+// The magnitude of a number, and whether it is negative.
+fn cj_mag(d: &CjDoc, n: u64) -> u64 {
+    if cj_kind(d, n) != CJ_NUM { return 0_u64; }
+    d.n[(n + 1_u64) as usize]
+}
+
+fn cj_neg(d: &CjDoc, n: u64) -> bool {
+    cj_kind(d, n) == CJ_NUM && d.n[(n + 2_u64) as usize] == 1_u64 && d.n[(n + 1_u64) as usize] != 0_u64
+}
+
+// A number as 64 bits in two's complement.
+fn cj_bits(d: &CjDoc, n: u64) -> u64 {
+    let m = cj_mag(d, n);
+    if cj_neg(d, n) { return (0_u64).wrapping_sub(m); }
+    m
+}
+
+// Where a string starts in the source, and its length as written.
+fn cj_sstart(d: &CjDoc, n: u64) -> u64 {
+    if cj_kind(d, n) != CJ_STR { return 0_u64; }
+    d.n[(n + 1_u64) as usize]
+}
+
+fn cj_slen(d: &CjDoc, n: u64) -> u64 {
+    if cj_kind(d, n) != CJ_STR { return 0_u64; }
+    d.n[(n + 2_u64) as usize]
+}
+
+// True when two string nodes hold the same bytes.
+fn cj_same_str(d: &CjDoc, a: u64, b: u64) -> bool {
+    if cj_kind(d, a) != CJ_STR || cj_kind(d, b) != CJ_STR { return false; }
+    let n = cj_slen(d, a);
+    if n != cj_slen(d, b) { return false; }
+    let sa = cj_sstart(d, a);
+    let sb = cj_sstart(d, b);
+    let mut same = true;
+    let mut i: u64 = 0_u64;
+    while i < n {
+        if d.src[(sa + i) as usize] != d.src[(sb + i) as usize] { same = false; }
+        i = i + 1_u64;
+    }
+    same
+}
+
+// True when the string n starts with the text s.
+fn cj_str_starts(d: &CjDoc, n: u64, s: str) -> bool {
+    if cj_kind(d, n) != CJ_STR || cj_slen(d, n) < s.len() as u64 { return false; }
+    cj_text_is(d, cj_sstart(d, n), s.len() as u64, s)
+}
+
+// True when the string n ends with the text s.
+fn cj_str_ends(d: &CjDoc, n: u64, s: str) -> bool {
+    let len = cj_slen(d, n);
+    if cj_kind(d, n) != CJ_STR || len < s.len() as u64 { return false; }
+    cj_text_is(d, cj_sstart(d, n) + len - s.len() as u64, s.len() as u64, s)
+}

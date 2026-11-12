@@ -20,6 +20,8 @@ mod c_abi;
 mod env_macro;
 mod expr;
 mod format;
+mod global_init;
+mod global_places;
 mod limits;
 mod lowlevel;
 mod macros;
@@ -2694,7 +2696,10 @@ impl<'ctx> MirLowerer<'ctx> {
 
     fn lower_static(&mut self, s: &ast::StaticDef) -> CodegenResult<()> {
         let ty = self.lower_type_from_ast(&s.ty);
-        let init = s.value.as_ref().and_then(|e| self.try_const_eval(e));
+        let init = match s.value.as_ref() {
+            Some(e) => self.global_initializer(&s.name.name, e, &ty)?,
+            None => None,
+        };
 
         let mut global = MirGlobal::new(s.name.name.clone(), ty);
         global.init = init;
@@ -2706,7 +2711,10 @@ impl<'ctx> MirLowerer<'ctx> {
 
     fn lower_const(&mut self, c: &ast::ConstDef) -> CodegenResult<()> {
         let ty = self.lower_type_from_ast(&c.ty);
-        let init = c.value.as_ref().and_then(|e| self.try_const_eval(e));
+        let init = match c.value.as_ref() {
+            Some(e) => self.global_initializer(&c.name.name, e, &ty)?,
+            None => None,
+        };
 
         let mut global = MirGlobal::new(c.name.name.clone(), ty);
         global.init = init;
@@ -2737,6 +2745,9 @@ impl<'ctx> MirLowerer<'ctx> {
                 MirConst::Zeroed(ty) => ty.clone(),
                 MirConst::Undef(ty) => ty.clone(),
                 MirConst::Struct(name, _) => MirType::Struct(name.clone()),
+                MirConst::Array(elem, vals) => {
+                    MirType::Array(Box::new(elem.clone()), vals.len() as u64)
+                }
             },
             MirValue::Local(id) => {
                 // Look up the local's declared type in the current function builder

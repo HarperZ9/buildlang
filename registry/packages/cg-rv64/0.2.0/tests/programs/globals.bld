@@ -1,0 +1,233 @@
+// Differential corpus, since 0.2.0: arrays and structs held in mutable
+// globals, with initial values (struct fields written out of order),
+// stores by index, compound stores, borrows as arrays and slices, a
+// method on a global, whole-array stores and reads of an immutable
+// global array. Written by tests/tools/gen_corpus2.py.
+
+static mut CNT: u64 = 4294967290_u64;
+const TAB: [u16; 4] = [3_u16, 65535_u16, 0_u16, 1000_u16];
+
+struct G_u8 { a: u8, w: [u8; 3], z: i64 }
+impl G_u8 { fn bump(&mut self, i: u64, v: u8) { self.w[i] = v; self.a = self.a + 1_u8; } }
+static mut GA_u8: [u8; 3] = [228_u8, 149_u8, 0_u8];
+static mut SG_u8: G_u8 = G_u8 { z: -3_i64, w: [255_u8, 168_u8, 89_u8], a: 5_u8 };
+static mut GP_u8: [G_u8; 2] = [G_u8 { a: 0_u8, w: [0_u8; 3], z: 0_i64 }; 2];
+fn put_u8(p: &mut [u8; 3], i: u64, v: u8) { p[i] = v; }
+fn sl_u8(p: &mut [u8], i: u64, v: u8) { p[i] = v; }
+fn sec_u8(k: u64) ~ Console {
+    unsafe {
+        println!("{} {} {} {} {} {} {} {}", GA_u8[0], GA_u8[1], GA_u8[2], SG_u8.a, SG_u8.w[0], SG_u8.w[1], SG_u8.w[2], SG_u8.z);
+        GA_u8[k % 3] = 10_u8;
+        GA_u8[(k + 1) % 3] ^= 0_u8;
+        put_u8(&mut GA_u8, (k + 2) % 3, 255_u8);
+        SG_u8.w[k % 3] = 29_u8;
+        SG_u8.z = SG_u8.z - 1_i64;
+        sl_u8(&mut SG_u8.w, (k + 1) % 3, 206_u8);
+        SG_u8.bump((k + 2) % 3, 127_u8);
+        GP_u8[k % 2].w[1] = 0_u8;
+        GP_u8[1].a = 7_u8;
+        let keep = GA_u8;
+        let fresh: [u8; 3] = [255_u8, 146_u8, 67_u8];
+        GA_u8 = fresh;
+        println!("{} {} {} {} {} {} {} {} {} {} {} {} {} {} {}", GA_u8[0], GA_u8[1], GA_u8[2], SG_u8.a, SG_u8.w[0], SG_u8.w[1], SG_u8.w[2], SG_u8.z, GP_u8[0].a, GP_u8[1].a, GP_u8[0].w[1], GP_u8[1].w[1], keep[0], keep[1], keep[2]);
+    }
+}
+struct G_i8 { a: u8, w: [i8; 3], z: i64 }
+impl G_i8 { fn bump(&mut self, i: u64, v: i8) { self.w[i] = v; self.a = self.a + 1_u8; } }
+static mut GA_i8: [i8; 3] = [56_i8, (-23_i8), (-128_i8)];
+static mut SG_i8: G_i8 = G_i8 { z: -3_i64, w: [127_i8, (-4_i8), (-83_i8)], a: 5_u8 };
+static mut GP_i8: [G_i8; 2] = [G_i8 { a: 0_u8, w: [0_i8; 3], z: 0_i64 }; 2];
+fn put_i8(p: &mut [i8; 3], i: u64, v: i8) { p[i] = v; }
+fn sl_i8(p: &mut [i8], i: u64, v: i8) { p[i] = v; }
+fn sec_i8(k: u64) ~ Console {
+    unsafe {
+        println!("{} {} {} {} {} {} {} {}", GA_i8[0], GA_i8[1], GA_i8[2], SG_i8.a, SG_i8.w[0], SG_i8.w[1], SG_i8.w[2], SG_i8.z);
+        GA_i8[k % 3] = 94_i8;
+        GA_i8[(k + 1) % 3] ^= (-128_i8);
+        put_i8(&mut GA_i8, (k + 2) % 3, 127_i8);
+        SG_i8.w[k % 3] = 113_i8;
+        SG_i8.z = SG_i8.z - 1_i64;
+        sl_i8(&mut SG_i8.w, (k + 1) % 3, 34_i8);
+        SG_i8.bump((k + 2) % 3, (-45_i8));
+        GP_i8[k % 2].w[1] = (-128_i8);
+        GP_i8[1].a = 7_u8;
+        let keep = GA_i8;
+        let fresh: [i8; 3] = [127_i8, (-26_i8), (-105_i8)];
+        GA_i8 = fresh;
+        println!("{} {} {} {} {} {} {} {} {} {} {} {} {} {} {}", GA_i8[0], GA_i8[1], GA_i8[2], SG_i8.a, SG_i8.w[0], SG_i8.w[1], SG_i8.w[2], SG_i8.z, GP_i8[0].a, GP_i8[1].a, GP_i8[0].w[1], GP_i8[1].w[1], keep[0], keep[1], keep[2]);
+    }
+}
+struct G_u16 { a: u8, w: [u16; 3], z: i64 }
+impl G_u16 { fn bump(&mut self, i: u64, v: u16) { self.w[i] = v; self.a = self.a + 1_u8; } }
+static mut GA_u16: [u16; 3] = [29836_u16, 60989_u16, 0_u16];
+static mut SG_u16: G_u16 = G_u16 { z: -3_i64, w: [65535_u16, 23376_u16, 54529_u16], a: 5_u8 };
+static mut GP_u16: [G_u16; 2] = [G_u16 { a: 0_u8, w: [0_u16; 3], z: 0_i64 }; 2];
+fn put_u16(p: &mut [u16; 3], i: u64, v: u16) { p[i] = v; }
+fn sl_u16(p: &mut [u16], i: u64, v: u16) { p[i] = v; }
+fn sec_u16(k: u64) ~ Console {
+    unsafe {
+        println!("{} {} {} {} {} {} {} {}", GA_u16[0], GA_u16[1], GA_u16[2], SG_u16.a, SG_u16.w[0], SG_u16.w[1], SG_u16.w[2], SG_u16.z);
+        GA_u16[k % 3] = 20146_u16;
+        GA_u16[(k + 1) % 3] ^= 0_u16;
+        put_u16(&mut GA_u16, (k + 2) % 3, 65535_u16);
+        SG_u16.w[k % 3] = 48069_u16;
+        SG_u16.z = SG_u16.z - 1_i64;
+        sl_u16(&mut SG_u16.w, (k + 1) % 3, 13686_u16);
+        SG_u16.bump((k + 2) % 3, 44839_u16);
+        GP_u16[k % 2].w[1] = 0_u16;
+        GP_u16[1].a = 7_u8;
+        let keep = GA_u16;
+        let fresh: [u16; 3] = [65535_u16, 7226_u16, 38379_u16];
+        GA_u16 = fresh;
+        println!("{} {} {} {} {} {} {} {} {} {} {} {} {} {} {}", GA_u16[0], GA_u16[1], GA_u16[2], SG_u16.a, SG_u16.w[0], SG_u16.w[1], SG_u16.w[2], SG_u16.z, GP_u16[0].a, GP_u16[1].a, GP_u16[0].w[1], GP_u16[1].w[1], keep[0], keep[1], keep[2]);
+    }
+}
+struct G_i16 { a: u8, w: [i16; 3], z: i64 }
+impl G_i16 { fn bump(&mut self, i: u64, v: i16) { self.w[i] = v; self.a = self.a + 1_u8; } }
+static mut GA_i16: [i16; 3] = [30304_i16, (-4079_i16), (-32768_i16)];
+static mut SG_i16: G_i16 = G_i16 { z: -3_i64, w: [32767_i16, 23844_i16, (-10539_i16)], a: 5_u8 };
+static mut GP_i16: [G_i16; 2] = [G_i16 { a: 0_u8, w: [0_i16; 3], z: 0_i64 }; 2];
+fn put_i16(p: &mut [i16; 3], i: u64, v: i16) { p[i] = v; }
+fn sl_i16(p: &mut [i16], i: u64, v: i16) { p[i] = v; }
+fn sec_i16(k: u64) ~ Console {
+    unsafe {
+        println!("{} {} {} {} {} {} {} {}", GA_i16[0], GA_i16[1], GA_i16[2], SG_i16.a, SG_i16.w[0], SG_i16.w[1], SG_i16.w[2], SG_i16.z);
+        GA_i16[k % 3] = 20614_i16;
+        GA_i16[(k + 1) % 3] ^= (-32768_i16);
+        put_i16(&mut GA_i16, (k + 2) % 3, 32767_i16);
+        SG_i16.w[k % 3] = (-16999_i16);
+        SG_i16.z = SG_i16.z - 1_i64;
+        sl_i16(&mut SG_i16.w, (k + 1) % 3, 14154_i16);
+        SG_i16.bump((k + 2) % 3, (-20229_i16));
+        GP_i16[k % 2].w[1] = (-32768_i16);
+        GP_i16[1].a = 7_u8;
+        let keep = GA_i16;
+        let fresh: [i16; 3] = [32767_i16, 7694_i16, (-26689_i16)];
+        GA_i16 = fresh;
+        println!("{} {} {} {} {} {} {} {} {} {} {} {} {} {} {}", GA_i16[0], GA_i16[1], GA_i16[2], SG_i16.a, SG_i16.w[0], SG_i16.w[1], SG_i16.w[2], SG_i16.z, GP_i16[0].a, GP_i16[1].a, GP_i16[0].w[1], GP_i16[1].w[1], keep[0], keep[1], keep[2]);
+    }
+}
+struct G_u32 { a: u8, w: [u32; 3], z: i64 }
+impl G_u32 { fn bump(&mut self, i: u64, v: u32) { self.w[i] = v; self.a = self.a + 1_u8; } }
+static mut GA_u32: [u32; 3] = [1274837044_u32, 3929272805_u32, 0_u32];
+static mut SG_u32: G_u32 = G_u32 { z: -3_i64, w: [4294967295_u32, 3302645496_u32, 1662113961_u32], a: 5_u8 };
+static mut GP_u32: [G_u32; 2] = [G_u32 { a: 0_u8, w: [0_u32; 3], z: 0_i64 }; 2];
+fn put_u32(p: &mut [u32; 3], i: u64, v: u32) { p[i] = v; }
+fn sl_u32(p: &mut [u32], i: u64, v: u32) { p[i] = v; }
+fn sec_u32(k: u64) ~ Console {
+    unsafe {
+        println!("{} {} {} {} {} {} {} {}", GA_u32[0], GA_u32[1], GA_u32[2], SG_u32.a, SG_u32.w[0], SG_u32.w[1], SG_u32.w[2], SG_u32.z);
+        GA_u32[k % 3] = 21582426_u32;
+        GA_u32[(k + 1) % 3] ^= 0_u32;
+        put_u32(&mut GA_u32, (k + 2) % 3, 4294967295_u32);
+        SG_u32.w[k % 3] = 3689922413_u32;
+        SG_u32.z = SG_u32.z - 1_i64;
+        sl_u32(&mut SG_u32.w, (k + 1) % 3, 2049390878_u32);
+        SG_u32.bump((k + 2) % 3, 408859343_u32);
+        GP_u32[k % 2].w[1] = 0_u32;
+        GP_u32[1].a = 7_u8;
+        let keep = GA_u32;
+        let fresh: [u32; 3] = [4294967295_u32, 4077199330_u32, 2436667795_u32];
+        GA_u32 = fresh;
+        println!("{} {} {} {} {} {} {} {} {} {} {} {} {} {} {}", GA_u32[0], GA_u32[1], GA_u32[2], SG_u32.a, SG_u32.w[0], SG_u32.w[1], SG_u32.w[2], SG_u32.z, GP_u32[0].a, GP_u32[1].a, GP_u32[0].w[1], GP_u32[1].w[1], keep[0], keep[1], keep[2]);
+    }
+}
+struct G_i32 { a: u8, w: [i32; 3], z: i64 }
+impl G_i32 { fn bump(&mut self, i: u64, v: i32) { self.w[i] = v; self.a = self.a + 1_u8; } }
+static mut GA_i32: [i32; 3] = [676461064_i32, (-964070471_i32), (-2147483648_i32)];
+static mut SG_i32: G_i32 = G_i32 { z: -3_i64, w: [2147483647_i32, (-1590697780_i32), 1063737981_i32], a: 5_u8 };
+static mut GP_i32: [G_i32; 2] = [G_i32 { a: 0_u8, w: [0_i32; 3], z: 0_i64 }; 2];
+fn put_i32(p: &mut [i32; 3], i: u64, v: i32) { p[i] = v; }
+fn sl_i32(p: &mut [i32], i: u64, v: i32) { p[i] = v; }
+fn sec_i32(k: u64) ~ Console {
+    unsafe {
+        println!("{} {} {} {} {} {} {} {}", GA_i32[0], GA_i32[1], GA_i32[2], SG_i32.a, SG_i32.w[0], SG_i32.w[1], SG_i32.w[2], SG_i32.z);
+        GA_i32[k % 3] = (-576793554_i32);
+        GA_i32[(k + 1) % 3] ^= (-2147483648_i32);
+        put_i32(&mut GA_i32, (k + 2) % 3, 2147483647_i32);
+        SG_i32.w[k % 3] = (-1203420863_i32);
+        SG_i32.z = SG_i32.z - 1_i64;
+        sl_i32(&mut SG_i32.w, (k + 1) % 3, 1451014898_i32);
+        SG_i32.bump((k + 2) % 3, (-189516637_i32));
+        GP_i32[k % 2].w[1] = (-2147483648_i32);
+        GP_i32[1].a = 7_u8;
+        let keep = GA_i32;
+        let fresh: [i32; 3] = [2147483647_i32, (-816143946_i32), 1838291815_i32];
+        GA_i32 = fresh;
+        println!("{} {} {} {} {} {} {} {} {} {} {} {} {} {} {}", GA_i32[0], GA_i32[1], GA_i32[2], SG_i32.a, SG_i32.w[0], SG_i32.w[1], SG_i32.w[2], SG_i32.z, GP_i32[0].a, GP_i32[1].a, GP_i32[0].w[1], GP_i32[1].w[1], keep[0], keep[1], keep[2]);
+    }
+}
+struct G_u64 { a: u8, w: [u64; 3], z: i64 }
+impl G_u64 { fn bump(&mut self, i: u64, v: u64) { self.w[i] = v; self.a = self.a + 1_u8; } }
+static mut GA_u64: [u64; 3] = [326495599580_u64, 329150035341_u64, 0_u64];
+static mut SG_u64: G_u64 = G_u64 { z: -3_i64, w: [18446744073709551615_u64, 337113342624_u64, 339767778385_u64], a: 5_u8 };
+static mut GP_u64: [G_u64; 2] = [G_u64 { a: 0_u8, w: [0_u64; 3], z: 0_i64 }; 2];
+fn put_u64(p: &mut [u64; 3], i: u64, v: u64) { p[i] = v; }
+fn sl_u64(p: &mut [u64], i: u64, v: u64) { p[i] = v; }
+fn sec_u64(k: u64) ~ Console {
+    unsafe {
+        println!("{} {} {} {} {} {} {} {}", GA_u64[0], GA_u64[1], GA_u64[2], SG_u64.a, SG_u64.w[0], SG_u64.w[1], SG_u64.w[2], SG_u64.z);
+        GA_u64[k % 3] = 342422214146_u64;
+        GA_u64[(k + 1) % 3] ^= 0_u64;
+        put_u64(&mut GA_u64, (k + 2) % 3, 18446744073709551615_u64);
+        SG_u64.w[k % 3] = 350385521429_u64;
+        SG_u64.z = SG_u64.z - 1_i64;
+        sl_u64(&mut SG_u64.w, (k + 1) % 3, 353039957190_u64);
+        SG_u64.bump((k + 2) % 3, 355694392951_u64);
+        GP_u64[k % 2].w[1] = 0_u64;
+        GP_u64[1].a = 7_u8;
+        let keep = GA_u64;
+        let fresh: [u64; 3] = [18446744073709551615_u64, 363657700234_u64, 366312135995_u64];
+        GA_u64 = fresh;
+        println!("{} {} {} {} {} {} {} {} {} {} {} {} {} {} {}", GA_u64[0], GA_u64[1], GA_u64[2], SG_u64.a, SG_u64.w[0], SG_u64.w[1], SG_u64.w[2], SG_u64.z, GP_u64[0].a, GP_u64[1].a, GP_u64[0].w[1], GP_u64[1].w[1], keep[0], keep[1], keep[2]);
+    }
+}
+struct G_i64 { a: u8, w: [i64; 3], z: i64 }
+impl G_i64 { fn bump(&mut self, i: u64, v: i64) { self.w[i] = v; self.a = self.a + 1_u8; } }
+static mut GA_i64: [i64; 3] = [(-9223371657270461008_i64), (-9223371654616025247_i64), (-9223372036854775808_i64)];
+static mut SG_i64: G_i64 = G_i64 { z: -3_i64, w: [9223372036854775807_i64, (-9223371646652717964_i64), (-9223371643998282203_i64)], a: 5_u8 };
+static mut GP_i64: [G_i64; 2] = [G_i64 { a: 0_u8, w: [0_i64; 3], z: 0_i64 }; 2];
+fn put_i64(p: &mut [i64; 3], i: u64, v: i64) { p[i] = v; }
+fn sl_i64(p: &mut [i64], i: u64, v: i64) { p[i] = v; }
+fn sec_i64(k: u64) ~ Console {
+    unsafe {
+        println!("{} {} {} {} {} {} {} {}", GA_i64[0], GA_i64[1], GA_i64[2], SG_i64.a, SG_i64.w[0], SG_i64.w[1], SG_i64.w[2], SG_i64.z);
+        GA_i64[k % 3] = (-9223371641343846442_i64);
+        GA_i64[(k + 1) % 3] ^= (-9223372036854775808_i64);
+        put_i64(&mut GA_i64, (k + 2) % 3, 9223372036854775807_i64);
+        SG_i64.w[k % 3] = (-9223371633380539159_i64);
+        SG_i64.z = SG_i64.z - 1_i64;
+        sl_i64(&mut SG_i64.w, (k + 1) % 3, (-9223371630726103398_i64));
+        SG_i64.bump((k + 2) % 3, (-9223371628071667637_i64));
+        GP_i64[k % 2].w[1] = (-9223372036854775808_i64);
+        GP_i64[1].a = 7_u8;
+        let keep = GA_i64;
+        let fresh: [i64; 3] = [9223372036854775807_i64, (-9223371620108360354_i64), (-9223371617453924593_i64)];
+        GA_i64 = fresh;
+        println!("{} {} {} {} {} {} {} {} {} {} {} {} {} {} {}", GA_i64[0], GA_i64[1], GA_i64[2], SG_i64.a, SG_i64.w[0], SG_i64.w[1], SG_i64.w[2], SG_i64.z, GP_i64[0].a, GP_i64[1].a, GP_i64[0].w[1], GP_i64[1].w[1], keep[0], keep[1], keep[2]);
+    }
+}
+fn run(k: u64) ~ Console {
+    sec_u8(k);
+    sec_i8(k);
+    sec_u16(k);
+    sec_i16(k);
+    sec_u32(k);
+    sec_i32(k);
+    sec_u64(k);
+    sec_i64(k);
+    unsafe {
+        let mut i = 0_u64;
+        while i < 10_u64 { CNT = CNT + 1_u64; i = i + 1_u64; }
+        println!("{} {}", CNT, TAB[k % 4]);
+        if k == 2_u64 { GA_u8[k + 1] = 1_u8; }
+        if k == 3_u64 { SG_i32.w[k] = 1_i32; }
+        if k == 4_u64 { GP_u64[k].z = 1_i64; }
+        if k == 5_u64 { println!("{}", GA_i16[k]); }
+        if k == 6_u64 { println!("{}", TAB[k]); }
+    }
+}
+
+fn main() ~ Console + Process + Environment {
+    run(args_get(1).parse_int() as u64);
+}

@@ -1,0 +1,4977 @@
+{
+  "schema": "buildlang.mir/v1",
+  "module": {
+    "name": "main",
+    "functions": [
+      {
+        "name": "fill8",
+        "sig": {
+          "params": [
+            {
+              "Int": [
+                "I64",
+                false
+              ]
+            }
+          ],
+          "ret": {
+            "Vec": {
+              "Int": [
+                "I8",
+                false
+              ]
+            }
+          },
+          "is_variadic": false,
+          "calling_conv": "Build"
+        },
+        "blocks": null,
+        "locals": [],
+        "is_public": false,
+        "linkage": "External",
+        "shader_stage": null,
+        "bindings": []
+      },
+      {
+        "name": "sum8",
+        "sig": {
+          "params": [
+            {
+              "Ptr": {
+                "Vec": {
+                  "Int": [
+                    "I8",
+                    false
+                  ]
+                }
+              }
+            }
+          ],
+          "ret": {
+            "Int": [
+              "I64",
+              false
+            ]
+          },
+          "is_variadic": false,
+          "calling_conv": "Build"
+        },
+        "blocks": null,
+        "locals": [],
+        "is_public": false,
+        "linkage": "External",
+        "shader_stage": null,
+        "bindings": []
+      },
+      {
+        "name": "flip",
+        "sig": {
+          "params": [
+            {
+              "Ptr": {
+                "Vec": {
+                  "Int": [
+                    "I8",
+                    false
+                  ]
+                }
+              }
+            },
+            {
+              "Int": [
+                "I64",
+                false
+              ]
+            }
+          ],
+          "ret": "Void",
+          "is_variadic": false,
+          "calling_conv": "Build"
+        },
+        "blocks": null,
+        "locals": [],
+        "is_public": false,
+        "linkage": "External",
+        "shader_stage": null,
+        "bindings": []
+      },
+      {
+        "name": "squares",
+        "sig": {
+          "params": [
+            {
+              "Int": [
+                "I64",
+                false
+              ]
+            }
+          ],
+          "ret": {
+            "Vec": {
+              "Int": [
+                "I64",
+                false
+              ]
+            }
+          },
+          "is_variadic": false,
+          "calling_conv": "Build"
+        },
+        "blocks": null,
+        "locals": [],
+        "is_public": false,
+        "linkage": "External",
+        "shader_stage": null,
+        "bindings": []
+      },
+      {
+        "name": "xor_all",
+        "sig": {
+          "params": [
+            {
+              "Ptr": {
+                "Vec": {
+                  "Int": [
+                    "I64",
+                    false
+                  ]
+                }
+              }
+            }
+          ],
+          "ret": {
+            "Int": [
+              "I64",
+              false
+            ]
+          },
+          "is_variadic": false,
+          "calling_conv": "Build"
+        },
+        "blocks": null,
+        "locals": [],
+        "is_public": false,
+        "linkage": "External",
+        "shader_stage": null,
+        "bindings": []
+      },
+      {
+        "name": "bytes_sum",
+        "sig": {
+          "params": [
+            {
+              "Ptr": {
+                "Slice": {
+                  "Int": [
+                    "I8",
+                    false
+                  ]
+                }
+              }
+            }
+          ],
+          "ret": {
+            "Int": [
+              "I64",
+              false
+            ]
+          },
+          "is_variadic": false,
+          "calling_conv": "Build"
+        },
+        "blocks": null,
+        "locals": [],
+        "is_public": false,
+        "linkage": "External",
+        "shader_stage": null,
+        "bindings": []
+      },
+      {
+        "name": "formats",
+        "sig": {
+          "params": [
+            {
+              "Int": [
+                "I64",
+                false
+              ]
+            }
+          ],
+          "ret": "Void",
+          "is_variadic": false,
+          "calling_conv": "Build"
+        },
+        "blocks": null,
+        "locals": [],
+        "is_public": false,
+        "linkage": "External",
+        "shader_stage": null,
+        "bindings": []
+      },
+      {
+        "name": "run",
+        "sig": {
+          "params": [
+            {
+              "Int": [
+                "I64",
+                false
+              ]
+            }
+          ],
+          "ret": "Void",
+          "is_variadic": false,
+          "calling_conv": "Build"
+        },
+        "blocks": null,
+        "locals": [],
+        "is_public": false,
+        "linkage": "External",
+        "shader_stage": null,
+        "bindings": []
+      },
+      {
+        "name": "fill8",
+        "sig": {
+          "params": [
+            {
+              "Int": [
+                "I64",
+                false
+              ]
+            }
+          ],
+          "ret": {
+            "Vec": {
+              "Int": [
+                "I8",
+                false
+              ]
+            }
+          },
+          "is_variadic": false,
+          "calling_conv": "Build"
+        },
+        "blocks": [
+          {
+            "id": 0,
+            "label": null,
+            "stmts": [],
+            "terminator": {
+              "Call": {
+                "func": {
+                  "Global": "Vec_new"
+                },
+                "args": [],
+                "dest": 2,
+                "target": 1,
+                "unwind": null
+              }
+            }
+          },
+          {
+            "id": 1,
+            "label": null,
+            "stmts": [
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 3,
+                    "value": {
+                      "Use": {
+                        "Local": 2
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 4,
+                    "value": {
+                      "Use": {
+                        "Const": {
+                          "Uint": [
+                            0,
+                            {
+                              "Int": [
+                                "I64",
+                                false
+                              ]
+                            }
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            ],
+            "terminator": {
+              "Goto": 2
+            }
+          },
+          {
+            "id": 2,
+            "label": null,
+            "stmts": [
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 5,
+                    "value": {
+                      "BinaryOp": {
+                        "op": "Lt",
+                        "left": {
+                          "Local": 4
+                        },
+                        "right": {
+                          "Local": 0
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            ],
+            "terminator": {
+              "If": {
+                "cond": {
+                  "Local": 5
+                },
+                "then_block": 3,
+                "else_block": 4
+              }
+            }
+          },
+          {
+            "id": 3,
+            "label": null,
+            "stmts": [
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 6,
+                    "value": {
+                      "BinaryOp": {
+                        "op": "Mul",
+                        "left": {
+                          "Local": 4
+                        },
+                        "right": {
+                          "Const": {
+                            "Uint": [
+                              7,
+                              {
+                                "Int": [
+                                  "I64",
+                                  false
+                                ]
+                              }
+                            ]
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 7,
+                    "value": {
+                      "BinaryOp": {
+                        "op": "Rem",
+                        "left": {
+                          "Local": 6
+                        },
+                        "right": {
+                          "Const": {
+                            "Uint": [
+                              256,
+                              {
+                                "Int": [
+                                  "I64",
+                                  false
+                                ]
+                              }
+                            ]
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 8,
+                    "value": {
+                      "Cast": {
+                        "kind": "IntToInt",
+                        "value": {
+                          "Local": 7
+                        },
+                        "ty": {
+                          "Int": [
+                            "I8",
+                            false
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            ],
+            "terminator": {
+              "Call": {
+                "func": {
+                  "Function": "build_hvec_push_u8"
+                },
+                "args": [
+                  {
+                    "Local": 3
+                  },
+                  {
+                    "Local": 8
+                  }
+                ],
+                "dest": 9,
+                "target": 5,
+                "unwind": null
+              }
+            }
+          },
+          {
+            "id": 4,
+            "label": null,
+            "stmts": [],
+            "terminator": {
+              "Return": {
+                "Local": 3
+              }
+            }
+          },
+          {
+            "id": 5,
+            "label": null,
+            "stmts": [
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 10,
+                    "value": {
+                      "BinaryOp": {
+                        "op": "Add",
+                        "left": {
+                          "Local": 4
+                        },
+                        "right": {
+                          "Const": {
+                            "Uint": [
+                              1,
+                              {
+                                "Int": [
+                                  "I64",
+                                  false
+                                ]
+                              }
+                            ]
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 4,
+                    "value": {
+                      "Use": {
+                        "Local": 10
+                      }
+                    }
+                  }
+                }
+              }
+            ],
+            "terminator": {
+              "Goto": 2
+            }
+          }
+        ],
+        "locals": [
+          {
+            "id": 0,
+            "name": "n",
+            "ty": {
+              "Int": [
+                "I64",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": true,
+            "annotations": []
+          },
+          {
+            "id": 1,
+            "name": "_ret",
+            "ty": {
+              "Vec": {
+                "Int": [
+                  "I8",
+                  false
+                ]
+              }
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 2,
+            "name": null,
+            "ty": {
+              "Vec": {
+                "Int": [
+                  "I8",
+                  false
+                ]
+              }
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 3,
+            "name": "v",
+            "ty": {
+              "Vec": {
+                "Int": [
+                  "I8",
+                  false
+                ]
+              }
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 4,
+            "name": "i",
+            "ty": {
+              "Int": [
+                "I64",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 5,
+            "name": null,
+            "ty": "Bool",
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 6,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I64",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 7,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I64",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 8,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I8",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 9,
+            "name": null,
+            "ty": "Void",
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 10,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I64",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          }
+        ],
+        "is_public": false,
+        "linkage": "Internal",
+        "shader_stage": null,
+        "bindings": []
+      },
+      {
+        "name": "sum8",
+        "sig": {
+          "params": [
+            {
+              "Ptr": {
+                "Vec": {
+                  "Int": [
+                    "I8",
+                    false
+                  ]
+                }
+              }
+            }
+          ],
+          "ret": {
+            "Int": [
+              "I64",
+              false
+            ]
+          },
+          "is_variadic": false,
+          "calling_conv": "Build"
+        },
+        "blocks": [
+          {
+            "id": 0,
+            "label": null,
+            "stmts": [
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 2,
+                    "value": {
+                      "Use": {
+                        "Const": {
+                          "Uint": [
+                            0,
+                            {
+                              "Int": [
+                                "I64",
+                                false
+                              ]
+                            }
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 3,
+                    "value": {
+                      "Use": {
+                        "Const": {
+                          "Uint": [
+                            0,
+                            {
+                              "Int": [
+                                "ISize",
+                                false
+                              ]
+                            }
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            ],
+            "terminator": {
+              "Goto": 1
+            }
+          },
+          {
+            "id": 1,
+            "label": null,
+            "stmts": [
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 4,
+                    "value": {
+                      "Deref": {
+                        "ptr": {
+                          "Local": 0
+                        },
+                        "pointee_ty": {
+                          "Vec": {
+                            "Int": [
+                              "I8",
+                              false
+                            ]
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            ],
+            "terminator": {
+              "Call": {
+                "func": {
+                  "Function": "build_hvec_len"
+                },
+                "args": [
+                  {
+                    "Local": 4
+                  }
+                ],
+                "dest": 5,
+                "target": 4,
+                "unwind": null
+              }
+            }
+          },
+          {
+            "id": 2,
+            "label": null,
+            "stmts": [
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 7,
+                    "value": {
+                      "Deref": {
+                        "ptr": {
+                          "Local": 0
+                        },
+                        "pointee_ty": {
+                          "Vec": {
+                            "Int": [
+                              "I8",
+                              false
+                            ]
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 8,
+                    "value": {
+                      "IndexAccess": {
+                        "base": {
+                          "Local": 7
+                        },
+                        "index": {
+                          "Local": 3
+                        },
+                        "elem_ty": {
+                          "Int": [
+                            "I8",
+                            false
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 9,
+                    "value": {
+                      "Cast": {
+                        "kind": "IntToInt",
+                        "value": {
+                          "Local": 8
+                        },
+                        "ty": {
+                          "Int": [
+                            "I64",
+                            false
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 10,
+                    "value": {
+                      "BinaryOp": {
+                        "op": "Add",
+                        "left": {
+                          "Local": 2
+                        },
+                        "right": {
+                          "Local": 9
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 2,
+                    "value": {
+                      "Use": {
+                        "Local": 10
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 11,
+                    "value": {
+                      "BinaryOp": {
+                        "op": "Add",
+                        "left": {
+                          "Local": 3
+                        },
+                        "right": {
+                          "Const": {
+                            "Uint": [
+                              1,
+                              {
+                                "Int": [
+                                  "ISize",
+                                  false
+                                ]
+                              }
+                            ]
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 3,
+                    "value": {
+                      "Use": {
+                        "Local": 11
+                      }
+                    }
+                  }
+                }
+              }
+            ],
+            "terminator": {
+              "Goto": 1
+            }
+          },
+          {
+            "id": 3,
+            "label": null,
+            "stmts": [],
+            "terminator": {
+              "Return": {
+                "Local": 2
+              }
+            }
+          },
+          {
+            "id": 4,
+            "label": null,
+            "stmts": [
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 6,
+                    "value": {
+                      "BinaryOp": {
+                        "op": "Lt",
+                        "left": {
+                          "Local": 3
+                        },
+                        "right": {
+                          "Local": 5
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            ],
+            "terminator": {
+              "If": {
+                "cond": {
+                  "Local": 6
+                },
+                "then_block": 2,
+                "else_block": 3
+              }
+            }
+          }
+        ],
+        "locals": [
+          {
+            "id": 0,
+            "name": "v",
+            "ty": {
+              "Ptr": {
+                "Vec": {
+                  "Int": [
+                    "I8",
+                    false
+                  ]
+                }
+              }
+            },
+            "is_mut": false,
+            "is_param": true,
+            "annotations": []
+          },
+          {
+            "id": 1,
+            "name": "_ret",
+            "ty": {
+              "Int": [
+                "I64",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 2,
+            "name": "t",
+            "ty": {
+              "Int": [
+                "I64",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 3,
+            "name": "i",
+            "ty": {
+              "Int": [
+                "ISize",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 4,
+            "name": null,
+            "ty": {
+              "Vec": {
+                "Int": [
+                  "I8",
+                  false
+                ]
+              }
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 5,
+            "name": null,
+            "ty": {
+              "Int": [
+                "ISize",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 6,
+            "name": null,
+            "ty": "Bool",
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 7,
+            "name": null,
+            "ty": {
+              "Vec": {
+                "Int": [
+                  "I8",
+                  false
+                ]
+              }
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 8,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I8",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 9,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I64",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 10,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I64",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 11,
+            "name": null,
+            "ty": {
+              "Int": [
+                "ISize",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          }
+        ],
+        "is_public": false,
+        "linkage": "Internal",
+        "shader_stage": null,
+        "bindings": []
+      },
+      {
+        "name": "flip",
+        "sig": {
+          "params": [
+            {
+              "Ptr": {
+                "Vec": {
+                  "Int": [
+                    "I8",
+                    false
+                  ]
+                }
+              }
+            },
+            {
+              "Int": [
+                "I64",
+                false
+              ]
+            }
+          ],
+          "ret": "Void",
+          "is_variadic": false,
+          "calling_conv": "Build"
+        },
+        "blocks": [
+          {
+            "id": 0,
+            "label": null,
+            "stmts": [
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 2,
+                    "value": {
+                      "Cast": {
+                        "kind": "IntToInt",
+                        "value": {
+                          "Local": 1
+                        },
+                        "ty": {
+                          "Int": [
+                            "ISize",
+                            false
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 3,
+                    "value": {
+                      "Deref": {
+                        "ptr": {
+                          "Local": 0
+                        },
+                        "pointee_ty": {
+                          "Vec": {
+                            "Int": [
+                              "I8",
+                              false
+                            ]
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 4,
+                    "value": {
+                      "IndexAccess": {
+                        "base": {
+                          "Local": 3
+                        },
+                        "index": {
+                          "Local": 2
+                        },
+                        "elem_ty": {
+                          "Int": [
+                            "I8",
+                            false
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 5,
+                    "value": {
+                      "BinaryOp": {
+                        "op": "Sub",
+                        "left": {
+                          "Const": {
+                            "Uint": [
+                              255,
+                              {
+                                "Int": [
+                                  "I8",
+                                  false
+                                ]
+                              }
+                            ]
+                          }
+                        },
+                        "right": {
+                          "Local": 4
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 6,
+                    "value": {
+                      "Deref": {
+                        "ptr": {
+                          "Local": 0
+                        },
+                        "pointee_ty": {
+                          "Vec": {
+                            "Int": [
+                              "I8",
+                              false
+                            ]
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 7,
+                    "value": {
+                      "Cast": {
+                        "kind": "IntToInt",
+                        "value": {
+                          "Local": 1
+                        },
+                        "ty": {
+                          "Int": [
+                            "ISize",
+                            false
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            ],
+            "terminator": {
+              "Call": {
+                "func": {
+                  "Function": "build_hvec_set_u8"
+                },
+                "args": [
+                  {
+                    "Local": 6
+                  },
+                  {
+                    "Local": 7
+                  },
+                  {
+                    "Local": 5
+                  }
+                ],
+                "dest": null,
+                "target": 1,
+                "unwind": null
+              }
+            }
+          },
+          {
+            "id": 1,
+            "label": null,
+            "stmts": [],
+            "terminator": {
+              "Return": null
+            }
+          }
+        ],
+        "locals": [
+          {
+            "id": 0,
+            "name": "v",
+            "ty": {
+              "Ptr": {
+                "Vec": {
+                  "Int": [
+                    "I8",
+                    false
+                  ]
+                }
+              }
+            },
+            "is_mut": true,
+            "is_param": true,
+            "annotations": []
+          },
+          {
+            "id": 1,
+            "name": "at",
+            "ty": {
+              "Int": [
+                "I64",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": true,
+            "annotations": []
+          },
+          {
+            "id": 2,
+            "name": null,
+            "ty": {
+              "Int": [
+                "ISize",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 3,
+            "name": null,
+            "ty": {
+              "Vec": {
+                "Int": [
+                  "I8",
+                  false
+                ]
+              }
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 4,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I8",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 5,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I8",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 6,
+            "name": null,
+            "ty": {
+              "Vec": {
+                "Int": [
+                  "I8",
+                  false
+                ]
+              }
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 7,
+            "name": null,
+            "ty": {
+              "Int": [
+                "ISize",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          }
+        ],
+        "is_public": false,
+        "linkage": "Internal",
+        "shader_stage": null,
+        "bindings": []
+      },
+      {
+        "name": "squares",
+        "sig": {
+          "params": [
+            {
+              "Int": [
+                "I64",
+                false
+              ]
+            }
+          ],
+          "ret": {
+            "Vec": {
+              "Int": [
+                "I64",
+                false
+              ]
+            }
+          },
+          "is_variadic": false,
+          "calling_conv": "Build"
+        },
+        "blocks": [
+          {
+            "id": 0,
+            "label": null,
+            "stmts": [],
+            "terminator": {
+              "Call": {
+                "func": {
+                  "Global": "Vec_new"
+                },
+                "args": [],
+                "dest": 2,
+                "target": 1,
+                "unwind": null
+              }
+            }
+          },
+          {
+            "id": 1,
+            "label": null,
+            "stmts": [
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 3,
+                    "value": {
+                      "Use": {
+                        "Local": 2
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 4,
+                    "value": {
+                      "Use": {
+                        "Const": {
+                          "Uint": [
+                            0,
+                            {
+                              "Int": [
+                                "I64",
+                                false
+                              ]
+                            }
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            ],
+            "terminator": {
+              "Goto": 2
+            }
+          },
+          {
+            "id": 2,
+            "label": null,
+            "stmts": [
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 5,
+                    "value": {
+                      "BinaryOp": {
+                        "op": "Lt",
+                        "left": {
+                          "Local": 4
+                        },
+                        "right": {
+                          "Local": 0
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            ],
+            "terminator": {
+              "If": {
+                "cond": {
+                  "Local": 5
+                },
+                "then_block": 3,
+                "else_block": 4
+              }
+            }
+          },
+          {
+            "id": 3,
+            "label": null,
+            "stmts": [
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 6,
+                    "value": {
+                      "BinaryOp": {
+                        "op": "MulWrapping",
+                        "left": {
+                          "Local": 4
+                        },
+                        "right": {
+                          "Const": {
+                            "Uint": [
+                              11400714819323198485,
+                              {
+                                "Int": [
+                                  "I64",
+                                  false
+                                ]
+                              }
+                            ]
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            ],
+            "terminator": {
+              "Call": {
+                "func": {
+                  "Function": "build_hvec_push_u64"
+                },
+                "args": [
+                  {
+                    "Local": 3
+                  },
+                  {
+                    "Local": 6
+                  }
+                ],
+                "dest": 7,
+                "target": 5,
+                "unwind": null
+              }
+            }
+          },
+          {
+            "id": 4,
+            "label": null,
+            "stmts": [],
+            "terminator": {
+              "Return": {
+                "Local": 3
+              }
+            }
+          },
+          {
+            "id": 5,
+            "label": null,
+            "stmts": [
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 8,
+                    "value": {
+                      "BinaryOp": {
+                        "op": "Add",
+                        "left": {
+                          "Local": 4
+                        },
+                        "right": {
+                          "Const": {
+                            "Uint": [
+                              1,
+                              {
+                                "Int": [
+                                  "I64",
+                                  false
+                                ]
+                              }
+                            ]
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 4,
+                    "value": {
+                      "Use": {
+                        "Local": 8
+                      }
+                    }
+                  }
+                }
+              }
+            ],
+            "terminator": {
+              "Goto": 2
+            }
+          }
+        ],
+        "locals": [
+          {
+            "id": 0,
+            "name": "n",
+            "ty": {
+              "Int": [
+                "I64",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": true,
+            "annotations": []
+          },
+          {
+            "id": 1,
+            "name": "_ret",
+            "ty": {
+              "Vec": {
+                "Int": [
+                  "I64",
+                  false
+                ]
+              }
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 2,
+            "name": null,
+            "ty": {
+              "Vec": {
+                "Int": [
+                  "I64",
+                  false
+                ]
+              }
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 3,
+            "name": "v",
+            "ty": {
+              "Vec": {
+                "Int": [
+                  "I64",
+                  false
+                ]
+              }
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 4,
+            "name": "i",
+            "ty": {
+              "Int": [
+                "I64",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 5,
+            "name": null,
+            "ty": "Bool",
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 6,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I64",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 7,
+            "name": null,
+            "ty": "Void",
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 8,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I64",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          }
+        ],
+        "is_public": false,
+        "linkage": "Internal",
+        "shader_stage": null,
+        "bindings": []
+      },
+      {
+        "name": "xor_all",
+        "sig": {
+          "params": [
+            {
+              "Ptr": {
+                "Vec": {
+                  "Int": [
+                    "I64",
+                    false
+                  ]
+                }
+              }
+            }
+          ],
+          "ret": {
+            "Int": [
+              "I64",
+              false
+            ]
+          },
+          "is_variadic": false,
+          "calling_conv": "Build"
+        },
+        "blocks": [
+          {
+            "id": 0,
+            "label": null,
+            "stmts": [
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 2,
+                    "value": {
+                      "Use": {
+                        "Const": {
+                          "Uint": [
+                            0,
+                            {
+                              "Int": [
+                                "I64",
+                                false
+                              ]
+                            }
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 3,
+                    "value": {
+                      "Use": {
+                        "Const": {
+                          "Uint": [
+                            0,
+                            {
+                              "Int": [
+                                "ISize",
+                                false
+                              ]
+                            }
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            ],
+            "terminator": {
+              "Goto": 1
+            }
+          },
+          {
+            "id": 1,
+            "label": null,
+            "stmts": [
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 4,
+                    "value": {
+                      "Deref": {
+                        "ptr": {
+                          "Local": 0
+                        },
+                        "pointee_ty": {
+                          "Vec": {
+                            "Int": [
+                              "I64",
+                              false
+                            ]
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            ],
+            "terminator": {
+              "Call": {
+                "func": {
+                  "Function": "build_hvec_len"
+                },
+                "args": [
+                  {
+                    "Local": 4
+                  }
+                ],
+                "dest": 5,
+                "target": 4,
+                "unwind": null
+              }
+            }
+          },
+          {
+            "id": 2,
+            "label": null,
+            "stmts": [
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 7,
+                    "value": {
+                      "Deref": {
+                        "ptr": {
+                          "Local": 0
+                        },
+                        "pointee_ty": {
+                          "Vec": {
+                            "Int": [
+                              "I64",
+                              false
+                            ]
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 8,
+                    "value": {
+                      "IndexAccess": {
+                        "base": {
+                          "Local": 7
+                        },
+                        "index": {
+                          "Local": 3
+                        },
+                        "elem_ty": {
+                          "Int": [
+                            "I64",
+                            false
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 9,
+                    "value": {
+                      "BinaryOp": {
+                        "op": "BitXor",
+                        "left": {
+                          "Local": 2
+                        },
+                        "right": {
+                          "Local": 8
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 2,
+                    "value": {
+                      "Use": {
+                        "Local": 9
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 10,
+                    "value": {
+                      "BinaryOp": {
+                        "op": "Add",
+                        "left": {
+                          "Local": 3
+                        },
+                        "right": {
+                          "Const": {
+                            "Uint": [
+                              1,
+                              {
+                                "Int": [
+                                  "ISize",
+                                  false
+                                ]
+                              }
+                            ]
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 3,
+                    "value": {
+                      "Use": {
+                        "Local": 10
+                      }
+                    }
+                  }
+                }
+              }
+            ],
+            "terminator": {
+              "Goto": 1
+            }
+          },
+          {
+            "id": 3,
+            "label": null,
+            "stmts": [],
+            "terminator": {
+              "Return": {
+                "Local": 2
+              }
+            }
+          },
+          {
+            "id": 4,
+            "label": null,
+            "stmts": [
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 6,
+                    "value": {
+                      "BinaryOp": {
+                        "op": "Lt",
+                        "left": {
+                          "Local": 3
+                        },
+                        "right": {
+                          "Local": 5
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            ],
+            "terminator": {
+              "If": {
+                "cond": {
+                  "Local": 6
+                },
+                "then_block": 2,
+                "else_block": 3
+              }
+            }
+          }
+        ],
+        "locals": [
+          {
+            "id": 0,
+            "name": "v",
+            "ty": {
+              "Ptr": {
+                "Vec": {
+                  "Int": [
+                    "I64",
+                    false
+                  ]
+                }
+              }
+            },
+            "is_mut": false,
+            "is_param": true,
+            "annotations": []
+          },
+          {
+            "id": 1,
+            "name": "_ret",
+            "ty": {
+              "Int": [
+                "I64",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 2,
+            "name": "t",
+            "ty": {
+              "Int": [
+                "I64",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 3,
+            "name": "i",
+            "ty": {
+              "Int": [
+                "ISize",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 4,
+            "name": null,
+            "ty": {
+              "Vec": {
+                "Int": [
+                  "I64",
+                  false
+                ]
+              }
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 5,
+            "name": null,
+            "ty": {
+              "Int": [
+                "ISize",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 6,
+            "name": null,
+            "ty": "Bool",
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 7,
+            "name": null,
+            "ty": {
+              "Vec": {
+                "Int": [
+                  "I64",
+                  false
+                ]
+              }
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 8,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I64",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 9,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I64",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 10,
+            "name": null,
+            "ty": {
+              "Int": [
+                "ISize",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          }
+        ],
+        "is_public": false,
+        "linkage": "Internal",
+        "shader_stage": null,
+        "bindings": []
+      },
+      {
+        "name": "bytes_sum",
+        "sig": {
+          "params": [
+            {
+              "Ptr": {
+                "Slice": {
+                  "Int": [
+                    "I8",
+                    false
+                  ]
+                }
+              }
+            }
+          ],
+          "ret": {
+            "Int": [
+              "I64",
+              false
+            ]
+          },
+          "is_variadic": false,
+          "calling_conv": "Build"
+        },
+        "blocks": [
+          {
+            "id": 0,
+            "label": null,
+            "stmts": [
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 2,
+                    "value": {
+                      "Use": {
+                        "Const": {
+                          "Uint": [
+                            0,
+                            {
+                              "Int": [
+                                "I64",
+                                false
+                              ]
+                            }
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 3,
+                    "value": {
+                      "Use": {
+                        "Const": {
+                          "Uint": [
+                            0,
+                            {
+                              "Int": [
+                                "ISize",
+                                false
+                              ]
+                            }
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            ],
+            "terminator": {
+              "Goto": 1
+            }
+          },
+          {
+            "id": 1,
+            "label": null,
+            "stmts": [
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 4,
+                    "value": {
+                      "FieldAccess": {
+                        "base": {
+                          "Local": 0
+                        },
+                        "field_name": "len",
+                        "field_ty": {
+                          "Int": [
+                            "ISize",
+                            false
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 5,
+                    "value": {
+                      "BinaryOp": {
+                        "op": "Lt",
+                        "left": {
+                          "Local": 3
+                        },
+                        "right": {
+                          "Local": 4
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            ],
+            "terminator": {
+              "If": {
+                "cond": {
+                  "Local": 5
+                },
+                "then_block": 2,
+                "else_block": 3
+              }
+            }
+          },
+          {
+            "id": 2,
+            "label": null,
+            "stmts": [
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 6,
+                    "value": {
+                      "BinaryOp": {
+                        "op": "Mul",
+                        "left": {
+                          "Local": 2
+                        },
+                        "right": {
+                          "Const": {
+                            "Uint": [
+                              3,
+                              {
+                                "Int": [
+                                  "I64",
+                                  false
+                                ]
+                              }
+                            ]
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 7,
+                    "value": {
+                      "IndexAccess": {
+                        "base": {
+                          "Local": 0
+                        },
+                        "index": {
+                          "Local": 3
+                        },
+                        "elem_ty": {
+                          "Int": [
+                            "I8",
+                            false
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 8,
+                    "value": {
+                      "Cast": {
+                        "kind": "IntToInt",
+                        "value": {
+                          "Local": 7
+                        },
+                        "ty": {
+                          "Int": [
+                            "I64",
+                            false
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 9,
+                    "value": {
+                      "BinaryOp": {
+                        "op": "Add",
+                        "left": {
+                          "Local": 6
+                        },
+                        "right": {
+                          "Local": 8
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 2,
+                    "value": {
+                      "Use": {
+                        "Local": 9
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 10,
+                    "value": {
+                      "BinaryOp": {
+                        "op": "Add",
+                        "left": {
+                          "Local": 3
+                        },
+                        "right": {
+                          "Const": {
+                            "Uint": [
+                              1,
+                              {
+                                "Int": [
+                                  "ISize",
+                                  false
+                                ]
+                              }
+                            ]
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 3,
+                    "value": {
+                      "Use": {
+                        "Local": 10
+                      }
+                    }
+                  }
+                }
+              }
+            ],
+            "terminator": {
+              "Goto": 1
+            }
+          },
+          {
+            "id": 3,
+            "label": null,
+            "stmts": [],
+            "terminator": {
+              "Return": {
+                "Local": 2
+              }
+            }
+          }
+        ],
+        "locals": [
+          {
+            "id": 0,
+            "name": "s",
+            "ty": {
+              "Ptr": {
+                "Slice": {
+                  "Int": [
+                    "I8",
+                    false
+                  ]
+                }
+              }
+            },
+            "is_mut": false,
+            "is_param": true,
+            "annotations": []
+          },
+          {
+            "id": 1,
+            "name": "_ret",
+            "ty": {
+              "Int": [
+                "I64",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 2,
+            "name": "t",
+            "ty": {
+              "Int": [
+                "I64",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 3,
+            "name": "i",
+            "ty": {
+              "Int": [
+                "ISize",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 4,
+            "name": null,
+            "ty": {
+              "Int": [
+                "ISize",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 5,
+            "name": null,
+            "ty": "Bool",
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 6,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I64",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 7,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I8",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 8,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I64",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 9,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I64",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 10,
+            "name": null,
+            "ty": {
+              "Int": [
+                "ISize",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          }
+        ],
+        "is_public": false,
+        "linkage": "Internal",
+        "shader_stage": null,
+        "bindings": []
+      },
+      {
+        "name": "formats",
+        "sig": {
+          "params": [
+            {
+              "Int": [
+                "I64",
+                false
+              ]
+            }
+          ],
+          "ret": "Void",
+          "is_variadic": false,
+          "calling_conv": "Build"
+        },
+        "blocks": [
+          {
+            "id": 0,
+            "label": null,
+            "stmts": [
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 1,
+                    "value": {
+                      "Use": {
+                        "Const": {
+                          "Int": [
+                            -1,
+                            {
+                              "Int": [
+                                "I8",
+                                true
+                              ]
+                            }
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 2,
+                    "value": {
+                      "Use": {
+                        "Const": {
+                          "Uint": [
+                            255,
+                            {
+                              "Int": [
+                                "I8",
+                                false
+                              ]
+                            }
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 3,
+                    "value": {
+                      "Use": {
+                        "Const": {
+                          "Int": [
+                            -32767,
+                            {
+                              "Int": [
+                                "I16",
+                                true
+                              ]
+                            }
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 4,
+                    "value": {
+                      "Use": {
+                        "Const": {
+                          "Uint": [
+                            3735928559,
+                            {
+                              "Int": [
+                                "I32",
+                                false
+                              ]
+                            }
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 5,
+                    "value": {
+                      "Use": {
+                        "Const": {
+                          "Int": [
+                            -9223372036854775807,
+                            {
+                              "Int": [
+                                "I64",
+                                true
+                              ]
+                            }
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 6,
+                    "value": {
+                      "Use": {
+                        "Const": {
+                          "Str": 0
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            ],
+            "terminator": {
+              "Call": {
+                "func": {
+                  "Function": "printf"
+                },
+                "args": [
+                  {
+                    "Local": 6
+                  },
+                  {
+                    "Local": 1
+                  },
+                  {
+                    "Local": 2
+                  },
+                  {
+                    "Local": 3
+                  },
+                  {
+                    "Local": 4
+                  },
+                  {
+                    "Local": 5
+                  },
+                  {
+                    "Local": 0
+                  }
+                ],
+                "dest": null,
+                "target": 1,
+                "unwind": null
+              }
+            }
+          },
+          {
+            "id": 1,
+            "label": null,
+            "stmts": [
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 7,
+                    "value": {
+                      "Use": {
+                        "Const": {
+                          "Str": 1
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            ],
+            "terminator": {
+              "Call": {
+                "func": {
+                  "Function": "printf"
+                },
+                "args": [
+                  {
+                    "Local": 7
+                  },
+                  {
+                    "Local": 2
+                  },
+                  {
+                    "Local": 4
+                  },
+                  {
+                    "Local": 4
+                  },
+                  {
+                    "Local": 0
+                  },
+                  {
+                    "Const": {
+                      "Uint": [
+                        0,
+                        {
+                          "Int": [
+                            "I32",
+                            false
+                          ]
+                        }
+                      ]
+                    }
+                  }
+                ],
+                "dest": null,
+                "target": 2,
+                "unwind": null
+              }
+            }
+          },
+          {
+            "id": 2,
+            "label": null,
+            "stmts": [
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 8,
+                    "value": {
+                      "Use": {
+                        "Const": {
+                          "Str": 2
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            ],
+            "terminator": {
+              "Call": {
+                "func": {
+                  "Function": "printf"
+                },
+                "args": [
+                  {
+                    "Local": 8
+                  },
+                  {
+                    "Const": {
+                      "Uint": [
+                        5,
+                        {
+                          "Int": [
+                            "I8",
+                            false
+                          ]
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "Const": {
+                      "Uint": [
+                        2748,
+                        {
+                          "Int": [
+                            "I16",
+                            false
+                          ]
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "Const": {
+                      "Uint": [
+                        18364758544493064720,
+                        {
+                          "Int": [
+                            "I64",
+                            false
+                          ]
+                        }
+                      ]
+                    }
+                  }
+                ],
+                "dest": null,
+                "target": 3,
+                "unwind": null
+              }
+            }
+          },
+          {
+            "id": 3,
+            "label": null,
+            "stmts": [
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 9,
+                    "value": {
+                      "BinaryOp": {
+                        "op": "Eq",
+                        "left": {
+                          "Local": 0
+                        },
+                        "right": {
+                          "Const": {
+                            "Uint": [
+                              0,
+                              {
+                                "Int": [
+                                  "I64",
+                                  false
+                                ]
+                              }
+                            ]
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 10,
+                    "value": {
+                      "BinaryOp": {
+                        "op": "Ne",
+                        "left": {
+                          "Local": 0
+                        },
+                        "right": {
+                          "Const": {
+                            "Uint": [
+                              0,
+                              {
+                                "Int": [
+                                  "I64",
+                                  false
+                                ]
+                              }
+                            ]
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 11,
+                    "value": {
+                      "Use": {
+                        "Const": {
+                          "Str": 3
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            ],
+            "terminator": {
+              "Call": {
+                "func": {
+                  "Function": "printf"
+                },
+                "args": [
+                  {
+                    "Local": 11
+                  },
+                  {
+                    "Local": 9
+                  },
+                  {
+                    "Local": 10
+                  }
+                ],
+                "dest": null,
+                "target": 4,
+                "unwind": null
+              }
+            }
+          },
+          {
+            "id": 4,
+            "label": null,
+            "stmts": [],
+            "terminator": {
+              "Return": null
+            }
+          }
+        ],
+        "locals": [
+          {
+            "id": 0,
+            "name": "k",
+            "ty": {
+              "Int": [
+                "I64",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": true,
+            "annotations": []
+          },
+          {
+            "id": 1,
+            "name": "a",
+            "ty": {
+              "Int": [
+                "I8",
+                true
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 2,
+            "name": "b",
+            "ty": {
+              "Int": [
+                "I8",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 3,
+            "name": "c",
+            "ty": {
+              "Int": [
+                "I16",
+                true
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 4,
+            "name": "d",
+            "ty": {
+              "Int": [
+                "I32",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 5,
+            "name": "e",
+            "ty": {
+              "Int": [
+                "I64",
+                true
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 6,
+            "name": null,
+            "ty": {
+              "Ptr": {
+                "Int": [
+                  "I8",
+                  true
+                ]
+              }
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 7,
+            "name": null,
+            "ty": {
+              "Ptr": {
+                "Int": [
+                  "I8",
+                  true
+                ]
+              }
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 8,
+            "name": null,
+            "ty": {
+              "Ptr": {
+                "Int": [
+                  "I8",
+                  true
+                ]
+              }
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 9,
+            "name": null,
+            "ty": "Bool",
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 10,
+            "name": null,
+            "ty": "Bool",
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 11,
+            "name": null,
+            "ty": {
+              "Ptr": {
+                "Int": [
+                  "I8",
+                  true
+                ]
+              }
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          }
+        ],
+        "is_public": false,
+        "linkage": "Internal",
+        "shader_stage": null,
+        "bindings": []
+      },
+      {
+        "name": "run",
+        "sig": {
+          "params": [
+            {
+              "Int": [
+                "I64",
+                false
+              ]
+            }
+          ],
+          "ret": "Void",
+          "is_variadic": false,
+          "calling_conv": "Build"
+        },
+        "blocks": [
+          {
+            "id": 0,
+            "label": null,
+            "stmts": [
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 1,
+                    "value": {
+                      "BinaryOp": {
+                        "op": "Mul",
+                        "left": {
+                          "Local": 0
+                        },
+                        "right": {
+                          "Const": {
+                            "Uint": [
+                              9,
+                              {
+                                "Int": [
+                                  "I64",
+                                  false
+                                ]
+                              }
+                            ]
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 2,
+                    "value": {
+                      "BinaryOp": {
+                        "op": "Add",
+                        "left": {
+                          "Local": 1
+                        },
+                        "right": {
+                          "Const": {
+                            "Uint": [
+                              3,
+                              {
+                                "Int": [
+                                  "I64",
+                                  false
+                                ]
+                              }
+                            ]
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            ],
+            "terminator": {
+              "Call": {
+                "func": {
+                  "Global": "fill8"
+                },
+                "args": [
+                  {
+                    "Local": 2
+                  }
+                ],
+                "dest": 3,
+                "target": 1,
+                "unwind": null
+              }
+            }
+          },
+          {
+            "id": 1,
+            "label": null,
+            "stmts": [
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 4,
+                    "value": {
+                      "Use": {
+                        "Local": 3
+                      }
+                    }
+                  }
+                }
+              }
+            ],
+            "terminator": {
+              "Call": {
+                "func": {
+                  "Function": "build_hvec_len"
+                },
+                "args": [
+                  {
+                    "Local": 4
+                  }
+                ],
+                "dest": 5,
+                "target": 2,
+                "unwind": null
+              }
+            }
+          },
+          {
+            "id": 2,
+            "label": null,
+            "stmts": [
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 6,
+                    "value": {
+                      "Ref": {
+                        "is_mut": false,
+                        "place": {
+                          "local": 4,
+                          "projections": []
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            ],
+            "terminator": {
+              "Call": {
+                "func": {
+                  "Global": "sum8"
+                },
+                "args": [
+                  {
+                    "Local": 6
+                  }
+                ],
+                "dest": 7,
+                "target": 3,
+                "unwind": null
+              }
+            }
+          },
+          {
+            "id": 3,
+            "label": null,
+            "stmts": [
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 8,
+                    "value": {
+                      "Use": {
+                        "Const": {
+                          "Str": 4
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            ],
+            "terminator": {
+              "Call": {
+                "func": {
+                  "Function": "printf"
+                },
+                "args": [
+                  {
+                    "Local": 8
+                  },
+                  {
+                    "Local": 5
+                  },
+                  {
+                    "Local": 7
+                  }
+                ],
+                "dest": null,
+                "target": 4,
+                "unwind": null
+              }
+            }
+          },
+          {
+            "id": 4,
+            "label": null,
+            "stmts": [
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 9,
+                    "value": {
+                      "Ref": {
+                        "is_mut": true,
+                        "place": {
+                          "local": 4,
+                          "projections": []
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 10,
+                    "value": {
+                      "BinaryOp": {
+                        "op": "Rem",
+                        "left": {
+                          "Local": 0
+                        },
+                        "right": {
+                          "Const": {
+                            "Uint": [
+                              3,
+                              {
+                                "Int": [
+                                  "I64",
+                                  false
+                                ]
+                              }
+                            ]
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            ],
+            "terminator": {
+              "Call": {
+                "func": {
+                  "Global": "flip"
+                },
+                "args": [
+                  {
+                    "Local": 9
+                  },
+                  {
+                    "Local": 10
+                  }
+                ],
+                "dest": null,
+                "target": 5,
+                "unwind": null
+              }
+            }
+          },
+          {
+            "id": 5,
+            "label": null,
+            "stmts": [
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 11,
+                    "value": {
+                      "Ref": {
+                        "is_mut": false,
+                        "place": {
+                          "local": 4,
+                          "projections": []
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            ],
+            "terminator": {
+              "Call": {
+                "func": {
+                  "Global": "sum8"
+                },
+                "args": [
+                  {
+                    "Local": 11
+                  }
+                ],
+                "dest": 12,
+                "target": 6,
+                "unwind": null
+              }
+            }
+          },
+          {
+            "id": 6,
+            "label": null,
+            "stmts": [
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 13,
+                    "value": {
+                      "IndexAccess": {
+                        "base": {
+                          "Local": 4
+                        },
+                        "index": {
+                          "Const": {
+                            "Int": [
+                              0,
+                              {
+                                "Int": [
+                                  "I32",
+                                  true
+                                ]
+                              }
+                            ]
+                          }
+                        },
+                        "elem_ty": {
+                          "Int": [
+                            "I8",
+                            false
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 14,
+                    "value": {
+                      "Use": {
+                        "Const": {
+                          "Str": 5
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            ],
+            "terminator": {
+              "Call": {
+                "func": {
+                  "Function": "printf"
+                },
+                "args": [
+                  {
+                    "Local": 14
+                  },
+                  {
+                    "Local": 12
+                  },
+                  {
+                    "Local": 13
+                  }
+                ],
+                "dest": null,
+                "target": 7,
+                "unwind": null
+              }
+            }
+          },
+          {
+            "id": 7,
+            "label": null,
+            "stmts": [
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 15,
+                    "value": {
+                      "BinaryOp": {
+                        "op": "Add",
+                        "left": {
+                          "Local": 0
+                        },
+                        "right": {
+                          "Const": {
+                            "Uint": [
+                              20,
+                              {
+                                "Int": [
+                                  "I64",
+                                  false
+                                ]
+                              }
+                            ]
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            ],
+            "terminator": {
+              "Call": {
+                "func": {
+                  "Global": "squares"
+                },
+                "args": [
+                  {
+                    "Local": 15
+                  }
+                ],
+                "dest": 16,
+                "target": 8,
+                "unwind": null
+              }
+            }
+          },
+          {
+            "id": 8,
+            "label": null,
+            "stmts": [
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 17,
+                    "value": {
+                      "Use": {
+                        "Local": 16
+                      }
+                    }
+                  }
+                }
+              }
+            ],
+            "terminator": {
+              "Call": {
+                "func": {
+                  "Function": "build_hvec_len"
+                },
+                "args": [
+                  {
+                    "Local": 17
+                  }
+                ],
+                "dest": 18,
+                "target": 9,
+                "unwind": null
+              }
+            }
+          },
+          {
+            "id": 9,
+            "label": null,
+            "stmts": [
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 19,
+                    "value": {
+                      "Ref": {
+                        "is_mut": false,
+                        "place": {
+                          "local": 17,
+                          "projections": []
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            ],
+            "terminator": {
+              "Call": {
+                "func": {
+                  "Global": "xor_all"
+                },
+                "args": [
+                  {
+                    "Local": 19
+                  }
+                ],
+                "dest": 20,
+                "target": 10,
+                "unwind": null
+              }
+            }
+          },
+          {
+            "id": 10,
+            "label": null,
+            "stmts": [],
+            "terminator": {
+              "Call": {
+                "func": {
+                  "Function": "build_hvec_len"
+                },
+                "args": [
+                  {
+                    "Local": 17
+                  }
+                ],
+                "dest": 21,
+                "target": 11,
+                "unwind": null
+              }
+            }
+          },
+          {
+            "id": 11,
+            "label": null,
+            "stmts": [
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 22,
+                    "value": {
+                      "BinaryOp": {
+                        "op": "Sub",
+                        "left": {
+                          "Local": 21
+                        },
+                        "right": {
+                          "Const": {
+                            "Int": [
+                              1,
+                              {
+                                "Int": [
+                                  "I32",
+                                  true
+                                ]
+                              }
+                            ]
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 23,
+                    "value": {
+                      "IndexAccess": {
+                        "base": {
+                          "Local": 17
+                        },
+                        "index": {
+                          "Local": 22
+                        },
+                        "elem_ty": {
+                          "Int": [
+                            "I64",
+                            false
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 24,
+                    "value": {
+                      "Use": {
+                        "Const": {
+                          "Str": 6
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            ],
+            "terminator": {
+              "Call": {
+                "func": {
+                  "Function": "printf"
+                },
+                "args": [
+                  {
+                    "Local": 24
+                  },
+                  {
+                    "Local": 18
+                  },
+                  {
+                    "Local": 20
+                  },
+                  {
+                    "Local": 23
+                  }
+                ],
+                "dest": null,
+                "target": 12,
+                "unwind": null
+              }
+            }
+          },
+          {
+            "id": 12,
+            "label": null,
+            "stmts": [
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 25,
+                    "value": {
+                      "Aggregate": {
+                        "kind": {
+                          "Array": {
+                            "Int": [
+                              "I8",
+                              false
+                            ]
+                          }
+                        },
+                        "operands": [
+                          {
+                            "Const": {
+                              "Uint": [
+                                10,
+                                {
+                                  "Int": [
+                                    "I8",
+                                    false
+                                  ]
+                                }
+                              ]
+                            }
+                          },
+                          {
+                            "Const": {
+                              "Uint": [
+                                20,
+                                {
+                                  "Int": [
+                                    "I8",
+                                    false
+                                  ]
+                                }
+                              ]
+                            }
+                          },
+                          {
+                            "Const": {
+                              "Uint": [
+                                30,
+                                {
+                                  "Int": [
+                                    "I8",
+                                    false
+                                  ]
+                                }
+                              ]
+                            }
+                          },
+                          {
+                            "Const": {
+                              "Uint": [
+                                40,
+                                {
+                                  "Int": [
+                                    "I8",
+                                    false
+                                  ]
+                                }
+                              ]
+                            }
+                          },
+                          {
+                            "Const": {
+                              "Uint": [
+                                250,
+                                {
+                                  "Int": [
+                                    "I8",
+                                    false
+                                  ]
+                                }
+                              ]
+                            }
+                          },
+                          {
+                            "Const": {
+                              "Uint": [
+                                255,
+                                {
+                                  "Int": [
+                                    "I8",
+                                    false
+                                  ]
+                                }
+                              ]
+                            }
+                          }
+                        ]
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 26,
+                    "value": {
+                      "Use": {
+                        "Local": 25
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 27,
+                    "value": {
+                      "BinaryOp": {
+                        "op": "Rem",
+                        "left": {
+                          "Local": 0
+                        },
+                        "right": {
+                          "Const": {
+                            "Uint": [
+                              6,
+                              {
+                                "Int": [
+                                  "I64",
+                                  false
+                                ]
+                              }
+                            ]
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 28,
+                    "value": {
+                      "Cast": {
+                        "kind": "IntToInt",
+                        "value": {
+                          "Local": 27
+                        },
+                        "ty": {
+                          "Int": [
+                            "ISize",
+                            false
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "IndexStore": {
+                    "base": {
+                      "Local": 26
+                    },
+                    "index": {
+                      "Local": 28
+                    },
+                    "elem_ty": {
+                      "Int": [
+                        "I8",
+                        false
+                      ]
+                    },
+                    "value": {
+                      "Use": {
+                        "Const": {
+                          "Uint": [
+                            1,
+                            {
+                              "Int": [
+                                "I8",
+                                false
+                              ]
+                            }
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 29,
+                    "value": {
+                      "Aggregate": {
+                        "kind": {
+                          "Struct": "BlSlice_u8"
+                        },
+                        "operands": [
+                          {
+                            "Local": 26
+                          },
+                          {
+                            "Const": {
+                              "Int": [
+                                6,
+                                {
+                                  "Int": [
+                                    "ISize",
+                                    false
+                                  ]
+                                }
+                              ]
+                            }
+                          }
+                        ]
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 30,
+                    "value": {
+                      "AddressOf": {
+                        "is_mut": false,
+                        "place": {
+                          "local": 29,
+                          "projections": []
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            ],
+            "terminator": {
+              "Call": {
+                "func": {
+                  "Global": "bytes_sum"
+                },
+                "args": [
+                  {
+                    "Local": 30
+                  }
+                ],
+                "dest": 31,
+                "target": 13,
+                "unwind": null
+              }
+            }
+          },
+          {
+            "id": 13,
+            "label": null,
+            "stmts": [
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 32,
+                    "value": {
+                      "Use": {
+                        "Const": {
+                          "Str": 7
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            ],
+            "terminator": {
+              "Call": {
+                "func": {
+                  "Function": "printf"
+                },
+                "args": [
+                  {
+                    "Local": 32
+                  },
+                  {
+                    "Local": 31
+                  }
+                ],
+                "dest": null,
+                "target": 14,
+                "unwind": null
+              }
+            }
+          },
+          {
+            "id": 14,
+            "label": null,
+            "stmts": [],
+            "terminator": {
+              "Call": {
+                "func": {
+                  "Global": "formats"
+                },
+                "args": [
+                  {
+                    "Local": 0
+                  }
+                ],
+                "dest": null,
+                "target": 15,
+                "unwind": null
+              }
+            }
+          },
+          {
+            "id": 15,
+            "label": null,
+            "stmts": [],
+            "terminator": {
+              "Return": null
+            }
+          }
+        ],
+        "locals": [
+          {
+            "id": 0,
+            "name": "k",
+            "ty": {
+              "Int": [
+                "I64",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": true,
+            "annotations": []
+          },
+          {
+            "id": 1,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I64",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 2,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I64",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 3,
+            "name": null,
+            "ty": {
+              "Vec": {
+                "Int": [
+                  "I8",
+                  false
+                ]
+              }
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 4,
+            "name": "v",
+            "ty": {
+              "Vec": {
+                "Int": [
+                  "I8",
+                  false
+                ]
+              }
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 5,
+            "name": null,
+            "ty": {
+              "Int": [
+                "ISize",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 6,
+            "name": null,
+            "ty": {
+              "Ptr": {
+                "Vec": {
+                  "Int": [
+                    "I8",
+                    false
+                  ]
+                }
+              }
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 7,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I64",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 8,
+            "name": null,
+            "ty": {
+              "Ptr": {
+                "Int": [
+                  "I8",
+                  true
+                ]
+              }
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 9,
+            "name": null,
+            "ty": {
+              "Ptr": {
+                "Vec": {
+                  "Int": [
+                    "I8",
+                    false
+                  ]
+                }
+              }
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 10,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I64",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 11,
+            "name": null,
+            "ty": {
+              "Ptr": {
+                "Vec": {
+                  "Int": [
+                    "I8",
+                    false
+                  ]
+                }
+              }
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 12,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I64",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 13,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I8",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 14,
+            "name": null,
+            "ty": {
+              "Ptr": {
+                "Int": [
+                  "I8",
+                  true
+                ]
+              }
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 15,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I64",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 16,
+            "name": null,
+            "ty": {
+              "Vec": {
+                "Int": [
+                  "I64",
+                  false
+                ]
+              }
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 17,
+            "name": "w",
+            "ty": {
+              "Vec": {
+                "Int": [
+                  "I64",
+                  false
+                ]
+              }
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 18,
+            "name": null,
+            "ty": {
+              "Int": [
+                "ISize",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 19,
+            "name": null,
+            "ty": {
+              "Ptr": {
+                "Vec": {
+                  "Int": [
+                    "I64",
+                    false
+                  ]
+                }
+              }
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 20,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I64",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 21,
+            "name": null,
+            "ty": {
+              "Int": [
+                "ISize",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 22,
+            "name": null,
+            "ty": {
+              "Int": [
+                "ISize",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 23,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I64",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 24,
+            "name": null,
+            "ty": {
+              "Ptr": {
+                "Int": [
+                  "I8",
+                  true
+                ]
+              }
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 25,
+            "name": null,
+            "ty": {
+              "Array": [
+                {
+                  "Int": [
+                    "I8",
+                    false
+                  ]
+                },
+                6
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 26,
+            "name": "raw",
+            "ty": {
+              "Array": [
+                {
+                  "Int": [
+                    "I8",
+                    false
+                  ]
+                },
+                6
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 27,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I64",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 28,
+            "name": null,
+            "ty": {
+              "Int": [
+                "ISize",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 29,
+            "name": null,
+            "ty": {
+              "Slice": {
+                "Int": [
+                  "I8",
+                  false
+                ]
+              }
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 30,
+            "name": null,
+            "ty": {
+              "Ptr": {
+                "Slice": {
+                  "Int": [
+                    "I8",
+                    false
+                  ]
+                }
+              }
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 31,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I64",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 32,
+            "name": null,
+            "ty": {
+              "Ptr": {
+                "Int": [
+                  "I8",
+                  true
+                ]
+              }
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          }
+        ],
+        "is_public": false,
+        "linkage": "Internal",
+        "shader_stage": null,
+        "bindings": []
+      },
+      {
+        "name": "main",
+        "sig": {
+          "params": [],
+          "ret": {
+            "Int": [
+              "I32",
+              true
+            ]
+          },
+          "is_variadic": false,
+          "calling_conv": "Build"
+        },
+        "blocks": [
+          {
+            "id": 0,
+            "label": null,
+            "stmts": [],
+            "terminator": {
+              "Call": {
+                "func": {
+                  "Function": "build_args_get"
+                },
+                "args": [
+                  {
+                    "Const": {
+                      "Int": [
+                        1,
+                        {
+                          "Int": [
+                            "I32",
+                            true
+                          ]
+                        }
+                      ]
+                    }
+                  }
+                ],
+                "dest": 1,
+                "target": 1,
+                "unwind": null
+              }
+            }
+          },
+          {
+            "id": 1,
+            "label": null,
+            "stmts": [],
+            "terminator": {
+              "Call": {
+                "func": {
+                  "Function": "build_string_parse_int"
+                },
+                "args": [
+                  {
+                    "Local": 1
+                  }
+                ],
+                "dest": 2,
+                "target": 2,
+                "unwind": null
+              }
+            }
+          },
+          {
+            "id": 2,
+            "label": null,
+            "stmts": [
+              {
+                "kind": {
+                  "Assign": {
+                    "dest": 3,
+                    "value": {
+                      "Cast": {
+                        "kind": "IntToInt",
+                        "value": {
+                          "Local": 2
+                        },
+                        "ty": {
+                          "Int": [
+                            "I64",
+                            false
+                          ]
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            ],
+            "terminator": {
+              "Call": {
+                "func": {
+                  "Global": "run"
+                },
+                "args": [
+                  {
+                    "Local": 3
+                  }
+                ],
+                "dest": null,
+                "target": 3,
+                "unwind": null
+              }
+            }
+          },
+          {
+            "id": 3,
+            "label": null,
+            "stmts": [],
+            "terminator": {
+              "Return": {
+                "Const": {
+                  "Int": [
+                    0,
+                    {
+                      "Int": [
+                        "I32",
+                        true
+                      ]
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        ],
+        "locals": [
+          {
+            "id": 0,
+            "name": "_ret",
+            "ty": {
+              "Int": [
+                "I32",
+                true
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 1,
+            "name": null,
+            "ty": {
+              "Struct": "BuildString"
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 2,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I64",
+                true
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          },
+          {
+            "id": 3,
+            "name": null,
+            "ty": {
+              "Int": [
+                "I64",
+                false
+              ]
+            },
+            "is_mut": false,
+            "is_param": false,
+            "annotations": []
+          }
+        ],
+        "is_public": true,
+        "linkage": "External",
+        "shader_stage": null,
+        "bindings": []
+      }
+    ],
+    "globals": [],
+    "types": [
+      {
+        "name": "build_vec2",
+        "kind": {
+          "Struct": {
+            "fields": [
+              [
+                "x",
+                {
+                  "Float": "F64"
+                }
+              ],
+              [
+                "y",
+                {
+                  "Float": "F64"
+                }
+              ]
+            ],
+            "packed": false
+          }
+        }
+      },
+      {
+        "name": "build_vec3",
+        "kind": {
+          "Struct": {
+            "fields": [
+              [
+                "x",
+                {
+                  "Float": "F64"
+                }
+              ],
+              [
+                "y",
+                {
+                  "Float": "F64"
+                }
+              ],
+              [
+                "z",
+                {
+                  "Float": "F64"
+                }
+              ]
+            ],
+            "packed": false
+          }
+        }
+      },
+      {
+        "name": "build_vec4",
+        "kind": {
+          "Struct": {
+            "fields": [
+              [
+                "x",
+                {
+                  "Float": "F64"
+                }
+              ],
+              [
+                "y",
+                {
+                  "Float": "F64"
+                }
+              ],
+              [
+                "z",
+                {
+                  "Float": "F64"
+                }
+              ],
+              [
+                "w",
+                {
+                  "Float": "F64"
+                }
+              ]
+            ],
+            "packed": false
+          }
+        }
+      }
+    ],
+    "strings": [
+      "dec %d %u %d %u %lld %llu\n",
+      "hex %x %x %08x %016llx %x\n",
+      "pad %02x %04x %016llx\n",
+      "bool %s %s 100%% {}\n",
+      "v8 len %llu sum %llu\n",
+      "v8 sum %llu first %u\n",
+      "v64 len %llu xor %016llx last %llu\n",
+      "bytes %llu\n"
+    ],
+    "externals": [],
+    "vtables": [],
+    "trait_methods": {},
+    "uniforms": []
+  }
+}

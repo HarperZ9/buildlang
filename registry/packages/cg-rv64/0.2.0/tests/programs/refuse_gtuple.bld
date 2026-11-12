@@ -1,0 +1,14 @@
+// A global the generator gives no place: a tuple. cg-rv64 0.2.0 refuses
+// the store into it by name.
+static mut T: (u8, u16) = (1_u8, 2_u16);
+
+fn run(k: u64) ~ Console {
+    unsafe {
+        T.0 = k as u8;
+        println!("{}", T.0);
+    }
+}
+
+fn main() ~ Console + Process + Environment {
+    run(args_get(1).parse_int() as u64);
+}

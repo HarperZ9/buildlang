@@ -1,0 +1,212 @@
+// cg-rv64: globals, since 0.2.0.
+//
+// Every global whose type the generator holds gets a place in the global
+// area, which starts at CG_GLOBALS, the bottom of the heap. Each global
+// starts at a multiple of 8 and is laid out as a local is. The start code
+// fills the area with zeros, stores the initial value of every global the
+// MIR gives one, and moves the heap pointer past the area. A global whose
+// initial value the generator cannot read keeps no place, and any use of
+// it is refused by name.
+//
+// The MIR writes an initial value as a constant: {"Int": [n, type]},
+// {"Uint": [n, type]}, {"Bool": b}, {"Zeroed": type},
+// {"Struct": [name, [values in field order]]} and
+// {"Array": [element type, [one value per element]]}; null is none.
+
+// True when a value of type t holds no vector: a global vector would need
+// a handle made at run time.
+fn cd_plain(g: &Cg, d: &CjDoc, t: u64) -> bool {
+    let k = ct_kind(d, t);
+    if k == CT_VEC || k == CT_VOID { return false; }
+    if k == CT_ARRAY { return cd_plain(g, d, ct_elem(d, t)); }
+    if k != CT_STRUCT { return true; }
+    let mut f = cj_first(d, ct_fields(g, d, t));
+    while f != CG_NONE {
+        if !cd_plain(g, d, cj_next(d, cj_first(d, f))) { return false; }
+        f = cj_next(d, f);
+    }
+    true
+}
+
+// True when global node e is an immutable integer with an integer initial
+// value. Its value is folded into the code where it is read, as in 0.1.0
+// (cv_global), so it needs no place, and a program with no other global
+// gets the same text as from 0.1.0.
+fn cd_folded(d: &CjDoc, e: u64) -> bool {
+    let init = cj_get(d, e, "init");
+    let num = cj_kind(d, cj_first(d, cj_body(d, init))) == CJ_NUM;
+    let isint = (cj_tag_is(d, init, "Int") || cj_tag_is(d, init, "Uint")) && num;
+    cj_kind(d, cj_get(d, e, "is_mut")) == CJ_FALSE && isint
+}
+
+// Gives every global of a covered type its offset in the area, and sets
+// the size of the area, a multiple of 16.
+fn cd_layout(g: &mut Cg, d: &CjDoc) {
+    g.gnode.clear();
+    g.goff.clear();
+    let mut off: u64 = 0_u64;
+    let mut e = cj_first(d, g.globals);
+    while e != CG_NONE {
+        let t = cj_get(d, e, "ty");
+        let mut at = CG_NONE;
+        if !cd_folded(d, e) && ct_known(g, d, t) && cd_plain(g, d, t) && ct_size(g, d, t) > 0_u64 {
+            at = off;
+            off = ct_round(off + ct_size(g, d, t), 8_u64);
+        }
+        g.gnode.push(e);
+        g.goff.push(at);
+        e = cj_next(d, e);
+    }
+    g.gsize = ct_round(off, 16_u64);
+}
+
+// The number of the global a value {"Global": name} names, when it has a
+// place; CG_NONE otherwise.
+fn cd_of(g: &Cg, d: &CjDoc, v: u64) -> u64 {
+    if !cj_tag_is(d, v, "Global") { return CG_NONE; }
+    cd_named(g, d, cj_body(d, v))
+}
+
+// The number of the global whose name is the string node name, when it
+// has a place; CG_NONE otherwise.
+fn cd_named(g: &Cg, d: &CjDoc, name: u64) -> u64 {
+    let mut i: usize = 0;
+    while i < g.gnode.len() {
+        if cj_same_str(d, cj_get(d, g.gnode[i], "name"), name) {
+            if g.goff[i] == CG_NONE { return CG_NONE; }
+            return i as u64;
+        }
+        i = i + 1;
+    }
+    CG_NONE
+}
+
+// The type of global number gi.
+fn cd_ty(g: &Cg, d: &CjDoc, gi: u64) -> u64 {
+    cj_get(d, g.gnode[gi as usize], "ty")
+}
+
+// reg = the address of global number gi.
+fn cd_addr(g: &mut Cg, reg: u64, gi: u64) {
+    ci_li(g, reg, CG_GLOBALS + g.goff[gi as usize]);
+}
+
+// Stores the scalar constant c, of type t, at x6 + off; nothing for zero.
+fn cd_scalar(g: &mut Cg, d: &CjDoc, c: u64, t: u64, off: u64) -> bool {
+    let body = cj_body(d, c);
+    let mut v: u64 = 0_u64;
+    if (cj_tag_is(d, c, "Int") || cj_tag_is(d, c, "Uint")) && ct_kind(d, t) == CT_INT {
+        if cj_kind(d, cj_first(d, body)) != CJ_NUM { return false; }
+        v = cv_canon(d, cj_bits(d, cj_first(d, body)), t);
+    } else if cj_tag_is(d, c, "Bool") && ct_kind(d, t) == CT_BOOL {
+        if cj_kind(d, body) == CJ_TRUE { v = 1_u64; }
+    } else {
+        return false;
+    }
+    if v != 0_u64 {
+        ci_li(g, 5_u64, v);
+        ci_add(g, 7_u64, 6_u64, off);
+        ci_store(g, d, 5_u64, 7_u64, 0_u64, t);
+    }
+    true
+}
+
+// Stores the constant c, of type t, at x6 + off. Returns false when c is
+// not a constant of type t the generator reads. Defect 27 writes element
+// i of an array to the place of element i + 1, when there is one.
+fn cd_const(g: &mut Cg, d: &CjDoc, c: u64, t: u64, off: u64) -> bool {
+    if cj_kind(d, c) == CJ_NULL || cj_tag_is(d, c, "Zeroed") { return true; }
+    let body = cj_body(d, c);
+    let k = ct_kind(d, t);
+    if k == CT_INT || k == CT_BOOL { return cd_scalar(g, d, c, t, off); }
+    let vals = cj_next(d, cj_first(d, body));
+    if cj_tag_is(d, c, "Array") && k == CT_ARRAY && cj_count(d, vals) == ct_alen(d, t) {
+        let e = ct_elem(d, t);
+        let es = ct_size(g, d, e);
+        let mut v = cj_first(d, vals);
+        let mut i: u64 = 0_u64;
+        while v != CG_NONE {
+            let mut at = i;
+            if g.v == CGC_GINIT && i + 1_u64 < ct_alen(d, t) { at = i + 1_u64; }
+            if !cd_const(g, d, v, e, off + at * es) { return false; }
+            i = i + 1_u64;
+            v = cj_next(d, v);
+        }
+        return true;
+    }
+    let fl = ct_fields(g, d, t);
+    if cj_tag_is(d, c, "Struct") && k == CT_STRUCT && cj_count(d, vals) == cj_count(d, fl) {
+        let mut v = cj_first(d, vals);
+        let mut f = cj_first(d, fl);
+        while v != CG_NONE {
+            let fd = ct_field(g, d, t, cj_first(d, f));
+            if !fd.ok || !cd_const(g, d, v, fd.ty, off + fd.off) { return false; }
+            v = cj_next(d, v);
+            f = cj_next(d, f);
+        }
+        return true;
+    }
+    false
+}
+
+// The start code of the global area: zero it, store the initial values,
+// and start the heap after it. Runs before the entry arguments are
+// loaded; uses x5, x6, x7 and x31.
+fn cd_start(g: &mut Cg, d: &CjDoc) {
+    cd_layout(g, d);
+    if g.gsize == 0_u64 { return; }
+    ci_li(g, 6_u64, CG_GLOBALS);
+    ci_add(g, 7_u64, 6_u64, g.gsize);
+    cql(g, "rt_gzero");
+    cq(g, "beq x6, x7, rt_gzero_end");
+    cq(g, "sd x0, 0(x6)");
+    cq(g, "addi x6, x6, 8");
+    cq(g, "jal x0, rt_gzero");
+    cql(g, "rt_gzero_end");
+    ci_li(g, 6_u64, CG_GLOBALS);
+    let mut i: usize = 0;
+    while i < g.gnode.len() {
+        let e = g.gnode[i];
+        let at = g.goff[i];
+        if at != CG_NONE && !cd_const(g, d, cj_get(d, e, "init"), cj_get(d, e, "ty"), at) {
+            g.goff[i] = CG_NONE;
+        }
+        i = i + 1;
+    }
+    ci_add(g, 26_u64, 6_u64, g.gsize);
+    ci_i(g, "addi", 27_u64, 26_u64, 1024_u64);
+}
+
+// GLOBAL = rvalue. A scalar goes through x5; an aggregate is copied from
+// a local of its type. Defect 26 writes eight bytes past the global.
+fn cd_store(g: &mut Cg, d: &CjDoc, body: u64) {
+    let gi = cd_named(g, d, cj_get(d, body, "name"));
+    if gi == CG_NONE {
+        cg_refuse(g, d, "store into a global the generator gives no place");
+        return;
+    }
+    let t = cd_ty(g, d, gi);
+    let rv = cj_get(d, body, "value");
+    let mut extra: u64 = 0_u64;
+    if g.v == CGC_GADDR { extra = 8_u64; }
+    if ct_scalar(d, t) {
+        cr_scalar(g, d, rv, t);
+        cd_addr(g, 7_u64, gi);
+        ci_store(g, d, 5_u64, 7_u64, extra, t);
+        return;
+    }
+    cd_addr(g, 6_u64, gi);
+    ci_add(g, 6_u64, 6_u64, extra);
+    cs_copy_local(g, d, rv, t);
+}
+
+// x5 = the address of a global: AddressOfGlobal, whose result type dty
+// is a pointer to the global's type.
+fn cd_address(g: &mut Cg, d: &CjDoc, body: u64, dty: u64) {
+    let gi = cd_named(g, d, cj_get(d, body, "name"));
+    if gi == CG_NONE || ct_kind(d, dty) != CT_PTR || !ct_same(d, ct_elem(d, dty), cd_ty(g, d, gi)) {
+        cg_refuse(g, d, "address of a global the generator gives no place, or of another type");
+        return;
+    }
+    cd_addr(g, 5_u64, gi);
+}

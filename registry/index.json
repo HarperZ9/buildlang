@@ -74,16 +74,23 @@
       }
     },
     "cg-rv64": {
-      "version": "0.1.0",
-      "description": "RV64IM code generator for BuildLang programs: reads the MIR JSON that buildc mir emit writes and prints assembly text for asm-rv64, with a small runtime in emitted assembly that prints through the serial device of emu-rv64; integer arithmetic with the traps of the hosted C backend, structs, arrays, slices, byte and word vectors, calls and printf with a format fixed at compile time; every construct outside the covered set is refused by name; checked by a differential corpus and a seeded differential fuzz against the hosted build, planted wrong-code controls and committed fixtures",
+      "version": "0.2.0",
+      "description": "RV64IM code generator for BuildLang programs: reads the MIR JSON that buildc mir emit writes and prints assembly text for asm-rv64, with a small runtime in emitted assembly that prints through the serial device of emu-rv64; integer arithmetic with the traps of the hosted C backend, structs (including struct literals with array fields), arrays, slices, byte and word vectors, mutable and aggregate globals with their initial values, calls and printf with a format fixed at compile time; every construct outside the covered set is refused by name; checked by a differential corpus and a seeded differential fuzz against the hosted build, planted wrong-code controls and committed fixtures",
       "author": "Zain Dana Harper",
       "license": "AGPL-3.0-only",
-      "checksum": "sha256:c2c35593782c02e297fa4ace65da600eb5544f5f32cfc0b95e1b6d183ae7f024",
-      "path": "packages/cg-rv64/0.1.0",
+      "checksum": "sha256:e7effc10e96a4544fe81eafa821cafb5863a4073917295f1c6b829741ceb487d",
+      "path": "packages/cg-rv64/0.2.0",
       "versions": {
         "0.1.0": {
           "path": "packages/cg-rv64/0.1.0",
           "checksum": "sha256:c2c35593782c02e297fa4ace65da600eb5544f5f32cfc0b95e1b6d183ae7f024",
+          "dependencies": {
+            "asm-rv64": "=0.4.0"
+          }
+        },
+        "0.2.0": {
+          "path": "packages/cg-rv64/0.2.0",
+          "checksum": "sha256:e7effc10e96a4544fe81eafa821cafb5863a4073917295f1c6b829741ceb487d",
           "dependencies": {
             "asm-rv64": "=0.4.0"
           }

@@ -1610,8 +1610,9 @@ impl<'ctx> MirLowerer<'ctx> {
                         .unwrap_or_else(MirType::i32);
                     Ok(Some((MirPlace::local(local), ty)))
                 }
-                // A bare name with no local is a global; not an in-place location.
-                None => Ok(None),
+                // A bare name with no local is a global. A mutable global is
+                // addressed where it lives (G35); any other is not a place.
+                None => self.global_place(ident),
             },
             ExprKind::Field { expr: base, field } => {
                 let (mut place, base_ty) = match self.lower_place(base)? {
@@ -3952,6 +3953,11 @@ impl<'ctx> MirLowerer<'ctx> {
                         }
                     }
                 }
+                // A mutable global has its declared type, so a store into a
+                // nested element (`G[i][j] = v`) sees the inner array (G35).
+                if let Some((_, ty)) = self.mutable_global(&ident.name) {
+                    return ty;
+                }
                 MirType::i32()
             }
             ExprKind::Call { func, .. } => self.resolve_call_return_type(func),
@@ -5303,7 +5309,17 @@ impl<'ctx> MirLowerer<'ctx> {
             // pass it directly to avoid double-indirection.
             let receiver_already_ptr = matches!(&receiver_ty, MirType::Ptr(_));
 
-            let self_arg = if self_is_ref && !receiver_already_ptr {
+            // A receiver that is a field, an element or a mutable global is
+            // borrowed where it lives; a borrow of the copy in `receiver_val`
+            // lost every write the method made (`o.c.inc()`, `TB.inc()`).
+            let place_ref = if self_is_ref && !receiver_already_ptr {
+                self.receiver_place_ref(receiver)?
+            } else {
+                None
+            };
+            let self_arg = if let Some(ptr) = place_ref {
+                ptr
+            } else if self_is_ref && !receiver_already_ptr {
                 let receiver_local = match &receiver_val {
                     MirValue::Local(id) => *id,
                     _ => {
@@ -9778,6 +9794,10 @@ impl<'ctx> MirLowerer<'ctx> {
         mutability: ast::Mutability,
         inner: &ast::Expr,
     ) -> CodegenResult<MirValue> {
+        // `&GLOBAL` of a mutable global is its address (G35).
+        if let Some(ptr) = self.global_ref(inner)? {
+            return Ok(ptr);
+        }
         // Address-of a real place (`&arr[i].field`, `&t.0`, `&s.field`, `&x`).
         // Reference the location itself so the pointer aliases storage the caller
         // can mutate. Without this the operand was copied to a temp first, so the

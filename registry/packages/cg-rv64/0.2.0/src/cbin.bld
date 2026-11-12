@@ -1,0 +1,271 @@
+// cg-rv64: binary operations. Each rule below is the rule of the hosted
+// C backend (compiler/src/codegen/backend/c.rs and the runtime it emits),
+// restated for registers that hold a value in the form of its type.
+//
+// The result is left in x5, in the form of the result type.
+
+fn cb_op(d: &CjDoc, n: u64) -> u64 {
+    if cj_str_is(d, n, "Add") { return CB_ADD; }
+    if cj_str_is(d, n, "Sub") { return CB_SUB; }
+    if cj_str_is(d, n, "Mul") { return CB_MUL; }
+    if cj_str_is(d, n, "Div") { return CB_DIV; }
+    if cj_str_is(d, n, "Rem") { return CB_REM; }
+    if cj_str_is(d, n, "BitAnd") { return CB_AND; }
+    if cj_str_is(d, n, "BitOr") { return CB_OR; }
+    if cj_str_is(d, n, "BitXor") { return CB_XOR; }
+    if cj_str_is(d, n, "Shl") { return CB_SHL; }
+    if cj_str_is(d, n, "Shr") { return CB_SHR; }
+    if cj_str_is(d, n, "Eq") { return CB_EQ; }
+    if cj_str_is(d, n, "Ne") { return CB_NE; }
+    if cj_str_is(d, n, "Lt") { return CB_LT; }
+    if cj_str_is(d, n, "Le") { return CB_LE; }
+    if cj_str_is(d, n, "Gt") { return CB_GT; }
+    if cj_str_is(d, n, "Ge") { return CB_GE; }
+    if cj_str_is(d, n, "AddWrapping") { return CB_ADDW; }
+    if cj_str_is(d, n, "SubWrapping") { return CB_SUBW; }
+    if cj_str_is(d, n, "MulWrapping") { return CB_MULW; }
+    0_u64
+}
+
+// The type an operation works in, chosen as the C backend chooses it:
+// the type of the left operand when it is a local, else of the right
+// when it is a local, else of a global, else the type written on a
+// constant, left before right.
+fn cb_pref(g: &Cg, d: &CjDoc, l: u64, r: u64) -> u64 {
+    if cv_is_local(d, l) { return cv_ty(g, d, l); }
+    if cv_is_local(d, r) { return cv_ty(g, d, r); }
+    let gl = cv_ty(g, d, l);
+    if gl != CG_NONE { return gl; }
+    let gr = cv_ty(g, d, r);
+    if gr != CG_NONE { return gr; }
+    if cv_is_int(d, l) { return cv_int_ty(d, l); }
+    if cv_is_int(d, r) { return cv_int_ty(d, r); }
+    CG_NONE
+}
+
+// True when operand v may enter an operation of type t with the value
+// the program text gives it: a local or global of exactly type t, or a
+// constant that is in the range of t.
+fn cb_exact(g: &Cg, d: &CjDoc, v: u64, t: u64) -> bool {
+    let vt = cv_ty(g, d, v);
+    if vt != CG_NONE { return ct_same(d, vt, t); }
+    if ct_kind(d, t) == CT_BOOL { return cv_is_bool(d, v); }
+    cv_is_int(d, v) && cv_fits(d, v, t)
+}
+
+// The smallest value of signed type t, in its register form.
+fn cb_min(d: &CjDoc, t: u64) -> u64 {
+    !0_u64 << (ct_bits(d, t) - 1_u64)
+}
+
+// Checked add, subtract or multiply of x5 and x6 in type t. A result
+// outside t traps, as bl_iadd_ and its siblings do.
+fn cb_checked(g: &mut Cg, d: &CjDoc, op: u64, t: u64) {
+    let mut ins = "add";
+    let mut trap = "rt_ovf_add";
+    let mut off = g.v == CGC_ADDOVF;
+    if op == CB_SUB {
+        ins = "sub";
+        trap = "rt_ovf_sub";
+        off = g.v == CGC_SUBOVF;
+    }
+    if op == CB_MUL {
+        ins = "mul";
+        trap = "rt_ovf_mul";
+        off = g.v == CGC_MULOVF;
+    }
+    if ct_bits(d, t) < 64_u64 {
+        ci_r(g, ins, 5_u64, 5_u64, 6_u64);
+        ci_i(g, "addi", 7_u64, 5_u64, 0_u64);
+        ci_norm(g, d, 5_u64, t);
+        if !off {
+            ci_skip(g, "beq", 5_u64, 7_u64, 1_u64);
+            ci_trap(g, trap);
+        }
+        return;
+    }
+    if op == CB_MUL {
+        cb_mul64(g, d, t, off);
+        return;
+    }
+    ci_r(g, ins, 7_u64, 5_u64, 6_u64);
+    if !off && !ct_signed(d, t) && op == CB_ADD { ci_skip(g, "bgeu", 7_u64, 5_u64, 1_u64); }
+    if !off && !ct_signed(d, t) && op == CB_SUB { ci_skip(g, "bgeu", 5_u64, 6_u64, 1_u64); }
+    if !off && ct_signed(d, t) {
+        if op == CB_ADD { ci_i(g, "slti", 28_u64, 6_u64, 0_u64); } else { ci_r(g, "slt", 28_u64, 0_u64, 6_u64); }
+        ci_r(g, "slt", 29_u64, 7_u64, 5_u64);
+        ci_skip(g, "beq", 28_u64, 29_u64, 1_u64);
+    }
+    if !off { ci_trap(g, trap); }
+    ci_i(g, "addi", 5_u64, 7_u64, 0_u64);
+}
+
+// 64-bit multiply: the high half of the full product tells whether the
+// low half is the whole result.
+fn cb_mul64(g: &mut Cg, d: &CjDoc, t: u64, off: bool) {
+    if ct_signed(d, t) {
+        ci_r(g, "mulh", 7_u64, 5_u64, 6_u64);
+        ci_r(g, "mul", 5_u64, 5_u64, 6_u64);
+        ci_i(g, "srai", 28_u64, 5_u64, 63_u64);
+        if !off { ci_skip(g, "beq", 7_u64, 28_u64, 1_u64); }
+    } else {
+        ci_r(g, "mulhu", 7_u64, 5_u64, 6_u64);
+        ci_r(g, "mul", 5_u64, 5_u64, 6_u64);
+        if !off { ci_skip(g, "beq", 7_u64, 0_u64, 1_u64); }
+    }
+    if !off { ci_trap(g, "rt_ovf_mul"); }
+}
+
+// Divide or remainder of x5 by x6 in type t. A zero divisor traps, and
+// so does the smallest signed value divided by -1, as bl_idiv_ and its
+// siblings do. Defect 14 takes the unsigned remainder of signed values.
+fn cb_divide(g: &mut Cg, d: &CjDoc, op: u64, t: u64) {
+    let rem = op == CB_REM;
+    if g.v != CGC_DIVZERO {
+        ci_skip(g, "bne", 6_u64, 0_u64, 1_u64);
+        if rem { ci_trap(g, "rt_rem_zero"); } else { ci_trap(g, "rt_div_zero"); }
+    }
+    if ct_signed(d, t) && g.v != CGC_DIVOVF {
+        ci_li(g, 7_u64, cb_min(d, t));
+        ci_skip(g, "bne", 5_u64, 7_u64, 3_u64);
+        ci_i(g, "addi", 28_u64, 0_u64, 0xFFFFFFFFFFFFFFFF_u64);
+        ci_skip(g, "bne", 6_u64, 28_u64, 1_u64);
+        if rem { ci_trap(g, "rt_ovf_rem"); } else { ci_trap(g, "rt_ovf_div"); }
+    }
+    let mut ins = "divu";
+    if rem { ins = "remu"; }
+    if ct_signed(d, t) && !rem { ins = "div"; }
+    if ct_signed(d, t) && rem && g.v != CGC_UREM { ins = "rem"; }
+    ci_r(g, ins, 5_u64, 5_u64, 6_u64);
+    if g.v == CGC_DIVOVF || g.v == CGC_UREM { ci_norm(g, d, 5_u64, t); }
+}
+
+// Add, subtract, multiply, divide and remainder, and the wrapping forms.
+// Both operands are converted to the type of the operation, as the
+// arguments of the C helper are; the result has that type. Defect 20
+// takes a wrapping subtract the wrong way round.
+fn cb_arith(g: &mut Cg, d: &CjDoc, op: u64, l: u64, r: u64, dty: u64) {
+    let t = cb_pref(g, d, l, r);
+    if ct_kind(d, t) != CT_INT || !ct_same(d, t, dty) {
+        cg_refuse(g, d, "arithmetic whose operand type is not the integer type of its result");
+        return;
+    }
+    cv_load(g, d, 5_u64, l, t);
+    cv_load(g, d, 6_u64, r, t);
+    if op == CB_ADD || op == CB_SUB || op == CB_MUL {
+        cb_checked(g, d, op, t);
+        return;
+    }
+    if op == CB_DIV || op == CB_REM {
+        cb_divide(g, d, op, t);
+        return;
+    }
+    let mut ins = "add";
+    if op == CB_SUBW { ins = "sub"; }
+    if op == CB_MULW { ins = "mul"; }
+    let mut a: u64 = 5_u64;
+    let mut b: u64 = 6_u64;
+    if g.v == CGC_WRAP && op == CB_SUBW {
+        a = 6_u64;
+        b = 5_u64;
+    }
+    ci_r(g, ins, 5_u64, a, b);
+    ci_norm(g, d, 5_u64, t);
+}
+
+// Comparisons. The C backend writes the C operator on the two operands.
+// The generator covers the cases where C compares the values the
+// program text gives: both operands of one type, or one of them a
+// constant in the range of the other's type. Defect 2 compares unsigned
+// values as signed; defect 18 turns <= into <.
+fn cb_compare(g: &mut Cg, d: &CjDoc, op: u64, l: u64, r: u64, dty: u64) {
+    let t = cb_pref(g, d, l, r);
+    let k = ct_kind(d, t);
+    let both = cb_exact(g, d, l, t) && cb_exact(g, d, r, t) && (cv_ty(g, d, l) != CG_NONE || cv_ty(g, d, r) != CG_NONE);
+    if (k != CT_INT && k != CT_BOOL) || !both || ct_kind(d, dty) != CT_BOOL {
+        cg_refuse(g, d, "comparison of operands that do not share one integer or boolean type");
+        return;
+    }
+    cv_load(g, d, 5_u64, l, t);
+    cv_load(g, d, 6_u64, r, t);
+    let mut lt = "sltu";
+    if ct_signed(d, t) || g.v == CGC_UCMP { lt = "slt"; }
+    if op == CB_EQ || op == CB_NE {
+        ci_r(g, "xor", 5_u64, 5_u64, 6_u64);
+        if op == CB_EQ { ci_i(g, "sltiu", 5_u64, 5_u64, 1_u64); } else { ci_r(g, "sltu", 5_u64, 0_u64, 5_u64); }
+        return;
+    }
+    if op == CB_LT || op == CB_GE || (op == CB_LE && g.v == CGC_LE) {
+        ci_r(g, lt, 5_u64, 5_u64, 6_u64);
+    } else {
+        ci_r(g, lt, 5_u64, 6_u64, 5_u64);
+    }
+    if op == CB_GE || (op == CB_LE && g.v != CGC_LE) { ci_i(g, "xori", 5_u64, 5_u64, 1_u64); }
+}
+
+// And, or, exclusive or, under the same operand rule as a comparison.
+// The result type is the operand type.
+fn cb_bitwise(g: &mut Cg, d: &CjDoc, op: u64, l: u64, r: u64, dty: u64) {
+    let t = cb_pref(g, d, l, r);
+    let k = ct_kind(d, t);
+    let both = cb_exact(g, d, l, t) && cb_exact(g, d, r, t);
+    if (k != CT_INT && k != CT_BOOL) || !both || !ct_same(d, t, dty) {
+        cg_refuse(g, d, "bit operation whose operands and result do not share one type");
+        return;
+    }
+    cv_load(g, d, 5_u64, l, t);
+    cv_load(g, d, 6_u64, r, t);
+    let mut ins = "and";
+    if op == CB_OR { ins = "or"; }
+    if op == CB_XOR { ins = "xor"; }
+    ci_r(g, ins, 5_u64, 5_u64, 6_u64);
+}
+
+// Shifts. The count is masked to the width of the left operand, and the
+// result has the type of the left operand. A right shift of a signed
+// type copies the sign. Defect 8 masks every count with 63; defect 22
+// shifts a signed type right with zeros.
+fn cb_shift(g: &mut Cg, d: &CjDoc, op: u64, l: u64, r: u64, dty: u64) {
+    let mut t = cv_ty(g, d, l);
+    if t == CG_NONE && cv_is_int(d, l) { t = cv_int_ty(d, l); }
+    if ct_kind(d, t) != CT_INT || !ct_same(d, t, dty) {
+        cg_refuse(g, d, "shift whose left operand type is not the integer type of its result");
+        return;
+    }
+    cv_load(g, d, 5_u64, l, t);
+    let rt = cv_load_own(g, d, 6_u64, r);
+    if ct_kind(d, rt) != CT_INT {
+        cg_refuse(g, d, "shift count that is not an integer");
+        return;
+    }
+    let mut mask = ct_bits(d, t) - 1_u64;
+    if g.v == CGC_SHMASK { mask = 63_u64; }
+    ci_i(g, "andi", 6_u64, 6_u64, mask);
+    if op == CB_SHL {
+        ci_r(g, "sll", 5_u64, 5_u64, 6_u64);
+        ci_norm(g, d, 5_u64, t);
+        return;
+    }
+    let mut ins = "srl";
+    if ct_signed(d, t) && g.v != CGC_SRA { ins = "sra"; }
+    ci_r(g, ins, 5_u64, 5_u64, 6_u64);
+}
+
+// x5 = l op r, as a value of type dty.
+fn cb_binary(g: &mut Cg, d: &CjDoc, body: u64, dty: u64) {
+    let opn = cj_get(d, body, "op");
+    let op = cb_op(d, opn);
+    let l = cj_get(d, body, "left");
+    let r = cj_get(d, body, "right");
+    if op == 0_u64 {
+        cg_refuse_tag(g, d, "binary operation", opn);
+    } else if op <= CB_REM || op >= CB_ADDW {
+        cb_arith(g, d, op, l, r, dty);
+    } else if op <= CB_XOR {
+        cb_bitwise(g, d, op, l, r, dty);
+    } else if op <= CB_SHR {
+        cb_shift(g, d, op, l, r, dty);
+    } else {
+        cb_compare(g, d, op, l, r, dty);
+    }
+}

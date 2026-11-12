@@ -1,0 +1,2 @@
+trap case 12
+Vec index out of bounds: 5 >= 2

@@ -1,0 +1,101 @@
+// cg-rv64: every constant of the package, in one file that sorts first.
+// The sources of asm-rv64 and emu-rv64 are joined before this file. Every
+// name of this package starts with cg_, cj_, ct_, ci_, cv_, cb_, cr_, cs_,
+// cc_, cp_, cf_, cm_, cq_, cx_ or cd_, or with CG_, CJ_, CT_, CB_ or CGC_.
+
+// "No such node", "no such type", "no such local".
+const CG_NONE: u64 = 0xFFFFFFFFFFFFFFFF_u64;
+
+// JSON node kinds. A node is six entries of CjDoc.n: kind, a, b, next
+// sibling, key start, key length. See cjson.bld.
+const CJ_NULL: u64 = 0_u64;
+const CJ_FALSE: u64 = 1_u64;
+const CJ_TRUE: u64 = 2_u64;
+const CJ_NUM: u64 = 3_u64;
+const CJ_STR: u64 = 4_u64;
+const CJ_ARR: u64 = 5_u64;
+const CJ_OBJ: u64 = 6_u64;
+// A number with a fraction or an exponent, and an integer past 64 bits.
+// The generator refuses both where it meets them.
+const CJ_FLOAT: u64 = 7_u64;
+const CJ_BIG: u64 = 8_u64;
+const CJ_STRIDE: u64 = 6_u64;
+
+// Type kinds. CT_BAD is every type the generator does not cover.
+const CT_VOID: u64 = 0_u64;
+const CT_BOOL: u64 = 1_u64;
+const CT_INT: u64 = 2_u64;
+const CT_PTR: u64 = 3_u64;
+const CT_ARRAY: u64 = 4_u64;
+const CT_SLICE: u64 = 5_u64;
+const CT_STRUCT: u64 = 6_u64;
+const CT_VEC: u64 = 7_u64;
+const CT_BAD: u64 = 9_u64;
+
+// Binary operations of the MIR that the generator covers.
+const CB_ADD: u64 = 1_u64;
+const CB_SUB: u64 = 2_u64;
+const CB_MUL: u64 = 3_u64;
+const CB_DIV: u64 = 4_u64;
+const CB_REM: u64 = 5_u64;
+const CB_AND: u64 = 6_u64;
+const CB_OR: u64 = 7_u64;
+const CB_XOR: u64 = 8_u64;
+const CB_SHL: u64 = 9_u64;
+const CB_SHR: u64 = 10_u64;
+const CB_EQ: u64 = 11_u64;
+const CB_NE: u64 = 12_u64;
+const CB_LT: u64 = 13_u64;
+const CB_LE: u64 = 14_u64;
+const CB_GT: u64 = 15_u64;
+const CB_GE: u64 = 16_u64;
+const CB_ADDW: u64 = 17_u64;
+const CB_SUBW: u64 = 18_u64;
+const CB_MULW: u64 = 19_u64;
+
+// The machine contract. See SPEC.md, "Machine contract".
+// Registers: x1 return address, x2 stack pointer, x10 to x17 arguments and
+// x10 the result, x26 the next free heap address, x27 the stack limit.
+// x5, x6, x7 and x28 to x31 are scratch.
+const CG_ARG_REGS: u64 = 8_u64;
+// Exit codes of a generated program.
+const CG_EXIT_TRAP: u64 = 101_u64;
+const CG_EXIT_MACHINE: u64 = 102_u64;
+const CG_EXIT_STACK: u64 = 103_u64;
+const CG_EXIT_MEMORY: u64 = 104_u64;
+// The global area: every global the generator gives memory to lives here,
+// at the bottom of the heap. The heap starts after it. Since 0.2.0.
+const CG_GLOBALS: u64 = 0x80100000_u64;
+
+// Planted defects. The number is passed down to the generator; 0 is the
+// generator itself. tests/controls.txt describes each one.
+const CGC_SEXT: u64 = 1_u64;
+const CGC_UCMP: u64 = 2_u64;
+const CGC_BOUNDS: u64 = 3_u64;
+const CGC_FIELD: u64 = 4_u64;
+const CGC_ARGREG: u64 = 5_u64;
+const CGC_ADDOVF: u64 = 6_u64;
+const CGC_DIVZERO: u64 = 7_u64;
+const CGC_SHMASK: u64 = 8_u64;
+const CGC_CAST: u64 = 9_u64;
+const CGC_STACKARG: u64 = 10_u64;
+const CGC_SUBOVF: u64 = 11_u64;
+const CGC_MULOVF: u64 = 12_u64;
+const CGC_STORE8: u64 = 13_u64;
+const CGC_UREM: u64 = 14_u64;
+const CGC_RETAGG: u64 = 15_u64;
+const CGC_HEXPAD: u64 = 16_u64;
+const CGC_MINUS: u64 = 17_u64;
+const CGC_LE: u64 = 18_u64;
+const CGC_VECOOB: u64 = 19_u64;
+const CGC_WRAP: u64 = 20_u64;
+const CGC_DIVOVF: u64 = 21_u64;
+const CGC_SRA: u64 = 22_u64;
+// Since 0.2.0.
+const CGC_ARROFF: u64 = 23_u64;
+const CGC_ARRSHORT: u64 = 24_u64;
+const CGC_GBOUNDS: u64 = 25_u64;
+const CGC_GADDR: u64 = 26_u64;
+const CGC_GINIT: u64 = 27_u64;
+const CGC_SLICEPROJ: u64 = 28_u64;
+const CGC_COUNT: u64 = 28_u64;

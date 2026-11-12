@@ -330,8 +330,8 @@ fn the_matrix_programs_print_what_the_python_model_computed() {
     }
 }
 
-/// What the C backend cannot yet build is refused with a diagnostic. Each of
-/// these compiled before and printed garbage or lost the store.
+/// What the C backend cannot yet build is refused with a diagnostic. It
+/// compiled before and printed garbage.
 #[test]
 fn shapes_that_cannot_be_built_are_refused_not_miscompiled() {
     let tuple = "fn main() ~ Console {\n\
@@ -345,18 +345,19 @@ fn shapes_that_cannot_be_built_are_refused_not_miscompiled() {
         "{}",
         ran.stderr
     );
+}
 
+/// A field store into a global struct was dropped, then refused (PR 254). It
+/// now lands in the global (G35); `compiler/tests/global_stores.rs` covers the
+/// class.
+#[test]
+fn a_field_store_into_a_global_struct_lands() {
     let global = "struct S { a: u8, b: u8 }\n\
                   static mut G: S = S { a: 1_u8, b: 2_u8 };\n\
                   fn main() ~ Console {\n\
-                  unsafe { G.a = 5_u8; println!(\"{}\", G.a); }\n\
+                  unsafe { G.a = 5_u8; println!(\"{} {}\", G.a, G.b); }\n\
                   }\n";
     let ran = run("global", global);
-    assert_ne!(ran.code, Some(0), "stdout: {}", ran.stdout);
-    assert!(
-        ran.stderr
-            .contains("cannot assign to a field of this value"),
-        "{}",
-        ran.stderr
-    );
+    assert_eq!(ran.code, Some(0), "stderr: {}", ran.stderr);
+    assert_eq!(ran.stdout.replace("\r\n", "\n"), "5 2\n");
 }

@@ -1,0 +1,106 @@
+// Differential corpus: recursion, mutual recursion, calls with more
+// arguments than the eight argument registers, mixed argument widths,
+// references to scalars, a match on an integer, and index traps.
+// run(k): k below 8 runs everything and ends with status 0. k from 8 to
+// 13 ends in an index trap, status 101.
+
+struct Pair { lo: u64, hi: i64 }
+
+fn fib(n: u64) -> u64 {
+    if n < 2_u64 { return n; }
+    fib(n - 1_u64) + fib(n - 2_u64)
+}
+
+fn is_even(n: u64) -> bool {
+    if n == 0_u64 { return true; }
+    is_odd(n - 1_u64)
+}
+
+fn is_odd(n: u64) -> bool {
+    if n == 0_u64 { return false; }
+    is_even(n - 1_u64)
+}
+
+fn ack(m: u64, n: u64) -> u64 {
+    if m == 0_u64 { return n + 1_u64; }
+    if n == 0_u64 { return ack(m - 1_u64, 1_u64); }
+    ack(m - 1_u64, ack(m, n - 1_u64))
+}
+
+fn many(a: u8, b: i8, c: u16, d: i16, e: u32, f: i32, g: u64, h: i64, i: u8, j: i64, k: bool, l: i8) -> i64 {
+    if !k { return 0; }
+    (a as i64) + 2 * (b as i64) + 3 * (c as i64) + 4 * (d as i64) + 5 * (e as i64) + 6 * (f as i64)
+        + 7 * (g as i64) + 8 * h + 9 * (i as i64) + 10 * j + 11 * (l as i64)
+}
+
+fn wide(a: u64, b: u64, c: u64, d: u64, e: u64, f: u64, g: u64, h: u64, p: Pair, q: &Pair, last: u16) -> Pair {
+    Pair { lo: a + b + c + d + e + f + g + h + p.lo + q.lo + last as u64, hi: p.hi - q.hi }
+}
+
+fn bump(x: &mut u64, by: u64) { *x = *x + by; }
+
+fn low(x: &mut i8) { *x = *x - 1_i8; }
+
+fn pick(k: u64) -> i64 {
+    match k {
+        0_u64 => 10,
+        1_u64 => 20,
+        7_u64 => 70,
+        _ => -1,
+    }
+}
+
+fn total(s: &[u32]) -> u64 {
+    let mut t: u64 = 0_u64;
+    let mut i: usize = 0;
+    while i < s.len() {
+        t = t + s[i] as u64;
+        i = i + 1;
+    }
+    t
+}
+
+fn fill(s: &mut [u32], at: u64, v: u32) { s[at as usize] = v; }
+
+fn traps(k: u64) ~ Console {
+    let mut a: [u32; 4] = [1_u32, 2_u32, 3_u32, 4_u32];
+    let mut v: Vec<u8> = Vec::new();
+    v.push(1_u8);
+    v.push(2_u8);
+    println!("trap case {}", k);
+    if k == 8_u64 { println!("{}", a[(k - 4_u64) as usize]); }
+    if k == 9_u64 { fill(&mut a, 4_u64, 9_u32); }
+    if k == 10_u64 { fill(&mut a, 0xFFFFFFFFFFFFFFFF_u64, 9_u32); }
+    if k == 11_u64 { println!("{}", v[2]); }
+    if k == 12_u64 { v[5] = 1_u8; }
+    if k == 13_u64 { println!("{}", a[(0_u64 - (k - 13_u64)) as usize + 1000]); }
+    println!("no trap {}", total(&a));
+}
+
+fn run(k: u64) ~ Console {
+    if k >= 8_u64 {
+        traps(k);
+        return;
+    }
+    println!("fib {} {}", fib(k + 10_u64), fib(1_u64));
+    println!("even {} {}", is_even(k + 20_u64), is_odd(k + 20_u64));
+    println!("ack {}", ack(2_u64, k));
+    println!("many {}", many(255_u8, -127_i8, 65535_u16, -32767_i16, 4294967295_u32, -2147483647_i32, k, -8, 9_u8, 10, true, 127_i8));
+    let p = Pair { lo: 100_u64, hi: -50 };
+    let q = Pair { lo: 1000_u64, hi: 7 };
+    let r = wide(1_u64, 2_u64, 3_u64, 4_u64, 5_u64, 6_u64, 7_u64, k, p, &q, 60000_u16);
+    println!("wide {} {}", r.lo, r.hi);
+    let mut n: u64 = 41_u64;
+    bump(&mut n, k);
+    let mut s: i8 = -127_i8;
+    low(&mut s);
+    println!("refs {} {}", n, s);
+    println!("pick {} {} {}", pick(k), pick(7_u64), pick(9_u64));
+    let mut a: [u32; 5] = [4000000000_u32, 2_u32, 3_u32, 4_u32, 5_u32];
+    fill(&mut a, k % 5_u64, 77_u32);
+    println!("slice {} {}", total(&a), a[(k % 5_u64) as usize]);
+}
+
+fn main() ~ Console + Process + Environment {
+    run(args_get(1).parse_int() as u64);
+}

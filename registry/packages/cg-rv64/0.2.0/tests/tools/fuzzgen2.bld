@@ -1,0 +1,217 @@
+// fuzzgen, second part: the struct, the function `run` and the command
+// line. tests/tools/fuzz.sh joins fuzzgen.bld and this file before it
+// compiles them.
+
+// A statement that declares nothing: an assignment, a store, a print.
+fn fz_plain(z: &mut Fz, fi: u64) {
+    let r = fz_pick(z, 10_u64);
+    let k = 1_u64 + fz_pick(z, z.vt.len() as u64 - 1_u64);
+    let f = fz_pick(z, 3_u64);
+    fz_s(z, "        ");
+    if r < 4_u64 {
+        fz_s(z, "v");
+        fz_u(z, k);
+        fz_s(z, " = ");
+        let j = fz_pick(z, fi + 1_u64);
+        if r == 0_u64 && j < fi && z.sig[(3_u64 * j + 2_u64) as usize] == z.vt[k as usize] { fz_call(z, j); } else { fz_expr(z, z.vt[k as usize], 3_u64); }
+        fz_s(z, ";\n");
+    } else if r == 4_u64 && fz_pick(z, 2_u64) == 0_u64 {
+        fz_remake(z);
+    } else if r < 6_u64 {
+        fz_s(z, "s.f");
+        fz_u(z, f);
+        fz_s(z, " = ");
+        fz_expr(z, z.ft[f as usize], 3_u64);
+        fz_s(z, ";\n");
+    } else if r < 8_u64 {
+        fz_s(z, "arr[((v0 ^ ");
+        fz_u(z, fz_pick(z, 8_u64));
+        if fz_pick(z, 6_u64) == 0_u64 { fz_s(z, "_u64) % 8_u64 + 1_u64) as usize] = "); } else { fz_s(z, "_u64) % 8_u64) as usize] = "); }
+        fz_expr(z, z.et, 3_u64);
+        fz_s(z, ";\n");
+    } else {
+        fz_s(z, "println!(\"f");
+        fz_u(z, fi);
+        if r == 8_u64 { fz_s(z, " {}\", v"); } else { fz_s(z, " {:016x}\", v"); }
+        fz_u(z, k);
+        if r == 8_u64 { fz_s(z, ");\n"); } else { fz_s(z, " as u64);\n"); }
+    }
+}
+
+// A statement of a function body: a declaration, an if, a counted loop
+// or a plain statement.
+fn fz_stmt(z: &mut Fz, fi: u64) {
+    let r = fz_pick(z, 10_u64);
+    if r < 3_u64 {
+        let t = fz_pick(z, 8_u64);
+        fz_s(z, "    let mut v");
+        fz_u(z, z.vt.len() as u64);
+        fz_s(z, ": ");
+        fz_ty(z, t);
+        fz_s(z, " = ");
+        fz_expr(z, t, 3_u64);
+        fz_s(z, ";\n");
+        z.vt.push(t);
+    } else if r < 5_u64 {
+        fz_s(z, "    if ");
+        fz_cond(z);
+        fz_s(z, " {\n");
+        fz_plain(z, fi);
+        fz_s(z, "    } else {\n");
+        fz_plain(z, fi);
+        fz_s(z, "    }\n");
+    } else if r == 5_u64 {
+        z.loops = z.loops + 1_u64;
+        fz_s(z, "    let mut i");
+        fz_u(z, z.loops);
+        fz_s(z, ": u64 = 0_u64;\n    while i");
+        fz_u(z, z.loops);
+        fz_s(z, " < ");
+        fz_u(z, 1_u64 + fz_pick(z, 4_u64));
+        fz_s(z, "_u64 {\n");
+        fz_plain(z, fi);
+        fz_plain(z, fi);
+        fz_s(z, "        i");
+        fz_u(z, z.loops);
+        fz_s(z, " = i");
+        fz_u(z, z.loops);
+        fz_s(z, " + 1_u64;\n    }\n");
+    } else {
+        fz_s(z, "    ");
+        fz_plain(z, fi);
+    }
+}
+
+// Function fi: its header, 4 to 11 statements and its result.
+fn fz_function(z: &mut Fz, fi: u64) {
+    z.vt.clear();
+    z.vt.push(7_u64);
+    z.vt.push(z.sig[(3_u64 * fi) as usize]);
+    z.vt.push(z.sig[(3_u64 * fi + 1_u64) as usize]);
+    z.vt.push(4_u64);
+    z.vt.push(1_u64);
+    z.vt.push(6_u64);
+    z.vt.push(3_u64);
+    z.vt.push(5_u64);
+    fz_s(z, "fn f");
+    fz_u(z, fi);
+    fz_s(z, "(v0: u64, v1: ");
+    fz_ty(z, z.vt[1]);
+    fz_s(z, ", v2: ");
+    fz_ty(z, z.vt[2]);
+    fz_s(z, ", s: &mut S, arr: &mut [");
+    fz_ty(z, z.et);
+    fz_s(z, "], v3: u8, v4: i16, v5: u32, v6: i64, v7: u16) -> ");
+    fz_ty(z, z.sig[(3_u64 * fi + 2_u64) as usize]);
+    fz_s(z, " ~ Console {\n");
+    let n = 4_u64 + fz_pick(z, 8_u64);
+    let mut i: u64 = 0_u64;
+    while i < n {
+        fz_stmt(z, fi);
+        i = i + 1_u64;
+    }
+    fz_s(z, "    ");
+    fz_expr(z, z.sig[(3_u64 * fi + 2_u64) as usize], 3_u64);
+    fz_s(z, "\n}\n\n");
+}
+
+// One call of function j from `run`, with its result printed.
+fn fz_run_call(z: &mut Fz, j: u64, n: u64) {
+    fz_s(z, "    let r");
+    fz_u(z, n);
+    fz_s(z, " = f");
+    fz_u(z, j);
+    fz_s(z, "(k + ");
+    fz_u(z, n);
+    fz_s(z, "_u64, ");
+    fz_lit(z, z.sig[(3_u64 * j) as usize]);
+    fz_s(z, ", ");
+    fz_lit(z, z.sig[(3_u64 * j + 1_u64) as usize]);
+    fz_s(z, ", &mut st, &mut data, 250_u8, -3_i16, 4000000000_u32, -5, 65535_u16);\n    println!(\"r {}\", r");
+    fz_u(z, n);
+    fz_s(z, ");\n");
+}
+
+// `run`: makes the struct and the array, calls three functions, prints
+// every field, reads one element of a vector of three (index 3 traps)
+// and prints every element of the array.
+fn fz_run(z: &mut Fz) {
+    fz_s(z, "fn run(k: u64) ~ Console {\n    let mut st = mk(");
+    fz_lit(z, z.ft[0]);
+    fz_s(z, ", ");
+    fz_lit(z, z.ft[1]);
+    fz_s(z, ", ");
+    fz_lit(z, z.ft[2]);
+    fz_s(z, ");\n    let mut data: [");
+    fz_ty(z, z.et);
+    fz_s(z, "; 8] = [");
+    let mut i: u64 = 0_u64;
+    while i < 8_u64 {
+        if i != 0_u64 { fz_s(z, ", "); }
+        fz_lit(z, z.et);
+        i = i + 1_u64;
+    }
+    fz_s(z, "];\n");
+    fz_run_call(z, 4_u64, 0_u64);
+    fz_run_call(z, 3_u64, 1_u64);
+    fz_run_call(z, 4_u64, 2_u64);
+    fz_s(z, "    println!(\"s {} {} {}\", st.f0, st.f1, st.f2);\n");
+    fz_s(z, "    let mut vv: Vec<u64> = Vec::new();\n    vv.push(r0 as u64);\n    vv.push(r1 as u64);\n    vv.push(r2 as u64);\n");
+    fz_s(z, "    println!(\"v {} {}\", vv.len(), vv[((k + ");
+    fz_u(z, fz_pick(z, 4_u64));
+    fz_s(z, "_u64) % 4_u64) as usize]);\n");
+    fz_s(z, "    let mut i: usize = 0;\n    while i < 8 {\n        println!(\"a {}\", data[i]);\n");
+    fz_s(z, "        i = i + 1;\n    }\n}\n\n");
+    fz_s(z, "fn main() ~ Console + Process + Environment {\n    run(args_get(1).parse_int() as u64);\n}\n");
+}
+
+fn fz_program(z: &mut Fz) {
+    let mut i: u64 = 0_u64;
+    while i < 3_u64 {
+        z.ft.push(fz_pick(z, 8_u64));
+        i = i + 1_u64;
+    }
+    z.et = fz_pick(z, 8_u64);
+    i = 0_u64;
+    while i < 15_u64 {
+        z.sig.push(fz_pick(z, 8_u64));
+        i = i + 1_u64;
+    }
+    fz_s(z, "struct S { f0: ");
+    fz_ty(z, z.ft[0]);
+    fz_s(z, ", f1: ");
+    fz_ty(z, z.ft[1]);
+    fz_s(z, ", f2: ");
+    fz_ty(z, z.ft[2]);
+    fz_s(z, " }\n\nfn mk(a: ");
+    fz_ty(z, z.ft[0]);
+    fz_s(z, ", b: ");
+    fz_ty(z, z.ft[1]);
+    fz_s(z, ", c: ");
+    fz_ty(z, z.ft[2]);
+    fz_s(z, ") -> S {\n    S { f0: a, f1: b, f2: c }\n}\n\n");
+    i = 0_u64;
+    while i < 5_u64 {
+        fz_function(z, i);
+        i = i + 1_u64;
+    }
+    fz_run(z);
+}
+
+fn main() ~ Console + Process + Environment {
+    let seed = args_get(1).parse_int() as u64;
+    let mut z = Fz { s: seed, out: Vec::new(), vt: Vec::new(), ft: Vec::new(), et: 0_u64, sig: Vec::new(), loops: 0_u64 };
+    println!("// fuzzgen seed {}", seed);
+    fz_program(&mut z);
+    let mut line = "";
+    let mut i: usize = 0;
+    while i < z.out.len() {
+        if z.out[i] == 10_u8 {
+            println!("{}", line);
+            line = "";
+        } else {
+            line = line + format!("{}", z.out[i] as char);
+        }
+        i = i + 1;
+    }
+}

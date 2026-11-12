@@ -1,0 +1,10 @@
+// Refusal fixture: a call of a runtime function with no body in the MIR.
+
+fn run(k: u64) ~ Console + Process {
+    println!("before {}", k);
+    if k == 1_u64 { exit(3); }
+}
+
+fn main() ~ Console + Process + Environment {
+    run(args_get(1).parse_int() as u64);
+}

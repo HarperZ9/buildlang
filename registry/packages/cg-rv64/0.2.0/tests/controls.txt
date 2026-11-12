@@ -1,0 +1,29 @@
+# id | where | planted defect | first corpus run that differs (of 172 since 0.2.0) | first fuzz comparison that differs (seeds 1 to 80, 3 runs a seed)
+1 | ci_norm | a signed value narrower than 64 bits is extended with zeros | run 1, structs argument 0 (host status 0, emulator 101) | comparison 4, seed 2
+2 | cb_compare | unsigned values are compared as signed | run 31, edge_u64 argument 0 (host status 0, emulator 101) | comparison 1, seed 1
+3 | cr_bounds | an array or slice index is not checked against the length | run 13, calls argument 8 (host status 101, emulator 0) | comparison 13, seed 5
+4 | cr_field | a field read through a pointer takes the offset of the field before it | run 1, structs argument 0 (host status 0, emulator 0) | comparison 10, seed 4
+5 | cc_reg | arguments 1 and 2 travel in each other's register | run 1, structs argument 0 (host status 0, emulator 102) | comparison 1, seed 1
+6 | cb_checked | an add that leaves its type does not trap | run 32, traps_s argument 0 (host status 101, emulator 0) | comparison 61, seed 22
+7 | cb_divide | a zero divisor does not trap | run 35, traps_s argument 3 (host status 101, emulator 0) | comparison 151, seed 53
+8 | cb_shift | every shift count is masked with 63 | run 24, edge_i8 argument 0 (host status 0, emulator 0) | comparison 5, seed 2
+9 | cr_cast | a cast of a signed value to a wider type fills with zeros | run 1, structs argument 0 (host status 0, emulator 0) | comparison 1, seed 1
+10 | cf_params | a stack argument is read one slot too high | run 5, calls argument 0 (host status 0, emulator 102) | comparison 1, seed 1
+11 | cb_checked | a subtract that leaves its type does not trap | run 33, traps_s argument 1 (host status 101, emulator 0) | comparison 43, seed 15
+12 | cb_checked | a multiply that leaves its type does not trap | run 34, traps_s argument 2 (host status 101, emulator 0) | comparison 19, seed 7
+13 | cs_index_store | an indexed store writes eight bytes whatever the element width | run 5, calls argument 0 (host status 0, emulator 0) | comparison 5, seed 2
+14 | cb_divide | a signed remainder is taken as unsigned | run 24, edge_i8 argument 0 (host status 0, emulator 0) | comparison 4, seed 2
+15 | cf_return | an aggregate result is copied back for its first 8 bytes only | run 1, structs argument 0 (host status 0, emulator 101) | comparison 1, seed 1
+16 | cp_int | a hex number is padded with spaces where the format asks for zeros | run 19, vecs argument 0 (host status 0, emulator 0) | comparison 1, seed 1
+17 | cq_dec | a negative decimal number is printed with no minus sign | run 1, structs argument 0 (host status 0, emulator 0) | comparison 1, seed 1
+18 | cb_compare | less-or-equal is compiled as less-than | run 24, edge_i8 argument 0 (host status 0, emulator 0) | comparison 51, seed 18
+19 | cr_bounds | a vector index is not checked against the length | run 16, calls argument 11 (host status 101, emulator 0) | comparison 3, seed 1
+20 | cb_arith | a wrapping subtract takes its operands the wrong way round | run 24, edge_i8 argument 0 (host status 0, emulator 101) | comparison 1, seed 1
+21 | cb_divide | the smallest signed value divided by -1 does not trap | run 42, traps_s argument 10 (host status 101, emulator 0) | comparison 4, seed 2
+22 | cb_shift | a right shift of a signed value fills with zeros | run 27, edge_i64 argument 0 (host status 0, emulator 0) | comparison 28, seed 10
+23 | cs_array_member | an array member of a struct literal is written one element past its field | run 160, sarrays argument 0 (host status 0, emulator 0) | not reached: the assembly of every fuzz program of seeds 1 to 80 equals that of the generator
+24 | cs_array_member | an array member of a struct literal is copied short by one element | run 160, sarrays argument 0 (host status 0, emulator 0) | not reached, as 23
+25 | cr_ref, cr_bounds | an index into an array reached through a global's address is not checked | run 166, globals argument 2 (host status 101, emulator 0) | not reached, as 23
+26 | cd_store | a store into a whole global writes eight bytes past the global | run 164, globals argument 0 (host status 0, emulator 0) | not reached, as 23
+27 | cd_const | the initial value of a global array element is written to the element after it | run 164, globals argument 0 (host status 0, emulator 0) | not reached, as 23
+28 | cr_slice_step | an index into a slice inside a place reads the length from the address word | run 162, sarrays argument 2 (host status 101, emulator 0) | not reached, as 23
