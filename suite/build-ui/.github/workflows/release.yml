@@ -1,0 +1,126 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish the already accepted release assets to PyPI
+        required: true
+        type: boolean
+        default: false
+      release_tag:
+        description: Existing GitHub release tag whose assets were accepted
+        required: true
+        type: string
+        default: v2.0.0
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  candidate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install build verification tools
+        run: python -m pip install --upgrade build pytest twine
+      - name: Verify release contract
+        run: python -m pytest tests/test_release_contract.py -q
+      - name: Install Linux Qt runtime libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libegl1 libxkbcommon0
+      - name: Build sdist and wheel
+        run: python -m build
+      - name: Check distributions
+        run: python -m twine check dist/*
+      - name: Resolve candidate wheel
+        shell: bash
+        run: |
+          wheel=$(python -c "from pathlib import Path; wheels=list(Path('dist').glob('*.whl')); assert len(wheels)==1; print(wheels[0].resolve())")
+          uri=$(python -c "from pathlib import Path; print(Path('$wheel').as_uri())")
+          echo "WHEEL=$wheel" >> "$GITHUB_ENV"
+          echo "WHEEL_URI=$uri" >> "$GITHUB_ENV"
+      - name: Verify core wheel without a binding
+        shell: bash
+        run: |
+          python -m venv "$RUNNER_TEMP/core"
+          "$RUNNER_TEMP/core/bin/pip" install "packaging>=24,<26" "build-ui @ $WHEEL_URI"
+          "$RUNNER_TEMP/core/bin/python" -m pip check
+          cd "$RUNNER_TEMP"
+          "$RUNNER_TEMP/core/bin/python" "$GITHUB_WORKSPACE/scripts/verify_wheel.py" \
+            --expect-no-binding --source-root "$GITHUB_WORKSPACE"
+      - name: Verify wheel with PyQt6 only
+        shell: bash
+        env:
+          QT_API: pyqt6
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          python -m venv "$RUNNER_TEMP/pyqt6"
+          "$RUNNER_TEMP/pyqt6/bin/pip" install "packaging>=24,<26" "build-ui[pyqt6] @ $WHEEL_URI"
+          "$RUNNER_TEMP/pyqt6/bin/python" -m pip check
+          cd "$RUNNER_TEMP"
+          "$RUNNER_TEMP/pyqt6/bin/python" "$GITHUB_WORKSPACE/scripts/verify_wheel.py" \
+            --expected-api PyQt6 --source-root "$GITHUB_WORKSPACE"
+          "$RUNNER_TEMP/pyqt6/bin/python" "$GITHUB_WORKSPACE/tests/qt_selection_mismatch_probe.py" \
+            --installed-api pyqt6
+      - name: Verify wheel with PySide6 only
+        shell: bash
+        env:
+          QT_API: pyside6
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          python -m venv "$RUNNER_TEMP/pyside6"
+          "$RUNNER_TEMP/pyside6/bin/pip" install "packaging>=24,<26" "build-ui[pyside6] @ $WHEEL_URI"
+          "$RUNNER_TEMP/pyside6/bin/python" -m pip check
+          cd "$RUNNER_TEMP"
+          "$RUNNER_TEMP/pyside6/bin/python" "$GITHUB_WORKSPACE/scripts/verify_wheel.py" \
+            --expected-api PySide6 --source-root "$GITHUB_WORKSPACE"
+          "$RUNNER_TEMP/pyside6/bin/python" "$GITHUB_WORKSPACE/tests/qt_selection_mismatch_probe.py" \
+            --installed-api pyside6
+      - name: Record candidate hashes
+        run: sha256sum dist/* > dist/SHA256SUMS.txt
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    if: github.event_name == 'release' || inputs.publish
+    needs: candidate
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Download the exact accepted GitHub release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.release_tag }}
+        run: gh release download "$RELEASE_TAG" --dir dist --repo "$GITHUB_REPOSITORY"
+      - name: Verify the accepted release-asset hashes
+        run: |
+          cp dist/SHA256SUMS.txt SHA256SUMS.txt
+          sha256sum --check SHA256SUMS.txt
+      - name: Validate the accepted distributions
+        run: |
+          python -m pip install --upgrade twine packaging
+          python -m twine check dist/*.whl dist/*.tar.gz
+      - name: Keep the checksum receipt out of the PyPI upload set
+        run: rm -f dist/SHA256SUMS.txt
+      - name: Publish verified distributions to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
