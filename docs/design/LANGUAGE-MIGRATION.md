@@ -1,6 +1,6 @@
 # Language migration: other languages into BuildLang
 
-Status: design. No frontend exists yet. Written 2026-11-02.
+Status: the first frontend slice exists (2026-11-12): `port/` reads a C subset and is checked against gcc (`port/README.md`). The rest of this document is design. Written 2026-11-02.
 
 ## Goal
 
