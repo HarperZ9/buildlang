@@ -1,0 +1,11 @@
+const EOF: i32 = -1;
+const NULL: i32 = 0;
+const TRUE: bool = true;
+const LONG: i64 = 5000000000;
+const IN: i32 = 3;
+const INFINITY: f64 = 1.5;
+static mut errno: i32 = 4;
+fn main() ~ Console {
+    unsafe { errno = errno + IN; }
+    unsafe { println!("{} {} {} {} {} {}", EOF, NULL, TRUE, LONG, INFINITY, errno); }
+}

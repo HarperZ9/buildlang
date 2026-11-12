@@ -134,6 +134,10 @@ pub struct CBackend {
     /// The type of each module global, by name. `&GLOBAL` of an array global
     /// is the array's name, which decays to a pointer to its first element.
     global_types: std::collections::HashMap<String, MirType>,
+    /// Globals the program defines (not foreign declarations). Each is
+    /// emitted under `global_emit_name`, so a constant named like a C macro
+    /// or a platform typedef (`EOF`, `NULL`, `TRUE`, `LONG`) still builds.
+    user_globals: std::collections::HashSet<String>,
     /// Field names and types of each struct, for building a struct with an
     /// array member one member at a time (see `c/aggregates.rs`).
     struct_fields: aggregates::StructFields,
@@ -166,6 +170,7 @@ impl CBackend {
             experimental_free_override_for_test: None,
             global_int_types: std::collections::HashMap::new(),
             global_types: std::collections::HashMap::new(),
+            user_globals: std::collections::HashSet::new(),
         }
     }
 
@@ -1951,6 +1956,9 @@ impl CBackend {
             // A foreign `static` is an external declaration, never a definition.
             // If a header backs it, the header declares it and we emit nothing;
             // otherwise emit a bare `extern` declaration to reference the symbol.
+            if !global.is_extern_decl {
+                self.user_globals.insert(global.name.to_string());
+            }
             if global.is_extern_decl {
                 if global.link_header.is_none() {
                     let declarator = self.global_declarator(global);
@@ -3055,7 +3063,8 @@ impl CBackend {
                 // definition and the read path (value_to_c on MirValue::Global).
                 self.write_indent();
                 let rvalue = self.rvalue_to_c(value, locals)?;
-                write!(self.output, "{} = {};\n", name, rvalue).unwrap();
+                let c_name = self.value_to_c(&MirValue::Global(name.clone()), locals);
+                write!(self.output, "{} = {};\n", c_name, rvalue).unwrap();
             }
             MirStmtKind::IndexStore {
                 base,
@@ -4188,6 +4197,7 @@ impl CBackend {
                 "Stdin" => return "((io_Stdin){ 0 })".to_string(),
                 "Stdout" => return "((io_Stdout){ 0 })".to_string(),
                 "Stderr" => return "((io_Stderr){ 0 })".to_string(),
+                other if self.user_globals.contains(other) => Self::global_emit_name(other),
                 // A function reference in value position (a direct call's callee)
                 // must get the same stdlib-collision escape as its definition.
                 other if self.escaped_user_fns.contains(other) => Self::user_fn_emit_name(other),
@@ -8089,12 +8099,12 @@ fn main() {
         // expression, so MSVC rejects it as a file-scope initializer with C2099.
         // See `const_to_c_static`. Do not reintroduce the `(Color)` cast here.
         assert!(
-            code.contains("const Color WHITE = {"),
+            code.contains("const Color bld_g_WHITE = {"),
             "Expected const Color WHITE global in:\n{}",
             code
         );
         assert!(
-            code.contains("const Color BLACK = {"),
+            code.contains("const Color bld_g_BLACK = {"),
             "Expected const Color BLACK global in:\n{}",
             code
         );

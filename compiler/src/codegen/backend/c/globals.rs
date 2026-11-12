@@ -15,10 +15,16 @@ use super::CBackend;
 impl CBackend {
     /// `T NAME`, `const T NAME` or `T NAME[N][M]`, without the initializer.
     pub(super) fn global_declarator(&self, global: &MirGlobal) -> String {
-        let decl = if matches!(global.ty, MirType::Array(..)) {
-            self.fmt_array_decl(&global.ty, &global.name)
+        // A foreign static names a C symbol and keeps its name.
+        let c_name = if global.is_extern_decl {
+            global.name.to_string()
         } else {
-            format!("{} {}", self.type_to_c(&global.ty), global.name)
+            Self::global_emit_name(&global.name)
+        };
+        let decl = if matches!(global.ty, MirType::Array(..)) {
+            self.fmt_array_decl(&global.ty, &c_name)
+        } else {
+            format!("{} {}", self.type_to_c(&global.ty), c_name)
         };
         // A foreign static is declared without `const`: the other side owns
         // the object, and a C declaration that calls it constant would let
@@ -28,6 +34,14 @@ impl CBackend {
         } else {
             format!("const {decl}")
         }
+    }
+
+    /// The C name of a global the program defines. C headers define macros
+    /// and types under ordinary constant names (`EOF`, `NULL`, `TRUE`, `LONG`
+    /// and `IN` on Windows), and no list of them can be complete, so every
+    /// such global gets a prefix no header uses.
+    pub(super) fn global_emit_name(name: &str) -> String {
+        format!("bld_g_{name}")
     }
 
     /// The C name a global is read under, as `value_to_c` writes it.

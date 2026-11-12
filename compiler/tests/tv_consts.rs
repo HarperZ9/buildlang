@@ -61,18 +61,18 @@ fn a_changed_constant_initializer_is_refused() {
     for (name, from, to) in [
         (
             "scaled",
-            "const int64_t SCALE = 1000;",
-            "const int64_t SCALE = 1001;",
+            "const int64_t bld_g_SCALE = 1000;",
+            "const int64_t bld_g_SCALE = 1001;",
         ),
         (
             "halve",
-            "const double HALF = 0.5;",
-            "const double HALF = 0.25;",
+            "const double bld_g_HALF = 0.5;",
+            "const double bld_g_HALF = 0.25;",
         ),
         (
             "gate",
-            "const bool ENABLED = true;",
-            "const bool ENABLED = false;",
+            "const bool bld_g_ENABLED = true;",
+            "const bool bld_g_ENABLED = false;",
         ),
     ] {
         assert!(c0.contains(from), "`{from}` not in the C");
