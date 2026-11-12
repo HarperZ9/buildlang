@@ -1,0 +1,52 @@
+name: port
+
+# Builds the port tool (port/main.bld) with the buildc of this checkout and runs port/check.sh:
+# every C program in port/corpus/c is ported, built and run, and its output must equal gcc's byte
+# for byte; every program in port/corpus/c/refused must be refused at its recorded lines.
+# A change to compiler/ runs it too: a codegen regression that breaks the tool fails here.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "port/**"
+      - "compiler/**"
+      - ".github/workflows/port.yml"
+  push:
+    branches: [main]
+    paths:
+      - "port/**"
+      - "compiler/**"
+      - ".github/workflows/port.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: port-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  port:
+    name: Port the C corpus and compare with gcc
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: compiler
+
+      - name: Build buildc
+        working-directory: compiler
+        run: cargo build --release --locked
+
+      - name: Port the corpus and compare with gcc
+        env:
+          BUILDLANG_STDLIB: ${{ github.workspace }}/stdlib
+        run: bash port/check.sh compiler/target/release/buildc
