@@ -1,0 +1,111 @@
+// SPDX-License-Identifier: MIT
+//
+// port/lex.bld: The C lexer: source text to token kinds, texts and lines.
+
+// ------------------------------------------------------------------ the lexer
+// Token kinds: 0 end, 1 name, 2 integer, 3 float, 4 string, 5 character, 6 punctuation,
+// 7 preprocessor line.
+
+pub fn is_alpha(c: u8) -> bool { (c >= 97 && c <= 122) || (c >= 65 && c <= 90) || c == 95 }
+pub fn is_digit(c: u8) -> bool { c >= 48 && c <= 57 }
+
+pub fn lex(src: String, kind: Vec<i32>, text: Vec<String>, line: Vec<i32>) {
+    let b = src.as_bytes();
+    let n: usize = src.len();
+    let mut i: usize = 0;
+    let mut ln: i32 = 1;
+    while i < n {
+        let c: u8 = b[i];
+        if c == 10 { ln = ln + 1; i = i + 1; continue; }
+        if c == 32 || c == 9 || c == 13 { i = i + 1; continue; }
+        if c == 47 && i + 1 < n && b[i + 1] == 47 {
+            while i < n && b[i] != 10 { i = i + 1; }
+            continue;
+        }
+        if c == 47 && i + 1 < n && b[i + 1] == 42 {
+            i = i + 2;
+            while i + 1 < n && !(b[i] == 42 && b[i + 1] == 47) {
+                if b[i] == 10 { ln = ln + 1; }
+                i = i + 1;
+            }
+            i = i + 2;
+            continue;
+        }
+        let start: usize = i;
+        if c == 35 {
+            while i < n && b[i] != 10 { i = i + 1; }
+            kind.push(7); text.push(src.substring(start, i - start).trim()); line.push(ln);
+            continue;
+        }
+        if is_alpha(c) {
+            while i < n && (is_alpha(b[i]) || is_digit(b[i])) { i = i + 1; }
+            kind.push(1); text.push(src.substring(start, i - start)); line.push(ln);
+            continue;
+        }
+        if is_digit(c) || (c == 46 && i + 1 < n && is_digit(b[i + 1])) {
+            let mut is_float: bool = false;
+            let hex: bool = c == 48 && i + 1 < n && (b[i + 1] == 120 || b[i + 1] == 88);
+            if hex { i = i + 2; }
+            while i < n {
+                let d: u8 = b[i];
+                if is_digit(d) || (hex && is_alpha(d)) { i = i + 1; continue; }
+                if !hex && d == 46 { is_float = true; i = i + 1; continue; }
+                if !hex && (d == 101 || d == 69) {
+                    is_float = true;
+                    i = i + 1;
+                    if i < n && (b[i] == 43 || b[i] == 45) { i = i + 1; }
+                    continue;
+                }
+                break;
+            }
+            let mut body: String = src.substring(start, i - start);
+            // suffixes decide the literal's type: f is float, l is long, u is unsigned
+            let mut sf: bool = false;
+            let mut sl: bool = false;
+            let mut su: bool = false;
+            while i < n && (b[i] == 102 || b[i] == 70 || b[i] == 108 || b[i] == 76 || b[i] == 117 || b[i] == 85) {
+                if b[i] == 102 || b[i] == 70 { sf = true; }
+                if b[i] == 108 || b[i] == 76 { sl = true; }
+                if b[i] == 117 || b[i] == 85 { su = true; }
+                i = i + 1;
+            }
+            if is_float {
+                if body.starts_with(".") { body = "0" + body; }
+                if body.ends_with(".") { body = body + "0"; }
+                if !body.contains(".") { body = "((" + body + ") as f64)"; }
+                if sf { body = "((" + body + ") as f32)"; kind.push(10); } else { kind.push(3); }
+            } else if sl {
+                body = "((" + body + ") as i64)"; kind.push(8);
+            } else if su {
+                body = "((" + body + ") as u32)"; kind.push(9);
+            } else {
+                kind.push(2);
+            }
+            text.push(body); line.push(ln);
+            continue;
+        }
+        if c == 34 || c == 39 {
+            i = i + 1;
+            while i < n && b[i] != c {
+                if b[i] == 92 { i = i + 1; }
+                i = i + 1;
+            }
+            i = i + 1;
+            if c == 34 { kind.push(4); } else { kind.push(5); }
+            text.push(src.substring(start, i - start)); line.push(ln);
+            continue;
+        }
+        // punctuation, longest first
+        let mut len: usize = 1;
+        if i + 1 < n {
+            let d: u8 = b[i + 1];
+            let two: bool = (d == 61 && (c == 61 || c == 33 || c == 60 || c == 62 || c == 43 || c == 45 || c == 42 || c == 47 || c == 37))
+                || (c == 43 && d == 43) || (c == 45 && d == 45) || (c == 38 && d == 38) || (c == 124 && d == 124)
+                || (c == 60 && d == 60) || (c == 62 && d == 62) || (c == 45 && d == 62);
+            if two { len = 2; }
+        }
+        i = i + len;
+        kind.push(6); text.push(src.substring(start, len)); line.push(ln);
+    }
+    kind.push(0); text.push(String::from("")); line.push(ln);
+}

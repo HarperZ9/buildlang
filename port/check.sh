@@ -16,7 +16,7 @@ WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 fail=0
 
-cp "$HERE/main.bld" "$WORK/main.bld"
+cp "$HERE"/*.bld "$WORK"/
 (cd "$WORK" && "$BUILDC" build --release . > build.log 2>&1) || { cat "$WORK/build.log"; echo "port: the tool did not build"; exit 1; }
 PORT="$WORK/target/release/main"
 
