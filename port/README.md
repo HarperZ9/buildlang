@@ -4,7 +4,8 @@
 command and get a file that builds. If the program uses something the tool cannot carry over, it
 lists each line and writes nothing, so a port is whole or it is refused.
 
-The tool is itself a BuildLang program (`main.bld`). It is deterministic: the same input gives the
+The tool is itself a BuildLang program: `main.bld` and six modules beside it (`types`, `lex`,
+`state`, `exprs`, `stmts`, `file`). It is deterministic: the same input gives the
 same output, with no model in the loop.
 
 ## Use it

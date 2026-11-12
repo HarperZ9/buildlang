@@ -1,0 +1,173 @@
+// SPDX-License-Identifier: MIT
+//
+// port/state.bld: Parser state, the symbol tables and pass one (signatures and who prints).
+
+use types::*;
+
+// ------------------------------------------------------------------ parser state
+// st[0] position, st[1] type of the last expression, st[2] refusals, st[3] indent,
+// st[4] return type of the function being written, st[5] 1 inside main,
+// st[6] live symbols (Vec<String> has no pop yet, so the count is kept here), st[7] loop depth.
+
+pub struct Toks { kind: Vec<i32>, text: Vec<String>, line: Vec<i32> }
+pub struct Syms { names: Vec<String>, types: Vec<i32> }
+pub struct Fns { names: Vec<String>, ret: Vec<i32>, first: Vec<i32>, count: Vec<i32>, ptypes: Vec<i32>, prints: Vec<i32>, callers: Vec<i32>, callees: Vec<String> }
+
+pub fn cur(t: Toks, st: Vec<i32>) -> String { t.text[st[0] as usize] }
+pub fn cur_kind(t: Toks, st: Vec<i32>) -> i32 { t.kind[st[0] as usize] }
+pub fn peek(t: Toks, st: Vec<i32>, k: i32) -> String {
+    let p: usize = (st[0] + k) as usize;
+    if p >= t.text.len() { return String::from(""); }
+    t.text[p]
+}
+pub fn advance(st: Vec<i32>) { st[0] = st[0] + 1; }
+
+// One refusal a source line: the first thing wrong on a line is the useful one, and what
+// follows it on that line is the parser recovering.
+pub fn refuse(t: Toks, st: Vec<i32>, why: String) ~ Console {
+    let ln: i32 = t.line[st[0] as usize];
+    if ln == st[8] { return; }
+    st[8] = ln;
+    println!("  line {}: {} (at `{}`)", ln, why, cur(t, st));
+    st[2] = st[2] + 1;
+}
+
+// Skips to the end of the construct at the cursor: past its `;`, or past its `{ ... }` block.
+pub fn skip_construct(t: Toks, st: Vec<i32>) {
+    let mut depth: i32 = 0;
+    while cur_kind(t, st) != 0 {
+        let w: String = cur(t, st);
+        advance(st);
+        if w == "{" { depth = depth + 1; }
+        if w == "}" { depth = depth - 1; if depth <= 0 { if cur(t, st) == ";" { advance(st); } return; } }
+        if w == ";" && depth == 0 { return; }
+    }
+}
+
+pub fn expect(t: Toks, st: Vec<i32>, p: String) ~ Console {
+    if cur(t, st) == p { advance(st); return; }
+    refuse(t, st, "expected `" + p + "`");
+    advance(st);
+}
+
+pub fn is_type_word(w: String) -> bool {
+    w == "int" || w == "long" || w == "double" || w == "float" || w == "char" || w == "void"
+        || w == "unsigned" || w == "signed" || w == "short" || w == "const" || w == "static"
+}
+
+// Reads a type at the cursor. -1 when the type is outside the subset.
+pub fn parse_type(t: Toks, st: Vec<i32>) -> i32 {
+    let mut unsigned: bool = false;
+    let mut longs: i32 = 0;
+    let mut base: i32 = -2;
+    while cur_kind(t, st) == 1 && is_type_word(cur(t, st)) {
+        let w: String = cur(t, st);
+        if w == "unsigned" { unsigned = true; }
+        if w == "long" { longs = longs + 1; }
+        if w == "int" || w == "short" || w == "signed" { if base == -2 { base = 1; } }
+        if w == "double" { base = 3; }
+        if w == "float" { base = 4; }
+        if w == "char" { base = 5; }
+        if w == "void" { base = 0; }
+        advance(st);
+    }
+    if cur(t, st) == "*" { return -1; }
+    if base == 3 || base == 4 || base == 5 || base == 0 { return base; }
+    if longs > 0 { return 2; }
+    if unsigned { return 6; }
+    1
+}
+
+pub fn find_var(sy: Syms, st: Vec<i32>, name: String) -> i32 {
+    let mut i: i32 = st[6] - 1;
+    while i >= 0 {
+        if sy.names[i as usize] == name { return sy.types[i as usize]; }
+        i = i - 1;
+    }
+    -1
+}
+
+pub fn add_sym(sy: Syms, st: Vec<i32>, name: String, ty: i32) {
+    let at: usize = st[6] as usize;
+    if at < sy.names.len() { sy.names[at] = name; sy.types[at] = ty; } else { sy.names.push(name); sy.types.push(ty); }
+    st[6] = st[6] + 1;
+}
+
+pub fn push_step(steps: Vec<String>, st: Vec<i32>, step: String) {
+    let at: usize = st[7] as usize;
+    if at < steps.len() { steps[at] = step; } else { steps.push(step); }
+    st[7] = st[7] + 1;
+}
+
+pub fn find_fn(f: Fns, name: String) -> i32 {
+    let mut i: usize = 0;
+    while i < f.names.len() {
+        if f.names[i] == name { return i as i32; }
+        i = i + 1;
+    }
+    -1
+}
+
+// ------------------------------------------------------------------ pass one: signatures
+
+pub fn collect(t: Toks, f: Fns) {
+    let st: Vec<i32> = vec![0, 0, 0, 0, 0, 0, 0, 0, 0];
+    while cur_kind(t, st) != 0 {
+        if cur_kind(t, st) == 1 && is_type_word(cur(t, st)) {
+            let ret: i32 = parse_type(t, st);
+            if cur_kind(t, st) == 1 && peek(t, st, 1) == "(" && ret >= 0 {
+                let name: String = cur(t, st);
+                advance(st); advance(st);
+                let first: i32 = f.ptypes.len() as i32;
+                let mut count: i32 = 0;
+                while cur(t, st) != ")" && cur_kind(t, st) != 0 {
+                    if cur_kind(t, st) == 1 && is_type_word(cur(t, st)) {
+                        let pt: i32 = parse_type(t, st);
+                        if pt > 0 { f.ptypes.push(pt); count = count + 1; }
+                        if pt < 0 { f.ptypes.push(-1); count = count + 1; }
+                    } else {
+                        advance(st);
+                    }
+                }
+                advance(st);
+                let known: i32 = find_fn(f, name);
+                let mut idx: i32 = known;
+                if known < 0 {
+                    idx = f.names.len() as i32;
+                    f.names.push(name); f.ret.push(ret); f.first.push(first); f.count.push(count); f.prints.push(0);
+                }
+                if cur(t, st) == "{" {
+                    let mut depth: i32 = 0;
+                    loop {
+                        let w: String = cur(t, st);
+                        if w == "{" { depth = depth + 1; }
+                        if w == "}" { depth = depth - 1; if depth == 0 { advance(st); break; } }
+                        if cur_kind(t, st) == 0 { break; }
+                        if cur_kind(t, st) == 1 && peek(t, st, 1) == "(" {
+                            if w == "printf" || w == "puts" || w == "putchar" { f.prints[idx as usize] = 1; }
+                            f.callers.push(idx); f.callees.push(w);
+                        }
+                        advance(st);
+                    }
+                }
+                continue;
+            }
+        }
+        advance(st);
+    }
+    // a function prints when anything it calls prints
+    let mut changed: bool = true;
+    while changed {
+        changed = false;
+        let mut i: usize = 0;
+        while i < f.callers.len() {
+            let callee: i32 = find_fn(f, f.callees[i]);
+            let caller: usize = f.callers[i] as usize;
+            if callee >= 0 && f.prints[callee as usize] == 1 && f.prints[caller] == 0 {
+                f.prints[caller] = 1;
+                changed = true;
+            }
+            i = i + 1;
+        }
+    }
+}
