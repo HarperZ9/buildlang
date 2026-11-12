@@ -533,6 +533,17 @@ impl MirModuleBuilder {
         self.module.intern_string(s)
     }
 
+    /// Set the return type of every entry named `name`, the declaration and
+    /// the definition. A function that returns a closure learns its return
+    /// type from its body.
+    pub fn set_return_type(&mut self, name: &str, ret: &MirType) {
+        for func in self.module.functions.iter_mut() {
+            if func.name.as_ref() == name {
+                func.sig.ret = ret.clone();
+            }
+        }
+    }
+
     /// Declare an external function.
     pub fn declare_function(&mut self, name: impl Into<Arc<str>>, sig: MirFnSig) {
         let func = MirFunction::declaration(name, sig);

@@ -766,6 +766,9 @@ impl<'ctx> MirLowerer<'ctx> {
                     if let Some(cname) = self.local_closure_name.get(src_id).cloned() {
                         self.local_closure_name.insert(local_id, cname);
                     }
+                    if let Some(cname) = self.local_env_closure.get(src_id).cloned() {
+                        self.local_env_closure.insert(local_id, cname);
+                    }
                 }
             }
         }
@@ -787,7 +790,7 @@ impl<'ctx> MirLowerer<'ctx> {
             ExprKind::Unary { op, expr: inner } => self.lower_unary(*op, inner),
             ExprKind::Assign { op, target, value } => self.lower_assign(*op, target, value),
 
-            ExprKind::Call { func, args } => self.lower_call(func, args),
+            ExprKind::Call { func, args } => self.lower_call_with_closures(func, args),
             ExprKind::MethodCall {
                 receiver,
                 method,
@@ -2926,6 +2929,158 @@ impl<'ctx> MirLowerer<'ctx> {
             },
         );
         Ok(values::local(result))
+    }
+
+    /// A call, with the two cases a returned closure adds. Calling a
+    /// function that returns `impl Trait` lowers that function first, so
+    /// its real return type is known, and notes when the result carries a
+    /// closure's captured values. Calling through such a result calls the
+    /// closure's function with those values after the written arguments.
+    fn lower_call_with_closures(
+        &mut self,
+        func: &ast::Expr,
+        args: &[ast::Expr],
+    ) -> CodegenResult<MirValue> {
+        let callee: Option<Arc<str>> = self.extract_call_name(func).map(Arc::from);
+        let Some(callee) = callee else {
+            return self.lower_call(func, args);
+        };
+        let held = self
+            .var_map
+            .get(&callee)
+            .and_then(|local| Some((*local, self.local_env_closure.get(local)?.clone())));
+        if let Some((env_local, closure_name)) = held {
+            return self.lower_env_closure_call(env_local, &closure_name, args);
+        }
+        if self.var_map.contains_key(&callee) {
+            return self.lower_call(func, args);
+        }
+        if let Some(def) = self.impl_return_fns.get(&callee).cloned() {
+            if !self.impl_return_done.contains(&callee) {
+                self.lower_function(&def, &[])?;
+            }
+        }
+        let value = self.lower_call(func, args)?;
+        if let (Some(closure_name), MirValue::Local(id)) =
+            (self.fn_closure_env.get(&callee).cloned(), &value)
+        {
+            self.local_env_closure.insert(*id, closure_name);
+        }
+        Ok(value)
+    }
+
+    /// Call the closure whose captured values `env_local` holds.
+    fn lower_env_closure_call(
+        &mut self,
+        env_local: LocalId,
+        closure_name: &Arc<str>,
+        args: &[ast::Expr],
+    ) -> CodegenResult<MirValue> {
+        let mut arg_vals: Vec<MirValue> = args
+            .iter()
+            .map(|a| self.lower_expr(a))
+            .collect::<CodegenResult<_>>()?;
+        let fields = self
+            .closure_env_fields
+            .get(closure_name)
+            .map(|(_, fields)| fields.clone())
+            .unwrap_or_default();
+        let ret_ty = self
+            .module
+            .find_function(closure_name.as_ref())
+            .map(|f| f.sig.ret.clone())
+            .unwrap_or(MirType::i32());
+        let builder = self
+            .current_fn
+            .as_mut()
+            .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
+        for (name, ty) in fields {
+            let held = builder.create_local(ty.clone());
+            builder.assign(
+                held,
+                MirRValue::FieldAccess {
+                    base: values::local(env_local),
+                    field_name: name,
+                    field_ty: ty,
+                },
+            );
+            arg_vals.push(values::local(held));
+        }
+        let cont = builder.create_block();
+        let func_val = MirValue::Function(closure_name.clone());
+        if matches!(ret_ty, MirType::Void) {
+            builder.call(func_val, arg_vals, None, cont);
+            builder.switch_to_block(cont);
+            Ok(values::unit())
+        } else {
+            let result = builder.create_local(ret_ty);
+            builder.call(func_val, arg_vals, Some(result), cont);
+            builder.switch_to_block(cont);
+            Ok(values::local(result))
+        }
+    }
+
+    /// What a function that returns `impl Trait` hands back when its body
+    /// ends in a closure, with the type to put in its signature: a struct of
+    /// the values the closure captured. A closure that captured nothing
+    /// leaves as a struct with one unused byte, because C has no empty
+    /// struct. Anything else is returned as it was.
+    pub(crate) fn closure_return_value(
+        &mut self,
+        fn_name: &Arc<str>,
+        result: Option<MirValue>,
+    ) -> (Option<MirValue>, Option<MirType>) {
+        let Some(MirValue::Local(id)) = result else {
+            return (result, None);
+        };
+        let Some(closure_name) = self.local_closure_name.get(&id).cloned() else {
+            return (result, None);
+        };
+        let Some(builder) = self.current_fn.as_mut() else {
+            return (result, None);
+        };
+        let captures = self
+            .closure_captures
+            .get(&closure_name)
+            .cloned()
+            .unwrap_or_default();
+        let env_name: Arc<str> = Arc::from(format!("{closure_name}_env"));
+        let fields: Vec<(Arc<str>, MirType)> = captures
+            .iter()
+            .map(|(name, local)| {
+                (
+                    name.clone(),
+                    builder.local_type(*local).unwrap_or(MirType::i32()),
+                )
+            })
+            .collect();
+        let env_ty = MirType::Struct(env_name.clone());
+        let env = builder.create_local(env_ty.clone());
+        let mut operands: Vec<MirValue> = captures
+            .iter()
+            .map(|(_, local)| values::local(*local))
+            .collect();
+        let mut struct_fields: Vec<(Option<Arc<str>>, MirType)> = fields
+            .iter()
+            .map(|(name, ty)| (Some(name.clone()), ty.clone()))
+            .collect();
+        if struct_fields.is_empty() {
+            struct_fields.push((Some(Arc::from("unused")), MirType::u8()));
+            operands.push(MirValue::Const(MirConst::Uint(0, MirType::u8())));
+        }
+        builder.aggregate(env, AggregateKind::Struct(env_name.clone()), operands);
+        self.module.add_type(MirTypeDef {
+            name: env_name.clone(),
+            kind: TypeDefKind::Struct {
+                fields: struct_fields,
+                packed: false,
+            },
+        });
+        self.fn_closure_env
+            .insert(fn_name.clone(), closure_name.clone());
+        self.closure_env_fields
+            .insert(closure_name, (env_name, fields));
+        (Some(values::local(env)), Some(env_ty))
     }
 
     fn lower_call(&mut self, func: &ast::Expr, args: &[ast::Expr]) -> CodegenResult<MirValue> {

@@ -80,6 +80,10 @@ pub(crate) enum OverloadTarget {
 /// function name, and the name and type of each captured value.
 pub(crate) type ClosureParam = (usize, Arc<str>, Vec<(Arc<str>, MirType)>);
 
+/// The struct that carries a closure's captured values: its name, and each
+/// field's name and type.
+pub(crate) type ClosureEnv = (Arc<str>, Vec<(Arc<str>, MirType)>);
+
 /// AST to MIR lowerer.
 pub struct MirLowerer<'ctx> {
     /// Type context.
@@ -174,6 +178,19 @@ pub struct MirLowerer<'ctx> {
     /// captured value. The specialisation takes those values as extra
     /// parameters after the declared ones.
     pub(crate) pending_closure_params: Vec<ClosureParam>,
+    /// Functions declared to return `impl Trait`, by name, kept so one
+    /// can be lowered the first time it is called: what it returns is
+    /// known only from its body.
+    pub(crate) impl_return_fns: HashMap<Arc<str>, ast::FnDef>,
+    /// Functions from `impl_return_fns` already lowered.
+    pub(crate) impl_return_done: HashSet<Arc<str>>,
+    /// A function that returns a capturing closure -> that closure's name.
+    pub(crate) fn_closure_env: HashMap<Arc<str>, Arc<str>>,
+    /// Closure name -> the struct that carries its captured values out of
+    /// the function that made it, and each field's name and type.
+    pub(crate) closure_env_fields: HashMap<Arc<str>, ClosureEnv>,
+    /// Locals that hold such a struct -> the closure they stand for.
+    pub(crate) local_env_closure: HashMap<LocalId, Arc<str>>,
     /// Parameter and return types of every top-level function that is not
     /// generic, by name, so a function named as a value has a type before
     /// its body is lowered.
@@ -358,6 +375,11 @@ impl<'ctx> MirLowerer<'ctx> {
             closure_captures: HashMap::new(),
             local_closure_name: HashMap::new(),
             pending_closure_params: Vec::new(),
+            impl_return_fns: HashMap::new(),
+            impl_return_done: HashSet::new(),
+            fn_closure_env: HashMap::new(),
+            closure_env_fields: HashMap::new(),
+            local_env_closure: HashMap::new(),
             fn_ast_sigs: HashMap::new(),
             generic_impls: HashMap::new(),
             current_item_vis: None,
@@ -419,6 +441,11 @@ impl<'ctx> MirLowerer<'ctx> {
             closure_captures: HashMap::new(),
             local_closure_name: HashMap::new(),
             pending_closure_params: Vec::new(),
+            impl_return_fns: HashMap::new(),
+            impl_return_done: HashSet::new(),
+            fn_closure_env: HashMap::new(),
+            closure_env_fields: HashMap::new(),
+            local_env_closure: HashMap::new(),
             fn_ast_sigs: HashMap::new(),
             generic_impls: HashMap::new(),
             current_item_vis: None,
@@ -914,6 +941,14 @@ impl<'ctx> MirLowerer<'ctx> {
                     let params = f.sig.params.iter().map(|p| (*p.ty).clone()).collect();
                     let ret = f.sig.return_ty.as_ref().map(|t| (**t).clone());
                     self.fn_ast_sigs.insert(f.name.name.clone(), (params, ret));
+                    if f.sig
+                        .return_ty
+                        .as_ref()
+                        .is_some_and(|t| matches!(t.kind, ast::TypeKind::ImplTrait { .. }))
+                    {
+                        self.impl_return_fns
+                            .insert(f.name.name.clone(), (**f).clone());
+                    }
                 }
             }
         }
@@ -2624,6 +2659,13 @@ impl<'ctx> MirLowerer<'ctx> {
         if self.fn_has_type_generics(f) {
             return Ok(());
         }
+        // A function that returns `impl Trait` is lowered once, at its first
+        // call or here, whichever comes first.
+        if self.impl_return_fns.contains_key(&f.name.name)
+            && !self.impl_return_done.insert(f.name.name.clone())
+        {
+            return Ok(());
+        }
 
         // Build function signature
         let mut params: Vec<_> = f
@@ -2679,6 +2721,7 @@ impl<'ctx> MirLowerer<'ctx> {
             // Local ids restart in every function, so which locals hold a
             // closure is per function too.
             let saved_closure_locals = std::mem::take(&mut self.local_closure_name);
+            let saved_env_locals = std::mem::take(&mut self.local_env_closure);
 
             // Create function builder
             let mut builder = MirBuilder::with_linear_type_names(
@@ -2751,6 +2794,13 @@ impl<'ctx> MirLowerer<'ctx> {
 
             // Lower function body (tail expression sees the declared return type)
             let result = self.lower_fn_body(body)?;
+            // A closure in the tail of a function that returns `impl Trait`
+            // leaves as its function pointer, or as its captured values.
+            let (result, closure_ret) = if self.impl_return_fns.contains_key(&f.name.name) {
+                self.closure_return_value(&emitted_name, result)
+            } else {
+                (result, None)
+            };
 
             // Add return if needed
             let mut builder = self.current_fn.take().unwrap();
@@ -2799,6 +2849,10 @@ impl<'ctx> MirLowerer<'ctx> {
             }
 
             let mut func = builder.build();
+            if let Some(ty) = closure_ret {
+                func.sig.ret = ty.clone();
+                self.module.set_return_type(emitted_name.as_ref(), &ty);
+            }
             if is_main {
                 func.linkage = Linkage::External; // main must not be static
             }
@@ -2829,6 +2883,7 @@ impl<'ctx> MirLowerer<'ctx> {
             self.char_vec_locals = saved_char_vecs;
             self.pending_untyped_vecs = saved_pending_vecs;
             self.local_closure_name = saved_closure_locals;
+            self.local_env_closure = saved_env_locals;
         } else {
             // Declaration only
             self.module.declare_function(f.name.name.clone(), sig);
