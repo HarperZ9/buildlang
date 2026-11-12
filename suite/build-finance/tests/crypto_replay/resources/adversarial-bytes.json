@@ -1,0 +1,77 @@
+{
+  "schema": "build-finance.adversarial-bytes/v1",
+  "cases": [
+    {
+      "name": "bom",
+      "record_base64": "77u/eyJhIjoxfQo="
+    },
+    {
+      "name": "duplicate_key",
+      "record_base64": "eyJhIjoxLCJhIjoyfQo="
+    },
+    {
+      "name": "leading_whitespace",
+      "record_base64": "IHsiYSI6MX0K"
+    },
+    {
+      "name": "trailing_whitespace",
+      "record_base64": "eyJhIjoxfSAK"
+    },
+    {
+      "name": "crlf",
+      "record_base64": "eyJhIjoxfQ0K"
+    },
+    {
+      "name": "missing_lf",
+      "record_base64": "eyJhIjoxfQ=="
+    },
+    {
+      "name": "double_lf",
+      "record_base64": "eyJhIjoxfQoK"
+    },
+    {
+      "name": "comment",
+      "record_base64": "eyJhIjoxLypjb21tZW50Ki99Cg=="
+    },
+    {
+      "name": "nan",
+      "record_base64": "eyJhIjpOYU59Cg=="
+    },
+    {
+      "name": "infinity",
+      "record_base64": "eyJhIjpJbmZpbml0eX0K"
+    },
+    {
+      "name": "float",
+      "record_base64": "eyJhIjoxLjV9Cg=="
+    },
+    {
+      "name": "negative_zero",
+      "record_base64": "eyJhIjotMH0K"
+    },
+    {
+      "name": "unsafe_json_integer",
+      "record_base64": "eyJhIjo5MDA3MTk5MjU0NzQwOTkyfQo="
+    },
+    {
+      "name": "trailing_object",
+      "record_base64": "eyJhIjoxfXsiYiI6Mn0K"
+    },
+    {
+      "name": "invalid_utf8",
+      "record_base64": "eyJhIjoi/yJ9Cg=="
+    },
+    {
+      "name": "noncanonical_key_order",
+      "record_base64": "eyJiIjoyLCJhIjoxfQo="
+    },
+    {
+      "name": "unnecessary_escape",
+      "record_base64": "eyJhIjoiXHUwMDYxIn0K"
+    },
+    {
+      "name": "lone_surrogate",
+      "record_base64": "eyJhIjoiXHVkODAwIn0K"
+    }
+  ]
+}

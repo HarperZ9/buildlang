@@ -1,0 +1,47 @@
+{
+  "schema": "build-finance.jcs-known-vectors/v1",
+  "vectors": [
+    {
+      "name": "canonical_nested",
+      "value": {
+        "z": [
+          3,
+          {
+            "b": true,
+            "a": null
+          }
+        ],
+        "a": "é"
+      },
+      "canonical_base64": "eyJhIjoiw6kiLCJ6IjpbMyx7ImEiOm51bGwsImIiOnRydWV9XX0=",
+      "sha256": "32c4cb9b3ad5e1166a2695f58b9e709490502e3dd4631b0e3dea4c3304adb61c"
+    },
+    {
+      "name": "control_and_string_escaping",
+      "value": {
+        "text": "\b\t\n\f\r\u0000\u001f\"\\/"
+      },
+      "canonical_base64": "eyJ0ZXh0IjoiXGJcdFxuXGZcclx1MDAwMFx1MDAxZlwiXFwvIn0=",
+      "sha256": "7898b92188c7728f38d5ba6dbb1cdc96447eab5f1ad16a75bfd30815fdaa4470"
+    },
+    {
+      "name": "integer_rendering",
+      "value": {
+        "minimum": -9007199254740991,
+        "zero": 0,
+        "maximum": 9007199254740991
+      },
+      "canonical_base64": "eyJtYXhpbXVtIjo5MDA3MTk5MjU0NzQwOTkxLCJtaW5pbXVtIjotOTAwNzE5OTI1NDc0MDk5MSwiemVybyI6MH0=",
+      "sha256": "6c2ebfc38ada26e6c5cac0887ce0571e3fe2bdd108725e1364e1dc23b6cfd0e0"
+    },
+    {
+      "name": "utf16_key_order",
+      "value": {
+        "": "bmp",
+        "😀": "astral"
+      },
+      "canonical_base64": "eyLwn5iAIjoiYXN0cmFsIiwi7oCAIjoiYm1wIn0=",
+      "sha256": "f205ab885ec5c0369796b58c5555bbc1cfb850bf95ea87acee1cfb667b2ef40f"
+    }
+  ]
+}
