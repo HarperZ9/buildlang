@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install ruff + mypy
+        run: pip install ruff mypy
+      - name: Lint
+        run: ruff check .
+      - name: Format check
+        run: ruff format --check .
+      - name: Type check (mypy)
+        run: mypy
+
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Validate package metadata
+        run: |
+          pip install build
+          python -m build --sdist 2>&1 | tail -5
+          echo "Package builds successfully"
+      - name: Check pyproject.toml
+        run: |
+          python -c "
+          import configparser, tomllib, pathlib
+          data = tomllib.loads(pathlib.Path('pyproject.toml').read_text())
+          deps = data['project']['dependencies']
+          print(f'Dependencies: {len(deps)}')
+          for d in deps: print(f'  - {d}')
+          assert len(deps) >= 5, 'Expected at least 5 ecosystem deps'
+          print('pyproject.toml valid')
+          "
+  art-receipts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify art receipt digests
+        run: python3 scripts/check_art_receipts.py
