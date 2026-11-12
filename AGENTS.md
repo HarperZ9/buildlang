@@ -6,6 +6,31 @@ This file applies to the BuildLang repository. Root workspace instructions
 still apply; this repo is a public compiler, language, editor-support, and
 semantic-corpus product surface.
 
+## Read first: where this repository sits
+
+These points apply to every session and every model working here.
+
+- **BuildLang is the language of the whole stack.** Every repository, program, tool and
+  release across the projects is meant to be written in it. New Rust, Python and JavaScript
+  are not added, here or in the other projects. C++, HLSL and GLSL stay in use where
+  renderers and GPUs need them, and they are reached through BuildLang.
+- **A missing feature is the task.** When another project cannot express something in
+  BuildLang, the answer is compiler, runtime or stdlib work in this repository (C++ interop,
+  shader targets, a browser target, host APIs). It is never a reason to fall back to another
+  language. File the gap and build it.
+- **The compiler is still Rust.** Self-hosting (`SELF_HOSTING_PROGRESS.md`) is how that ends.
+  Existing Rust keeps working until its BuildLang replacement passes an exact parity check.
+- **Ports are proven.** Code moving from another language to BuildLang ships with a check
+  that old and new outputs match bit for bit, then the old code is removed.
+- **Small repositories fold into large ones.** `suite/` holds the five Build products
+  (build-engine, build-ui, build-finance, build-oracle, build-ecosystem), moved here with
+  their history; their old repositories are archived. `build-universe` and the editor
+  grammars are next. Do not start a new repository for a tool.
+- **Sibling projects:** The Playground (the engine: renderer, type, sound, games) at
+  `HarperZ9/superframe`; The Flywheel (accountability and checking) at `HarperZ9/flywheel`;
+  The Commons at `HarperZ9/cmmns`; the site at `HarperZ9/HarperZ9.github.io`.
+- **Look for what exists before building.** Search this repository and the siblings first.
+
 ## Product Boundary
 
 BuildLang is the public language/compiler anchor for the Build ecosystem.
