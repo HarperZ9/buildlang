@@ -1,4 +1,18 @@
-trait Named { fn base(self) -> i32; fn twice(self) -> i32 { self.base() * 2 } }
+trait Named {
+    fn base(&self) -> i32;
+    fn twice(&self) -> i32 { self.base() * 2 }
+    fn label(&self) -> String { format!("n{}", self.twice()) }
+}
 struct A { v: i32 }
-impl Named for A { fn base(self) -> i32 { self.v } }
-fn main() ~ Console { println!("{}", A { v: 5 }.twice()); }
+struct B { v: i32 }
+impl Named for A { fn base(&self) -> i32 { self.v } }
+impl Named for B {
+    fn base(&self) -> i32 { self.v + 1 }
+    fn twice(&self) -> i32 { self.base() * 20 }
+}
+fn main() ~ Console {
+    let a: A = A { v: 5 };
+    let b: B = B { v: 5 };
+    println!("{} {}", a.twice(), a.label());
+    println!("{} {}", b.twice(), b.label());
+}

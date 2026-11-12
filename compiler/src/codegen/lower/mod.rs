@@ -115,6 +115,8 @@ pub struct MirLowerer<'ctx> {
     /// Locals declared `&str` or `&String`: a parameter, an annotated `let`, or
     /// a use of a `&str` constant. A string method on one reads through it.
     pub(crate) str_ref_locals: std::collections::HashSet<LocalId>,
+    /// `type Name = T;` at the top level: the name stands for `T`.
+    pub(crate) type_aliases: HashMap<Arc<str>, ast::Type>,
     /// Unannotated `vec_new()` bindings whose element type waits for the first
     /// push: binding local -> every local to retype (constructor temp, binding).
     pub(crate) pending_untyped_vecs: HashMap<LocalId, Vec<LocalId>>,
@@ -321,6 +323,7 @@ impl<'ctx> MirLowerer<'ctx> {
             char_globals: std::collections::HashSet::new(),
             str_ref_globals: std::collections::HashSet::new(),
             str_ref_locals: std::collections::HashSet::new(),
+            type_aliases: HashMap::new(),
             pending_untyped_vecs: HashMap::new(),
             untyped_vec_new_binding: false,
             untyped_vec_new_dest: None,
@@ -379,6 +382,7 @@ impl<'ctx> MirLowerer<'ctx> {
             char_globals: std::collections::HashSet::new(),
             str_ref_globals: std::collections::HashSet::new(),
             str_ref_locals: std::collections::HashSet::new(),
+            type_aliases: HashMap::new(),
             pending_untyped_vecs: HashMap::new(),
             untyped_vec_new_binding: false,
             untyped_vec_new_dest: None,
@@ -792,6 +796,65 @@ impl<'ctx> MirLowerer<'ctx> {
         Arc::from(format!("bld_u_{name}"))
     }
 
+    /// Give every `impl Trait for T` the trait's methods that have a body and
+    /// that the impl does not write itself. After this an inherited method is
+    /// an ordinary method of `T`: `T_method` exists, and `Self` in its body is
+    /// `T`. Only traits declared at the top level of the file are followed.
+    fn add_trait_default_methods(items: Vec<ast::Item>) -> Vec<ast::Item> {
+        let mut defaults: HashMap<Arc<str>, Vec<ast::FnDef>> = HashMap::new();
+        for item in &items {
+            if let ItemKind::Trait(t) = &item.kind {
+                let with_body: Vec<ast::FnDef> = t
+                    .items
+                    .iter()
+                    .filter_map(|ti| match &ti.kind {
+                        ast::TraitItemKind::Function(f) if f.body.is_some() => Some((**f).clone()),
+                        _ => None,
+                    })
+                    .collect();
+                if !with_body.is_empty() {
+                    defaults.insert(t.name.name.clone(), with_body);
+                }
+            }
+        }
+        if defaults.is_empty() {
+            return items;
+        }
+        items
+            .into_iter()
+            .map(|mut item| {
+                let ItemKind::Impl(impl_def) = &mut item.kind else {
+                    return item;
+                };
+                let Some(inherited) = impl_def
+                    .trait_ref
+                    .as_ref()
+                    .and_then(|tr| tr.path.last_ident())
+                    .and_then(|name| defaults.get(&name.name))
+                else {
+                    return item;
+                };
+                for f in inherited {
+                    let written = impl_def.items.iter().any(|ii| {
+                        matches!(&ii.kind, ast::ImplItemKind::Function(g)
+                            if g.name.name == f.name.name)
+                    });
+                    if !written {
+                        impl_def.items.push(ast::ImplItem {
+                            vis: ast::Visibility::Private,
+                            attrs: Vec::new(),
+                            is_default: false,
+                            kind: ast::ImplItemKind::Function(Box::new(f.clone())),
+                            span: f.name.span,
+                            id: ast::NodeId::DUMMY,
+                        });
+                    }
+                }
+                item
+            })
+            .collect()
+    }
+
     /// Top-level functions with a body whose names collide (see
     /// `shadows_runtime_name`), renamed for lowering. Declarations without a
     /// body and `extern` functions keep their names: those name C symbols.
@@ -826,6 +889,15 @@ impl<'ctx> MirLowerer<'ctx> {
         // A user function named like a C library or runtime function is
         // lowered under its own name space.
         let items = self.rename_shadowing_fns(&module.items);
+        let items = Self::add_trait_default_methods(items);
+        for item in &items {
+            if let ItemKind::TypeAlias(alias) = &item.kind {
+                if let Some(ty) = alias.ty.as_ref() {
+                    self.type_aliases
+                        .insert(alias.name.name.clone(), (**ty).clone());
+                }
+            }
+        }
 
         // Pre-pass: evaluate consts so const identifiers used as array
         // lengths (e.g. `[T; MAX_DIMS]`) resolve during type lowering below.

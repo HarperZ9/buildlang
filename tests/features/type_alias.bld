@@ -1,2 +1,13 @@
 type Meters = f64;
-fn main() ~ Console { let d: Meters = 5.0; println!("{}", d); }
+type Count = i32;
+struct P { x: i32, y: i32 }
+type Point = P;
+type Name = String;
+fn double(d: Meters) -> Meters { d * 2.0 }
+fn total(p: Point, n: Count) -> Count { (p.x + p.y) * n }
+fn main() ~ Console {
+    let d: Meters = 5.0;
+    let who: Name = String::from("ada");
+    println!("{} {}", d, double(d));
+    println!("{} {}", total(Point { x: 1, y: 2 }, 3), who);
+}
