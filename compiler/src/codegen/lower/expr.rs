@@ -187,6 +187,140 @@ impl<'ctx> MirLowerer<'ctx> {
             .collect()
     }
 
+    /// The variants of the enum `name`, as (tag, variant name, field types),
+    /// when every field of every variant is a scalar. Such an enum compares by
+    /// tag and then by the fields of the variant both values hold.
+    fn scalar_enum_variants(&self, name: &str) -> Option<Vec<(i128, Arc<str>, Vec<MirType>)>> {
+        let TypeDefKind::Enum { variants, .. } = &self.module.find_type(name)?.kind else {
+            return None;
+        };
+        if variants.is_empty() {
+            return None;
+        }
+        variants
+            .iter()
+            .map(|v| {
+                let tys: Vec<MirType> = v.fields.iter().map(|(_, t)| t.clone()).collect();
+                tys.iter()
+                    .all(|t| matches!(t, MirType::Bool | MirType::Int(..) | MirType::Float(_)))
+                    .then(|| (v.discriminant, v.name.clone(), tys))
+            })
+            .collect()
+    }
+
+    /// Equality of two values of an enum whose variants hold only scalars (see
+    /// `scalar_enum_variants`): the tags are equal, and for every variant either
+    /// the tag is another one or all of its fields are equal. Every field is
+    /// read without a branch; a field of a variant the value does not hold is
+    /// read as bits and masked out by the tag test.
+    fn lower_enum_eq(
+        &mut self,
+        left: MirValue,
+        right: MirValue,
+        ty: &MirType,
+        variants: &[(i128, Arc<str>, Vec<MirType>)],
+    ) -> CodegenResult<MirValue> {
+        let builder = self
+            .current_fn
+            .as_mut()
+            .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
+        let mut held = Vec::with_capacity(2);
+        let mut tags = Vec::with_capacity(2);
+        for v in [left, right] {
+            let h = builder.create_local(ty.clone());
+            builder.assign(h, MirRValue::Use(v));
+            let tag = builder.create_local(MirType::i32());
+            builder.assign(tag, MirRValue::Discriminant(MirPlace::local(h)));
+            held.push(h);
+            tags.push(tag);
+        }
+        let mut all = builder.create_local(MirType::Bool);
+        builder.assign(
+            all,
+            MirRValue::BinaryOp {
+                op: BinOp::Eq,
+                left: values::local(tags[0]),
+                right: values::local(tags[1]),
+            },
+        );
+        for (disc, vname, tys) in variants {
+            if tys.is_empty() {
+                continue;
+            }
+            // `other`: the left value holds a different variant.
+            let mut ok = builder.create_local(MirType::Bool);
+            builder.assign(
+                ok,
+                MirRValue::BinaryOp {
+                    op: BinOp::Ne,
+                    left: values::local(tags[0]),
+                    right: MirValue::Const(MirConst::Int(*disc, MirType::i32())),
+                },
+            );
+            let mut fields_eq = builder.create_local(MirType::Bool);
+            builder.assign(
+                fields_eq,
+                MirRValue::Use(MirValue::Const(MirConst::Bool(true))),
+            );
+            for (i, fty) in tys.iter().enumerate() {
+                let mut sides = Vec::with_capacity(2);
+                for h in &held {
+                    let f = builder.create_local(fty.clone());
+                    builder.assign(
+                        f,
+                        MirRValue::VariantField {
+                            base: values::local(*h),
+                            variant_name: vname.clone(),
+                            field_index: i as u32,
+                            field_ty: fty.clone(),
+                        },
+                    );
+                    sides.push(f);
+                }
+                let one = builder.create_local(MirType::Bool);
+                builder.assign(
+                    one,
+                    MirRValue::BinaryOp {
+                        op: BinOp::Eq,
+                        left: values::local(sides[0]),
+                        right: values::local(sides[1]),
+                    },
+                );
+                let both = builder.create_local(MirType::Bool);
+                builder.assign(
+                    both,
+                    MirRValue::BinaryOp {
+                        op: BinOp::BitAnd,
+                        left: values::local(fields_eq),
+                        right: values::local(one),
+                    },
+                );
+                fields_eq = both;
+            }
+            let either = builder.create_local(MirType::Bool);
+            builder.assign(
+                either,
+                MirRValue::BinaryOp {
+                    op: BinOp::BitOr,
+                    left: values::local(ok),
+                    right: values::local(fields_eq),
+                },
+            );
+            ok = either;
+            let both = builder.create_local(MirType::Bool);
+            builder.assign(
+                both,
+                MirRValue::BinaryOp {
+                    op: BinOp::BitAnd,
+                    left: values::local(all),
+                    right: values::local(ok),
+                },
+            );
+            all = both;
+        }
+        Ok(values::local(all))
+    }
+
     /// True when every field of the struct `ty` can be compared: scalars,
     /// strings and structs of those.
     fn struct_eq_supported(&self, ty: &MirType) -> bool {
@@ -893,11 +1027,37 @@ impl<'ctx> MirLowerer<'ctx> {
         }
     }
 
+    /// `func` with its name replaced, when it names a shadowing user function
+    /// (see `shadow_fns`) and no local variable of that name is in scope.
+    fn shadowed_callee(&self, func: &ast::Expr) -> Option<ast::Expr> {
+        let name = match &func.kind {
+            ExprKind::Ident(ident) => ident.name.clone(),
+            ExprKind::Path(path) if path.segments.len() == 1 => path.last_ident()?.name.clone(),
+            _ => return None,
+        };
+        if !self.shadow_fns.contains(&name) || self.var_map.contains_key(&name) {
+            return None;
+        }
+        let mut renamed = func.clone();
+        renamed.kind = ExprKind::Ident(ast::Ident {
+            name: MirLowerer::user_fn_c_name(&name),
+            span: func.span,
+        });
+        Some(renamed)
+    }
+
     pub(crate) fn lower_ident(&mut self, ident: &ast::Ident) -> CodegenResult<MirValue> {
         if let Some(&local) = self.var_map.get(&ident.name) {
             self.note_pending_vec_use(local);
             Ok(values::local(local))
         } else {
+            if self.shadow_fns.contains(&ident.name) {
+                let renamed = ast::Ident {
+                    name: MirLowerer::user_fn_c_name(&ident.name),
+                    span: ident.span,
+                };
+                return self.lower_ident(&renamed);
+            }
             // Built-in math constants, unless the program defines a global of
             // the same name: a user `const PI` shadows the built-in (#177).
             let user_global = self.module.find_global(ident.name.as_ref()).is_some();
@@ -1287,6 +1447,22 @@ impl<'ctx> MirLowerer<'ctx> {
         // field. C has no `==` on structs, so emitting the operator directly did
         // not compile although the check passed.
         if matches!(op, AstBinOp::Eq | AstBinOp::Ne) {
+            // An enum compares by tag, then by the data of the variant both hold.
+            if let MirType::Struct(name) = &left_ty {
+                if let Some(variants) = self.scalar_enum_variants(name) {
+                    let eq = self.lower_enum_eq(left_val, right_val, &left_ty, &variants)?;
+                    if op == AstBinOp::Eq {
+                        return Ok(eq);
+                    }
+                    let builder = self
+                        .current_fn
+                        .as_mut()
+                        .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
+                    let neg = builder.create_local(MirType::Bool);
+                    builder.unary_op(neg, UnaryOp::Not, eq);
+                    return Ok(values::local(neg));
+                }
+            }
             if let MirType::Struct(name) = &left_ty {
                 if Self::vec_component_count(name).is_none() && self.struct_eq_supported(&left_ty) {
                     let eq = self.lower_struct_eq(left_val, right_val, &left_ty)?;
@@ -2697,6 +2873,11 @@ impl<'ctx> MirLowerer<'ctx> {
     }
 
     fn lower_call(&mut self, func: &ast::Expr, args: &[ast::Expr]) -> CodegenResult<MirValue> {
+        // A call to a user function that shares a name with a C library or
+        // runtime function goes to the user's function (see `shadow_fns`).
+        if let Some(renamed) = self.shadowed_callee(func) {
+            return self.lower_call(&renamed, args);
+        }
         // M5: par_for(n, &ctx, f) / par_map(xs, f) lower to a thread-pool
         // wrapper; a user function of the same name keeps its meaning.
         if let Some(kind) = super::parallel::par_callee(func) {

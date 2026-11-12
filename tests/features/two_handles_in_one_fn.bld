@@ -1,0 +1,7 @@
+effect Ask { fn ask() -> i32, }
+fn a() -> i32 ~ Ask { perform Ask.ask() }
+fn main() ~ Console {
+    let x: i32 = handle { a() } with { Ask.ask() => |resume| { 4 }, };
+    let y: i32 = handle { a() } with { Ask.ask() => |resume| { 7 }, };
+    println!("{} {}", x, y);
+}

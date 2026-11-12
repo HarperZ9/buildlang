@@ -729,9 +729,9 @@ impl<'ctx> MirLowerer<'ctx> {
         let handle_result = builder.create_local(MirType::i32());
 
         // --- Create blocks ------------------------------------------------------
-        let push_block = builder.create_labeled_block("effect_push");
-        let body_block = builder.create_labeled_block("effect_body");
-        let merge_block = builder.create_labeled_block("effect_merge");
+        let push_block = builder.create_labeled_block(format!("effect_push_{}", setjmp_result.0));
+        let body_block = builder.create_labeled_block(format!("effect_body_{}", setjmp_result.0));
+        let merge_block = builder.create_labeled_block(format!("effect_merge_{}", setjmp_result.0));
 
         // Create a block for each handler clause.
         let handler_blocks: Vec<BlockId> = handlers
@@ -739,7 +739,7 @@ impl<'ctx> MirLowerer<'ctx> {
             .enumerate()
             .map(|(i, _)| {
                 let builder = self.current_fn.as_mut().unwrap();
-                builder.create_labeled_block(format!("effect_handler_{}", i))
+                builder.create_labeled_block(format!("effect_handler_{}_{}", setjmp_result.0, i))
             })
             .collect();
 

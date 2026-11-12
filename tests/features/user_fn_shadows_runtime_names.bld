@@ -1,0 +1,13 @@
+fn log(x: i32) -> i32 { x * 10 }
+fn read(x: i32) -> i32 { x + 1 }
+fn print(x: i32) -> i32 { x + 2 }
+fn time(x: i32) -> i32 { x + 3 }
+fn open(x: i32) -> i32 { x + 4 }
+fn strlen(x: i32) -> i32 { x + 5 }
+fn apply(f: fn(i32) -> i32, v: i32) -> i32 { f(v) }
+fn main() ~ Console {
+    println!("{} {} {} {} {} {}", log(1), read(1), print(1), time(1), open(1), strlen(1));
+    println!("{}", apply(log, 2));
+    let read = 7;
+    println!("{}", read + sqrt(16.0) as i32);
+}
