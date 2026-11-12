@@ -1,0 +1,22 @@
+fn apply<F: Fn(i32) -> i32>(f: F, v: i32) -> i32 { f(v) }
+fn twice<F: Fn(i32) -> i32>(f: F, v: i32) -> i32 { apply(f, apply(f, v)) }
+fn fold<F: Fn(i32, i32) -> i32>(xs: &Vec<i32>, init: i32, f: F) -> i32 {
+    let mut acc = init;
+    let mut i = 0;
+    while i < xs.len() { acc = f(acc, xs[i]); i = i + 1; }
+    acc
+}
+fn inc(x: i32) -> i32 { x + 1 }
+fn main() ~ Console {
+    let k: i32 = 6;
+    let m: i32 = 100;
+    println!("{}", apply(|x: i32| -> i32 { x + k }, 5));
+    println!("{}", apply(|x: i32| -> i32 { x * m + k }, 5));
+    let c = |x: i32| -> i32 { x - k };
+    println!("{}", apply(c, 5));
+    println!("{}", twice(|x: i32| -> i32 { x + k }, 1));
+    println!("{}", twice(inc, 1));
+    let xs = vec![1, 2, 3, 4];
+    println!("{}", fold(&xs, 0, |a: i32, b: i32| -> i32 { a + b * k }));
+    println!("{}", apply(|x: i32| -> i32 { x * 2 }, 5));
+}

@@ -866,9 +866,88 @@ impl<'ctx> MirLowerer<'ctx> {
             })
             .collect();
 
+        // Lower the arguments first: a closure argument has to exist before
+        // the callee can be specialised for it.
+        let mut arg_vals: Vec<_> = args
+            .iter()
+            .map(|a| self.lower_expr(a))
+            .collect::<CodegenResult<_>>()?;
+
         // Build multi-param substitution map by inferring types from arguments.
         let subst = self.infer_subst_from_args(&generic_fndef, &type_param_names, args);
-        let mangled_name = Self::mangle_generic_name(fn_name.as_ref(), &subst);
+
+        // A parameter typed by a bare type parameter (`f: F`) that receives a
+        // function or a closure: `F` is that function's pointer type. It stays
+        // out of `subst`, which is written back into the AST by type name, and
+        // is resolved through `type_param_subst` while the body is lowered. A
+        // closure that captured values gets its own specialisation, and the
+        // captured values are passed after the declared arguments.
+        let mut subst = subst;
+        let mut fn_subst: HashMap<Arc<str>, MirType> = HashMap::new();
+        let mut closure_params: Vec<super::ClosureParam> = Vec::new();
+        let mut captured_args: Vec<MirValue> = Vec::new();
+        let mut fn_suffix = String::new();
+        for (i, param) in generic_fndef.sig.params.iter().enumerate() {
+            let ast::TypeKind::Path(path) = &param.ty.kind else {
+                continue;
+            };
+            let Some(tp) = path
+                .last_ident()
+                .filter(|_| path.is_simple())
+                .and_then(|id| type_param_names.iter().find(|n| **n == id.name))
+                .cloned()
+            else {
+                continue;
+            };
+            let fn_ty = match arg_vals.get(i) {
+                Some(MirValue::Local(id)) => self
+                    .current_fn
+                    .as_ref()
+                    .and_then(|b| b.local_type(*id))
+                    .filter(|t| matches!(t, MirType::FnPtr(_))),
+                Some(MirValue::Function(name)) | Some(MirValue::Global(name)) => {
+                    self.fn_value_type(name)
+                }
+                _ => None,
+            };
+            let Some(fn_ty) = fn_ty else {
+                continue;
+            };
+            if fn_subst.contains_key(&tp) {
+                continue;
+            }
+            fn_suffix.push_str(&format!("_fn{}", Self::type_tag(&fn_ty)));
+            subst.remove(&tp);
+            fn_subst.insert(tp, fn_ty);
+            let Some(MirValue::Local(id)) = arg_vals.get(i) else {
+                continue;
+            };
+            let Some(closure_name) = self.local_closure_name.get(id).cloned() else {
+                continue;
+            };
+            let Some(captures) = self.closure_captures.get(&closure_name).cloned() else {
+                continue;
+            };
+            let typed: Vec<(Arc<str>, MirType)> = captures
+                .iter()
+                .map(|(name, local)| {
+                    let ty = self
+                        .current_fn
+                        .as_ref()
+                        .and_then(|b| b.local_type(*local))
+                        .unwrap_or(MirType::i32());
+                    (name.clone(), ty)
+                })
+                .collect();
+            captured_args.extend(captures.iter().map(|(_, local)| values::local(*local)));
+            fn_suffix.push_str(&format!("_{}", closure_name.trim_start_matches('_')));
+            closure_params.push((i, closure_name, typed));
+        }
+        let mangled_name: Arc<str> = Arc::from(format!(
+            "{}{}",
+            Self::mangle_generic_name(fn_name.as_ref(), &subst),
+            fn_suffix
+        ));
 
         // Monomorphize on demand: generate the specialization if we haven't already.
         if !self.monomorphized.contains(&mangled_name) {
@@ -882,12 +961,28 @@ impl<'ctx> MirLowerer<'ctx> {
             // overwrite current_fn / var_map for the specialization.
             let saved_fn = self.current_fn.take();
             let saved_vars = std::mem::take(&mut self.var_map);
-            let saved_subst = std::mem::replace(&mut self.type_param_subst, subst.clone());
+            let mut body_subst = subst.clone();
+            body_subst.extend(fn_subst.iter().map(|(k, v)| (k.clone(), v.clone())));
+            let saved_subst = std::mem::replace(&mut self.type_param_subst, body_subst);
+            // Inside the specialisation a captured value is one of its own
+            // parameters; the caller's view of the closure comes back after.
+            let saved_captures: Vec<_> = closure_params
+                .iter()
+                .map(|(_, name, _)| (name.clone(), self.closure_captures.get(name).cloned()))
+                .collect();
+            self.pending_closure_params = closure_params.clone();
 
             // Lower the specialized function as a normal (non-generic) function.
             let lowered = self.lower_function(&specialized, &[]);
 
             // Restore the caller's function context.
+            self.pending_closure_params.clear();
+            for (name, captures) in saved_captures {
+                match captures {
+                    Some(c) => self.closure_captures.insert(name, c),
+                    None => self.closure_captures.remove(&name),
+                };
+            }
             self.type_param_subst = saved_subst;
             self.current_fn = saved_fn;
             self.var_map = saved_vars;
@@ -904,10 +999,7 @@ impl<'ctx> MirLowerer<'ctx> {
             .map(|f| f.sig.ret.clone())
             .unwrap_or(MirType::i32());
 
-        let arg_vals: Vec<_> = args
-            .iter()
-            .map(|a| self.lower_expr(a))
-            .collect::<CodegenResult<_>>()?;
+        arg_vals.extend(captured_args);
 
         let builder = self
             .current_fn
@@ -920,6 +1012,20 @@ impl<'ctx> MirLowerer<'ctx> {
         builder.switch_to_block(cont);
 
         Ok(values::local(result))
+    }
+
+    /// The pointer type of a top-level function named as a value.
+    pub(crate) fn fn_value_type(&self, name: &str) -> Option<MirType> {
+        if let Some(f) = self.module.find_function(name) {
+            return Some(MirType::FnPtr(Box::new(f.sig.clone())));
+        }
+        let (params, ret) = self.fn_ast_sigs.get(name)?;
+        let params = params.iter().map(|t| self.lower_type_from_ast(t)).collect();
+        let ret = ret
+            .as_ref()
+            .map(|t| self.lower_type_from_ast(t))
+            .unwrap_or(MirType::Void);
+        Some(MirType::FnPtr(Box::new(MirFnSig::new(params, ret))))
     }
 
     /// Match a parameter's AST type against an argument's lowered type and bind
