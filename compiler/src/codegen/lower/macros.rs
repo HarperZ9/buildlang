@@ -2008,6 +2008,24 @@ impl<'ctx> MirLowerer<'ctx> {
         self.source = saved_source;
         self.in_macro_fragment = saved_fragment;
         let val = result?;
+        // A global read inline has no local to carry its type: a `bool` was
+        // passed to `%s` as it was (a crash) and a `char` printed as its code.
+        // Copy it into a typed local, as a `let` would.
+        if let MirValue::Global(name) = &val {
+            let is_char = self.char_globals.contains(name);
+            let ty = self.module.find_global(name).map(|g| g.ty.clone());
+            if let Some(ty) = ty.filter(|t| is_char || matches!(t, MirType::Bool)) {
+                let builder = self.current_fn.as_mut().ok_or_else(|| {
+                    CodegenError::Internal("No current function for macro".into())
+                })?;
+                let local = builder.create_local(ty);
+                builder.assign(local, MirRValue::Use(val.clone()));
+                if is_char {
+                    self.char_locals.insert(local);
+                }
+                return Ok(MirValue::Local(local));
+            }
+        }
         // `x as char` or a call to a `-> char` function prints as a character.
         // A `let` marks its local as a char; an argument written inline has no
         // `let`, so mark its value here (`format!("{}", 65u32 as char)` gave

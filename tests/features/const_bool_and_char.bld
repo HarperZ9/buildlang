@@ -1,0 +1,9 @@
+const B: bool = true;
+const K: char = 'k';
+const C: char = 120 as char;
+static ON: bool = false;
+fn main() ~ Console {
+    println!("{} {} {} {}", B, K, C, ON);
+    let k = K;
+    println!("{}", k);
+}

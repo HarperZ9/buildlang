@@ -51,11 +51,23 @@ fn a_global_struct_literal_takes_its_fields_by_name() {
     assert_prints("order", src, "1 5 3 -7 1 -2\n");
 }
 
+/// Arithmetic in an element is evaluated at compile time.
+#[test]
+fn an_element_written_as_arithmetic_is_evaluated() {
+    if !has_cc() {
+        return;
+    }
+    let src = "static mut T: [u32; 2] = [1_u32 + 1_u32, 2_u32 * 5_u32];\n\
+               fn main() ~ Console { unsafe { println!(\"{} {}\", T[0], T[1]); } }\n";
+    assert_prints("arith", src, "2 10\n");
+}
+
 /// An aggregate initializer that is not a constant is refused by name; the
 /// global used to be zero-filled.
 #[test]
 fn an_initializer_that_is_not_a_constant_is_refused() {
-    let src = "static mut T: [u32; 2] = [1_u32 + 1_u32, 2_u32];\n\
+    let src = "fn two() -> u32 { 2_u32 }\n\
+               static mut T: [u32; 2] = [two(), 2_u32];\n\
                fn main() ~ Console { unsafe { println!(\"{}\", T[0]); } }\n";
     let ran = run("noconst", src);
     assert_ne!(ran.code, Some(0), "stdout: {}", ran.stdout);

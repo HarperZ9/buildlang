@@ -689,7 +689,8 @@ impl<'ctx> MirLowerer<'ctx> {
                 .init
                 .as_ref()
                 .is_some_and(|init| Self::expr_is_char_literal_or_cast(&init.expr))
-                || matches!(&init_val, Some(MirValue::Local(src)) if self.char_locals.contains(src));
+                || matches!(&init_val, Some(MirValue::Local(src)) if self.char_locals.contains(src))
+                || matches!(&init_val, Some(MirValue::Global(g)) if self.char_globals.contains(g));
             // A direct call to a function declared `-> char` or `-> Vec<char>`.
             let callee = init_callee;
             let call_is_char = callee
@@ -715,6 +716,14 @@ impl<'ctx> MirLowerer<'ctx> {
             let annotated_other = local.ty.is_some() && !annotated_ref;
             if annotated_ref || (init_is_ref && !annotated_other) {
                 self.ref_locals.insert(local_id);
+            }
+            if local
+                .ty
+                .as_ref()
+                .is_some_and(|t| Self::ast_type_is_str_ref(t))
+                || matches!(&init_val, Some(MirValue::Local(src)) if self.str_ref_locals.contains(src))
+            {
+                self.str_ref_locals.insert(local_id);
             }
             if let Some(dest) = untyped_vec_dest {
                 self.pending_untyped_vecs
@@ -1092,6 +1101,27 @@ impl<'ctx> MirLowerer<'ctx> {
                         return Ok(values::local(result));
                     }
                     let resolved = self.resolve_fn_name(&ident.name);
+                    // A `&str` constant holds the string itself; a use of it is
+                    // a reference to that string, as its type says.
+                    if self.str_ref_globals.contains(&resolved) && self.current_fn.is_some() {
+                        let string_ty = MirType::Struct(Arc::from("BuildString"));
+                        let builder = self.current_fn.as_mut().ok_or_else(|| {
+                            CodegenError::Internal("No current function".to_string())
+                        })?;
+                        let held = builder.create_local(string_ty.clone());
+                        builder.assign(held, MirRValue::Use(values::global(resolved)));
+                        let reference = builder.create_local(MirType::Ptr(Box::new(string_ty)));
+                        builder.assign(
+                            reference,
+                            MirRValue::AddressOf {
+                                is_mut: false,
+                                place: MirPlace::local(held),
+                            },
+                        );
+                        self.ref_locals.insert(reference);
+                        self.str_ref_locals.insert(reference);
+                        return Ok(values::local(reference));
+                    }
                     Ok(values::global(resolved))
                 }
             }
@@ -1299,17 +1329,20 @@ impl<'ctx> MirLowerer<'ctx> {
             }
             t => Self::is_string_or_ref(t),
         };
+        // `r + s` with `r` a borrowed string joins the two strings, as `s + r` does.
+        let joins_borrowed = op == AstBinOp::Add && known_ref(self, left, &left_val);
         let (left_val, left_ty) = if Self::is_string_ref(&left_ty)
-            && compares_content
-            && matches!(
-                op,
-                AstBinOp::Eq
-                    | AstBinOp::Ne
-                    | AstBinOp::Lt
-                    | AstBinOp::Le
-                    | AstBinOp::Gt
-                    | AstBinOp::Ge
-            ) {
+            && (joins_borrowed
+                || (compares_content
+                    && matches!(
+                        op,
+                        AstBinOp::Eq
+                            | AstBinOp::Ne
+                            | AstBinOp::Lt
+                            | AstBinOp::Le
+                            | AstBinOp::Gt
+                            | AstBinOp::Ge
+                    ))) {
             let string_ty = MirType::Struct(Arc::from("BuildString"));
             let builder = self
                 .current_fn
@@ -4935,6 +4968,18 @@ impl<'ctx> MirLowerer<'ctx> {
         // Lower the receiver first to determine its type
         let receiver_val = self.lower_expr(receiver)?;
         let receiver_ty = self.type_of_value(&receiver_val);
+        // A method on a borrowed string (`s: &str`, a `&str` constant) is the
+        // string's method: `s.len()`, `s.trim()`, `s.starts_with(..)`.
+        let borrowed_string = matches!(&receiver_val, MirValue::Local(id) if self.str_ref_locals.contains(id))
+            && matches!(&receiver_ty, MirType::Ptr(inner)
+                if matches!(inner.as_ref(), MirType::Struct(n) if n.as_ref() == "BuildString"));
+        let (receiver_val, receiver_ty) = if borrowed_string {
+            let held = self.deref_if_pointer(receiver_val)?;
+            let ty = self.type_of_value(&held);
+            (held, ty)
+        } else {
+            (receiver_val, receiver_ty)
+        };
 
         // A slice (`&[T]` lowers to `Ptr(Slice(T))`) carries its length:
         // `xs.len()` reads it and `xs.is_empty()` compares it with 0.

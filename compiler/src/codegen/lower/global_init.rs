@@ -114,8 +114,24 @@ impl<'ctx> MirLowerer<'ctx> {
         expr: &ast::Expr,
         ty: &MirType,
     ) -> CodegenResult<Option<MirConst>> {
+        // A string constant is the string struct itself: pointer, length and a
+        // capacity of 0, which marks text that is not on the heap. With no
+        // constant the C global was a null string, and printing it crashed.
+        if matches!(ty, MirType::Struct(n) if n.as_ref() == "BuildString") {
+            if let Some(text) = string_literal(expr) {
+                let len = MirConst::Uint(text.len() as u128, MirType::usize());
+                return Ok(Some(MirConst::Struct(
+                    std::sync::Arc::from("BuildString"),
+                    vec![
+                        MirConst::ByteStr(text.as_bytes().to_vec()),
+                        len,
+                        MirConst::Uint(0, MirType::usize()),
+                    ],
+                )));
+            }
+        }
         if !is_aggregate(ty) {
-            return Ok(self.try_const_eval(expr));
+            return self.scalar_initializer(name, expr, ty);
         }
         if let Some(c) = self.const_eval_typed(expr, ty) {
             return Ok(Some(c));
@@ -136,6 +152,47 @@ impl<'ctx> MirLowerer<'ctx> {
                     .to_string(),
             ),
         })
+    }
+
+    /// The initializer of a global that is not an aggregate. A number or a
+    /// boolean gets its value or a compile error: with no constant the C global
+    /// was zero, so `const N: i32 = 3 + 4;` read as 0 with no diagnostic. Other
+    /// types keep the earlier evaluation.
+    fn scalar_initializer(
+        &self,
+        name: &str,
+        expr: &ast::Expr,
+        ty: &MirType,
+    ) -> CodegenResult<Option<MirConst>> {
+        let value = self.try_const_eval(expr);
+        let refuse = |why: &str| {
+            let span = expr.span;
+            Err(CodegenError::Rejected {
+                message: format!("the initializer of `{name}` {why}"),
+                location: (span.end.0 > span.start.0).then_some((span.start.0, span.end.0)),
+                help: Some(
+                    "use literals, other constants, arithmetic, comparisons and `as` casts between number types"
+                        .to_string(),
+                ),
+            })
+        };
+        match ty {
+            MirType::Bool => match value {
+                Some(MirConst::Bool(_)) => Ok(value),
+                _ => refuse("is not a boolean the compiler can evaluate"),
+            },
+            MirType::Float(_) => match value {
+                Some(MirConst::Float(v, _)) => Ok(Some(MirConst::Float(v, ty.clone()))),
+                Some(MirConst::Int(v, _)) => Ok(Some(MirConst::Float(v as f64, ty.clone()))),
+                Some(MirConst::Uint(v, _)) => Ok(Some(MirConst::Float(v as f64, ty.clone()))),
+                _ => refuse("is not a number the compiler can evaluate"),
+            },
+            MirType::Int(..) => match value {
+                Some(MirConst::Int(..)) | Some(MirConst::Uint(..)) => Ok(value),
+                _ => refuse("is not an integer the compiler can evaluate"),
+            },
+            _ => Ok(value),
+        }
     }
 
     /// `expr` as a constant of type `ty`, or `None` when it is not one.
@@ -210,5 +267,14 @@ impl<'ctx> MirLowerer<'ctx> {
             values.push(self.const_eval_typed(value, fty)?);
         }
         Some(MirConst::Struct(name.clone(), values))
+    }
+}
+
+/// The text of `expr` when it is a string literal, looking through parentheses.
+pub(super) fn string_literal(expr: &ast::Expr) -> Option<&str> {
+    match &expr.kind {
+        ExprKind::Paren(inner) => string_literal(inner),
+        ExprKind::Literal(ast::Literal::Str { value, .. }) => Some(value.as_ref()),
+        _ => None,
     }
 }

@@ -1,0 +1,8 @@
+fn info(s: &str) -> usize { s.len() }
+fn starts(s: &str) -> bool { s.starts_with("ab") && s.contains("c") && !s.ends_with("x") }
+fn shout(s: &str) -> String { s.trim() + "!" }
+fn main() ~ Console {
+    println!("{} {} {}", info("abc"), starts("abc"), shout("  hey "));
+    let owned: String = String::from("xyz");
+    println!("{}", info(&owned));
+}
