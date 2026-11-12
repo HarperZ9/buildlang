@@ -1,2 +1,7 @@
-fn f(n: i32) -> i32 { loop { return n + 1; } }
-fn main() ~ Console { println!("{}", f(1)); }
+struct C { n: i32 }
+impl C {
+    fn first(&self) -> i32 { loop { return self.n; } }
+}
+fn label(n: i32) -> String { loop { if n > 0 { return String::from("pos"); } return String::from("neg"); } }
+fn plain(n: i32) -> i32 { loop { return n + 1; } }
+fn main() ~ Console { let c: C = C { n: 9 }; println!("{} {} {}", c.first(), label(1), plain(1)); }

@@ -5,7 +5,7 @@
 #
 # Not expressible as a row here, because the program is wrong and the check should refuse it:
 # a function with a value whose body ends in a `while`, or in a `loop` left by a plain `break`,
-# passes the check and then fails in the C compiler. Found 2026-11-12, open.
+# passes the check. It builds, and stops the program if it reaches the end. Found 2026-11-12, open.
 async_await rejected
 closure_as_argument rejected
 closure_returned rejected
@@ -14,7 +14,6 @@ drop_trait broken
 effect_resume_value broken
 fixed_array_and_slice rejected
 float_exponent_format rejected
-loop_as_function_tail broken
 macro_rules rejected
 option_combinators rejected
 string_parse_and_to_string rejected

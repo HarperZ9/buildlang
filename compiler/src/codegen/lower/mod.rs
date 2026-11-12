@@ -2627,6 +2627,15 @@ impl<'ctx> MirLowerer<'ctx> {
                 // main returns 0 (success) in C - but not for shader entry points
                 let zero = MirValue::Const(MirConst::Int(0, MirType::i32()));
                 builder.ret(Some(zero));
+            } else if f.sig.return_ty.is_some()
+                && matches!(result, Some(MirValue::Const(MirConst::Unit)))
+                && !matches!(fn_ret_ty, MirType::Void)
+            {
+                // The body ends in a statement with no value, such as a `loop`
+                // that only leaves through `return`. A checked program never
+                // gets here; returning the unit value was a C error. Stop the
+                // program if it does.
+                builder.abort();
             } else if f.sig.return_ty.is_some() {
                 if let Some(val) = result {
                     // If the result is a local that might not be declared
@@ -2906,7 +2915,15 @@ impl<'ctx> MirLowerer<'ctx> {
             let result = self.lower_fn_body(body)?;
 
             let mut builder = self.current_fn.take().unwrap();
-            if f.sig.return_ty.is_some() {
+            let returns_value = f
+                .sig
+                .return_ty
+                .as_ref()
+                .is_some_and(|t| !matches!(self.lower_type_from_ast(t), MirType::Void));
+            if returns_value && matches!(result, Some(MirValue::Const(MirConst::Unit))) {
+                // The body ends in a statement with no value (see `lower_function`).
+                builder.abort();
+            } else if f.sig.return_ty.is_some() {
                 if let Some(val) = result {
                     builder.ret(Some(val));
                 }
@@ -3006,7 +3023,15 @@ impl<'ctx> MirLowerer<'ctx> {
             let result = self.lower_fn_body(body)?;
 
             let mut builder = self.current_fn.take().unwrap();
-            if f.sig.return_ty.is_some() {
+            let returns_value = f
+                .sig
+                .return_ty
+                .as_ref()
+                .is_some_and(|t| !matches!(self.lower_type_from_ast(t), MirType::Void));
+            if returns_value && matches!(result, Some(MirValue::Const(MirConst::Unit))) {
+                // The body ends in a statement with no value (see `lower_function`).
+                builder.abort();
+            } else if f.sig.return_ty.is_some() {
                 if let Some(val) = result {
                     builder.ret(Some(val));
                 }
