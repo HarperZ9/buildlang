@@ -103,6 +103,9 @@ pub struct MirLowerer<'ctx> {
     /// Locals (vectors, or pointers to vectors) whose elements are chars, from
     /// a `Vec<char>` annotation on a `let` or a parameter.
     pub(crate) char_vec_locals: std::collections::HashSet<LocalId>,
+    /// Top-level user functions lowered under `user_fn_c_name` because their
+    /// names collide with a C library or runtime name.
+    pub(crate) shadow_fns: std::collections::HashSet<Arc<str>>,
     /// Unannotated `vec_new()` bindings whose element type waits for the first
     /// push: binding local -> every local to retype (constructor temp, binding).
     pub(crate) pending_untyped_vecs: HashMap<LocalId, Vec<LocalId>>,
@@ -305,6 +308,7 @@ impl<'ctx> MirLowerer<'ctx> {
             char_locals: std::collections::HashSet::new(),
             ref_locals: std::collections::HashSet::new(),
             char_vec_locals: std::collections::HashSet::new(),
+            shadow_fns: std::collections::HashSet::new(),
             pending_untyped_vecs: HashMap::new(),
             untyped_vec_new_binding: false,
             untyped_vec_new_dest: None,
@@ -359,6 +363,7 @@ impl<'ctx> MirLowerer<'ctx> {
             char_locals: std::collections::HashSet::new(),
             ref_locals: std::collections::HashSet::new(),
             char_vec_locals: std::collections::HashSet::new(),
+            shadow_fns: std::collections::HashSet::new(),
             pending_untyped_vecs: HashMap::new(),
             untyped_vec_new_binding: false,
             untyped_vec_new_dest: None,
@@ -433,6 +438,9 @@ impl<'ctx> MirLowerer<'ctx> {
                 return prefixed;
             }
         }
+        if self.shadow_fns.contains(bare_name) {
+            return Self::user_fn_c_name(bare_name);
+        }
         Arc::from(bare_name)
     }
 
@@ -474,33 +482,359 @@ impl<'ctx> MirLowerer<'ctx> {
     }
 
     /// Lower a module.
+    /// True when a top-level user function of this name would collide with a
+    /// name the lowerer or the C output already uses: a C library function, a
+    /// runtime helper or a print builtin. Such a function is lowered under
+    /// `user_fn_c_name`, so `fn log(...)`, `fn read(...)` or `fn printf(...)`
+    /// in a program is the program's own function at every call.
+    /// `min`, `max`, `abs` and the names in the C backend's stdlib-collision
+    /// list are escaped there and are not repeated here.
+    pub(crate) fn shadows_runtime_name(name: &str) -> bool {
+        if name.starts_with("build_") || name.starts_with("__") {
+            return true;
+        }
+        matches!(
+            name,
+            "print"
+                | "println"
+                | "eprint"
+                | "eprintln"
+                | "assert"
+                | "printf"
+                | "fprintf"
+                | "sprintf"
+                | "snprintf"
+                | "vprintf"
+                | "vfprintf"
+                | "vsprintf"
+                | "vsnprintf"
+                | "scanf"
+                | "fscanf"
+                | "sscanf"
+                | "puts"
+                | "fputs"
+                | "gets"
+                | "fgets"
+                | "putc"
+                | "fputc"
+                | "putchar"
+                | "getc"
+                | "fgetc"
+                | "getchar"
+                | "ungetc"
+                | "perror"
+                | "fopen"
+                | "freopen"
+                | "fclose"
+                | "fflush"
+                | "fread"
+                | "fwrite"
+                | "fseek"
+                | "ftell"
+                | "rewind"
+                | "fgetpos"
+                | "fsetpos"
+                | "feof"
+                | "ferror"
+                | "clearerr"
+                | "tmpfile"
+                | "tmpnam"
+                | "setbuf"
+                | "setvbuf"
+                | "malloc"
+                | "calloc"
+                | "realloc"
+                | "free"
+                | "_Exit"
+                | "quick_exit"
+                | "at_quick_exit"
+                | "strtoul"
+                | "strtoll"
+                | "strtoull"
+                | "strtof"
+                | "strtold"
+                | "atoll"
+                | "mblen"
+                | "mbtowc"
+                | "wctomb"
+                | "mbstowcs"
+                | "wcstombs"
+                | "memcpy"
+                | "memmove"
+                | "memset"
+                | "memcmp"
+                | "memchr"
+                | "strlen"
+                | "strcpy"
+                | "strncpy"
+                | "strcat"
+                | "strncat"
+                | "strcmp"
+                | "strncmp"
+                | "strcoll"
+                | "strxfrm"
+                | "strchr"
+                | "strrchr"
+                | "strstr"
+                | "strspn"
+                | "strcspn"
+                | "strpbrk"
+                | "strtok"
+                | "strerror"
+                | "strdup"
+                | "strndup"
+                | "sqrt"
+                | "cbrt"
+                | "sin"
+                | "cos"
+                | "tan"
+                | "asin"
+                | "acos"
+                | "atan"
+                | "atan2"
+                | "sinh"
+                | "cosh"
+                | "tanh"
+                | "asinh"
+                | "acosh"
+                | "atanh"
+                | "exp"
+                | "exp2"
+                | "expm1"
+                | "log"
+                | "log2"
+                | "log10"
+                | "log1p"
+                | "pow"
+                | "fabs"
+                | "floor"
+                | "ceil"
+                | "round"
+                | "trunc"
+                | "rint"
+                | "nearbyint"
+                | "lround"
+                | "llround"
+                | "lrint"
+                | "llrint"
+                | "fmod"
+                | "remainder"
+                | "remquo"
+                | "fmax"
+                | "fmin"
+                | "fdim"
+                | "fma"
+                | "hypot"
+                | "copysign"
+                | "nan"
+                | "nextafter"
+                | "nexttoward"
+                | "frexp"
+                | "ldexp"
+                | "modf"
+                | "scalbn"
+                | "scalbln"
+                | "ilogb"
+                | "logb"
+                | "erf"
+                | "erfc"
+                | "tgamma"
+                | "lgamma"
+                | "j0"
+                | "j1"
+                | "jn"
+                | "y0"
+                | "y1"
+                | "yn"
+                | "gamma"
+                | "signgam"
+                | "sqrtf"
+                | "sinf"
+                | "cosf"
+                | "tanf"
+                | "powf"
+                | "expf"
+                | "logf"
+                | "fabsf"
+                | "floorf"
+                | "ceilf"
+                | "roundf"
+                | "fmodf"
+                | "time"
+                | "clock"
+                | "difftime"
+                | "mktime"
+                | "strftime"
+                | "gmtime"
+                | "localtime"
+                | "asctime"
+                | "ctime"
+                | "timespec_get"
+                | "isalnum"
+                | "isalpha"
+                | "isblank"
+                | "iscntrl"
+                | "isdigit"
+                | "isgraph"
+                | "islower"
+                | "isprint"
+                | "ispunct"
+                | "isspace"
+                | "isupper"
+                | "isxdigit"
+                | "signal"
+                | "raise"
+                | "setjmp"
+                | "longjmp"
+                | "errno"
+                | "read"
+                | "write"
+                | "open"
+                | "close"
+                | "creat"
+                | "lseek"
+                | "pipe"
+                | "dup"
+                | "dup2"
+                | "fork"
+                | "execv"
+                | "execve"
+                | "execvp"
+                | "wait"
+                | "waitpid"
+                | "kill"
+                | "sleep"
+                | "usleep"
+                | "alarm"
+                | "pause"
+                | "access"
+                | "chdir"
+                | "getcwd"
+                | "rmdir"
+                | "mkdir"
+                | "unlink"
+                | "link"
+                | "symlink"
+                | "readlink"
+                | "stat"
+                | "fstat"
+                | "lstat"
+                | "chmod"
+                | "chown"
+                | "truncate"
+                | "ftruncate"
+                | "isatty"
+                | "getpid"
+                | "getppid"
+                | "getuid"
+                | "geteuid"
+                | "getgid"
+                | "socket"
+                | "bind"
+                | "listen"
+                | "accept"
+                | "connect"
+                | "send"
+                | "recv"
+                | "sendto"
+                | "recvfrom"
+                | "shutdown"
+                | "select"
+                | "poll"
+                | "ioctl"
+                | "fcntl"
+                | "index"
+                | "rindex"
+                | "bcopy"
+                | "bzero"
+                | "bcmp"
+                | "ffs"
+                | "random"
+                | "srandom"
+                | "drand48"
+                | "lrand48"
+                | "srand48"
+                | "basename"
+                | "dirname"
+                | "mmap"
+                | "munmap"
+                | "mprotect"
+                | "dlopen"
+                | "dlsym"
+                | "dlclose"
+                | "environ"
+                | "optarg"
+                | "optind"
+                | "getopt"
+                | "stdin"
+                | "stdout"
+                | "stderr"
+        )
+    }
+
+    /// The name a shadowing user function is lowered under.
+    pub(crate) fn user_fn_c_name(name: &str) -> Arc<str> {
+        Arc::from(format!("bld_u_{name}"))
+    }
+
+    /// Top-level functions with a body whose names collide (see
+    /// `shadows_runtime_name`), renamed for lowering. Declarations without a
+    /// body and `extern` functions keep their names: those name C symbols.
+    fn rename_shadowing_fns(&mut self, items: &[ast::Item]) -> Vec<ast::Item> {
+        items
+            .iter()
+            .map(|item| {
+                let ItemKind::Function(f) = &item.kind else {
+                    return item.clone();
+                };
+                let name = f.name.name.as_ref();
+                if f.body.is_none() || f.sig.abi.is_some() || !Self::shadows_runtime_name(name) {
+                    return item.clone();
+                }
+                self.shadow_fns.insert(f.name.name.clone());
+                let mut f2 = f.as_ref().clone();
+                f2.name = ast::Ident {
+                    name: Self::user_fn_c_name(name),
+                    span: f.name.span,
+                };
+                let mut item2 = item.clone();
+                item2.kind = ItemKind::Function(Box::new(f2));
+                item2
+            })
+            .collect()
+    }
+
     pub fn lower_module(mut self, module: &ast::Module) -> CodegenResult<MirModule> {
         // Register built-in vector math types before user code
         self.register_vector_types();
 
+        // A user function named like a C library or runtime function is
+        // lowered under its own name space.
+        let items = self.rename_shadowing_fns(&module.items);
+
         // Pre-pass: evaluate consts so const identifiers used as array
         // lengths (e.g. `[T; MAX_DIMS]`) resolve during type lowering below.
-        for item in &module.items {
+        for item in &items {
             self.collect_const_values(item);
         }
 
         // Pre-pass: build the multiple-dispatch registry so the collection and
         // lowering passes both know which names are overloaded (and mangle
         // their definitions) while leaving single-def names on their plain name.
-        for item in &module.items {
+        for item in &items {
             self.collect_multi_fn_signatures(item);
             self.collect_repr_c(item);
         }
 
         // First pass: collect type definitions and function signatures
-        for item in &module.items {
+        for item in &items {
             self.collect_item(item)?;
         }
 
         // Register every `const` and `static` before any body is lowered, so a
         // body that names a global declared later in the source still sees its
         // declared type (a later `const BASE: u64` was typed `i32`, G13).
-        for item in &module.items {
+        for item in &items {
             self.collect_globals(item)?;
         }
 
@@ -508,7 +842,7 @@ impl<'ctx> MirLowerer<'ctx> {
         self.generate_vtables();
 
         // Second pass: lower function bodies
-        for item in &module.items {
+        for item in &items {
             self.lower_top_level_item(item)?;
         }
 
@@ -2362,6 +2696,17 @@ impl<'ctx> MirLowerer<'ctx> {
         for impl_item in &impl_def.items {
             if let ast::ImplItemKind::Function(f) = &impl_item.kind {
                 self.declare_impl_method(&type_name, f)?;
+            }
+            // An associated constant `Type::NAME` is the global `Type_NAME`,
+            // the name a path to it lowers to.
+            if let ast::ImplItemKind::Const { name, ty, value } = &impl_item.kind {
+                let global_name: Arc<str> = Arc::from(format!("{}_{}", type_name, name.name));
+                let mir_ty = self.lower_type_from_ast(ty);
+                let init = self.global_initializer(&global_name, value, &mir_ty)?;
+                let mut global = MirGlobal::new(global_name, mir_ty);
+                global.init = init;
+                global.is_mut = false;
+                self.module.add_global(global);
             }
         }
 
