@@ -1,1 +1,10 @@
-fn main() ~ Console { let v: Vec<String> = Vec::new(); v.push(String::from("a")); v.push(String::from("b")); let _ = v.pop(); println!("{}", v.len()); }
+fn main() ~ Console {
+    let v: Vec<String> = Vec::new();
+    v.push(String::from("a"));
+    v.push(String::from("b"));
+    let last: String = v.pop();
+    println!("{} {}", v.len(), last);
+    let again: String = v.pop();
+    let none: String = v.pop();
+    println!("{} {} [{}] {}", v.len(), again, none, none.len());
+}
