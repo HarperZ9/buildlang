@@ -12,6 +12,7 @@ tracked in `STATUS.md`, `README.md`, and
 
 ### Fixes
 
+- `pop` works on a vector of strings: `let last: String = v.pop();`. An empty vector gives an empty string. Before, the check refused it, because the runtime had no such function.
 - A type alias works in compiled code: `type Meters = f64;`, `type Point = P;`, in a `let`, a signature, a struct literal and a format argument. Before, the check refused a value of an aliased type in `println!`. Limit: only aliases declared at the top level of the file.
 - A trait's default methods reach every type that implements the trait: with `trait Named { fn base(&self) -> i32; fn twice(&self) -> i32 { self.base() * 2 } }`, `a.twice()` works for an `impl Named for A` that writes only `base`, and an impl that writes its own `twice` keeps it. Before, the check refused the call. Limit: only traits declared at the top level of the file.
 - A function with a value can end in a `loop` that only leaves through `return`: `fn f(n: i32) -> i32 { loop { return n + 1; } }`, also as a method. Before, the check passed and the C compiler stopped on a returned unit value. A body that reaches its end with no value now stops the program there. Known gap: the check still accepts a body ending in a `while`, or in a `loop` left by a plain `break`, where it should refuse it.

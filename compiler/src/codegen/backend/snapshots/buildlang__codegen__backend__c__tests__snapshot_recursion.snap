@@ -2842,6 +2842,8 @@ static BuildVecHandle build_hvec_new_str(void) {
 }
 static void build_hvec_push_str(BuildVecHandle h, BuildString val) { build_vec_push(h.inner, &val); }
 static BuildString build_hvec_get_str(BuildVecHandle h, size_t index) { return *(BuildString*)build_vec_get(h.inner, index); }
+// Removes and returns the last string. An empty vector gives an empty string.
+static BuildString build_hvec_pop_str(BuildVecHandle h) { BuildString z = { "", 0, 0 }; if (h.inner->len == 0) return z; h.inner->len--; return *(BuildString*)((char*)h.inner->ptr + h.inner->len * h.inner->elem_size); }
 /* `v.join(sep)` on a Vec<String>: one allocation of the exact size. A
    chain of `+` copies the growing prefix for every part and leaves each copy
    behind, which costs O(parts x length) bytes; this costs the result only. */

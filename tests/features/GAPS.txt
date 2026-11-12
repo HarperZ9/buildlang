@@ -20,4 +20,3 @@ string_parse_and_to_string rejected
 trait_object_dyn rejected
 user_fn_named_exit rejected
 vec_of_strings_slice_len rejected
-vec_string_pop rejected
