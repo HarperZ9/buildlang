@@ -76,6 +76,10 @@ pub(crate) enum OverloadTarget {
     Generic,
 }
 
+/// A parameter that receives a capturing closure: its index, the closure's
+/// function name, and the name and type of each captured value.
+pub(crate) type ClosureParam = (usize, Arc<str>, Vec<(Arc<str>, MirType)>);
+
 /// AST to MIR lowerer.
 pub struct MirLowerer<'ctx> {
     /// Type context.
@@ -164,6 +168,16 @@ pub struct MirLowerer<'ctx> {
     /// pointer to the closure's internal function name, so that `lower_call`
     /// can look up captures.
     local_closure_name: HashMap<LocalId, Arc<str>>,
+    /// Set by a generic call for the specialisation it is about to lower:
+    /// for each parameter that receives a capturing closure, the parameter
+    /// index, the closure's function name, and the name and type of every
+    /// captured value. The specialisation takes those values as extra
+    /// parameters after the declared ones.
+    pub(crate) pending_closure_params: Vec<ClosureParam>,
+    /// Parameter and return types of every top-level function that is not
+    /// generic, by name, so a function named as a value has a type before
+    /// its body is lowered.
+    pub(crate) fn_ast_sigs: HashMap<Arc<str>, (Vec<ast::Type>, Option<ast::Type>)>,
     /// Generic impl blocks stored for deferred monomorphization.
     /// Maps base type name (e.g., "Option") -> list of impl defs.
     generic_impls: HashMap<Arc<str>, Vec<ast::ImplDef>>,
@@ -343,6 +357,8 @@ impl<'ctx> MirLowerer<'ctx> {
             effect_defs: HashMap::new(),
             closure_captures: HashMap::new(),
             local_closure_name: HashMap::new(),
+            pending_closure_params: Vec::new(),
+            fn_ast_sigs: HashMap::new(),
             generic_impls: HashMap::new(),
             current_item_vis: None,
             current_impl_type: None,
@@ -402,6 +418,8 @@ impl<'ctx> MirLowerer<'ctx> {
             effect_defs: HashMap::new(),
             closure_captures: HashMap::new(),
             local_closure_name: HashMap::new(),
+            pending_closure_params: Vec::new(),
+            fn_ast_sigs: HashMap::new(),
             generic_impls: HashMap::new(),
             current_item_vis: None,
             current_impl_type: None,
@@ -890,6 +908,15 @@ impl<'ctx> MirLowerer<'ctx> {
         // lowered under its own name space.
         let items = self.rename_shadowing_fns(&module.items);
         let items = Self::add_trait_default_methods(items);
+        for item in &items {
+            if let ItemKind::Function(f) = &item.kind {
+                if !self.fn_has_type_generics(f) {
+                    let params = f.sig.params.iter().map(|p| (*p.ty).clone()).collect();
+                    let ret = f.sig.return_ty.as_ref().map(|t| (**t).clone());
+                    self.fn_ast_sigs.insert(f.name.name.clone(), (params, ret));
+                }
+            }
+        }
         for item in &items {
             if let ItemKind::TypeAlias(alias) = &item.kind {
                 if let Some(ty) = alias.ty.as_ref() {
@@ -1747,6 +1774,15 @@ impl<'ctx> MirLowerer<'ctx> {
 
     /// Generate a mangled name from a base name and a substitution map.
     /// E.g., ("Result", {T: i32, E: BuildString}) → "Result_i32_BuildString"
+    /// A short stable tag for a type that has no readable mangled name.
+    pub(crate) fn type_tag(ty: &MirType) -> String {
+        let mut h: u32 = 0x811c_9dc5;
+        for b in format!("{ty:?}").bytes() {
+            h = (h ^ u32::from(b)).wrapping_mul(0x0100_0193);
+        }
+        format!("{h:08x}")
+    }
+
     fn mangle_generic_name(base: &str, subst: &HashMap<Arc<str>, MirType>) -> Arc<str> {
         let mut parts = vec![base.to_string()];
         // Sort by param name for deterministic mangling
@@ -2590,12 +2626,19 @@ impl<'ctx> MirLowerer<'ctx> {
         }
 
         // Build function signature
-        let params: Vec<_> = f
+        let mut params: Vec<_> = f
             .sig
             .params
             .iter()
             .map(|p| self.lower_type_from_ast(&p.ty))
             .collect();
+        // A specialisation made for a capturing closure takes the captured
+        // values after its declared parameters.
+        let closure_params = std::mem::take(&mut self.pending_closure_params);
+        let declared_params = params.len();
+        for (_, _, captured) in &closure_params {
+            params.extend(captured.iter().map(|(_, ty)| ty.clone()));
+        }
 
         let is_main = f.name.name.as_ref() == "main";
         let has_shader_stage = Self::extract_shader_stage(attrs).is_some();
@@ -2633,6 +2676,9 @@ impl<'ctx> MirLowerer<'ctx> {
             let saved_str_refs = std::mem::take(&mut self.str_ref_locals);
             let saved_char_vecs = std::mem::take(&mut self.char_vec_locals);
             let saved_pending_vecs = std::mem::take(&mut self.pending_untyped_vecs);
+            // Local ids restart in every function, so which locals hold a
+            // closure is per function too.
+            let saved_closure_locals = std::mem::take(&mut self.local_closure_name);
 
             // Create function builder
             let mut builder = MirBuilder::with_linear_type_names(
@@ -2682,6 +2728,23 @@ impl<'ctx> MirLowerer<'ctx> {
                         self.char_vec_locals.insert(local_id);
                     }
                 }
+            }
+
+            let mut next_param = declared_params;
+            for (index, closure_name, captured) in &closure_params {
+                self.local_closure_name
+                    .insert(builder.param_local(*index), closure_name.clone());
+                let mut here = Vec::with_capacity(captured.len());
+                for (name, _) in captured {
+                    let local_id = builder.param_local(next_param);
+                    builder.set_param_name(
+                        next_param,
+                        Arc::from(format!("{}_{}", closure_name, name)),
+                    );
+                    here.push((name.clone(), local_id));
+                    next_param += 1;
+                }
+                self.closure_captures.insert(closure_name.clone(), here);
             }
 
             self.current_fn = Some(builder);
@@ -2765,6 +2828,7 @@ impl<'ctx> MirLowerer<'ctx> {
             self.str_ref_locals = saved_str_refs;
             self.char_vec_locals = saved_char_vecs;
             self.pending_untyped_vecs = saved_pending_vecs;
+            self.local_closure_name = saved_closure_locals;
         } else {
             // Declaration only
             self.module.declare_function(f.name.name.clone(), sig);

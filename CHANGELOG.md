@@ -12,6 +12,8 @@ tracked in `STATUS.md`, `README.md`, and
 
 ### Fixes
 
+- A closure or a function can be passed to a generic parameter: `fn apply<F: Fn(i32) -> i32>(f: F, v: i32) -> i32 { f(v) }` called with `|x: i32| -> i32 { x + k }`, with a closure held in a variable, or with a function's name. The callee is specialised for the closure, and the values the closure captured travel as extra arguments, so nothing is allocated. The closure can be passed on to another generic function. Before, the check refused every one of these. Not done yet: a function that returns a closure (`-> impl Fn(i32) -> i32`). Test: `tests/features/closure_generic_forms.bld`.
+- Which locals hold a closure is now tracked for each function. Before, the record was shared by every function, so a local in one function could be read as a closure from another with the same number.
 - `pop` works on a vector of strings: `let last: String = v.pop();`. An empty vector gives an empty string. Before, the check refused it, because the runtime had no such function.
 - A type alias works in compiled code: `type Meters = f64;`, `type Point = P;`, in a `let`, a signature, a struct literal and a format argument. Before, the check refused a value of an aliased type in `println!`. Limit: only aliases declared at the top level of the file.
 - A trait's default methods reach every type that implements the trait: with `trait Named { fn base(&self) -> i32; fn twice(&self) -> i32 { self.base() * 2 } }`, `a.twice()` works for an `impl Named for A` that writes only `base`, and an impl that writes its own `twice` keeps it. Before, the check refused the call. Limit: only traits declared at the top level of the file.
