@@ -27,6 +27,7 @@ mod lowlevel;
 mod macros;
 mod option_combinators;
 mod string_parse;
+mod unwrap_trap;
 pub(crate) mod parallel;
 #[cfg(test)]
 mod tests;

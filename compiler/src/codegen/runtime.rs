@@ -891,6 +891,58 @@ static BuildString build_bool_to_string(bool v) { return build_string_new(v ? "t
 // s.parse::<T>() gives Result<T, str>, with Rust's rules and error texts: the
 // whole string is the number, a leading '+' is allowed, whitespace anywhere is
 // an invalid digit, and a value outside T's range is an error.
+// unwrap / expect on None or Err: print Rust's message and stop with 101, the
+// code every other runtime trap uses (an index out of bounds, an overflow).
+// `kind` says how to print the Err payload: 0 not at all, 1 a string (quoted,
+// as Rust's Debug does), 2 a signed integer, 3 an unsigned one, 4 a float.
+static void bl_unwrap_err_detail(Result r, int32_t kind) {
+    if (kind == 1 && r.err.err_p) {
+        BuildString* e = (BuildString*)r.err.err_p;
+        fprintf(stderr, ": \"%.*s\"", (int)e->len, e->ptr);
+    } else if (kind == 2) {
+        fprintf(stderr, ": %lld", (long long)r.err.err_i);
+    } else if (kind == 3) {
+        fprintf(stderr, ": %llu", (unsigned long long)r.err.err_u);
+    } else if (kind == 4) {
+        fprintf(stderr, ": %s", bl_fmt_f64(r.err.err_f));
+    }
+}
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((noreturn, cold))
+#endif
+static void bl_unwrap_none(const char* what) {
+    fflush(stdout);
+    fprintf(stderr, "%s\n", what);
+    exit(101);
+}
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((noreturn, cold))
+#endif
+static void bl_expect_none(BuildString msg) {
+    fflush(stdout);
+    fprintf(stderr, "%.*s\n", (int)msg.len, msg.ptr);
+    exit(101);
+}
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((noreturn, cold))
+#endif
+static void bl_unwrap_fail(const char* what, Result r, int32_t kind) {
+    fflush(stdout);
+    fprintf(stderr, "%s", what);
+    bl_unwrap_err_detail(r, kind);
+    fprintf(stderr, "\n");
+    exit(101);
+}
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((noreturn, cold))
+#endif
+static void bl_expect_fail(BuildString msg, Result r, int32_t kind) {
+    fflush(stdout);
+    fprintf(stderr, "%.*s", (int)msg.len, msg.ptr);
+    bl_unwrap_err_detail(r, kind);
+    fprintf(stderr, "\n");
+    exit(101);
+}
 static Result bl_parse_err(const char* msg) {
     Result r;
     memset(&r, 0, sizeof r);

@@ -19,6 +19,7 @@ use crate::codegen::runtime;
 
 use super::asserts;
 use super::limits::{c_limit_macro, int_type_by_name};
+use super::unwrap_trap::UnwrapFail;
 use super::{MirLowerer, OverloadTarget};
 
 /// Owned copy of a loop label for storage in `loop_stack`, or `None` for an
@@ -6100,10 +6101,17 @@ impl<'ctx> MirLowerer<'ctx> {
                     }
                     return Ok(values::local(hv));
                 }
-                "unwrap" => {
+                "unwrap" | "expect" if args.len() == usize::from(method_name == "expect") => {
+                    // `expect`'s message is evaluated first, as in Rust.
+                    let fail = match args.first() {
+                        Some(msg) => UnwrapFail::Expect(self.lower_expr(msg)?),
+                        None => UnwrapFail::Fixed("called `Option::unwrap()` on a `None` value"),
+                    };
                     let builder = self.current_fn.as_mut().unwrap();
                     let scrut = builder.create_local(receiver_ty.clone());
                     builder.assign(scrut, MirRValue::Use(receiver_val));
+                    self.trap_unless(scrut, "has_value", true, fail)?;
+                    let builder = self.current_fn.as_mut().unwrap();
                     let val = builder.create_local(inner_ty.clone());
                     builder.assign(
                         val,
@@ -6191,15 +6199,32 @@ impl<'ctx> MirLowerer<'ctx> {
                     }
                     return Ok(values::local(ok));
                 }
-                "unwrap" | "unwrap_err" => {
-                    let (field, ty) = if method_name == "unwrap_err" {
-                        ("err", err_ty)
-                    } else {
+                "unwrap" | "unwrap_err" | "expect"
+                    if args.len() == usize::from(method_name == "expect") =>
+                {
+                    let want_ok = method_name != "unwrap_err";
+                    let fail = match (method_name, args.first()) {
+                        ("expect", Some(msg)) => {
+                            UnwrapFail::ExpectWithErr(self.lower_expr(msg)?, err_ty.clone())
+                        }
+                        ("unwrap_err", _) => {
+                            UnwrapFail::Fixed("called `Result::unwrap_err()` on an `Ok` value")
+                        }
+                        _ => UnwrapFail::FixedWithErr(
+                            "called `Result::unwrap()` on an `Err` value",
+                            err_ty.clone(),
+                        ),
+                    };
+                    let (field, ty) = if want_ok {
                         ("ok", ok_ty)
+                    } else {
+                        ("err", err_ty)
                     };
                     let builder = self.current_fn.as_mut().unwrap();
                     let scrut = builder.create_local(MirType::Struct(Arc::from("Result")));
                     builder.assign(scrut, MirRValue::Use(receiver_val));
+                    self.trap_unless(scrut, "is_ok", want_ok, fail)?;
+                    let builder = self.current_fn.as_mut().unwrap();
                     let val = builder.create_local(ty.clone());
                     builder.assign(
                         val,
