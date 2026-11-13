@@ -8664,6 +8664,7 @@ impl<'ctx> MirLowerer<'ctx> {
         let loop_block = builder.create_block();
         let exit_block = builder.create_block();
 
+        self.loop_drop_depths.push(self.drop_scopes.len());
         self.loop_stack
             .push((loop_block, exit_block, label_name(label)));
 
@@ -8680,6 +8681,7 @@ impl<'ctx> MirLowerer<'ctx> {
         builder.goto(loop_block);
 
         self.loop_stack.pop();
+        self.loop_drop_depths.pop();
 
         builder.switch_to_block(exit_block);
 
@@ -8704,6 +8706,7 @@ impl<'ctx> MirLowerer<'ctx> {
         let body_block = builder.create_block();
         let exit_block = builder.create_block();
 
+        self.loop_drop_depths.push(self.drop_scopes.len());
         self.loop_stack
             .push((cond_block, exit_block, label_name(label)));
 
@@ -8724,6 +8727,7 @@ impl<'ctx> MirLowerer<'ctx> {
         builder.goto(cond_block);
 
         self.loop_stack.pop();
+        self.loop_drop_depths.pop();
 
         builder.switch_to_block(exit_block);
 
@@ -8749,6 +8753,7 @@ impl<'ctx> MirLowerer<'ctx> {
         let body_block = builder.create_block();
         let exit_block = builder.create_block();
 
+        self.loop_drop_depths.push(self.drop_scopes.len());
         self.loop_stack
             .push((cond_block, exit_block, label_name(label)));
 
@@ -8836,6 +8841,7 @@ impl<'ctx> MirLowerer<'ctx> {
         builder.goto(cond_block);
 
         self.loop_stack.pop();
+        self.loop_drop_depths.pop();
 
         let builder = self.current_fn.as_mut().unwrap();
         builder.switch_to_block(exit_block);
@@ -9041,6 +9047,7 @@ impl<'ctx> MirLowerer<'ctx> {
         let incr_block = builder.create_block();
         let exit_block = builder.create_block();
 
+        self.loop_drop_depths.push(self.drop_scopes.len());
         self.loop_stack
             .push((incr_block, exit_block, label_name(label)));
 
@@ -9087,6 +9094,7 @@ impl<'ctx> MirLowerer<'ctx> {
         builder.goto(cond_block);
 
         self.loop_stack.pop();
+        self.loop_drop_depths.pop();
 
         let builder = self.current_fn.as_mut().unwrap();
         builder.switch_to_block(exit_block);
@@ -9130,6 +9138,7 @@ impl<'ctx> MirLowerer<'ctx> {
         let body_block = builder.create_block();
         let incr_block = builder.create_block();
         let exit_block = builder.create_block();
+        self.loop_drop_depths.push(self.drop_scopes.len());
         self.loop_stack
             .push((incr_block, exit_block, label_name(label)));
         let builder = self.current_fn.as_mut().unwrap();
@@ -9167,6 +9176,7 @@ impl<'ctx> MirLowerer<'ctx> {
         builder.assign(idx, MirRValue::Use(values::local(next)));
         builder.goto(cond_block);
         self.loop_stack.pop();
+        self.loop_drop_depths.pop();
         let builder = self.current_fn.as_mut().unwrap();
         builder.switch_to_block(exit_block);
         Ok(values::unit())
@@ -9219,6 +9229,7 @@ impl<'ctx> MirLowerer<'ctx> {
         let incr_block = builder.create_block();
         let exit_block = builder.create_block();
 
+        self.loop_drop_depths.push(self.drop_scopes.len());
         self.loop_stack
             .push((incr_block, exit_block, label_name(label)));
 
@@ -9268,6 +9279,7 @@ impl<'ctx> MirLowerer<'ctx> {
         builder.goto(cond_block);
 
         self.loop_stack.pop();
+        self.loop_drop_depths.pop();
 
         let builder = self.current_fn.as_mut().unwrap();
         builder.switch_to_block(exit_block);
@@ -9321,6 +9333,7 @@ impl<'ctx> MirLowerer<'ctx> {
         let body_block = builder.create_block();
         let incr_block = builder.create_block();
         let exit_block = builder.create_block();
+        self.loop_drop_depths.push(self.drop_scopes.len());
         self.loop_stack
             .push((incr_block, exit_block, label_name(label)));
 
@@ -9383,6 +9396,7 @@ impl<'ctx> MirLowerer<'ctx> {
         builder.goto(cond_block);
 
         self.loop_stack.pop();
+        self.loop_drop_depths.pop();
         let builder = self.current_fn.as_mut().unwrap();
         builder.switch_to_block(exit_block);
         Ok(values::unit())
@@ -9461,6 +9475,7 @@ impl<'ctx> MirLowerer<'ctx> {
         let incr_block = builder.create_block();
         let exit_block = builder.create_block();
 
+        self.loop_drop_depths.push(self.drop_scopes.len());
         self.loop_stack
             .push((incr_block, exit_block, label_name(label)));
 
@@ -9510,6 +9525,7 @@ impl<'ctx> MirLowerer<'ctx> {
         }
 
         self.loop_stack.pop();
+        self.loop_drop_depths.pop();
 
         let builder = self.current_fn.as_mut().unwrap();
         builder.switch_to_block(exit_block);
@@ -9591,6 +9607,7 @@ impl<'ctx> MirLowerer<'ctx> {
         let body_block = builder.create_block();
         let exit_block = builder.create_block();
 
+        self.loop_drop_depths.push(self.drop_scopes.len());
         self.loop_stack
             .push((cond_block, exit_block, label_name(label)));
 
@@ -9673,6 +9690,7 @@ impl<'ctx> MirLowerer<'ctx> {
         builder.goto(cond_block);
 
         self.loop_stack.pop();
+        self.loop_drop_depths.pop();
 
         let builder = self.current_fn.as_mut().unwrap();
         builder.switch_to_block(exit_block);
@@ -9900,8 +9918,11 @@ impl<'ctx> MirLowerer<'ctx> {
             );
             builder.goto(cont_block);
 
-            // 6. Err/None block -- construct the error variant and return early
+            // 6. Err/None block -- drop the function's live values, as
+            //    `return` does, then construct the error variant and return
             builder.switch_to_block(err_block);
+            self.drop_all_for_return()?;
+            let builder = self.current_fn.as_mut().unwrap();
 
             if let Some(err_v) = err_variant {
                 if err_v.fields.is_empty() {
@@ -10010,8 +10031,11 @@ impl<'ctx> MirLowerer<'ctx> {
         );
         builder.goto(cont_block);
 
-        // Failure: return the whole value to propagate Err/None unchanged.
+        // Failure: return the whole value to propagate Err/None unchanged,
+        // after dropping the function's live values, as `return` does.
         builder.switch_to_block(fail_block);
+        self.drop_all_for_return()?;
+        let builder = self.current_fn.as_mut().unwrap();
         builder.ret(Some(values::local(scrut)));
 
         // An unreachable block separates the early return from the continuation.
@@ -10035,7 +10059,7 @@ impl<'ctx> MirLowerer<'ctx> {
         // loop, which would compile the wrong control flow.
         let target = self.resolve_loop_target(label, "break")?;
 
-        if let Some((_, exit_block)) = target {
+        if let Some((cont_block, exit_block)) = target {
             if let Some(expr) = value {
                 let val = self.lower_expr(expr)?;
                 if !matches!(val, MirValue::Const(MirConst::Unit)) {
@@ -10055,7 +10079,10 @@ impl<'ctx> MirLowerer<'ctx> {
                     };
                     builder.assign(result, MirRValue::Use(val));
                 }
+                self.mark_moved(expr)?;
             }
+            // The values of the blocks inside the loop are dropped on the way out.
+            self.drop_scopes_inside_loop(cont_block, exit_block)?;
             let builder = self
                 .current_fn
                 .as_mut()
@@ -10075,6 +10102,10 @@ impl<'ctx> MirLowerer<'ctx> {
         // matches; a bare `continue` re-enters the innermost loop. An unresolved
         // label fails closed (see `lower_break`).
         let target = self.resolve_loop_target(label, "continue")?;
+        if let Some((continue_block, exit_block)) = target {
+            // The values of this iteration's blocks are dropped first.
+            self.drop_scopes_inside_loop(continue_block, exit_block)?;
+        }
 
         let builder = self
             .current_fn

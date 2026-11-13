@@ -100,6 +100,9 @@ pub struct MirLowerer<'ctx> {
     /// The label lets `break 'name` / `continue 'name` target an enclosing loop
     /// instead of the innermost one.
     loop_stack: Vec<(BlockId, BlockId, Option<String>)>,
+    /// For each entry of `loop_stack`, how many drop scopes were open when the
+    /// loop began, so `break` and `continue` drop the scopes inside it.
+    pub(crate) loop_drop_depths: Vec<usize>,
     /// Result local of a `loop` that a `break value` assigned, keyed by the
     /// loop's exit block, so `let r = loop { ... break v; }` binds `v`.
     loop_break_values: HashMap<BlockId, LocalId>,
@@ -363,6 +366,7 @@ impl<'ctx> MirLowerer<'ctx> {
             module: MirModuleBuilder::new("main"),
             var_map: HashMap::new(),
             loop_stack: Vec::new(),
+            loop_drop_depths: Vec::new(),
             loop_break_values: HashMap::new(),
             char_locals: std::collections::HashSet::new(),
             ref_locals: std::collections::HashSet::new(),
@@ -434,6 +438,7 @@ impl<'ctx> MirLowerer<'ctx> {
             module: MirModuleBuilder::new("main"),
             var_map: HashMap::new(),
             loop_stack: Vec::new(),
+            loop_drop_depths: Vec::new(),
             loop_break_values: HashMap::new(),
             char_locals: std::collections::HashSet::new(),
             ref_locals: std::collections::HashSet::new(),

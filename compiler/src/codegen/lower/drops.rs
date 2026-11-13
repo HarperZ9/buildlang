@@ -265,6 +265,34 @@ impl MirLowerer<'_> {
         Ok(())
     }
 
+    /// Before a `break` or `continue` to the loop with these blocks: drop the
+    /// live values of every scope opened inside that loop, innermost first.
+    pub(super) fn drop_scopes_inside_loop(
+        &mut self,
+        cont: BlockId,
+        exit: BlockId,
+    ) -> CodegenResult<()> {
+        let Some(index) = self
+            .loop_stack
+            .iter()
+            .rposition(|(c, e, _)| *c == cont && *e == exit)
+        else {
+            return Ok(());
+        };
+        let depth = self.loop_drop_depths.get(index).copied().unwrap_or(0);
+        let inside: Vec<DropSlot> = self
+            .drop_scopes
+            .iter()
+            .skip(depth)
+            .rev()
+            .flat_map(|s| s.iter().rev().cloned())
+            .collect();
+        for slot in &inside {
+            self.emit_drop(slot)?;
+        }
+        Ok(())
+    }
+
     /// Before a `return`: drop every live value of the function, innermost
     /// scope first. The scopes stay; their flags are now clear.
     pub(super) fn drop_all_for_return(&mut self) -> CodegenResult<()> {

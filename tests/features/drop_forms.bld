@@ -15,6 +15,35 @@ fn extras() ~ Console {
     match m { G { v } => println!("matched {}", v) }
     println!("extras end");
 }
+fn loops() ~ Console {
+    let mut i: i32 = 0;
+    while i < 3 {
+        let a: G = G { v: 40 + i };
+        if i == 1 {
+            let b: G = G { v: 50 };
+            println!("breaking");
+            break;
+        }
+        i = i + 1;
+    }
+    let mut j: i32 = 0;
+    while j < 2 {
+        j = j + 1;
+        let c: G = G { v: 60 + j };
+        if j == 1 { continue; }
+        let d: G = G { v: 70 + j };
+        println!("tail {}", d.v);
+    }
+    println!("loops end");
+}
+fn check(ok: bool) -> Result<i32, str> { if ok { Ok(5) } else { Err("no") } }
+fn step(ok: bool) -> Result<i32, str> ~ Console {
+    let a: G = G { v: 80 };
+    let b: G = G { v: 81 };
+    let n: i32 = check(ok)?;
+    println!("after ? {}", n);
+    Ok(n + a.v + b.v)
+}
 fn take(g: G) ~ Console { println!("take {}", g.v); }
 fn make(v: i32) -> G { G { v: v } }
 fn early(flag: bool) -> i32 ~ Console {
@@ -60,6 +89,9 @@ fn main() ~ Console {
         println!("loop {}", w.v);
         i = i + 1;
     }
+    loops();
+    match step(false) { Ok(v) => println!("ok {}", v), Err(e) => println!("err {}", e) }
+    match step(true) { Ok(v) => println!("ok {}", v), Err(e) => println!("err {}", e) }
     extras();
     println!("end");
 }
