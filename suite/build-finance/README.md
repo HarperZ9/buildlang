@@ -127,7 +127,7 @@ Sharpe, Sortino, Max Drawdown, Calmar, VaR (parametric + historical), CVaR, Beta
 - No network access: the package gate verifies the import closure denies sockets, subprocesses, and environment reads
 
 ### Crypto Replay (`crypto_replay`)
-- Deterministic replay of historical crypto fills against the same paper-core invariants
+- Deterministic offline replay contracts for crypto fills, tested on synthetic fixtures. No real fixture is admitted yet, and the real-fixture gate stays failed until one is
 
 ## GUI
 

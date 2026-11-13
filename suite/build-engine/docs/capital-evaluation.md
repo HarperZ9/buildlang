@@ -33,8 +33,8 @@ Install the already-built local wheel without contacting a package index, then
 install the current Build Engine checkout:
 
 ```powershell
-python -m pip install --no-deps C:/path/to/build-finance/.artifacts/paper-core/dist/build_finance_paper_core-1.1.0-py3-none-any.whl
-python -m pip install --no-deps -e "C:/path/to/build-engine[capital]"
+python -m pip install --no-deps path/to/build-finance/.artifacts/paper-core/dist/build_finance_paper_core-1.1.0-py3-none-any.whl
+python -m pip install --no-deps -e "path/to/build-engine[capital]"
 ```
 
 The Build Engine `capital` extra pins
@@ -47,8 +47,8 @@ The exporter refuses a non-empty destination and writes only deterministic
 synthetic evidence. From the reviewed Build Finance source checkout:
 
 ```powershell
-$Finance = "C:/path/to/build-finance"
-$Bundle = "C:/path/to/clean/g2-evaluation"
+$Finance = "path/to/build-finance"
+$Bundle = "path/to/clean/g2-evaluation"
 python "$Finance/scripts/export_g2_evaluation_bundle.py" "$Bundle"
 python "$Finance/scripts/export_g2_evaluation_bundle.py" --verify "$Bundle"
 ```
@@ -62,7 +62,7 @@ Build Finance reference projection.
 Create the receipt parent directory explicitly, then run the one-command demo:
 
 ```powershell
-$Receipt = "C:/path/to/output/evaluator-receipt.json"
+$Receipt = "path/to/output/evaluator-receipt.json"
 New-Item -ItemType Directory -Force (Split-Path $Receipt) | Out-Null
 build-engine capital-replay --fixture "$Bundle/g2-disk-fixture" --receipt-output "$Receipt"
 ```

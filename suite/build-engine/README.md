@@ -70,9 +70,9 @@ Install the separately built and verified local paper-core wheel, then install
 Build Engine with its optional capital dependency metadata:
 
 ```powershell
-python -m pip install --no-deps C:/path/to/build_finance_paper_core-1.1.0-py3-none-any.whl
+python -m pip install --no-deps path/to/build_finance_paper_core-1.1.0-py3-none-any.whl
 python -m pip install -e ".[capital]" --no-deps
-build-engine capital-replay --fixture C:/path/to/export/g2-disk-fixture --receipt-output C:/path/to/output/evaluator-receipt.json
+build-engine capital-replay --fixture path/to/export/g2-disk-fixture --receipt-output path/to/output/evaluator-receipt.json
 ```
 
 If the optional paper core is absent or incompatible, the command fails before
