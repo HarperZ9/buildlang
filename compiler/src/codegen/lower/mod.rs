@@ -17,6 +17,7 @@
 mod array_places;
 mod asserts;
 mod c_abi;
+mod drops;
 mod env_macro;
 mod expr;
 mod format;
@@ -187,6 +188,11 @@ pub struct MirLowerer<'ctx> {
     /// The Ok type of the `let` annotation being initialised, for a
     /// `s.parse()` written without a turbofish.
     pub(crate) parse_target_hint: Option<MirType>,
+    /// Types with an `impl Drop`, by name, to their `T_drop` function.
+    pub(crate) drop_fns: HashMap<Arc<str>, Arc<str>>,
+    /// The owned values with a Drop impl in each open block of the function
+    /// being lowered, outermost first (see `drops.rs`).
+    pub(crate) drop_scopes: Vec<Vec<drops::DropSlot>>,
     /// Functions declared to return `impl Trait`, by name, kept so one
     /// can be lowered the first time it is called: what it returns is
     /// known only from its body.
@@ -386,6 +392,8 @@ impl<'ctx> MirLowerer<'ctx> {
             pending_closure_params: Vec::new(),
             closure_param_hint: None,
             parse_target_hint: None,
+            drop_fns: HashMap::new(),
+            drop_scopes: Vec::new(),
             impl_return_fns: HashMap::new(),
             impl_return_done: HashSet::new(),
             fn_closure_env: HashMap::new(),
@@ -454,6 +462,8 @@ impl<'ctx> MirLowerer<'ctx> {
             pending_closure_params: Vec::new(),
             closure_param_hint: None,
             parse_target_hint: None,
+            drop_fns: HashMap::new(),
+            drop_scopes: Vec::new(),
             impl_return_fns: HashMap::new(),
             impl_return_done: HashSet::new(),
             fn_closure_env: HashMap::new(),
@@ -2239,6 +2249,7 @@ impl<'ctx> MirLowerer<'ctx> {
     /// Collect impl block methods, registering them as `TypeName_methodName` functions.
     fn collect_impl(&mut self, impl_def: &ast::ImplDef) -> CodegenResult<()> {
         let type_name = self.resolve_type_name(&impl_def.self_ty);
+        self.note_drop_impl(impl_def, &type_name);
 
         // Check if this is an impl on a generic type (e.g., impl<T> Option<T> { ... })
         // If so, store for deferred monomorphization.

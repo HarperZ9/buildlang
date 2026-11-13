@@ -8,7 +8,6 @@
 # passes the check. It builds, and stops the program if it reaches the end. Found 2026-11-12, open.
 async_await rejected
 const_generic rejected
-drop_trait broken
 effect_resume_value broken
 float_exponent_format rejected
 macro_rules rejected

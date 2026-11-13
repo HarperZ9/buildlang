@@ -178,6 +178,11 @@ impl MirBuilder {
         LocalId(index as u32)
     }
 
+    /// The number of parameters; their locals are ids `0..param_count()`.
+    pub fn param_count(&self) -> usize {
+        self.func.sig.params.len()
+    }
+
     /// Look up the type of a local variable by its ID.
     pub fn local_type(&self, id: LocalId) -> Option<MirType> {
         self.func

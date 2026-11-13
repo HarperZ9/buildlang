@@ -339,7 +339,12 @@ impl<'ctx> MirLowerer<'ctx> {
 
         self.current_fn = Some(closure_builder);
 
-        let body_val = self.lower_expr(body)?;
+        // The closure's drop scopes are its own; a `return` in it must not
+        // drop the enclosing function's values.
+        let saved_drops = std::mem::take(&mut self.drop_scopes);
+        let body_val = self.lower_expr(body);
+        self.drop_scopes = saved_drops;
+        let body_val = body_val?;
 
         // A closure written without a return type returns its body's type
         // (`|x| x > 2` gives a bool, `|x| Some(x)` an Option). Before, it

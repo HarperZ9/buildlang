@@ -1,0 +1,49 @@
+struct G { v: i32 }
+impl Drop for G { fn drop(&mut self) ~ Console { println!("drop {}", self.v); } }
+fn take(g: G) ~ Console { println!("take {}", g.v); }
+fn make(v: i32) -> G { G { v: v } }
+fn early(flag: bool) -> i32 ~ Console {
+    let a: G = G { v: 10 };
+    if flag {
+        let b: G = G { v: 11 };
+        return b.v;
+    }
+    let c: G = G { v: 12 };
+    c.v
+}
+fn pass_through(v: i32) -> G ~ Console {
+    let g: G = G { v: v };
+    let h: G = G { v: v + 100 };
+    println!("built {}", h.v);
+    g
+}
+fn main() ~ Console {
+    {
+        let a: G = G { v: 1 };
+        let b: G = G { v: 2 };
+        let c: G = G { v: 3 };
+        println!("in {} {} {}", a.v, b.v, c.v);
+    }
+    println!("after block");
+    {
+        let m: G = G { v: 4 };
+        take(m);
+        println!("moved");
+    }
+    println!("{}", early(true));
+    println!("{}", early(false));
+    let mut r: G = make(5);
+    r = make(6);
+    println!("reassigned {}", r.v);
+    let k: G = pass_through(7);
+    println!("got {}", k.v);
+    let n: G = k;
+    println!("n {}", n.v);
+    let mut i: i32 = 0;
+    while i < 2 {
+        let w: G = G { v: 20 + i };
+        println!("loop {}", w.v);
+        i = i + 1;
+    }
+    println!("end");
+}

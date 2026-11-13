@@ -1,0 +1,27 @@
+in 1 2 3
+drop 3
+drop 2
+drop 1
+after block
+take 4
+drop 4
+moved
+drop 11
+drop 10
+11
+drop 12
+drop 10
+12
+drop 5
+reassigned 6
+built 107
+drop 107
+got 7
+n 7
+loop 20
+drop 20
+loop 21
+drop 21
+end
+drop 7
+drop 6

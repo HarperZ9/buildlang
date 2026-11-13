@@ -46,6 +46,8 @@ impl<'ctx> MirLowerer<'ctx> {
         // is what threads a `-> (i64, i64)` return type into a returned tuple
         // literal so it is built at the width its caller reads.
         let block_expected = self.expected_type.clone();
+        // Values with a Drop impl declared in this block are dropped at its end.
+        self.push_drop_scope();
 
         for (i, stmt) in block.stmts.iter().enumerate() {
             let is_last = i == block.stmts.len() - 1;
@@ -66,7 +68,14 @@ impl<'ctx> MirLowerer<'ctx> {
                 None
             };
             result = self.lower_stmt(stmt, is_last)?;
+            // A block whose tail names a value hands that value out.
+            if is_last {
+                if let StmtKind::Expr(expr) = &stmt.kind {
+                    self.mark_moved(expr)?;
+                }
+            }
         }
+        self.pop_drop_scope()?;
 
         // Restore the incoming hint for the caller (an empty block never
         // touched it, but the loop above leaves it cleared otherwise).
@@ -84,7 +93,16 @@ impl<'ctx> MirLowerer<'ctx> {
         let body_expected = self.current_fn.as_ref().map(|b| b.return_type().clone());
         let prev_expected = self.expected_type.take();
         self.expected_type = body_expected;
-        let result = self.lower_block(body);
+        // The body's drop scopes are its own: parameters with a Drop impl in
+        // an outer scope, then the blocks. A `return` drops only these.
+        let saved_drops = std::mem::take(&mut self.drop_scopes);
+        self.push_drop_scope();
+        let result = self.register_param_drops().and_then(|_| {
+            let r = self.lower_block(body)?;
+            self.pop_drop_scope()?;
+            Ok(r)
+        });
+        self.drop_scopes = saved_drops;
         self.expected_type = prev_expected;
         result
     }
@@ -92,7 +110,19 @@ impl<'ctx> MirLowerer<'ctx> {
     fn lower_stmt(&mut self, stmt: &ast::Stmt, is_tail: bool) -> CodegenResult<Option<MirValue>> {
         match &stmt.kind {
             StmtKind::Local(local) => {
+                // `let b = a;` moves `a` (marked first, so `let a = a;` reads
+                // the old binding). The new binding gets its own drop flag.
+                if let Some(init) = &local.init {
+                    self.mark_moved(&init.expr)?;
+                }
                 self.lower_local(local)?;
+                if let (ast::PatternKind::Ident { name, .. }, Some(_)) =
+                    (&local.pattern.kind, &local.init)
+                {
+                    if let Some(id) = self.var_map.get(&name.name).copied() {
+                        self.register_drop(id)?;
+                    }
+                }
                 Ok(None)
             }
             StmtKind::Expr(expr) => {
@@ -798,9 +828,24 @@ impl<'ctx> MirLowerer<'ctx> {
 
             ExprKind::Binary { op, left, right } => self.lower_binary(*op, left, right),
             ExprKind::Unary { op, expr: inner } => self.lower_unary(*op, inner),
-            ExprKind::Assign { op, target, value } => self.lower_assign(*op, target, value),
+            ExprKind::Assign { op, target, value } => {
+                if *op == ast::AssignOp::Assign {
+                    if let Some(done) = self.try_lower_drop_assign(target, value) {
+                        return done;
+                    }
+                }
+                let v = self.lower_assign(*op, target, value)?;
+                self.mark_moved(value)?;
+                Ok(v)
+            }
 
-            ExprKind::Call { func, args } => self.lower_call_with_closures(func, args),
+            ExprKind::Call { func, args } => {
+                let v = self.lower_call_with_closures(func, args)?;
+                for a in args {
+                    self.mark_moved(a)?;
+                }
+                Ok(v)
+            }
             ExprKind::MethodCall {
                 receiver,
                 method,
@@ -817,7 +862,13 @@ impl<'ctx> MirLowerer<'ctx> {
                 method,
                 args,
                 ..
-            } => self.lower_method_call(receiver, method, args),
+            } => {
+                let v = self.lower_method_call(receiver, method, args)?;
+                for a in args {
+                    self.mark_moved(a)?;
+                }
+                Ok(v)
+            }
 
             ExprKind::If {
                 condition,
@@ -866,8 +917,17 @@ impl<'ctx> MirLowerer<'ctx> {
             ExprKind::Break { value, label } => self.lower_break(value.as_deref(), label.as_ref()),
             ExprKind::Continue { label } => self.lower_continue(label.as_ref()),
 
-            ExprKind::Tuple(elems) => self.lower_tuple(elems),
-            ExprKind::Array(elems) => self.lower_array(elems),
+            ExprKind::Tuple(elems) | ExprKind::Array(elems) => {
+                let v = if matches!(expr.kind, ExprKind::Tuple(_)) {
+                    self.lower_tuple(elems)?
+                } else {
+                    self.lower_array(elems)?
+                };
+                for e in elems {
+                    self.mark_moved(e)?;
+                }
+                Ok(v)
+            }
             ExprKind::ArrayRepeat { element, count } => self.lower_array_repeat(element, count),
             ExprKind::Index { expr: arr, index } => self.lower_index(arr, index),
             ExprKind::Field { expr: obj, field } => self.lower_field(obj, field),
@@ -894,7 +954,11 @@ impl<'ctx> MirLowerer<'ctx> {
 
             ExprKind::Struct { path, fields, rest } => {
                 let path = self.aliased_path(path).clone();
-                self.lower_struct_expr(&path, fields, rest.as_deref())
+                let v = self.lower_struct_expr(&path, fields, rest.as_deref())?;
+                for f in fields.iter().filter_map(|f| f.value.as_deref()) {
+                    self.mark_moved(f)?;
+                }
+                Ok(v)
             }
 
             ExprKind::Handle {
@@ -9684,6 +9748,11 @@ impl<'ctx> MirLowerer<'ctx> {
         } else {
             None
         };
+        // The returned value leaves; every other live value is dropped first.
+        if let Some(expr) = value {
+            self.mark_moved(expr)?;
+        }
+        self.drop_all_for_return()?;
 
         let builder = self
             .current_fn
