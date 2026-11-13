@@ -1,0 +1,54 @@
+in 1 2 3
+drop 3
+drop 2
+drop 1
+after block
+take 4
+drop 4
+moved
+drop 11
+drop 10
+11
+drop 12
+drop 10
+12
+drop 5
+reassigned 6
+built 107
+drop 107
+got 7
+n 7
+loop 20
+drop 20
+loop 21
+drop 21
+drop 40
+breaking
+drop 50
+drop 41
+drop 61
+tail 72
+drop 72
+drop 62
+loops end
+drop 81
+drop 80
+err no
+after ? 5
+drop 81
+drop 80
+ok 166
+holder 1
+pair 63
+consume 33
+drop 33
+consumed 33
+matched 34
+extras end
+drop 34
+drop 31
+drop 32
+drop 30
+end
+drop 7
+drop 6
