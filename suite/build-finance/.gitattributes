@@ -3,6 +3,9 @@
 /docs/crypto-replay/** text eol=lf
 /build_finance/live_paper/** text eol=lf
 /build_finance/paper_core_loader.py text eol=lf
+# The paper-core manifest pins this one file with CRLF line endings, as it was on the
+# machine that built the reviewed artifact. Keep CRLF on every checkout so the digest holds.
+/build_finance/__init__.py text eol=crlf
 /tests/live_paper/** text eol=lf
 /docs/live-paper/** text eol=lf
 /scripts/capture_crypto_replay_gate.py text eol=lf
