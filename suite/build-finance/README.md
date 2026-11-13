@@ -129,6 +129,10 @@ Sharpe, Sortino, Max Drawdown, Calmar, VaR (parametric + historical), CVaR, Beta
 ### Crypto Replay (`crypto_replay`)
 - Deterministic offline replay contracts for crypto fills, tested on synthetic fixtures. No real fixture is admitted yet, and the real-fixture gate stays failed until one is
 
+## Order gate
+
+All order paths submit through `OrderGate` (`build_finance/order_gate.py`). The gate applies a kill switch (`gate.halt()` or a `HALT` file in the state folder; only `gate.clear_halt()` unsets it), stop enforcement (buys without a stop get `stop_loss_pct`, breached stops close through the gate) and idempotent order ids (persisted in the state folder). Pass `state_dir` to `AutoTrader` to keep ids, stops and the halt flag across restarts; without it they live in memory only. `tests/test_order_gate_static.py` fails when a module outside the gate calls a broker's `submit_order`.
+
 ## GUI
 
 Professional interface matching Calibrate Pro's design:

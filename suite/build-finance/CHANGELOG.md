@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Features
+- **One order gate** (`build_finance/order_gate.py`): every order path (AutoTrader, the build-engine adapter through AutoTrader, the GUI flatten action) passes a kill switch (in-process flag plus a HALT file, cleared only by a person), enforced stops (a buy needs a stop or gets `stop_loss_pct`; a breached stop produces a closing sell through the same gate; sells cannot exceed holdings) and idempotent client order ids (persisted under a caller-supplied state folder, so a repeat after restart returns the first result).
+- A static test fails if any module outside the gate calls `submit_order` (or `place_order`, `create_order`, `send_order`); a planted-violation control shows it catches one.
+
+### Boundary
+- Tested with an in-memory fake broker only. No broker or network call is made by the tests. The gate does not change `paper_trading` defaults.
+- An order whose broker call raised or never completed is refused on repeat until a person calls `forget_order` after checking the broker.
+
 ## v1.1.0 (2026-08-22)
 
 ### Features

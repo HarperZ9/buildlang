@@ -30,6 +30,7 @@ from dataclasses import dataclass, field
 
 from build_finance.broker import PaperBroker
 from build_finance.data import Candle, Signal
+from build_finance.order_gate import SENT, OrderGate
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +62,9 @@ class AutoTraderConfig:
         Whether to use paper trading (default *True*).
     asset_type:
         ``"stock"``, ``"crypto"``, or ``"mixed"`` (default).
+    stop_loss_pct:
+        Stop distance below the entry price that the order gate attaches
+        when a signal carries no stop of its own (default 0.05).
     """
 
     symbols: list[str] = field(default_factory=lambda: ["AAPL", "BTC-USD"])
@@ -70,6 +74,7 @@ class AutoTraderConfig:
     max_positions: int = 5
     paper_trading: bool = True
     asset_type: str = "mixed"
+    stop_loss_pct: float = 0.05
 
 
 # ---------------------------------------------------------------------------
@@ -128,9 +133,20 @@ class AutoTrader:
         provided.
     """
 
-    def __init__(self, config: AutoTraderConfig, broker=None) -> None:
+    def __init__(
+        self,
+        config: AutoTraderConfig,
+        broker=None,
+        gate: OrderGate | None = None,
+        state_dir=None,
+    ) -> None:
         self.config = config
         self.broker = broker if broker is not None else PaperBroker()
+        # Every order goes through the gate.  Without a state folder the
+        # gate keeps its ids and stops in memory only.
+        self.gate = gate or OrderGate(
+            self.broker, state_dir=state_dir, default_stop_pct=config.stop_loss_pct
+        )
         self.strategy = _create_strategy(config.strategy_name)
         self.running: bool = False
         self.iteration: int = 0
@@ -179,6 +195,10 @@ class AutoTrader:
         risk_amount = equity * self.config.risk_per_trade
         qty = int(risk_amount / price)
         return max(1, qty)
+
+    def _decision_id(self, symbol: str, signal: Signal) -> str:
+        """Identify the decision: iteration, symbol, side and signal time."""
+        return f"{self.iteration}:{symbol}:{signal.side}:{signal.timestamp}"
 
     def _process_signals(
         self,
@@ -232,7 +252,17 @@ class AutoTrader:
                     return []
 
             try:
-                result = self.broker.submit_order(symbol, "buy", qty)
+                outcome = self.gate.submit(
+                    symbol,
+                    "buy",
+                    qty,
+                    decision_id=self._decision_id(symbol, signal),
+                    ref_price=current_price,
+                    stop_price=signal.stop_loss,
+                )
+                if outcome["status"] != SENT:
+                    return []
+                result = outcome["result"]
                 action = {
                     "action": "BUY",
                     "symbol": symbol,
@@ -259,7 +289,16 @@ class AutoTrader:
             qty = pos.get("quantity", 0)
             if qty > 0:
                 try:
-                    result = self.broker.submit_order(symbol, "sell", qty)
+                    outcome = self.gate.submit(
+                        symbol,
+                        "sell",
+                        qty,
+                        decision_id=self._decision_id(symbol, signal),
+                        ref_price=current_price,
+                    )
+                    if outcome["status"] != SENT:
+                        return []
+                    result = outcome["result"]
                     action = {
                         "action": "SELL",
                         "symbol": symbol,
@@ -308,6 +347,11 @@ class AutoTrader:
             # 2. Update broker prices for mark-to-market
             if hasattr(self.broker, "update_prices"):
                 self.broker.update_prices({symbol: candles[-1].close})
+
+            # 2b. Closing orders for breached stops, through the gate
+            for outcome in self.gate.enforce_stops({symbol: candles[-1].close}):
+                if outcome["status"] == SENT:
+                    all_actions.append({"action": "STOP", "symbol": symbol, **outcome["result"]})
 
             # 3. Generate signals
             try:
