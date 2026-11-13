@@ -33,6 +33,7 @@ mod string_parse;
 mod tests;
 mod types;
 mod unwrap_trap;
+mod vec_range;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;

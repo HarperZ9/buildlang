@@ -4728,12 +4728,15 @@ impl<'ctx> MirLowerer<'ctx> {
                 }
                 MirType::i32()
             }
-            ExprKind::Index { expr: base, .. } => {
+            ExprKind::Index { expr: base, index } => {
                 let mut bt = self.infer_expr_type(base);
                 if let MirType::Ptr(inner) = bt {
                     bt = *inner;
                 }
                 match bt {
+                    MirType::Vec(e) if matches!(index.kind, ExprKind::Range { .. }) => {
+                        MirType::Ptr(Box::new(MirType::Slice(e)))
+                    }
                     MirType::Vec(e) | MirType::Array(e, _) | MirType::Slice(e) => *e,
                     _ => MirType::i32(),
                 }
@@ -10460,6 +10463,11 @@ impl<'ctx> MirLowerer<'ctx> {
             {
                 return self.lower_substring(base, start.as_deref(), end.as_deref(), *inclusive);
             }
+            if let Some(view) =
+                self.vec_range_view(&arr_val, start.as_deref(), end.as_deref(), *inclusive)?
+            {
+                return Ok(view);
+            }
         }
 
         let idx_val = self.lower_expr(index)?;
@@ -10713,6 +10721,14 @@ impl<'ctx> MirLowerer<'ctx> {
         // `&GLOBAL` of a mutable global is its address (G35).
         if let Some(ptr) = self.global_ref(inner)? {
             return Ok(ptr);
+        }
+        // `&v[a..b]` on a vector is already a `&[T]` view: no second borrow.
+        if let ExprKind::Index { index, .. } = &inner.kind {
+            if matches!(index.kind, ExprKind::Range { .. })
+                && matches!(self.infer_expr_type(inner), MirType::Ptr(ref t) if matches!(**t, MirType::Slice(_)))
+            {
+                return self.lower_expr(inner);
+            }
         }
         // Address-of a real place (`&arr[i].field`, `&t.0`, `&s.field`, `&x`).
         // Reference the location itself so the pointer aliases storage the caller
