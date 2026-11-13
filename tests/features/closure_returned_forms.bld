@@ -1,0 +1,19 @@
+fn adder(k: i32) -> impl Fn(i32) -> i32 { move |x: i32| -> i32 { x + k } }
+fn scale(a: i32, b: i32) -> impl Fn(i32) -> i32 {
+    let m = a * b;
+    move |x: i32| -> i32 { x * m + a }
+}
+fn plain() -> impl Fn(i32) -> i32 { |x: i32| -> i32 { x * 3 } }
+fn main() ~ Console {
+    let f = adder(4);
+    println!("{}", f(5));
+    let g = late(10);
+    println!("{}", g(1));
+    let s = scale(2, 3);
+    let t = s;
+    println!("{}", t(5));
+    let p = plain();
+    println!("{}", p(7));
+    println!("{}", f(1) + g(1));
+}
+fn late(k: i32) -> impl Fn(i32) -> i32 { move |x: i32| -> i32 { x - k } }
