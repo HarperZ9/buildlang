@@ -576,7 +576,7 @@ Interpolation: `lerp`, `smoothstep`, `inverse_lerp`
 I/O: `println!`, `print!`, `eprintln!`
 Collections: `vec_new`, `vec_push`, `vec_get`, `vec_len`, `vec_pop`
 HashMap: `map_new`, `map_insert`, `map_get`, `map_contains`, `map_len`
-String: `to_string_i32`, `to_string_f64`
+String: `to_string_i32`, `to_string_f64`, `x.to_string()` on an integer, float or bool, `s.parse::<T>()` (section 7.4)
 File I/O: `read_file`, `write_file`, `file_exists`
 Environment: `getenv`, `clock_ms`, `args_count`, `args_get`
 Math: `sqrt`, `sin`, `cos`, `tan`, `log`, `exp`, `pow`, `abs`, `floor`, `ceil`
@@ -584,17 +584,9 @@ Assert: `assert`, `assert_eq`
 
 ### 7.4 Vectors and strings in practice
 
-A `let` bound to `vec_new()` with no annotation takes its element type from the first value pushed into it (`v.push(x)` or `vec_push(&mut v, x)`); a later push of another type is a check error (BL0901). With no push before the vector is used it holds `i32`, so annotate it there: `let mut v: Vec<str> = vec_new();`. The free functions accept the vector by value or borrowed (`vec_push(&mut v, x)`, `vec_len(&v)`), and the method forms (`v.push(x)`, `v.len()`, `v[i]`) work the same way, on a vector held directly or through a `&Vec<T>` or `&mut Vec<T>` parameter. `v.insert(i, x)` puts `x` at index `i` and `v.remove(i)` takes the element at `i` out and returns it; both stop the program on an index past the length. `s.push(c)` appends a char to a string and `s.push_str(t)` appends a string. Strings split with `split`, iterate with `chars`, and compare with `<` and `==`. `s.substring(start, len)` takes a byte offset and a length: `"hello".substring(1, 3)` is `"ell"`. The C backend has no `.parse()` yet; the check rejects it with BL0901, so convert digits by hand:
+A `let` bound to `vec_new()` with no annotation takes its element type from the first value pushed into it (`v.push(x)` or `vec_push(&mut v, x)`); a later push of another type is a check error (BL0901). With no push before the vector is used it holds `i32`, so annotate it there: `let mut v: Vec<str> = vec_new();`. The free functions accept the vector by value or borrowed (`vec_push(&mut v, x)`, `vec_len(&v)`), and the method forms (`v.push(x)`, `v.len()`, `v[i]`) work the same way, on a vector held directly or through a `&Vec<T>` or `&mut Vec<T>` parameter. `v.insert(i, x)` puts `x` at index `i` and `v.remove(i)` takes the element at `i` out and returns it; both stop the program on an index past the length. `s.push(c)` appends a char to a string and `s.push_str(t)` appends a string. Strings split with `split`, iterate with `chars`, and compare with `<` and `==`. `s.substring(start, len)` takes a byte offset and a length: `"hello".substring(1, 3)` is `"ell"`. `s.parse::<T>()` reads a number and returns `Result<T, str>`, as `json_parse` does, for `T` from `i8` to `i64`, `u8` to `u64`, `isize`, `usize`, `f32` and `f64`. Without the turbofish the target comes from a `let` annotation: `let r: Result<i32, str> = s.parse();`. The rules are Rust's: the whole string is the number, a leading `+` is allowed, and whitespace anywhere is an error. The `Err` text names the cause: `cannot parse integer from empty string`, `invalid digit found in string`, `number too large to fit in target type`, `number too small to fit in target type`, `cannot parse float from empty string` or `invalid float literal`. Use `?`, `unwrap_or` or a `match` on the result. `x.to_string()` writes an integer, a float or a bool (`true`, `false`) as a new string.
 
 ```build
-fn parse_int(s: str) -> i64 {
-    let mut n: i64 = 0;
-    for c in s.chars() {
-        n = n * 10 + (c as i64 - 48);
-    }
-    n
-}
-
 fn main() ~ Console {
     // Give a vector its element type where it is created.
     let mut words: Vec<str> = vec_new();
@@ -608,12 +600,16 @@ fn main() ~ Console {
         println!("{} sorts before {}", words[1], words[0]);
     }
 
-    // There is no `.parse()` on the C backend yet: convert digits by hand.
+    // parse gives a Result; a line that is not a number counts as 0.
     let mut total: i64 = 0;
-    for line in "12\n30\n7".split("\n") {
-        total = total + parse_int(line);
+    for line in "12\n30\nx\n7".split("\n") {
+        total = total + line.parse::<i64>().unwrap_or(0);
     }
     println!("total {}", total);
+    match "99999999999".parse::<i32>() {
+        Ok(v) => println!("read {}", v),
+        Err(e) => println!("error: {}", e),
+    }
 }
 ```
 

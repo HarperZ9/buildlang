@@ -22407,20 +22407,25 @@ fn run_stdout(path: &Path) -> String {
 #[test]
 fn check_rejects_a_method_the_c_backend_cannot_compile() {
     // M1: `s.parse()` used to pass `buildc check` and then fail in gcc with
-    // "implicit declaration of function 'parse'" about generated C.
+    // "implicit declaration of function 'parse'" about generated C. Since
+    // `parse::<T>()` compiles, a `parse` with no target type is the case that
+    // must still be refused at check, at its line, with the fix in the help.
     let fixture = m1_fixture(
         "parse",
         "fn main() ~ Console {\n    let s = \"42\";\n    let n: i32 = s.parse().unwrap();\n    println!(\"{}\", n);\n}\n",
     );
     let (ok, text) = check_output(&fixture);
-    assert!(!ok, "check must reject .parse():\n{text}");
-    assert!(text.contains("`parse` cannot be compiled"), "{text}");
+    assert!(
+        !ok,
+        "check must reject .parse() with no target type:\n{text}"
+    );
+    assert!(text.contains("`parse` needs its target type"), "{text}");
     assert!(
         text.contains("3:"),
         "diagnostic should point at line 3:\n{text}"
     );
     assert!(
-        text.contains("help: string parsing is not supported"),
+        text.contains("help: write the type: `s.parse::<i32>()`"),
         "{text}"
     );
 }

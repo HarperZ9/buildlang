@@ -1,0 +1,28 @@
+ok 42
+ok 7
+ok -2147483648
+err number too large to fit in target type
+err number too small to fit in target type
+err cannot parse integer from empty string
+err invalid digit found in string
+err invalid digit found in string
+err invalid digit found in string
+err invalid digit found in string
+ok 9223372036854775807
+err number too large to fit in target type
+ok -9000000000
+ok 2.5
+ok -1000
+ok 0.5
+err cannot parse float from empty string
+err invalid float literal
+err invalid float literal
+err invalid float literal
+ok 17
+5 -1
+16
+true true
+ok 42
+err invalid digit found in string
+41 2.25 true false
+42 2

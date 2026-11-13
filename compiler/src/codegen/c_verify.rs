@@ -481,9 +481,13 @@ pub fn hint_for(name: &str) -> String {
         "iter" | "into_iter" | "iter_mut" => "iterators are not supported by the C backend yet; \
              loop with an index: `let mut i = 0; while i < v.len() { let x = v[i]; ... i += 1; }`"
             .to_string(),
-        "parse" | "unwrap" | "expect" => "string parsing is not supported by the C backend yet; \
-             convert digits by hand (`let d = c as i64 - 48;`) and keep the value in a plain integer"
+        "parse" => "`parse` works on a string with its target type written: \
+             `s.parse::<i32>()` gives a `Result<i32, str>`"
             .to_string(),
+        "unwrap" | "expect" => format!(
+            "`{name}` works on an `Option` or a `Result` whose type is known here; \
+             annotate the value (`let r: Result<i32, str> = ...;`) or use `match`"
+        ),
         "split" | "lines" | "split_whitespace" | "chars" | "trim" | "bytes" => format!(
             "`{name}` is not supported by the C backend yet; walk the string by index with \
              `s.len()` and `s[i]`"

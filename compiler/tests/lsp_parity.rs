@@ -113,7 +113,7 @@ fn lsp_and_cli_report_the_same_codes_and_help() {
         ("type", "fn main() ~ Console {\n    let x: i32 = \"a\";\n    println!(\"{}\", x);\n}\n"),
         ("effect", "fn main() ~ Console {\n    let s = read_file(\"a.txt\");\n    println!(\"{}\", s);\n}\n"),
         ("macro_arg", "fn f(n: i32) -> i32 { n }\nfn main() ~ Console {\n    println!(\"{}\", f(\"x\"));\n}\n"),
-        ("backend", "fn main() ~ Console {\n    let n = \"12\".parse::<i64>().unwrap();\n    println!(\"{}\", n);\n}\n"),
+        ("backend", "fn main() ~ Console {\n    let n = \"12\".parse().unwrap();\n    println!(\"{}\", n);\n}\n"),
         ("lexer", "fn main() ~ Console {\n    let s = \"open;\n}\n"),
     ];
     for (name, source) in cases {
