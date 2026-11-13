@@ -27,6 +27,7 @@ Issues = "https://github.com/HarperZ9/build-engine/issues"
 build-engine = "build_engine.cli:main"
 
 [project.optional-dependencies]
+capital = ["build-finance-paper-core>=1.1.0,<1.2"]
 test = ["pytest>=8.0", "pytest-cov>=5"]
 dev = ["pytest>=8.0", "pytest-cov>=5", "ruff>=0.6", "mypy>=1.10", "build>=1.2"]
 
