@@ -32,3 +32,7 @@ The artifact is synthetic/offline paper evidence only. It has no external data,
 credential, account, transaction signing, live order, publication, or profitability
 claim. Live sensors, process isolation, models, and real-capital execution remain
 outside G2 and require separately authorized milestones.
+
+## Correction, 2026-11-13
+
+`evidence/G2-command-transcript.json` recorded the absolute folder of the machine that built the artifacts, in two places. Those two prefixes were removed when the kernel moved into this repository, so the artifact paths now read as relative paths. Nothing else in the transcript changed. The transcript digest in `evidence/G2-green.json` was updated to match: it was `4b70cb9ce1e219e283edbf3da4f137f3d6dbeefdea7bb6dc8473e4ba186f7596` and is now `8174305d55c7b8413a9295c277c6a449ca1ef65711b4a343629cd457d6307df5`. The wheel and sdist digests are unchanged.
