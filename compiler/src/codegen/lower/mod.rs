@@ -193,6 +193,8 @@ pub struct MirLowerer<'ctx> {
     /// The owned values with a Drop impl in each open block of the function
     /// being lowered, outermost first (see `drops.rs`).
     pub(crate) drop_scopes: Vec<Vec<drops::DropSlot>>,
+    /// Methods, as (type name, method name), whose `self` is taken by value.
+    pub(crate) by_value_self: HashSet<(Arc<str>, Arc<str>)>,
     /// Functions declared to return `impl Trait`, by name, kept so one
     /// can be lowered the first time it is called: what it returns is
     /// known only from its body.
@@ -394,6 +396,7 @@ impl<'ctx> MirLowerer<'ctx> {
             parse_target_hint: None,
             drop_fns: HashMap::new(),
             drop_scopes: Vec::new(),
+            by_value_self: HashSet::new(),
             impl_return_fns: HashMap::new(),
             impl_return_done: HashSet::new(),
             fn_closure_env: HashMap::new(),
@@ -464,6 +467,7 @@ impl<'ctx> MirLowerer<'ctx> {
             parse_target_hint: None,
             drop_fns: HashMap::new(),
             drop_scopes: Vec::new(),
+            by_value_self: HashSet::new(),
             impl_return_fns: HashMap::new(),
             impl_return_done: HashSet::new(),
             fn_closure_env: HashMap::new(),

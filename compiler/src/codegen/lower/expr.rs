@@ -204,7 +204,7 @@ impl<'ctx> MirLowerer<'ctx> {
     }
 
     /// The named fields of a user struct, when `ty` is one.
-    fn struct_fields_of(&self, ty: &MirType) -> Option<Vec<(Arc<str>, MirType)>> {
+    pub(super) fn struct_fields_of(&self, ty: &MirType) -> Option<Vec<(Arc<str>, MirType)>> {
         let MirType::Struct(name) = ty else {
             return None;
         };
@@ -864,6 +864,7 @@ impl<'ctx> MirLowerer<'ctx> {
                 ..
             } => {
                 let v = self.lower_method_call(receiver, method, args)?;
+                self.mark_receiver_moved(receiver, method)?;
                 for a in args {
                     self.mark_moved(a)?;
                 }
@@ -955,8 +956,11 @@ impl<'ctx> MirLowerer<'ctx> {
             ExprKind::Struct { path, fields, rest } => {
                 let path = self.aliased_path(path).clone();
                 let v = self.lower_struct_expr(&path, fields, rest.as_deref())?;
-                for f in fields.iter().filter_map(|f| f.value.as_deref()) {
-                    self.mark_moved(f)?;
+                for f in fields {
+                    match f.value.as_deref() {
+                        Some(value) => self.mark_moved(value)?,
+                        None => self.mark_moved_name(&f.name.name)?,
+                    }
                 }
                 Ok(v)
             }

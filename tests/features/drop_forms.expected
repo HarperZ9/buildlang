@@ -22,6 +22,17 @@ loop 20
 drop 20
 loop 21
 drop 21
+holder 1
+pair 63
+consume 33
+drop 33
+consumed 33
+matched 34
+extras end
+drop 34
+drop 31
+drop 32
+drop 30
 end
 drop 7
 drop 6

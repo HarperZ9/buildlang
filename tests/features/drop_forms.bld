@@ -1,5 +1,20 @@
 struct G { v: i32 }
 impl Drop for G { fn drop(&mut self) ~ Console { println!("drop {}", self.v); } }
+impl G { fn consume(self) -> i32 ~ Console { println!("consume {}", self.v); self.v } }
+struct Holder { g: G, n: i32 }
+struct Pair { a: G, b: G }
+fn extras() ~ Console {
+    let g: G = G { v: 30 };
+    let h: Holder = Holder { g, n: 1 };
+    println!("holder {}", h.n);
+    let p: Pair = Pair { a: G { v: 31 }, b: G { v: 32 } };
+    println!("pair {}", p.a.v + p.b.v);
+    let c: G = G { v: 33 };
+    println!("consumed {}", c.consume());
+    let m: G = G { v: 34 };
+    match m { G { v } => println!("matched {}", v) }
+    println!("extras end");
+}
 fn take(g: G) ~ Console { println!("take {}", g.v); }
 fn make(v: i32) -> G { G { v: v } }
 fn early(flag: bool) -> i32 ~ Console {
@@ -45,5 +60,6 @@ fn main() ~ Console {
         println!("loop {}", w.v);
         i = i + 1;
     }
+    extras();
     println!("end");
 }
