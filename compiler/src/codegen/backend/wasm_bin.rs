@@ -29,6 +29,8 @@ pub struct ModuleSpec {
     /// (export name, function index)
     pub exports: Vec<(String, u32)>,
     pub memory_pages: u32,
+    /// (value type, mutable, i32 initial value) globals.
+    pub globals: Vec<(u8, bool, i64)>,
     /// (offset, bytes) active data segments in memory 0.
     pub data: Vec<(u32, Vec<u8>)>,
     /// Encoded code-section entries, one per defined function.
@@ -113,6 +115,16 @@ pub fn encode_module(m: &ModuleSpec) -> Vec<u8> {
     uleb(&mut b, m.memory_pages as u64);
     section(&mut out, 5, b);
     let mut b = Vec::new();
+    uleb(&mut b, m.globals.len() as u64);
+    for (ty, mutable, init) in &m.globals {
+        b.push(*ty);
+        b.push(*mutable as u8);
+        b.push(0x41);
+        sleb(&mut b, *init);
+        b.push(0x0b);
+    }
+    section(&mut out, 6, b);
+    let mut b = Vec::new();
     uleb(&mut b, m.exports.len() as u64 + 1);
     name(&mut b, "memory");
     b.extend([0x02, 0x00]);
@@ -156,6 +168,8 @@ fn plain_opcode(op: &str) -> Option<u8> {
         "return" => Some(0x0f),
         "drop" => Some(0x1a),
         "select" => Some(0x1b),
+        "i32.extend8_s" => Some(0xc0),
+        "i32.extend16_s" => Some(0xc1),
         "f32.neg" => Some(0x8c),
         "f32.add" => Some(0x92),
         "f32.sub" => Some(0x93),
@@ -216,6 +230,12 @@ fn mem_opcode(op: &str) -> Option<(u8, u8)> {
         "i64.store" => Some((0x37, 3)),
         "f32.store" => Some((0x38, 2)),
         "f64.store" => Some((0x39, 3)),
+        "i32.load8_s" => Some((0x2c, 0)),
+        "i32.load8_u" => Some((0x2d, 0)),
+        "i32.load16_s" => Some((0x2e, 1)),
+        "i32.load16_u" => Some((0x2f, 1)),
+        "i32.store8" => Some((0x3a, 0)),
+        "i32.store16" => Some((0x3b, 1)),
         _ => None,
     }
 }
@@ -231,6 +251,7 @@ pub fn assemble_body(
     locals: &[u8],
     local_index: &HashMap<String, u32>,
     func_index: &HashMap<String, u32>,
+    global_index: &HashMap<String, u32>,
 ) -> Result<Vec<u8>, String> {
     let mut code = Vec::new();
     uleb(&mut code, locals.len() as u64);
@@ -291,6 +312,14 @@ pub fn assemble_body(
                 let idx = local_index
                     .get(*n)
                     .ok_or_else(|| format!("unknown local `{n}`"))?;
+                uleb(&mut code, *idx as u64);
+            }
+            "global.get" | "global.set" => {
+                code.push(if op == "global.get" { 0x23 } else { 0x24 });
+                let n = toks.get(1).ok_or("global op without operand")?;
+                let idx = global_index
+                    .get(*n)
+                    .ok_or_else(|| format!("unknown global `{n}`"))?;
                 uleb(&mut code, *idx as u64);
             }
             "call" => {

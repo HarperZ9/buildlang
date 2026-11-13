@@ -27,7 +27,7 @@ WebAssembly.instantiate(bytes, { env }).then(({ instance }) => {
 }).catch(e => { console.error(String(e)); process.exit(1); });
 "#;
 
-const PROGRAMS: [(&str, &str, &str); 3] = [
+const PROGRAMS: [(&str, &str, &str); 4] = [
     (
         "arith",
         "fn add_mul(a: i64, b: i64) -> i64 {\n    (a + b) * 3 - a / 2\n}\n\nfn main() ~ Console {\n    let r: i64 = add_mul(7, 5);\n    println(\"{}\", r);\n}\n",
@@ -43,6 +43,43 @@ const PROGRAMS: [(&str, &str, &str); 3] = [
         "fn pick(x: i64) -> i64 {\n    if x > 10 { x * 2 } else { x - 1 }\n}\n\nfn main() ~ Console {\n    println(\"{}\", pick(21));\n    println(\"{} and {}\", pick(3), pick(11));\n}\n",
         "42\n2 and 22\n",
     ),
+    (
+        "arrays_u32_u8",
+        r#"fn main() ~ Console {
+    let mut a: [u32; 8] = [1_u32, 2_u32, 3_u32, 4_u32, 5_u32, 6_u32, 7_u32, 8_u32];
+    let mut b: [u8; 4] = [0_u8; 4];
+    let mut i: usize = 0;
+    while i < 8 {
+        a[i] = (a[i] << 28) | (a[i] >> 1);
+        i = i + 1;
+    }
+    let mut j: usize = 0;
+    while j < 4 {
+        b[j] = (a[j] & 255_u32) as u8;
+        j = j + 1;
+    }
+    let mut sum: u32 = 0;
+    let mut k: usize = 0;
+    while k < 8 {
+        sum = sum.wrapping_add(a[k]);
+        k = k + 1;
+    }
+    let mut bs: u32 = 0;
+    let mut m: usize = 0;
+    while m < 4 {
+        bs = bs + (b[m] as u32);
+        m = m + 1;
+    }
+    let big: u32 = 4000000000_u32;
+    let mut c: u32 = 0;
+    if big > 5_u32 { c = 1; }
+    let wrapped: u8 = ((250_u32 + 10_u32) & 511_u32) as u8;
+    println("sum {} bytes {} cmp {} div {} wrap {}", sum, bs, c, big / 3_u32, wrapped);
+}
+"#,
+        "sum 1073741840 bytes 4 cmp 1 div 1333333333 wrap 4\n",
+    ),
+
 ];
 
 fn node_available() -> bool {

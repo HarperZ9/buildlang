@@ -85,6 +85,8 @@ impl WasmBackend {
             self.local_names.insert(local.id, name.clone());
             self.fl.local_decls.push((name, self.emit_type(&local.ty)));
         }
+        self.plan_frame(func)?;
+        self.fl.local_decls.push(("$__fp".into(), "i32"));
         self.fl.local_decls.push(("$__bb".into(), "i32"));
         self.fl.local_decls.push(("$__switch_val".into(), "i64"));
         for (name, ty) in self.fl.local_decls.clone() {
@@ -106,6 +108,7 @@ impl WasmBackend {
         };
         self.fl.block_pos = blocks.iter().enumerate().map(|(i, b)| (b.id, i)).collect();
         self.fl.string_locals.clear();
+        self.emit_prologue()?;
         self.emit_line("loop $dispatch");
         for i in (0..blocks.len()).rev() {
             self.emit_line(&format!("block $bb{}", i));
@@ -165,6 +168,12 @@ impl WasmBackend {
         }
         let instr = self.wasm_binop(op, &ty);
         self.emit_line(&instr);
+        if !matches!(
+            op,
+            BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge
+        ) {
+            self.narrow_int(&ty);
+        }
         Ok(())
     }
 
@@ -371,6 +380,7 @@ impl WasmBackend {
                 } else if func.sig.ret != MirType::Void {
                     self.gen_default_value(&func.sig.ret);
                 }
+                self.emit_epilogue();
                 self.emit_line("return");
             }
             MirTerminator::Assert {
@@ -404,19 +414,7 @@ impl WasmBackend {
     fn check_binary_subset(func: &MirFunction) -> CodegenResult<()> {
         for block in func.blocks.iter().flatten() {
             for stmt in &block.stmts {
-                let bad = match &stmt.kind {
-                    MirStmtKind::Assign { value, .. } => !matches!(
-                        value,
-                        MirRValue::Use(_)
-                            | MirRValue::BinaryOp { .. }
-                            | MirRValue::UnaryOp { .. }
-                            | MirRValue::Cast { .. }
-                    ),
-                    MirStmtKind::StorageLive(_)
-                    | MirStmtKind::StorageDead(_)
-                    | MirStmtKind::Nop => false,
-                    _ => true,
-                };
+                let bad = !Self::stmt_supported(stmt);
                 if bad {
                     return unsupported(format!(
                         "`{}`: memory operations (structs, arrays, references, stores) are not yet lowered to binary WASM: {:?}",
@@ -463,6 +461,10 @@ impl WasmBackend {
             self.gen_wasi_imports();
         }
         self.gen_memory();
+        self.emit_line(&format!(
+            "(global $__sp (mut i32) (i32.const {}))",
+            self.memory_pages.max(1) * 65536
+        ));
         self.gen_types(mir);
         self.gen_globals(mir);
         self.gen_table(mir);
@@ -497,6 +499,9 @@ impl WasmBackend {
             memory_pages: self.memory_pages.max(1),
             ..Default::default()
         };
+        spec.globals
+            .push((0x7f, true, spec.memory_pages as i64 * 65536));
+        let global_index: HashMap<String, u32> = [("$__sp".to_string(), 0)].into_iter().collect();
         let mut func_index: HashMap<String, u32> = HashMap::new();
         for (field, params) in PRINT_IMPORTS {
             let p = params
@@ -547,8 +552,9 @@ impl WasmBackend {
                 local_index.insert(name.clone(), (f.sig.params.len() + k) as u32);
                 locals.push(wasm_bin::valtype(ty).map_err(CodegenError::Unsupported)?);
             }
-            let body = wasm_bin::assemble_body(&text, &locals, &local_index, &func_index)
-                .map_err(|e| CodegenError::Unsupported(format!("`{}`: {}", f.name, e)))?;
+            let body =
+                wasm_bin::assemble_body(&text, &locals, &local_index, &func_index, &global_index)
+                    .map_err(|e| CodegenError::Unsupported(format!("`{}`: {}", f.name, e)))?;
             spec.bodies.push(body);
         }
         if !self.fl.pool.is_empty() {
