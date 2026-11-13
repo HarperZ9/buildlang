@@ -1426,6 +1426,14 @@ impl<'ctx> MirLowerer<'ctx> {
             MirType::Struct(n) => n.to_string(),
             MirType::Vec(_) => "BuildVecHandle".to_string(),
             MirType::Map(_, _) => "BuildMapHandle".to_string(),
+            // A view element: keyed by its slice struct name, as in
+            // hvec_elem_suffix.
+            MirType::Ptr(inner) if matches!(inner.as_ref(), MirType::Slice(_)) => {
+                match inner.as_ref() {
+                    MirType::Slice(e) => MirType::slice_type_name(e).to_string(),
+                    _ => unreachable!(),
+                }
+            }
             _ => {
                 return Err(CodegenError::Unsupported(format!(
                     "a vector of `{elem_ty}` elements is not supported yet: the Vec \

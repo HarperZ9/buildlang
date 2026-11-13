@@ -271,14 +271,26 @@ impl CBackend {
             // Nested collection element: keyed by its C handle type name.
             MirType::Vec(_) => "BuildVecHandle".to_string(),
             MirType::Map(_, _) => "BuildMapHandle".to_string(),
+            // A view element: keyed by its slice struct name.
+            MirType::Ptr(inner) if matches!(inner.as_ref(), MirType::Slice(_)) => {
+                Self::type_name_of_slice_ref(inner)
+            }
             _ => "i32".to_string(),
         }
     }
 
     /// True when a Vec element type needs a monomorphized element-sized wrapper
     /// (rather than one of the built-in i32/i64/f64/str handle families).
+    fn type_name_of_slice_ref(slice: &MirType) -> String {
+        match slice {
+            MirType::Slice(e) => MirType::slice_type_name(e).to_string(),
+            _ => "i32".to_string(),
+        }
+    }
+
     fn vec_elem_needs_sized_wrapper(elem: &MirType) -> bool {
-        matches!(elem, MirType::Struct(n) if n.as_ref() != "BuildString")
+        Self::is_slice_ref(elem)
+            || matches!(elem, MirType::Struct(n) if n.as_ref() != "BuildString")
             || matches!(elem, MirType::Vec(_) | MirType::Map(_, _))
             || matches!(
                 elem,
@@ -5007,7 +5019,18 @@ impl CBackend {
             }
             MirRValue::Deref { ptr, .. } => {
                 let ptr_str = self.value_to_c(ptr, locals);
-                format!("(*{})", ptr_str)
+                // A view is carried by value: `*view` is the view itself.
+                let is_view = match ptr {
+                    MirValue::Local(id) => locals
+                        .get(id.0 as usize)
+                        .is_some_and(|l| Self::is_slice_ref(&l.ty)),
+                    _ => false,
+                };
+                if is_view {
+                    ptr_str
+                } else {
+                    format!("(*{})", ptr_str)
+                }
             }
             MirRValue::TextureSample { .. } => {
                 // GPU-only operation; emit a zero placeholder in C
