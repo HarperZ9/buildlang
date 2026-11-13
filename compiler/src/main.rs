@@ -7451,7 +7451,7 @@ fn cmd_build(
         println!("Build successful!");
         println!("Output: {}", wasm_output_file.display());
         println!();
-        println!("Run: {}", "the module imports env.print_i64, env.print_u64, env.print_f64, env.print_bool and env.print_str(ptr, len), and exports main and memory; run it in a browser or Node with WebAssembly.instantiate");
+        println!("Run: {}", "the module imports env.print_i64, env.print_u64, env.print_f64, env.print_bool and env.print_str(ptr, len), and exports memory, __alloc, __str_new and every function it defines; load it in a browser or Node with compiler/wasm/loader.js or WebAssembly.instantiate");
         return Ok(());
     } else if use_llvm {
         // LLVM IR target: write .ll file
@@ -10682,7 +10682,7 @@ fn cmd_compile(
 
     // WASM: say how to run the module (no external runtime is needed).
     if target == Target::Wasm && !wants_wat {
-        println!("Run: {}", "the module imports env.print_i64, env.print_u64, env.print_f64, env.print_bool and env.print_str(ptr, len), and exports main and memory; run it in a browser or Node with WebAssembly.instantiate");
+        println!("Run: {}", "the module imports env.print_i64, env.print_u64, env.print_f64, env.print_bool and env.print_str(ptr, len), and exports memory, __alloc, __str_new and every function it defines; load it in a browser or Node with compiler/wasm/loader.js or WebAssembly.instantiate");
     }
 
     Ok(())

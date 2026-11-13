@@ -28,6 +28,12 @@ use crate::codegen::{GeneratedCode, OutputFormat};
 
 #[path = "wasm_flow.rs"]
 mod flow;
+#[path = "wasm_mem.rs"]
+mod mem;
+#[path = "wasm_rt.rs"]
+mod rt;
+#[path = "wasm_struct.rs"]
+mod structs;
 
 // =============================================================================
 // WASI SYSCALL DEFINITIONS
@@ -197,6 +203,10 @@ pub struct WasmBackend {
     threads: bool,
     /// Dispatch-loop and binary-encoding state.
     fl: flow::FlowState,
+    /// Shadow stack frame and array slots.
+    mem: mem::MemState,
+    /// In-module runtime helpers (heap, Vec).
+    rt: rt::RtState,
 }
 
 impl WasmBackend {
@@ -217,6 +227,8 @@ impl WasmBackend {
             simd: false,
             threads: false,
             fl: flow::FlowState::default(),
+            mem: mem::MemState::default(),
+            rt: rt::RtState::default(),
         }
     }
 
@@ -674,6 +686,9 @@ impl WasmBackend {
 
     /// Generate a statement.
     fn gen_stmt(&mut self, stmt: &MirStmt, func: &MirFunction) -> CodegenResult<()> {
+        if self.gen_mem_stmt(stmt, func)? {
+            return Ok(());
+        }
         match &stmt.kind {
             MirStmtKind::GlobalStore { .. } => {
                 return Err(CodegenError::Unsupported(
@@ -807,6 +822,7 @@ impl WasmBackend {
                 self.gen_value(value, func)?;
                 let from_ty = self.infer_value_type(value, func)?;
                 self.gen_cast(*kind, &from_ty, ty)?;
+                self.narrow_int(ty);
             }
             MirRValue::Aggregate { kind: _, operands } => {
                 // Allocate space on heap and store values
@@ -864,37 +880,9 @@ impl WasmBackend {
                 }
             }
             MirRValue::FieldAccess {
-                base,
-                field_name,
-                field_ty,
+                base, field_name, ..
             } => {
-                // Struct field access: base is a pointer to the struct in memory.
-                // Load the base pointer, add the field offset, then load the value.
-                // We use a simplified fixed-size field layout (4 bytes per field).
-                self.emit_line(&format!(";; field access .{}", field_name));
-                self.gen_value(base, func)?;
-                // Compute field offset: for now, use a hash-based index as a
-                // rough placeholder.  In a real implementation the struct layout
-                // would be looked up from MirTypeDef.
-                let field_offset = field_name
-                    .bytes()
-                    .fold(0u32, |acc, b| acc.wrapping_add(b as u32))
-                    % 64;
-                let elem_size = self.type_size(field_ty);
-                self.emit_line(&format!(
-                    "i32.const {} ;; offset of .{}",
-                    field_offset * elem_size,
-                    field_name
-                ));
-                self.emit_line("i32.add");
-                // Load the field value with the appropriate instruction.
-                let load_instr = match self.emit_type(field_ty) {
-                    "f32" => "f32.load",
-                    "f64" => "f64.load",
-                    "i64" => "i64.load",
-                    _ => "i32.load",
-                };
-                self.emit_line(load_instr);
+                self.gen_field_load(base, field_name, func)?;
             }
             MirRValue::VariantField {
                 base,
@@ -927,20 +915,7 @@ impl WasmBackend {
                 index,
                 elem_ty,
             } => {
-                // Array index access: base_ptr + index * elem_size, then load.
-                self.gen_value(base, func)?;
-                self.gen_value(index, func)?;
-                let elem_size = self.type_size(elem_ty);
-                self.emit_line(&format!("i32.const {} ;; element size", elem_size));
-                self.emit_line("i32.mul");
-                self.emit_line("i32.add");
-                let load_instr = match self.emit_type(elem_ty) {
-                    "f32" => "f32.load",
-                    "f64" => "f64.load",
-                    "i64" => "i64.load",
-                    _ => "i32.load",
-                };
-                self.emit_line(load_instr);
+                self.gen_index_load(base, index, elem_ty, func)?;
             }
             MirRValue::Deref { ptr, pointee_ty } => {
                 self.gen_value(ptr, func)?;
