@@ -79,6 +79,9 @@ pub struct CBackend {
     /// Calls to them must use the escaped name too, or `max(1, 2)` binds to the
     /// platform macro or to nothing at all.
     escaped_user_fns: std::collections::HashSet<String>,
+    /// BuildLang functions that return `&[T]` through a caller-owned slot
+    /// (see `slice_ret_out_param`), keyed by MIR name.
+    slice_ret_fns: std::collections::HashSet<String>,
     /// Functions the program declares in `extern "C"` blocks. A call to one is
     /// a call to the C symbol of that name, so it is never escaped, even when
     /// the name is a C library function such as `strtod` or `atof`.
@@ -152,6 +155,7 @@ impl CBackend {
             temp_counter: 0,
             stdio_mode: StdioMode::Native,
             fn_params: std::collections::HashMap::new(),
+            slice_ret_fns: std::collections::HashSet::new(),
             current_ret_ty: MirType::Void,
             current_fn_name: None,
             string_literals: Vec::new(),
@@ -2147,6 +2151,9 @@ impl CBackend {
         self.output.push_str("// Forward declarations\n");
         for func in regular_fns {
             if !func.is_declaration() {
+                if self.slice_ret_out_param(func).is_some() {
+                    self.slice_ret_fns.insert(func.name.to_string());
+                }
                 self.generate_function_signature(func)?;
                 self.output.push_str(";\n");
             }
@@ -2762,6 +2769,7 @@ impl CBackend {
 
         // Parameters
         let params: Vec<_> = func.locals.iter().filter(|l| l.is_param).collect();
+        let array_ret_out = array_ret_out.or_else(|| self.slice_ret_out_param(func));
 
         if params.is_empty() && array_ret_out.is_none() {
             self.output.push_str("void");
@@ -3785,6 +3793,19 @@ impl CBackend {
                         let mut all_args = args_str.clone();
                         all_args.push(format!("&{}", dest_name));
                         write!(self.output, "{}({});\n", func_str, all_args.join(", ")).unwrap();
+                    } else if let Some(slot) = self.slice_ret_slot(func, *dest_local, locals) {
+                        // `&[T]` return: pass storage in this frame for the header.
+                        let dest_name = self.local_name(*dest_local, locals);
+                        let mut all_args = args_str.clone();
+                        all_args.push(slot);
+                        write!(
+                            self.output,
+                            "{} = {}({});\n",
+                            dest_name,
+                            func_str,
+                            all_args.join(", ")
+                        )
+                        .unwrap();
                     } else if dest_is_void || fn_returns_void {
                         write!(self.output, "{}({});\n", func_str, args_str.join(", ")).unwrap();
                     } else {
@@ -3893,6 +3914,24 @@ impl CBackend {
                         .unwrap();
                         self.write_indent();
                         self.output.push_str("return;\n");
+                        return Ok(());
+                    }
+                    let slice_ret = self
+                        .current_fn_name
+                        .as_ref()
+                        .is_some_and(|n| self.slice_ret_fns.contains(n));
+                    if slice_ret {
+                        // Copy the header out of this frame into the caller's slot.
+                        let val_str = self.value_to_c(val, locals);
+                        write!(
+                            self.output,
+                            "*{out} = *{val};\n",
+                            out = Self::SLICE_RET_OUT_PARAM,
+                            val = val_str
+                        )
+                        .unwrap();
+                        self.write_indent();
+                        write!(self.output, "return {};\n", Self::SLICE_RET_OUT_PARAM).unwrap();
                         return Ok(());
                     }
                 }
@@ -4173,6 +4212,56 @@ impl CBackend {
     /// For a return type `[f64; 3]` this yields `double (*__buildret_out)[3]`
     /// (a pointer to `double[3]`); for `[[f64; 4]; 4]`, `double (*__buildret_out)[4][4]`.
     /// Returns `None` for non-array return types.
+    /// The caller-owned slot a `&[T]`-returning BuildLang function writes its
+    /// `{ptr, len}` header into. A `&[T]` is a pointer to that header, and a
+    /// view built in the callee lives in the callee's frame, so returning its
+    /// address handed the caller a pointer into a dead frame. The callee
+    /// copies the header into `*__buildret_slice` and returns that pointer;
+    /// each call site passes fresh storage in its own frame.
+    const SLICE_RET_OUT_PARAM: &'static str = "__buildret_slice";
+
+    /// `BlSlice_T* __buildret_slice` for a BuildLang (not C-ABI) function
+    /// with a body whose return type is `&[T]` or `&mut [T]`; `None` otherwise.
+    fn slice_ret_out_param(&self, func: &MirFunction) -> Option<String> {
+        if func.name.as_ref() == "main"
+            || func.is_declaration()
+            || func.sig.calling_conv != CallingConv::Build
+        {
+            return None;
+        }
+        let MirType::Ptr(inner) = &func.sig.ret else {
+            return None;
+        };
+        if !matches!(**inner, MirType::Slice(_)) {
+            return None;
+        }
+        Some(format!(
+            "{} {}",
+            self.type_to_c(&func.sig.ret),
+            Self::SLICE_RET_OUT_PARAM
+        ))
+    }
+
+    /// The slot argument for a call to a `&[T]`-returning function: a
+    /// compound literal in the caller's frame, `&(BlSlice_T){0}`.
+    fn slice_ret_slot(
+        &self,
+        func: &MirValue,
+        dest: LocalId,
+        locals: &[MirLocal],
+    ) -> Option<String> {
+        let (MirValue::Function(name) | MirValue::Global(name)) = func else {
+            return None;
+        };
+        if !self.slice_ret_fns.contains(name.as_ref()) {
+            return None;
+        }
+        let MirType::Ptr(inner) = &locals.get(dest.0 as usize)?.ty else {
+            return None;
+        };
+        Some(format!("&({}){{0}}", self.type_to_c(inner)))
+    }
+
     fn array_ret_out_param(&self, ret_ty: &MirType) -> Option<String> {
         if !matches!(ret_ty, MirType::Array(_, _)) {
             return None;
