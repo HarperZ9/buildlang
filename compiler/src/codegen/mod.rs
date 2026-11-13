@@ -2075,10 +2075,13 @@ mod tests {
         assert!(result.is_ok());
 
         let generated = result.unwrap();
-        assert_eq!(generated.format, OutputFormat::Wat);
+        assert_eq!(generated.format, OutputFormat::Wasm);
 
-        // WAT output should be valid UTF-8
-        assert!(generated.as_string().is_some());
+        // Binary module: magic word and version 1
+        assert_eq!(
+            &generated.data[..8],
+            &[0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]
+        );
     }
 
     #[test]
