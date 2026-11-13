@@ -36,3 +36,7 @@ outside G2 and require separately authorized milestones.
 ## Correction, 2026-11-13
 
 `evidence/G2-command-transcript.json` recorded the absolute folder of the machine that built the artifacts, in two places. Those two prefixes were removed when the kernel moved into this repository, so the artifact paths now read as relative paths. Nothing else in the transcript changed. The transcript digest in `evidence/G2-green.json` was updated to match: it was `4b70cb9ce1e219e283edbf3da4f137f3d6dbeefdea7bb6dc8473e4ba186f7596` and is now `8174305d55c7b8413a9295c277c6a449ca1ef65711b4a343629cd457d6307df5`. The wheel and sdist digests are unchanged.
+
+## Order boundary, 2026-11-13
+
+The G2 kernel never reaches a broker. The separate AutoTrader path now submits through `build_finance/order_gate.py`, which adds a kill switch, enforced stops and idempotent order ids in front of any broker call. The gate is not part of the sealed paper-core manifest and its risk code is separate from `live_paper/risk.py`, which works on integer Q18 records. The gate is tested with an in-memory fake broker only; no broker, network or credential is touched.

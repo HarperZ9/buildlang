@@ -409,11 +409,22 @@ class DataBridge:
             for sym, p in positions.items():
                 qty = p.get("quantity", 0)
                 if qty > 0:
-                    result = self._broker.submit_order(sym, "sell", qty)
-                    results.append(result)
+                    outcome = self._gate().submit(
+                        sym, "sell", qty, decision_id=f"flatten:{time.time_ns()}:{sym}"
+                    )
+                    if outcome["status"] == "sent":
+                        results.append(outcome["result"])
         except Exception as exc:
             logger.error("Flatten all failed: %s", exc)
         return results
+
+    def _gate(self):
+        """Order gate for the GUI broker, created on first use."""
+        if getattr(self, "_order_gate", None) is None:
+            from build_finance.order_gate import OrderGate
+
+            self._order_gate = OrderGate(self._broker)
+        return self._order_gate
 
     def invalidate_cache(self) -> None:
         """Clear all cached data, forcing fresh fetches."""
