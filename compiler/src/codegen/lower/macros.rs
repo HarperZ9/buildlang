@@ -270,12 +270,17 @@ impl<'ctx> MirLowerer<'ctx> {
             Self::collect_free_vars(body, &param_names, &self.var_map, self.source.as_deref());
 
         // ---- Build the MIR signature ----
-        // Declared params first, then captured-variable params appended.
+        // Declared params first, then captured-variable params appended. A
+        // parameter written without a type takes the caller's hint
+        // (`opt.map(|x| ..)` gives `x` the payload type), else i32.
+        let hint = self.closure_param_hint.take().unwrap_or_default();
         let mut mir_params: Vec<MirType> = params
             .iter()
-            .map(|p| {
+            .enumerate()
+            .map(|(i, p)| {
                 p.ty.as_ref()
                     .map(|t| self.lower_type_from_ast(t))
+                    .or_else(|| hint.get(i).cloned())
                     .unwrap_or(MirType::i32())
             })
             .collect();
@@ -302,7 +307,7 @@ impl<'ctx> MirLowerer<'ctx> {
         // The fn-ptr type must use the *full* parameter list (visible +
         // captured) so that the C declaration matches the call sites, which
         // append captured values as extra arguments.
-        let fn_ptr_ty =
+        let mut fn_ptr_ty =
             MirType::FnPtr(Box::new(MirFnSig::new(mir_params.clone(), mir_ret.clone())));
 
         // Save current function state
@@ -336,7 +341,23 @@ impl<'ctx> MirLowerer<'ctx> {
 
         let body_val = self.lower_expr(body)?;
 
+        // A closure written without a return type returns its body's type
+        // (`|x| x > 2` gives a bool, `|x| Some(x)` an Option). Before, it
+        // always returned i32.
+        let inferred_ret = if return_type.is_none() {
+            self.closure_body_type(&body_val)
+        } else {
+            None
+        };
+
         let mut closure_builder = self.current_fn.take().unwrap();
+        if let Some(ret) = inferred_ret {
+            if let Some(ret_local) = closure_builder.return_local() {
+                closure_builder.retype_local(ret_local, ret.clone());
+            }
+            closure_builder.set_return_type(ret.clone());
+            fn_ptr_ty = MirType::FnPtr(Box::new(MirFnSig::new(mir_params.clone(), ret)));
+        }
         if mir_ret != MirType::Void {
             closure_builder.ret(Some(body_val));
         } else {

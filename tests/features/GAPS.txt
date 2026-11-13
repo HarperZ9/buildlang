@@ -13,7 +13,6 @@ effect_resume_value broken
 fixed_array_and_slice rejected
 float_exponent_format rejected
 macro_rules rejected
-option_combinators rejected
 string_parse_and_to_string rejected
 trait_object_dyn rejected
 user_fn_named_exit rejected

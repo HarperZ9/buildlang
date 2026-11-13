@@ -6069,6 +6069,12 @@ impl<'ctx> TypeInfer<'ctx> {
             }
             "ok" | "err" => return Ty::fresh_var(), // Result → Option conversion
             "ok_or" | "ok_or_else" => return Ty::fresh_var(),
+            // `opt.or(other)` keeps the receiver's Option type.
+            "or" if matches!(&receiver_ty.kind, TyKind::Adt(def_id, _)
+                if Some(*def_id) == self.well_known_types.option) =>
+            {
+                return receiver_ty.clone();
+            }
             "is_some" | "is_none" | "is_ok" | "is_err" => return Ty::bool(),
             "as_mut" => return Ty::fresh_var(),
 
