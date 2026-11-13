@@ -153,6 +153,8 @@ fn flipped_code_byte_breaks_the_comparison() {
     bytes[at + 2] = 0x31;
     let bad_exe = dir.join(format!("{name}_flipped.exe"));
     fs::write(&bad_exe, &bytes).unwrap();
+    // A fresh file has no execute bit on Linux; give the copy the original's permissions.
+    fs::set_permissions(&bad_exe, fs::metadata(&exe).unwrap().permissions()).unwrap();
     let bad = result(&run_exe(&bad_exe));
     assert_ne!(good.0, bad.0, "flipping a code byte left stdout unchanged");
     if let Some((c_out, _)) = run_c(&src) {
