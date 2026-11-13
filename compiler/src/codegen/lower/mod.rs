@@ -25,6 +25,7 @@ mod global_places;
 mod limits;
 mod lowlevel;
 mod macros;
+mod option_combinators;
 pub(crate) mod parallel;
 #[cfg(test)]
 mod tests;
@@ -178,6 +179,9 @@ pub struct MirLowerer<'ctx> {
     /// captured value. The specialisation takes those values as extra
     /// parameters after the declared ones.
     pub(crate) pending_closure_params: Vec<ClosureParam>,
+    /// Parameter types for the next closure written in place, for its
+    /// parameters that have no written type (`opt.map(|x| x * 2)`).
+    pub(crate) closure_param_hint: Option<Vec<MirType>>,
     /// Functions declared to return `impl Trait`, by name, kept so one
     /// can be lowered the first time it is called: what it returns is
     /// known only from its body.
@@ -375,6 +379,7 @@ impl<'ctx> MirLowerer<'ctx> {
             closure_captures: HashMap::new(),
             local_closure_name: HashMap::new(),
             pending_closure_params: Vec::new(),
+            closure_param_hint: None,
             impl_return_fns: HashMap::new(),
             impl_return_done: HashSet::new(),
             fn_closure_env: HashMap::new(),
@@ -441,6 +446,7 @@ impl<'ctx> MirLowerer<'ctx> {
             closure_captures: HashMap::new(),
             local_closure_name: HashMap::new(),
             pending_closure_params: Vec::new(),
+            closure_param_hint: None,
             impl_return_fns: HashMap::new(),
             impl_return_done: HashSet::new(),
             fn_closure_env: HashMap::new(),

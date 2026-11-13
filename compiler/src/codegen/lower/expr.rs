@@ -3568,6 +3568,13 @@ impl<'ctx> MirLowerer<'ctx> {
             }
         }
 
+        // `Some(x)` records its payload type, so a closure whose body is
+        // `Some(..)` returns `Option<T>` with the right `T`.
+        let some_payload = (self.extract_call_name(func) == Some("Some")
+            && arg_vals.len() == 1
+            && Self::is_option_mir_type(&ret_ty))
+        .then(|| self.type_of_value(&arg_vals[0]));
+
         let builder = self
             .current_fn
             .as_mut()
@@ -3584,6 +3591,9 @@ impl<'ctx> MirLowerer<'ctx> {
             let result = builder.create_local(ret_ty);
             builder.call(func_val, arg_vals, Some(result), cont);
             builder.switch_to_block(cont);
+            if let Some(payload) = some_payload {
+                self.option_inner_types.insert(result, payload);
+            }
             Ok(values::local(result))
         }
     }
@@ -6040,6 +6050,15 @@ impl<'ctx> MirLowerer<'ctx> {
                     _ => None,
                 })
                 .unwrap_or_else(MirType::i32);
+            if let Some(lowered) = self.try_lower_option_combinator(
+                receiver_val.clone(),
+                &receiver_ty,
+                &inner_ty,
+                method_name,
+                args,
+            ) {
+                return lowered;
+            }
             match method_name {
                 "is_some" | "is_none" => {
                     let builder = self.current_fn.as_mut().unwrap();

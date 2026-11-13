@@ -206,6 +206,13 @@ impl MirBuilder {
         &self.func.sig.ret
     }
 
+    /// Change the function's return type, for a body whose type is known
+    /// only after it is lowered. The return local keeps its id; retype it
+    /// with `retype_local`.
+    pub fn set_return_type(&mut self, ret: MirType) {
+        self.func.sig.ret = ret;
+    }
+
     /// Rename a parameter local.
     pub fn set_param_name(&mut self, index: usize, name: impl Into<Arc<str>>) {
         if let Some(local) = self.func.locals.get_mut(index) {

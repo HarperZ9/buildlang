@@ -1,0 +1,39 @@
+fn half(x: i32) -> Option<i32> { if x % 2 == 0 { Some(x / 2) } else { None } }
+fn root(x: f64) -> Option<f64> { if x >= 0.0 { Some(x * 0.5) } else { None } }
+fn triple(x: i32) -> i32 { x * 3 }
+fn main() ~ Console {
+    let a: Option<i32> = Some(3);
+    let b: Option<i32> = None;
+    let k: i32 = 10;
+    println!("{} {}", a.map(|x| x * 2).unwrap_or(0), b.map(|x| x * 2).unwrap_or(-1));
+    println!("{}", a.map(|x| x + k).unwrap_or(0));
+    println!("{}", a.map(triple).unwrap_or(0));
+    let add = |x: i32| -> i32 { x + k + 1 };
+    println!("{}", a.map(add).unwrap_or(0));
+    println!("{} {} {} {}", a.is_some(), a.is_none(), b.is_some(), b.is_none());
+    println!("{}", a.map(|x| x > 2).unwrap_or(false));
+    let f: Option<f64> = Some(1.5);
+    println!("{}", f.map(|x| x * 2.5).unwrap_or(0.0));
+    let e: Option<i32> = Some(8);
+    println!("{}", e.and_then(half).and_then(half).unwrap_or(-1));
+    println!("{}", a.and_then(half).unwrap_or(-1));
+    println!("{}", e.and_then(|x| if x > 5 { Some(x - 5) } else { None }).unwrap_or(-1));
+    println!("{}", e.and_then(|x| Some(x * k)).unwrap_or(-1));
+    println!("{}", b.and_then(half).is_none());
+    println!("{} {} {}", e.filter(|x| x > 5).is_some(), e.filter(|x| *x > 50).is_some(), b.filter(|x| x > 0).is_some());
+    println!("{} {}", a.map_or(0, |x| x * 100), b.map_or(7, |x| x * 100));
+    println!("{} {}", b.unwrap_or_else(|| k * 2), a.unwrap_or_else(|| k * 2));
+    println!("{} {}", b.or(Some(4)).unwrap_or(0), a.or(Some(4)).unwrap_or(0));
+    println!("{}", a.map(|x| x * 2).map(|y| y + 1).unwrap_or(0));
+    println!("{}", half(10).map(|x| x + 1).unwrap_or(0));
+    let r: Option<f64> = Some(9.0);
+    println!("{}", r.and_then(root).map(|v| v + 0.25).unwrap_or(-1.0));
+    println!("{}", r.and_then(|v| Some(v * 3.0)).unwrap_or(-1.0));
+    let mut total: i32 = 0;
+    let mut i: i32 = 0;
+    while i < 5 { total = total + half(i).map(|h| h * 10).unwrap_or(1); i = i + 1; }
+    println!("{}", total);
+    match e.map(|x| x * 2) { Some(v) => println!("some {}", v), None => println!("none") }
+    if let Some(w) = half(6).and_then(half) { println!("w {}", w); } else { println!("no w"); }
+    if let Some(w) = half(12).and_then(half) { println!("w {}", w); } else { println!("no w"); }
+}
