@@ -465,7 +465,7 @@ fn main() ~ Console {
 }
 ```
 
-Handlers are one-shot and do not resume (setjmp/longjmp on the C backend). When a handler clause runs, its value becomes the value of the `handle` expression and the code after the `perform` does not run. In the example, `status` is `1` and `might_fail` stops at its `perform`.
+A handler clause resumes only from tail position. When every exit of the clause is `resume(value)` (the clause body, the last expression of a block, each `if` branch, each `match` arm), the clause runs at the `perform` site as a function: `perform` returns `value` and the code after the `perform` runs. A clause without `resume` ends the `handle`: its value becomes the value of the `handle` expression and the code after the `perform` does not run (setjmp/longjmp on the C backend). A `resume` anywhere else, and a clause that resumes on some paths only, are refused at check time. Full one-shot continuations, with `resume` in any position, are a later step. In the example, `status` is `1` and `might_fail` stops at its `perform`.
 
 ### 6.4 Parallel map and for
 

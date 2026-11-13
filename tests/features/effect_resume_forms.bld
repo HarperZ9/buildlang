@@ -1,0 +1,27 @@
+effect Ask { fn ask() -> i32, }
+effect Pick { fn pick(a: i32, b: i32) -> i32, }
+effect Fail { fn fail(code: i32) -> i32, }
+effect Log { fn log(msg: str) -> (), }
+fn use_it() -> i32 ~ Ask { let v: i32 = perform Ask.ask(); v + 1 }
+fn twice() -> i32 ~ Ask { let a: i32 = perform Ask.ask(); let b: i32 = perform Ask.ask(); a * 10 + b }
+fn choose() -> i32 ~ Pick { let m: i32 = perform Pick.pick(3, 8); m * 2 }
+fn both() -> i32 ~ Ask + Pick { let a: i32 = perform Ask.ask(); let p: i32 = perform Pick.pick(a, 1); a + p }
+fn risky() -> i32 ~ Fail { let c: i32 = perform Fail.fail(7); c + 1000 }
+fn work() -> i32 ~ Log { perform Log.log("a"); 9 }
+fn main() ~ Console {
+    let v: i32 = handle { use_it() } with { Ask.ask() => |resume| { resume(4) }, };
+    println!("{}", v);
+    let base: i32 = 20;
+    let w: i32 = handle { use_it() } with { Ask.ask() => |resume| { resume(base + 2) }, };
+    println!("{}", w);
+    let t: i32 = handle { twice() } with { Ask.ask() => |resume| { resume(3) }, };
+    println!("{}", t);
+    let c: i32 = handle { choose() } with { Pick.pick(a, b) => |resume| { if a > b { resume(a) } else { resume(b) } }, };
+    println!("{}", c);
+    let n: i32 = handle { handle { both() } with { Pick.pick(x, y) => |resume| { resume(x * y + 100) }, } } with { Ask.ask() => |resume| { resume(5) }, };
+    println!("{}", n);
+    let k: i32 = handle { work() } with { Log.log(msg) => |resume| { println!("log {}", msg); resume(()) }, };
+    println!("{}", k);
+    let r: i32 = handle { risky() } with { Fail.fail(code) => { code * 2 }, };
+    println!("{}", r);
+}

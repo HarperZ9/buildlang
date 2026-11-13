@@ -1,0 +1,25 @@
+fn window(v: &Vec<i32>, i: i64) -> &[i32] { &v[i..i + 2] }
+fn main() ~ Console {
+    let v: Vec<i32> = vec![1, 2, 3, 4, 5];
+    let mut first = window(&v, 0);
+    let mut second = window(&v, 0);
+    let mut third = window(&v, 0);
+    let mut i: i64 = 0;
+    while i < 3 {
+        let s = window(&v, i);
+        if i == 0 { first = s; } else if i == 1 { second = s; } else { third = s; }
+        i = i + 1;
+    }
+    println!("{} {} {}", first[0], second[0], third[0]);
+    let mut keep: Vec<&[i32]> = Vec::new();
+    let mut j: i64 = 0;
+    while j < 3 {
+        keep.push(window(&v, j));
+        j = j + 1;
+    }
+    let k0 = keep[0];
+    let k1 = keep[1];
+    let k2 = keep[2];
+    println!("{} {} {}", k0[1], k1[1], k2[1]);
+    println!("{} {} {} {}", k0.len(), k1.len(), k2.len(), keep.len());
+}

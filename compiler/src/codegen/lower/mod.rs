@@ -28,11 +28,14 @@ mod lowlevel;
 mod macros;
 mod option_combinators;
 pub(crate) mod parallel;
+mod slice_escape;
 mod string_parse;
+mod tail_resume;
 #[cfg(test)]
 mod tests;
 mod types;
 mod unwrap_trap;
+mod vec_range;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -170,6 +173,7 @@ pub struct MirLowerer<'ctx> {
     trait_impls: HashMap<(Arc<str>, Arc<str>), Vec<Arc<str>>>,
     /// Effect definitions: maps effect name -> vec of (operation_name, param_types).
     effect_defs: HashMap<Arc<str>, Vec<(Arc<str>, Vec<MirType>)>>,
+    effect_op_rets: HashMap<(Arc<str>, Arc<str>), MirType>,
     /// Closure capture registry: maps closure function name -> list of
     /// (captured_var_name, captured_var_local_id) pairs.  When a call is made
     /// through a local that was assigned from a capturing closure, the extra
@@ -393,6 +397,7 @@ impl<'ctx> MirLowerer<'ctx> {
             trait_methods: HashMap::new(),
             trait_impls: HashMap::new(),
             effect_defs: HashMap::new(),
+            effect_op_rets: HashMap::new(),
             closure_captures: HashMap::new(),
             local_closure_name: HashMap::new(),
             pending_closure_params: Vec::new(),
@@ -465,6 +470,7 @@ impl<'ctx> MirLowerer<'ctx> {
             trait_methods: HashMap::new(),
             trait_impls: HashMap::new(),
             effect_defs: HashMap::new(),
+            effect_op_rets: HashMap::new(),
             closure_captures: HashMap::new(),
             local_closure_name: HashMap::new(),
             pending_closure_params: Vec::new(),
@@ -1189,6 +1195,15 @@ impl<'ctx> MirLowerer<'ctx> {
                 (Arc::from(op.name.name.as_ref()), param_types)
             })
             .collect();
+        for op in &e.operations {
+            let r = op
+                .return_ty
+                .as_ref()
+                .map(|t| self.lower_type_from_ast(t))
+                .unwrap_or(MirType::Void);
+            self.effect_op_rets
+                .insert((effect_name.clone(), Arc::from(op.name.name.as_ref())), r);
+        }
         self.effect_defs.insert(effect_name, ops);
         Ok(())
     }
@@ -2672,6 +2687,7 @@ impl<'ctx> MirLowerer<'ctx> {
     /// main file, so `format!("hello {}", n)` in a module printed unrelated
     /// text from the main program.
     fn lower_function(&mut self, f: &ast::FnDef, attrs: &[ast::Attribute]) -> CodegenResult<()> {
+        slice_escape::check_fn(f)?;
         let own = crate::lexer::source_text_for_id(f.name.span.source_id)
             .filter(|_| f.name.span.source_id != crate::lexer::SourceId::ANONYMOUS);
         let Some(text) = own else {

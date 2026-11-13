@@ -799,7 +799,7 @@ fn saxpy_c_output_compiles_and_runs_under_the_host_cc() {
          int main(void) {\n\
          \x20   float a[4] = {1, 2, 3, 4}, b[4] = {10, 20, 30, 40}, o[4] = {0};\n\
          \x20   BlSlice_f32 sa = {a, 4}, sb = {b, 4}, so = {o, 4};\n\
-         \x20   for (uint32_t i = 0; i < 4; ++i) { buildc_gl_global_invocation_x = i; saxpy(2.5f, &sa, &sb, &so); }\n\
+         \x20   for (uint32_t i = 0; i < 4; ++i) { buildc_gl_global_invocation_x = i; saxpy(2.5f, sa, sb, so); }\n\
          \x20   for (int i = 0; i < 4; ++i) printf(\"%g\\n\", (double)o[i]);\n\
          \x20   return 0;\n\
          }\n",

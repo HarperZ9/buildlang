@@ -2862,6 +2862,16 @@ impl<'ctx> MirLowerer<'ctx> {
         let MirType::Slice(elem) = target.as_ref() else {
             return Ok(None);
         };
+        // `&[]` given to a `&[T]`: the empty view `{NULL, 0}` of T.
+        if let ExprKind::Ref { expr: inner, .. } = &arg.kind {
+            if matches!(&inner.kind, ExprKind::Array(elems) if elems.is_empty()) {
+                let null = MirValue::Const(MirConst::Null(MirType::Ptr(elem.clone())));
+                let zero = MirValue::Const(MirConst::Int(0, MirType::usize()));
+                return self
+                    .slice_from_parts(null, zero, elem, target.as_ref())
+                    .map(Some);
+            }
+        }
         let ExprKind::Ref { expr: inner, .. } = &arg.kind else {
             // A reference the function already holds (`v: &Vec<T>`).
             return self.forwarded_ref_as_slice(arg, elem, target.as_ref());
@@ -4571,6 +4581,14 @@ impl<'ctx> MirLowerer<'ctx> {
             MirType::Vec(_) => "BuildVecHandle".to_string(),
             MirType::Map(_, _) => "BuildMapHandle".to_string(),
             MirType::Bool => "i32".to_string(),
+            // A view element rides the element-sized wrapper keyed by its
+            // slice struct name (the view is carried by value).
+            MirType::Ptr(inner) if matches!(inner.as_ref(), MirType::Slice(_)) => {
+                match inner.as_ref() {
+                    MirType::Slice(e) => MirType::slice_type_name(e).to_string(),
+                    _ => unreachable!(),
+                }
+            }
             _ => {
                 return Err(CodegenError::Unsupported(format!(
                     "a vector of `{elem_ty}` elements is not supported yet: the Vec \
@@ -4728,12 +4746,17 @@ impl<'ctx> MirLowerer<'ctx> {
                 }
                 MirType::i32()
             }
-            ExprKind::Index { expr: base, .. } => {
+            ExprKind::Index { expr: base, index } => {
                 let mut bt = self.infer_expr_type(base);
                 if let MirType::Ptr(inner) = bt {
                     bt = *inner;
                 }
                 match bt {
+                    MirType::Vec(e) | MirType::Array(e, _) | MirType::Slice(e)
+                        if matches!(index.kind, ExprKind::Range { .. }) =>
+                    {
+                        MirType::Ptr(Box::new(MirType::Slice(e)))
+                    }
                     MirType::Vec(e) | MirType::Array(e, _) | MirType::Slice(e) => *e,
                     _ => MirType::i32(),
                 }
@@ -10460,6 +10483,16 @@ impl<'ctx> MirLowerer<'ctx> {
             {
                 return self.lower_substring(base, start.as_deref(), end.as_deref(), *inclusive);
             }
+            if let Some(view) =
+                self.vec_range_view(&arr_val, start.as_deref(), end.as_deref(), *inclusive)?
+            {
+                return Ok(view);
+            }
+            if let Some(view) =
+                self.slice_range_view(&arr_val, start.as_deref(), end.as_deref(), *inclusive)?
+            {
+                return Ok(view);
+            }
         }
 
         let idx_val = self.lower_expr(index)?;
@@ -10713,6 +10746,24 @@ impl<'ctx> MirLowerer<'ctx> {
         // `&GLOBAL` of a mutable global is its address (G35).
         if let Some(ptr) = self.global_ref(inner)? {
             return Ok(ptr);
+        }
+        // `&[]` where a `&[T]` is expected: the empty view `{NULL, 0}` of T.
+        if matches!(&inner.kind, ExprKind::Array(elems) if elems.is_empty()) {
+            if let Some(MirType::Ptr(target)) = self.expected_type.clone() {
+                if let MirType::Slice(elem) = target.as_ref() {
+                    let null = MirValue::Const(MirConst::Null(MirType::Ptr(elem.clone())));
+                    let zero = MirValue::Const(MirConst::Int(0, MirType::usize()));
+                    return self.slice_from_parts(null, zero, elem, target.as_ref());
+                }
+            }
+        }
+        // `&v[a..b]` on a vector is already a `&[T]` view: no second borrow.
+        if let ExprKind::Index { index, .. } = &inner.kind {
+            if matches!(index.kind, ExprKind::Range { .. })
+                && matches!(self.infer_expr_type(inner), MirType::Ptr(ref t) if matches!(**t, MirType::Slice(_)))
+            {
+                return self.lower_expr(inner);
+            }
         }
         // Address-of a real place (`&arr[i].field`, `&t.0`, `&s.field`, `&x`).
         // Reference the location itself so the pointer aliases storage the caller

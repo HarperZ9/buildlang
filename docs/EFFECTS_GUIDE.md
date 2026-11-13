@@ -512,7 +512,7 @@ fn main() ~ Console {
 
 When `welcome()` executes `perform Greeting.greet("Alice")`, control transfers to the handler, which runs `println!("Hello, Alice!")`.
 
-Handlers are one-shot and do not resume today. After the handler runs, control continues after the whole `handle` expression, not after the `perform`, and the handler's value becomes the value of the `handle` expression. So `welcome_everyone()` under this handler prints only `Hello, Alice!`, and in `let a = perform Ask.number(); a + 1` the `a + 1` never runs. Resumable handlers are not implemented; write effectful code so that each `perform` is the last thing its handled computation needs.
+A handler clause resumes only from tail position. When every exit of the clause is `resume(value)` (the clause body, the last expression of a block, each `if` branch, each `match` arm), the clause runs at the `perform` site as a function: `perform` returns `value` and the code after the `perform` runs. A clause without `resume` ends the `handle`: its value becomes the value of the `handle` expression and the code after the `perform` does not run (setjmp/longjmp on the C backend). A `resume` anywhere else, and a clause that resumes on some paths only, are refused at check time. Full one-shot continuations, with `resume` in any position, are a later step. So `welcome_everyone()` under the handler above, whose clause has no `resume`, prints only `Hello, Alice!`. Under `Ask.number() => |resume| { resume(4) }`, `let a = perform Ask.number(); a + 1` gives `5`.
 
 ---
 
