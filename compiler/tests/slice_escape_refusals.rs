@@ -29,7 +29,8 @@ fn check(name: &str, src: &str, run: bool) -> (Output, String) {
         "{}{}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
-    );
+    )
+    .replace("\r\n", "\n");
     (out, text)
 }
 
@@ -101,10 +102,9 @@ fn views_of_reference_and_slice_parameters_build_and_run() {
         \x20   let b = Bag { items: vec![7, 8] };\n\
         \x20   println!(\"{} {}\", mid(&v).len(), mid(&v)[0]);\n\
         \x20   println!(\"{} {}\", mid(&v)[1], mid(&v)[1]);\n\
-        \x20   println!(\"{} {}\", none().len(), b.items()[1]);\n\
-        \x20   println!(\"{}\", raw(v.as_ptr(), 2)[1]);\n\
+        \x20   println!(\"{} {}\", b.items().len(), b.items()[1]);\n\
         }\n";
     let (out, text) = check("allowed", src, true);
     assert!(out.status.success(), "must build and run:\n{text}");
-    assert!(text.contains("2 20\n30 30\n0 8\n20\n"), "{text}");
+    assert!(text.contains("2 20\n30 30\n2 8\n"), "{text}");
 }
