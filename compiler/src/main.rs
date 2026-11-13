@@ -11405,6 +11405,8 @@ mod tests {
             Target::Wasm => "wasm",
             Target::SpirV => "spirv",
             Target::X86_64 => "x86-64",
+            // Not on the card yet; the card and its SVG are redrawn separately.
+            Target::X86_64Pe | Target::X86_64Elf => "x86_64-native",
             Target::Arm64 => "arm64",
         }
     }
