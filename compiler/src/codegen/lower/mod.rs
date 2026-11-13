@@ -26,6 +26,7 @@ mod limits;
 mod lowlevel;
 mod macros;
 mod option_combinators;
+mod string_parse;
 pub(crate) mod parallel;
 #[cfg(test)]
 mod tests;
@@ -182,6 +183,9 @@ pub struct MirLowerer<'ctx> {
     /// Parameter types for the next closure written in place, for its
     /// parameters that have no written type (`opt.map(|x| x * 2)`).
     pub(crate) closure_param_hint: Option<Vec<MirType>>,
+    /// The Ok type of the `let` annotation being initialised, for a
+    /// `s.parse()` written without a turbofish.
+    pub(crate) parse_target_hint: Option<MirType>,
     /// Functions declared to return `impl Trait`, by name, kept so one
     /// can be lowered the first time it is called: what it returns is
     /// known only from its body.
@@ -380,6 +384,7 @@ impl<'ctx> MirLowerer<'ctx> {
             local_closure_name: HashMap::new(),
             pending_closure_params: Vec::new(),
             closure_param_hint: None,
+            parse_target_hint: None,
             impl_return_fns: HashMap::new(),
             impl_return_done: HashSet::new(),
             fn_closure_env: HashMap::new(),
@@ -447,6 +452,7 @@ impl<'ctx> MirLowerer<'ctx> {
             local_closure_name: HashMap::new(),
             pending_closure_params: Vec::new(),
             closure_param_hint: None,
+            parse_target_hint: None,
             impl_return_fns: HashMap::new(),
             impl_return_done: HashSet::new(),
             fn_closure_env: HashMap::new(),
@@ -2765,6 +2771,7 @@ impl<'ctx> MirLowerer<'ctx> {
                         builder.set_param_annotations(i, annotations);
                     }
                     self.var_map.insert(name.name.clone(), local_id);
+                    self.record_result_param(local_id, &param.ty);
                     if matches!(param.ty.kind, ast::TypeKind::Ref { .. }) {
                         self.ref_locals.insert(local_id);
                     }
@@ -3093,6 +3100,7 @@ impl<'ctx> MirLowerer<'ctx> {
                     let local_id = builder.param_local(i);
                     builder.set_param_name(i, name.name.clone());
                     self.var_map.insert(name.name.clone(), local_id);
+                    self.record_result_param(local_id, &param.ty);
                     if matches!(param.ty.kind, ast::TypeKind::Ref { .. }) {
                         self.ref_locals.insert(local_id);
                     }
@@ -3202,6 +3210,7 @@ impl<'ctx> MirLowerer<'ctx> {
                     let local_id = builder.param_local(i);
                     builder.set_param_name(i, name.name.clone());
                     self.var_map.insert(name.name.clone(), local_id);
+                    self.record_result_param(local_id, &param.ty);
                     if matches!(param.ty.kind, ast::TypeKind::Ref { .. }) {
                         self.ref_locals.insert(local_id);
                     }

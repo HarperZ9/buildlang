@@ -576,6 +576,13 @@ impl<'ctx> MirLowerer<'ctx> {
         self.untyped_vec_new_binding = untyped_vec_new;
         self.untyped_vec_new_dest = None;
 
+        // `let r: Result<i32, str> = s.parse();` gives parse its target type.
+        let parse_hint = local
+            .ty
+            .as_ref()
+            .and_then(|t| self.result_ok_inner_from_ast(t));
+        let prev_parse_hint = std::mem::replace(&mut self.parse_target_hint, parse_hint);
+
         // Compute init value if present
         let init_val = if let Some(init) = &local.init {
             // `let s: &[T] = &v;` (a vector or an array) takes the same slice view as a `&[T]`
@@ -590,10 +597,12 @@ impl<'ctx> MirLowerer<'ctx> {
                 self.lower_expr(&init.expr)
             };
             self.untyped_vec_new_binding = false;
+            self.parse_target_hint = prev_parse_hint.clone();
             Some(lowered?)
         } else {
             None
         };
+        self.parse_target_hint = prev_parse_hint;
         self.untyped_vec_new_binding = false;
         let untyped_vec_dest = self.untyped_vec_new_dest.take();
 
@@ -791,6 +800,17 @@ impl<'ctx> MirLowerer<'ctx> {
             ExprKind::Assign { op, target, value } => self.lower_assign(*op, target, value),
 
             ExprKind::Call { func, args } => self.lower_call_with_closures(func, args),
+            ExprKind::MethodCall {
+                receiver,
+                method,
+                generics,
+                args,
+            } if method.name.as_ref() == "parse"
+                && args.is_empty()
+                && self.is_string_receiver(receiver) =>
+            {
+                self.lower_string_parse(receiver, generics)
+            }
             ExprKind::MethodCall {
                 receiver,
                 method,
@@ -6667,6 +6687,7 @@ impl<'ctx> MirLowerer<'ctx> {
                 MirType::Int(_, true) => Some("build_i64_to_string"),
                 MirType::Int(_, false) => Some("build_u64_to_string"),
                 MirType::Float(..) => Some("build_f64_to_string"),
+                MirType::Bool => Some("build_bool_to_string"),
                 MirType::Struct(n) if n.as_ref() == "BuildString" => {
                     // String::to_string() is identity; return the receiver.
                     return Ok(receiver_val);

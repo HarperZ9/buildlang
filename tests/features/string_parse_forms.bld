@@ -1,0 +1,49 @@
+fn show(r: Result<i32, str>) -> str {
+    match r { Ok(v) => format!("ok {}", v), Err(e) => format!("err {}", e) }
+}
+fn show64(r: Result<i64, str>) -> str {
+    match r { Ok(v) => format!("ok {}", v), Err(e) => format!("err {}", e) }
+}
+fn showf(r: Result<f64, str>) -> str {
+    match r { Ok(v) => format!("ok {}", v), Err(e) => format!("err {}", e) }
+}
+fn sum_two(a: &str, b: &str) -> Result<i32, str> {
+    let x = a.parse::<i32>()?;
+    let y = b.parse::<i32>()?;
+    Ok(x + y)
+}
+fn main() ~ Console {
+    println!("{}", show("42".parse::<i32>()));
+    println!("{}", show("+7".parse::<i32>()));
+    println!("{}", show("-2147483648".parse::<i32>()));
+    println!("{}", show("2147483648".parse::<i32>()));
+    println!("{}", show("-2147483649".parse::<i32>()));
+    println!("{}", show("".parse::<i32>()));
+    println!("{}", show(" 42".parse::<i32>()));
+    println!("{}", show("4 2".parse::<i32>()));
+    println!("{}", show("12a".parse::<i32>()));
+    println!("{}", show("-".parse::<i32>()));
+    println!("{}", show64("9223372036854775807".parse::<i64>()));
+    println!("{}", show64("9223372036854775808".parse::<i64>()));
+    println!("{}", show64("-9000000000".parse::<i64>()));
+    println!("{}", showf("2.5".parse::<f64>()));
+    println!("{}", showf("-1e3".parse::<f64>()));
+    println!("{}", showf("+.5".parse::<f64>()));
+    println!("{}", showf("".parse::<f64>()));
+    println!("{}", showf("1.5x".parse::<f64>()));
+    println!("{}", showf(" 1.5".parse::<f64>()));
+    println!("{}", showf("0x10".parse::<f64>()));
+    let r: Result<i32, str> = "17".parse();
+    println!("{}", show(r));
+    println!("{} {}", "5".parse::<i32>().unwrap_or(-1), "five".parse::<i32>().unwrap_or(-1));
+    println!("{}", "8".parse::<i64>().unwrap() * 2);
+    println!("{} {}", "abc".parse::<i32>().is_err(), "300".parse::<i32>().is_ok());
+    println!("{}", show(sum_two("20", "22")));
+    println!("{}", show(sum_two("20", "x")));
+    let n: i32 = 41;
+    let t: bool = true;
+    let f: bool = false;
+    println!("{} {} {} {}", n.to_string(), 2.25.to_string(), t.to_string(), f.to_string());
+    let s: String = (n + 1).to_string();
+    println!("{} {}", s, s.len());
+}

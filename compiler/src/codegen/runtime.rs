@@ -887,6 +887,64 @@ static BuildString build_u128_to_string(unsigned __int128 v) {
     return build_format_str("%s", buf);
 }
 static BuildString build_f64_to_string(double v) { return build_format_str("%s", bl_fmt_f64(v)); }
+static BuildString build_bool_to_string(bool v) { return build_string_new(v ? "true" : "false"); }
+// s.parse::<T>() gives Result<T, str>, with Rust's rules and error texts: the
+// whole string is the number, a leading '+' is allowed, whitespace anywhere is
+// an invalid digit, and a value outside T's range is an error.
+static Result bl_parse_err(const char* msg) {
+    Result r;
+    memset(&r, 0, sizeof r);
+    r.is_ok = false;
+    BuildString* e = (BuildString*)malloc(sizeof(BuildString));
+    *e = build_string_new(msg);
+    r.err.err_p = (void*)e;
+    return r;
+}
+static Result build_parse_int(BuildString s, int32_t bits, bool is_signed) {
+    __int128 lo = is_signed ? -((__int128)1 << (bits - 1)) : 0;
+    __int128 hi = is_signed ? ((__int128)1 << (bits - 1)) - 1 : ((__int128)1 << bits) - 1;
+    size_t i = 0;
+    bool neg = false;
+    if (s.len == 0) return bl_parse_err("cannot parse integer from empty string");
+    if (s.ptr[0] == '+' || s.ptr[0] == '-') { neg = s.ptr[0] == '-'; i = 1; }
+    if (i == s.len || (neg && lo == 0)) return bl_parse_err("invalid digit found in string");
+    __int128 v = 0;
+    for (; i < s.len; i++) {
+        char c = s.ptr[i];
+        if (c < '0' || c > '9') return bl_parse_err("invalid digit found in string");
+        v = v * 10 + (neg ? -(__int128)(c - '0') : (__int128)(c - '0'));
+        if (v > hi) return bl_parse_err("number too large to fit in target type");
+        if (v < lo) return bl_parse_err("number too small to fit in target type");
+    }
+    Result r;
+    memset(&r, 0, sizeof r);
+    r.is_ok = true;
+    if (lo == 0) r.ok.ok_u = (uint64_t)v; else r.ok.ok_i = (int64_t)v;
+    return r;
+}
+static Result build_parse_float(BuildString s, bool single) {
+    if (s.len == 0) return bl_parse_err("cannot parse float from empty string");
+    for (size_t i = 0; i < s.len; i++) {
+        char c = s.ptr[i];
+        // strtod also reads leading space, hex floats and nan(...); Rust does not.
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v'
+            || c == 'x' || c == 'X' || c == '(' || c == ')')
+            return bl_parse_err("invalid float literal");
+    }
+    char* buf = (char*)malloc(s.len + 1);
+    memcpy(buf, s.ptr, s.len);
+    buf[s.len] = 0;
+    char* end = NULL;
+    double v = single ? (double)strtof(buf, &end) : strtod(buf, &end);
+    bool whole = end == buf + s.len;
+    free(buf);
+    if (!whole) return bl_parse_err("invalid float literal");
+    Result r;
+    memset(&r, 0, sizeof r);
+    r.is_ok = true;
+    r.ok.ok_f = v;
+    return r;
+}
 // JSON.stringify text for a double: ECMAScript Number::toString for finite
 // values (shortest round-trip digits; exponent form below 1e-6 and from 1e21),
 // "0" for both zeros, "null" for NaN and the infinities.

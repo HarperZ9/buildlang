@@ -3058,6 +3058,14 @@ impl<'ctx> TypeInfer<'ctx> {
             ExprKind::MethodCall {
                 receiver,
                 method,
+                generics,
+                args,
+            } if method.name.as_ref() == "parse" && args.is_empty() => {
+                self.infer_string_parse(receiver, method, generics, expr.span)
+            }
+            ExprKind::MethodCall {
+                receiver,
+                method,
                 generics: _,
                 args,
             } => self.infer_method_call(receiver, method, args, expr.span),
@@ -7848,6 +7856,34 @@ impl<'ctx> TypeInfer<'ctx> {
     // =========================================================================
     // TYPE LOWERING
     // =========================================================================
+
+    /// `s.parse::<T>()` on a string is `Result<T, str>`, as `json_parse` is.
+    /// Without a turbofish `T` is left to the context (`let r: Result<i32,
+    /// str> = s.parse();`). A `parse` method on any other type is an
+    /// ordinary method call.
+    fn infer_string_parse(
+        &mut self,
+        receiver: &ast::Expr,
+        method: &ast::Ident,
+        generics: &[ast::GenericArg],
+        span: Span,
+    ) -> Ty {
+        let receiver_ty = self.infer_expr(receiver);
+        let receiver_ty = self.apply(&receiver_ty);
+        let is_string = match &receiver_ty.kind {
+            TyKind::Str => true,
+            TyKind::Ref(_, _, inner) => matches!(inner.kind, TyKind::Str),
+            _ => false,
+        };
+        let Some(result) = self.well_known_types.result.filter(|_| is_string) else {
+            return self.infer_method_call(receiver, method, &[], span);
+        };
+        let target = match generics.first() {
+            Some(ast::GenericArg::Type(t)) => self.lower_type(t),
+            _ => Ty::fresh_var(),
+        };
+        Ty::adt(result, vec![target, Ty::str()])
+    }
 
     /// Lower an AST type to an internal type.
     pub fn lower_type(&mut self, ty: &ast::Type) -> Ty {
