@@ -57,6 +57,7 @@ mod parallel_hoist;
 mod parallel_walk;
 pub use macro_args::macro_call_arg_exprs;
 mod recursive;
+pub(crate) mod resume_tail;
 mod traits;
 mod ty;
 mod unify;

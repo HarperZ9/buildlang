@@ -2365,6 +2365,10 @@ typedef struct BuildHandler {
     int32_t effect_id;
     void* handler_data;
     struct BuildHandler* parent;
+    int32_t tail_count;
+    int32_t tail_op[8];
+    void* tail_fn[8];
+    void** tail_env[8];
 } BuildHandler;
 
 // Global handler stack
@@ -2374,8 +2378,20 @@ static BuildHandler* __build_handler_stack = NULL;
 static void build_push_handler(BuildHandler* h, int32_t effect_id) {
     h->effect_id = effect_id;
     h->handler_data = NULL;
+    h->tail_count = 0;
     h->parent = __build_handler_stack;
     __build_handler_stack = h;
+}
+
+// A clause that resumes from tail position runs at the perform site:
+// fn(args, caps, result) with args.handler_data = argv, caps.handler_data = env.
+typedef void (*BuildTailClause)(BuildHandler args, BuildHandler caps, void* result);
+static void build_handler_tail(BuildHandler* h, int32_t op_id, void* fn, void** env) {
+    if (h->tail_count >= 8) { fprintf(stderr, "a handle has more than 8 resuming clauses\n"); exit(101); }
+    h->tail_op[h->tail_count] = op_id;
+    h->tail_fn[h->tail_count] = fn;
+    h->tail_env[h->tail_count] = env;
+    h->tail_count++;
 }
 
 // Pop a handler from the stack
@@ -2390,6 +2406,16 @@ static void build_perform(int32_t effect_id, int32_t op_id, void* arg, void* res
     BuildHandler* h = __build_handler_stack;
     while (h) {
         if (h->effect_id == effect_id) {
+            for (int32_t i = 0; i < h->tail_count; i++) {
+                if (h->tail_op[i] != op_id) continue;
+                BuildHandler args = *h; args.handler_data = arg;
+                BuildHandler caps = *h; caps.handler_data = (void*)h->tail_env[i];
+                BuildHandler* saved = __build_handler_stack;
+                __build_handler_stack = h->parent;
+                ((BuildTailClause)h->tail_fn[i])(args, caps, result);
+                __build_handler_stack = saved;
+                return;
+            }
             h->handler_data = arg;
             longjmp(h->env, op_id + 1); // +1 because setjmp returns 0 on first call
         }

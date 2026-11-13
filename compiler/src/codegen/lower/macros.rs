@@ -28,7 +28,7 @@ impl<'ctx> MirLowerer<'ctx> {
     /// enclosing scope (i.e., present in `env_vars`) but are NOT among
     /// the closure's own `param_names`.  Returns a de-duplicated list of
     /// (variable_name, local_id_in_enclosing_scope).
-    fn collect_free_vars(
+    pub(super) fn collect_free_vars(
         expr: &ast::Expr,
         param_names: &HashSet<Arc<str>>,
         env_vars: &HashMap<Arc<str>, LocalId>,
@@ -66,6 +66,7 @@ impl<'ctx> MirLowerer<'ctx> {
             | ExprKind::Ref { expr: inner, .. }
             | ExprKind::Deref(inner)
             | ExprKind::Return(Some(inner))
+            | ExprKind::Resume(Some(inner))
             | ExprKind::Try(inner)
             | ExprKind::Await(inner)
             | ExprKind::Cast { expr: inner, .. } => {
@@ -691,7 +692,7 @@ impl<'ctx> MirLowerer<'ctx> {
     ///
     /// Returns `None` if the effect or operation is not found, or if the index
     /// is out of range.
-    fn lookup_effect_param_type(
+    pub(super) fn lookup_effect_param_type(
         &self,
         effect_name: &str,
         op_name: &str,
@@ -769,6 +770,7 @@ impl<'ctx> MirLowerer<'ctx> {
             })
             .collect();
 
+        let mut is_tail: Vec<bool> = Vec::with_capacity(handlers.len());
         // --- Emit: push handler -------------------------------------------------
         {
             let builder = self.current_fn.as_mut().unwrap();
@@ -797,6 +799,10 @@ impl<'ctx> MirLowerer<'ctx> {
                 cont,
             );
             builder.switch_to_block(cont);
+            for h in handlers {
+                is_tail.push(self.lower_tail_clause(h, &effect_name, handler_local)?);
+            }
+            let builder = self.current_fn.as_mut().unwrap();
 
             // setjmp(handler.env) - pass the handler local directly;
             // the C backend will emit `.env` when it sees a setjmp call
@@ -836,7 +842,16 @@ impl<'ctx> MirLowerer<'ctx> {
                 let targets: Vec<(MirConst, BlockId)> = handler_blocks
                     .iter()
                     .enumerate()
-                    .map(|(i, &blk)| (MirConst::Int((i as i128) + 1, MirType::i32()), blk))
+                    .map(|(i, &blk)| {
+                        (
+                            MirConst::Int(
+                                super::tail_resume::op_hash(&handlers[i].operation.name) as i128
+                                    + 1,
+                                MirType::i32(),
+                            ),
+                            blk,
+                        )
+                    })
                     .collect();
                 builder.switch(MirValue::Local(setjmp_result), targets, merge_block);
             }
@@ -869,6 +884,19 @@ impl<'ctx> MirLowerer<'ctx> {
             {
                 let builder = self.current_fn.as_mut().unwrap();
                 builder.switch_to_block(handler_blocks[i]);
+            }
+            if is_tail[i] {
+                let builder = self.current_fn.as_mut().unwrap();
+                let cont = builder.create_block();
+                builder.call(
+                    MirValue::Function(Arc::from("build_pop_handler")),
+                    vec![],
+                    None,
+                    cont,
+                );
+                builder.switch_to_block(cont);
+                builder.goto(merge_block);
+                continue;
             }
 
             // Map handler parameters to locals so the handler body can reference
@@ -981,13 +1009,13 @@ impl<'ctx> MirLowerer<'ctx> {
         // In a full implementation this would look up the effect declaration to
         // find the canonical index; here we use a hash so that different op
         // names within the same effect get distinct IDs.
-        let op_id: i32 = {
-            let mut h: i32 = 0;
-            for b in operation.name.bytes() {
-                h = h.wrapping_mul(31).wrapping_add(b as i32);
-            }
-            h.abs()
-        };
+        let op_id: i32 = super::tail_resume::op_hash(&operation.name);
+        let ret_ty = self
+            .effect_op_rets
+            .get(&(effect.name.clone(), operation.name.clone()))
+            .cloned()
+            .filter(|t| *t != MirType::Void)
+            .unwrap_or(MirType::i32());
 
         // Lower every argument. Each is marshalled into a `void*[N]` argv
         // array whose i-th slot holds the address of argument i; the handler
@@ -1011,7 +1039,7 @@ impl<'ctx> MirLowerer<'ctx> {
         // Allocate a result slot on the stack.  Use an unnamed local to
         // avoid duplicate C declarations when perform is called multiple
         // times with the same effect/operation.
-        let result_local = builder.create_local(MirType::i32());
+        let result_local = builder.create_local(ret_ty.clone());
 
         // Build the argv array of pointers-to-arguments. Each argument value is
         // stored into its own local so its address is stable, then written into
@@ -1041,7 +1069,7 @@ impl<'ctx> MirLowerer<'ctx> {
         };
 
         // Take the address of the result slot for the void* result parameter.
-        let result_ptr = builder.create_local(MirType::Ptr(Box::new(MirType::i32())));
+        let result_ptr = builder.create_local(MirType::Ptr(Box::new(ret_ty)));
         builder.assign(
             result_ptr,
             MirRValue::AddressOf {
