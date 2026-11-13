@@ -1265,16 +1265,24 @@ def validate_simulated_fill_receipt_semantics(
     fill_group = fill_coordinates.get("fill_equal_time_group")
     fill_ingest = fill_coordinates.get("fill_ingest_sequence")
     same_or_earlier = reasons == ["FILL_SAME_OR_EARLIER_EVENT"]
-    if has_event and fill_group is not None and decision_group is not None:
-        if same_or_earlier and fill_group > decision_group:
+    if has_event and same_or_earlier:
+        if (
+            fill_group is not None
+            and decision_group is not None
+            and fill_ingest is not None
+            and decision_ingest is not None
+            and fill_group > decision_group
+            and fill_ingest > decision_ingest
+        ):
             issues.append(
                 _issue(
                     "semantic_fill_trigger",
                     ("fill_equal_time_group",),
-                    "same-or-earlier reason requires a non-later group",
+                    "same-or-earlier reason requires a non-later group or ingest sequence",
                 )
             )
-        elif not same_or_earlier and fill_group <= decision_group:
+    elif has_event and fill_group is not None and decision_group is not None:
+        if fill_group <= decision_group:
             issues.append(
                 _issue(
                     "semantic_fill_trigger",

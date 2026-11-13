@@ -59,9 +59,42 @@ pip install -e .
 The GUI code remains private/license-gated until the Qt binding posture is
 resolved. The public-ready package path is CLI and library first.
 
-## Paper Mode
+## Offline Capital Replay
 
-Paper trading is the default.
+The `capital-replay` path is a separate, paper-only product shell. It accepts
+only an explicit local fixture, disables model evidence, and returns immutable
+projection and receipt identifiers. It has no live, broker, wallet, provider,
+credential, or order-placement options.
+
+Install the separately built and verified local paper-core wheel, then install
+Build Engine with its optional capital dependency metadata:
+
+```powershell
+python -m pip install --no-deps path/to/build_finance_paper_core-1.1.0-py3-none-any.whl
+python -m pip install -e ".[capital]" --no-deps
+build-engine capital-replay --fixture path/to/export/g2-disk-fixture --receipt-output path/to/output/evaluator-receipt.json
+```
+
+If the optional paper core is absent or incompatible, the command fails before
+the fixture path is accessed and prints an installation instruction.
+
+The current G2 shell binds the reviewed Build Finance `replay-envelope/` disk
+loader lazily. It reports a CLOSED PAPER ONLY / SIMULATED replay and exact
+`ABSTAIN / MODEL_DISABLED` model evidence. The optional evaluator receipt is
+canonical, content-addressed JSON and does not retain the absolute fixture
+path. It is evaluation evidence, not trading authority, a live-readiness
+signal, or a profitability claim.
+
+See [docs/capital-evaluation.md](docs/capital-evaluation.md) for the reproducible
+local export, verification, replay, and receipt-check workflow.
+
+## Legacy Adaptive Paper Mode
+
+The existing direct model -> `AutoTrader` workflow remains available for
+compatibility, but it is now the legacy path. The new capital replay command
+does not invoke models, `AutoTrader`, brokers, or external data sources.
+
+Paper trading remains the default for the legacy command.
 
 ```bash
 build-engine run --symbols AAPL,BTC-USD --paper --cycles 10
@@ -136,6 +169,7 @@ be used only by an operator who understands the consequences.
 | `prediction_strategy.py` | Bridges oracle forecasts to `build-finance` signals. |
 | `performance_tracker.py` | Tracks accuracy and computes dynamic model weights. |
 | `adaptive_engine.py` | Wires model training, prediction, broker setup, and feedback. |
+| `capital/` | Model-disabled offline paper supervision and read-only evidence feedback. |
 | `persistence.py` | Saves non-secret engine state and trade history. |
 | `cli.py` | Command-line interface. |
 
