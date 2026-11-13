@@ -74,6 +74,32 @@ impl WasmBackend {
         (limit, sp, (sp / 65536 + 1).max(self.memory_pages))
     }
 
+    /// A literal string value: bytes in the pool plus an aligned {ptr, len} header.
+    pub(super) fn lit_string(&mut self, bytes: &[u8]) -> u32 {
+        let off = self.intern(bytes);
+        while self.fl.pool.len() % 4 != 0 {
+            self.fl.pool.push(0);
+        }
+        let mut hdr = off.to_le_bytes().to_vec();
+        hdr.extend((bytes.len() as u32).to_le_bytes());
+        self.intern(&hdr)
+    }
+
+    /// The string-literal index assigned to `local`, if any.
+    fn const_str_of(func: &MirFunction, local: LocalId) -> Option<usize> {
+        func.blocks
+            .iter()
+            .flatten()
+            .flat_map(|b| b.stmts.iter())
+            .find_map(|s| match &s.kind {
+                MirStmtKind::Assign {
+                    dest,
+                    value: MirRValue::Use(MirValue::Const(MirConst::Str(i))),
+                } if *dest == local => Some(*i as usize),
+                _ => None,
+            })
+    }
+
     pub(super) fn str_offset(&self, idx: usize) -> u32 {
         self.fl.str_offsets.get(idx).copied().unwrap_or(0)
     }
@@ -256,6 +282,15 @@ impl WasmBackend {
                         "print_u64"
                     }
                 }
+                MirType::Struct(n) if n.as_ref() == "BuildString" => {
+                    self.emit_line("i32.load");
+                    self.gen_value(arg, func)?;
+                    self.emit_line("i32.const 4");
+                    self.emit_line("i32.add");
+                    self.emit_line("i32.load");
+                    "print_str"
+                }
+
                 MirType::Float(FloatSize::F64) => "print_f64",
                 other => return unsupported(format!("printing a {:?} value in WASM", other)),
             };
@@ -289,11 +324,36 @@ impl WasmBackend {
         let name = super::rt::runtime_target(&name).unwrap_or(name);
         let ret = match name.as_str() {
             "build_string_new" => {
-                if let (Some(d), Some(MirValue::Const(MirConst::Str(i)))) = (dest, args.first()) {
-                    self.fl.string_locals.insert(d, *i as usize);
+                let idx = match args.first() {
+                    Some(MirValue::Const(MirConst::Str(i))) => Some(*i as usize),
+                    Some(MirValue::Local(l)) => Self::const_str_of(func, *l),
+                    _ => None,
+                };
+                let Some(i) = idx else {
+                    return unsupported("build_string_new without a literal".into());
+                };
+                if let Some(d) = dest {
+                    self.fl.string_locals.insert(d, i);
                 }
-                MirType::Void
+                let bytes = self.fl.strings[i].clone().into_bytes();
+                let h = self.lit_string(&bytes);
+                self.emit_line(&format!("i32.const {}", h));
+                MirType::Struct(std::sync::Arc::from("BuildString"))
             }
+            "build_sprintf" => {
+                let idx = match args.first() {
+                    Some(MirValue::Const(MirConst::Str(i))) => Some(*i as usize),
+                    Some(MirValue::Local(l)) => Self::const_str_of(func, *l),
+                    _ => None,
+                };
+                let Some(i) = idx else {
+                    return unsupported("format! without a literal format".into());
+                };
+                let fmt = self.fl.strings[i].clone();
+                self.gen_sprintf(&fmt, &args[1..], func)?;
+                MirType::Struct(std::sync::Arc::from("BuildString"))
+            }
+
             "println" | "print" => {
                 self.emit_print(name == "println", args, func)?;
                 MirType::Void

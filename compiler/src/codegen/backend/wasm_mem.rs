@@ -165,6 +165,9 @@ impl WasmBackend {
         func: &MirFunction,
     ) -> CodegenResult<()> {
         if self.array_of(base).is_none() {
+            if self.gen_str_index(base, index, func)? {
+                return Ok(());
+            }
             if let MirType::Vec(_) = self.infer_value_type(base, func)? {
                 return self.gen_vec_access("get", base, index, None, elem_ty, func);
             }

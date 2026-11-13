@@ -53,6 +53,9 @@ pub(super) fn runtime_target(name: &str) -> Option<String> {
     match name {
         "Vec_new" | "vec_new" => return Some("__vec_new".into()),
         "build_hvec_len" => return Some("__vec_len".into()),
+        "build_string_len" => return Some("__str_len".into()),
+        "build_string_byte_at" => return Some("__str_byte_at".into()),
+        "build_string_concat" => return Some("__str_concat".into()),
         _ => {}
     }
     let rest = name.strip_prefix("build_hvec_")?;
@@ -124,6 +127,9 @@ fn elem_addr(index: &str, w: u32) -> String {
 }
 
 fn build_func(name: &str) -> Option<RtFunc> {
+    if let Some(rf) = build_str_func(name) {
+        return Some(rf);
+    }
     let f = |params: Vec<&'static str>, ret, locals: Vec<&'static str>, body: String| RtFunc {
         name: name.to_string(),
         params,
@@ -210,6 +216,10 @@ impl WasmBackend {
                     if let Some(t) = runtime_target(n) {
                         names.insert(t);
                     }
+                    if n.as_ref() == "build_sprintf" {
+                        names.insert("__fmt_hex".to_string());
+                        names.insert("__str_concat".to_string());
+                    }
                 }
             }
         }
@@ -223,11 +233,18 @@ impl WasmBackend {
                     MirStmtKind::IndexStore { base, elem_ty, .. } => ("set", base, elem_ty),
                     _ => continue,
                 };
+                let is_str = matches!(base, MirValue::Local(id) if func.locals.iter().any(|l| l.id == *id && is_build_string(&l.ty)));
+                if is_str && op == "get" {
+                    names.insert("__str_byte_at".to_string());
+                }
                 let is_vec = matches!(base, MirValue::Local(id) if func.locals.iter().any(|l| l.id == *id && matches!(l.ty, MirType::Vec(_))));
                 if let (true, Some(sfx)) = (is_vec, vec_elem_suffix(elem)) {
                     names.insert(format!("__vec_{op}_{sfx}"));
                 }
             }
+        }
+        if names.contains("__str_concat") || names.contains("__fmt_hex") {
+            names.insert("__str_new".to_string());
         }
         self.rt = RtState::default();
         if names.is_empty() {
@@ -358,5 +375,193 @@ impl WasmBackend {
             out.push(((params, results), body));
         }
         Ok(out)
+    }
+}
+
+// Strings. A string value is an i32 handle to an 8-byte header {ptr, len}.
+// Strings are immutable (concatenation and formatting build new strings), so
+// sharing a handle behaves like the C backend's by-value BuildString. A null
+// handle (0) reads as the empty string because addresses 0..15 stay zero.
+
+const STR_NEW: &str = "i32.const 8\ncall $__alloc\nlocal.tee $t0\nlocal.get $p0\ni32.store\n\
+local.get $t0\ni32.const 4\ni32.add\nlocal.get $p1\ni32.store\nlocal.get $t0\n";
+
+const STR_CONCAT: &str = "local.get $p0\ni32.const 4\ni32.add\ni32.load\nlocal.set $t0\n\
+local.get $p1\ni32.const 4\ni32.add\ni32.load\nlocal.set $t1\nlocal.get $t0\nlocal.get $t1\n\
+i32.add\ncall $__alloc\nlocal.set $t2\nlocal.get $t2\nlocal.get $p0\ni32.load\nlocal.get $t0\n\
+memory.copy\nlocal.get $t2\nlocal.get $t0\ni32.add\nlocal.get $p1\ni32.load\nlocal.get $t1\n\
+memory.copy\nlocal.get $t2\nlocal.get $t0\nlocal.get $t1\ni32.add\ncall $__str_new\n";
+
+const STR_BYTE_AT: &str = "local.get $p1\nlocal.get $p0\ni32.const 4\ni32.add\ni32.load\n\
+i64.extend_i32_u\ni64.ge_u\nif\ni32.const 0\nreturn\nend\nlocal.get $p0\ni32.load\n\
+local.get $p1\ni32.wrap_i64\ni32.add\ni32.load8_u\n";
+
+/// Lower-case hex of an unsigned value, zero-padded to a minimum width.
+const FMT_HEX: &str = "i32.const 0\nlocal.set $t0\nlocal.get $p0\nlocal.set $t1\nblock $c_done\n\
+loop $c\nlocal.get $t0\ni32.const 1\ni32.add\nlocal.set $t0\nlocal.get $t1\ni64.const 4\n\
+i64.shr_u\nlocal.tee $t1\ni64.eqz\nbr_if $c_done\nbr $c\nend\nend\nlocal.get $t0\nlocal.get $p1\n\
+local.get $t0\nlocal.get $p1\ni32.gt_s\nselect\nlocal.set $t0\nlocal.get $t0\ncall $__alloc\n\
+local.set $t2\nlocal.get $p0\nlocal.set $t1\nlocal.get $t0\nlocal.set $t3\nblock $f_done\n\
+loop $f\nlocal.get $t3\ni32.eqz\nbr_if $f_done\nlocal.get $t3\ni32.const 1\ni32.sub\n\
+local.set $t3\nlocal.get $t1\ni32.wrap_i64\ni32.const 15\ni32.and\nlocal.tee $t4\n\
+i32.const 48\ni32.add\nlocal.get $t4\ni32.const 87\ni32.add\nlocal.get $t4\ni32.const 10\n\
+i32.lt_u\nselect\nlocal.set $t4\nlocal.get $t2\nlocal.get $t3\ni32.add\nlocal.get $t4\n\
+i32.store8\nlocal.get $t1\ni64.const 4\ni64.shr_u\nlocal.set $t1\nbr $f\nend\nend\n\
+local.get $t2\nlocal.get $t0\ncall $__str_new\n";
+
+fn build_str_func(name: &str) -> Option<RtFunc> {
+    let (params, ret, locals, body): (Vec<&'static str>, _, Vec<&'static str>, &str) = match name {
+        "__str_new" => (vec!["i32", "i32"], Some("i32"), vec!["i32"], STR_NEW),
+        "__str_concat" => (vec!["i32", "i32"], Some("i32"), vec!["i32"; 3], STR_CONCAT),
+        "__str_len" => (
+            vec!["i32"],
+            Some("i64"),
+            vec![],
+            "local.get $p0\ni32.const 4\ni32.add\ni32.load\ni64.extend_i32_u\n",
+        ),
+        "__str_byte_at" => (vec!["i32", "i64"], Some("i32"), vec![], STR_BYTE_AT),
+        "__fmt_hex" => (
+            vec!["i64", "i32"],
+            Some("i32"),
+            vec!["i32", "i64", "i32", "i32", "i32"],
+            FMT_HEX,
+        ),
+        _ => return None,
+    };
+    Some(RtFunc {
+        name: name.to_string(),
+        params,
+        ret,
+        locals,
+        body: body.to_string(),
+    })
+}
+
+fn is_build_string(ty: &MirType) -> bool {
+    matches!(ty, MirType::Struct(n) if n.as_ref() == "BuildString")
+}
+
+impl WasmBackend {
+    /// `s[i]` on a string: the byte, or 0 past the end (as `build_string_byte_at` in C).
+    pub(super) fn gen_str_index(
+        &mut self,
+        base: &MirValue,
+        index: &MirValue,
+        func: &MirFunction,
+    ) -> CodegenResult<bool> {
+        if !is_build_string(&self.infer_value_type(base, func)?) {
+            return Ok(false);
+        }
+        self.gen_value(base, func)?;
+        self.gen_value(index, func)?;
+        if self.emit_type(&self.infer_value_type(index, func)?) == "i32" {
+            self.emit_line("i64.extend_i32_u");
+        }
+        self.emit_line("call $__str_byte_at");
+        Ok(true)
+    }
+
+    /// `format!` lowered at the call site: literal pieces and holes concatenated.
+    pub(super) fn gen_sprintf(
+        &mut self,
+        fmt: &str,
+        args: &[MirValue],
+        func: &MirFunction,
+    ) -> CodegenResult<()> {
+        let mut pieces = vec![String::new()];
+        let mut holes = Vec::new();
+        let mut chars = fmt.chars().peekable();
+        while let Some(c) = chars.next() {
+            match c {
+                '{' if chars.peek() == Some(&'{') => {
+                    chars.next();
+                    pieces.last_mut().unwrap().push('{');
+                }
+                '}' if chars.peek() == Some(&'}') => {
+                    chars.next();
+                    pieces.last_mut().unwrap().push('}');
+                }
+                '{' => {
+                    let spec: String = chars.by_ref().take_while(|d| *d != '}').collect();
+                    holes.push(spec);
+                    pieces.push(String::new());
+                }
+                other => pieces.last_mut().unwrap().push(other),
+            }
+        }
+        // The lowering hands over a C printf format ("%02x", "%s").
+        if fmt.contains('%') {
+            pieces = vec![String::new()];
+            holes.clear();
+            let mut it = fmt.chars().peekable();
+            while let Some(c) = it.next() {
+                if c != '%' {
+                    pieces.last_mut().unwrap().push(c);
+                    continue;
+                }
+                if it.peek() == Some(&'%') {
+                    it.next();
+                    pieces.last_mut().unwrap().push('%');
+                    continue;
+                }
+                let mut width = String::new();
+                while let Some(d) = it
+                    .peek()
+                    .copied()
+                    .filter(|d| d.is_ascii_digit() || *d == '-')
+                {
+                    width.push(d);
+                    it.next();
+                }
+                while matches!(it.peek(), Some('l' | 'h' | 'z' | 'j')) {
+                    it.next();
+                }
+                holes.push(match it.next().unwrap_or(' ') {
+                    's' => String::new(),
+                    'x' => format!(":{}x", width),
+                    other => format!("%{width}{other}"),
+                });
+                pieces.push(String::new());
+            }
+        }
+
+        if holes.len() != args.len() {
+            return Err(CodegenError::Unsupported(format!(
+                "format `{fmt}` does not match its argument count"
+            )));
+        }
+        let first = self.lit_string(pieces[0].as_bytes());
+        self.emit_line(&format!("i32.const {}", first));
+        for (i, spec) in holes.iter().enumerate() {
+            let arg = &args[i];
+            let ty = self.infer_value_type(arg, func)?;
+            let hex = spec
+                .strip_prefix(':')
+                .and_then(|s| s.strip_suffix('x'))
+                .filter(|_| matches!(ty, MirType::Int(..)));
+            if spec.is_empty() && is_build_string(&ty) {
+                self.gen_value(arg, func)?;
+            } else if let Some(width) = hex {
+                let width: u32 = width.trim_start_matches('0').parse().unwrap_or(0);
+                self.gen_value(arg, func)?;
+                if self.emit_type(&ty) == "i32" {
+                    self.emit_line("i64.extend_i32_u");
+                }
+                self.emit_line(&format!("i32.const {}", width));
+                self.emit_line("call $__fmt_hex");
+            } else {
+                return Err(CodegenError::Unsupported(format!(
+                    "format hole `{{{spec}}}` for a {:?} value in WASM",
+                    ty
+                )));
+            }
+            self.emit_line("call $__str_concat");
+            if !pieces[i + 1].is_empty() {
+                let lit = self.lit_string(pieces[i + 1].as_bytes());
+                self.emit_line(&format!("i32.const {}", lit));
+                self.emit_line("call $__str_concat");
+            }
+        }
+        Ok(())
     }
 }

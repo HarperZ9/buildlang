@@ -210,3 +210,45 @@ fn wasm_binary_runs_in_node_and_matches_c_backend() {
     }
     let _ = fs::remove_dir_all(&dir);
 }
+
+/// The registry's sha256 package, unmodified, compiled to wasm and run in Node.
+#[test]
+fn sha256_package_digests_match_c_backend_in_node() {
+    if !node_available() {
+        eprintln!("SKIP wasm_node: `node` is not on PATH; nothing was run");
+        return;
+    }
+    let package = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../registry/packages/sha256/1.0.0/src/lib.bld"
+    ));
+    let source = format!(
+        "{package}\nfn main() ~ Console {{\n    println(\"{{}}\", sha256_hex(\"abc\"));\n    println(\"{{}}\", sha256_hex(\"\"));\n}}\n"
+    );
+    let expected = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\n\
+                    e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\n";
+    let dir = std::env::temp_dir().join(format!("bl-wasm-sha256-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("create sha256 dir");
+    let src = dir.join("sha256_main.bld");
+    let wasm = dir.join("sha256_main.wasm");
+    fs::write(&src, source).expect("write source");
+    let build = Command::new(env!("CARGO_BIN_EXE_buildc"))
+        .arg(&src)
+        .args(["--target", "wasm", "-o"])
+        .arg(&wasm)
+        .output()
+        .expect("run buildc");
+    assert!(
+        build.status.success(),
+        "sha256: buildc --target wasm failed: {}{}",
+        String::from_utf8_lossy(&build.stdout),
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let got = run_wasm(&wasm);
+    assert_eq!(got, expected, "sha256: Node output");
+    match run_c(&src) {
+        Some(c_out) => assert_eq!(got, c_out, "sha256: WASM and C backends disagree"),
+        None => eprintln!("sha256: C comparison skipped; checked against the literal"),
+    }
+    let _ = fs::remove_dir_all(&dir);
+}
