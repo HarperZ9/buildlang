@@ -87,30 +87,21 @@ return values, and basic type mapping.
   6. Only testable on ARM64 hardware or via QEMU emulation
 - **Tests:** 21 unit tests plus machine code tests.
 
-## 4. WASM Backend (`wasm.rs`) -- EXPERIMENTAL (WAT text mode)
+## 4. WASM Backend (`wasm.rs`, `wasm_flow.rs`, `wasm_bin.rs`) -- EXPERIMENTAL (binary module, Node execution check)
 
-- **Implements Backend trait:** Yes (line 1630)
-- **Output format:** WAT text format (OutputFormat::Wat), not binary .wasm
-- **MIR operations handled:**
-  - Use, BinaryOp (all arithmetic, comparison, bitwise -- proper i32/i64/f32/f64 selection): handled
-  - UnaryOp (Neg: float `neg` / int `0 - x`, Not: bool `xor 1` / bitwise `xor -1`): handled
-  - Ref/AddressOf, Cast, Aggregate, Repeat, Discriminant, Len, NullaryOp: handled (some simplified)
-  - FieldAccess, VariantField: emits `i32.const 0` with TODO comment
-  - IndexAccess: partial (assumes 4-byte elements)
-  - Terminators: Goto (comment only -- WASM structured control flow), If (generates `if/then/else`), Call (proper `call $name`), Return, Unreachable, Drop, Assert: handled
-  - Switch: emits comments only (no `br_table` generation)
-- **Could produce a working hello-world:** Partially for single-block WAT inspection. It is not a current `.wasm` execution claim:
-  - Output is WAT text, not binary .wasm. Would need `wat2wasm` (from WABT toolkit) to convert.
-  - WASI mode generates full module structure with memory, imports, `_start` export.
-  - Goto terminator only emits a comment -- breaks any multi-block control flow. Single-block functions would work.
+Updated 2026-11-13.
+
+- **Output format:** `--target wasm` / `wasm32` writes a binary `.wasm` module (OutputFormat::Wasm), encoded by the compiler itself in `wasm_bin.rs`. `--target wat` (or `-o NAME.wat`) writes WebAssembly text from the same instruction selection.
+- **Control flow:** every function body is a dispatch loop (`loop` with one `block` per MIR block, entered through `br_table` on a `$__bb` local), so any MIR control-flow graph lowers correctly, including loops whose header is not block 0. Structured reconstruction is not done yet.
+- **Output:** host imports `env.print_i64`, `env.print_u64`, `env.print_f64`, `env.print_bool` and `env.print_str(ptr, len)`; the module exports `main` and `memory`. No WASI is needed. `println`/`print` with a literal format and plain `{}` holes lower to these imports.
+- **Execution check:** `compiler/tests/wasm_node.rs` compiles three programs (a call with integer arithmetic, a `while` loop summing 1 to 100, an `if/else`), runs each in Node's built-in `WebAssembly` and requires its stdout to equal the C backend's `buildc run` stdout. The test skips with a message when `node` is not on PATH.
+- **Refused:** there is no linear-memory model yet. Aggregates, field and variant access, index access, references, deref and every store kind fail with an "unsupported" error in binary output instead of emitting code. Globals, indirect calls, string values other than print formats, and runtime builtins other than `println`/`print` are also refused.
 - **Work needed before promotion:**
-  1. Promote CLI-selected WAT/WASM output to a verified binary/run path
-  2. Either emit binary .wasm directly or invoke `wat2wasm`
-  3. Fix Goto terminator to use WASM structured control flow (`block`/`loop`/`br`)
-  4. Fix Switch terminator to use `br_table`
-  5. Implement FieldAccess for struct member access
-  6. Test with `wasmtime` or browser runtime
-- **Tests:** 11 unit tests.
+  1. Linear-memory model: shadow stack frames for address-taken locals, a bump allocator, struct layout from `MirTypeDef`
+  2. Aggregate, field, index and deref lowering, with typed stores in the correct operand order
+  3. A Vec/String runtime inside the module, then globals
+  4. Package builds to wasm and a page loader; float formatting that matches C
+- **Tests:** 11 unit tests in `wasm.rs`, plus the Node execution test.
 
 ## 5. LLVM Backend (`llvm.rs`) -- EXPERIMENTAL (nearest non-C candidate)
 
@@ -165,7 +156,7 @@ return values, and basic type mapping.
 | C | Yes | C99 source | **Yes (working)** | None |
 | x86-64 | Yes | Assembly / machine code | Experimental subset only | No assembler/linker integration |
 | ARM64 | Yes | Assembly / machine code | Experimental subset only | No assembler/linker integration, needs ARM hardware/emulation |
-| WASM | Yes | WAT text | Experimental partial | Goto terminator is comment-only, no binary output |
+| WASM | Yes | Binary .wasm and WAT text | Experimental; three programs run in Node and match C | No linear-memory model yet |
 | LLVM | Yes | LLVM IR text | Experimental, nearest non-C candidate | No clang/llc invocation, wrong target() return |
 | SPIR-V | Yes | SPIR-V binary | No (GPU-only format) | Needs Vulkan host, no buffer I/O |
 
@@ -177,7 +168,7 @@ reasonable technical sequence:
 
 1. **LLVM** -- Lowest effort. Output is already valid LLVM IR. Harden clang/llc invocation.
 2. **x86-64** -- Medium effort. Assembly output is reasonable. Need assembler + linker.
-3. **WASM** -- Medium effort. Fix structured control flow, add wat2wasm or binary emission.
+3. **WASM** -- Binary output and dispatch-loop control flow landed 2026-11-13. Next: the linear-memory model.
 4. **ARM64** -- Medium effort but hardware-dependent. Same as x86-64 but for ARM.
 5. **SPIR-V** -- High effort. Fundamentally different target (GPU). Needs buffer I/O, Vulkan host.
 

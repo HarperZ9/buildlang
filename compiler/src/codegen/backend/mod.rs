@@ -18,6 +18,7 @@ pub mod llvm;
 pub mod rust;
 pub mod spirv;
 pub mod wasm;
+pub mod wasm_bin;
 pub mod x86_64;
 pub mod x86_64_enc;
 

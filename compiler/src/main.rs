@@ -1057,7 +1057,7 @@ const BACKEND_MATURITY: [(&str, &str, &str); 9] = [
     (
         "wasm",
         "experimental",
-        "WASM/WAT output; runtime depends on wasmtime",
+        "WASM binary or WAT text; runs in a browser or Node with env.print_* imports",
     ),
     (
         "spirv",
@@ -7447,32 +7447,11 @@ fn cmd_build(
             1
         })?;
 
-        // Try running with wasmtime if available
-        if !emit_c_only {
-            let wt_ok = std::process::Command::new("wasmtime")
-                .arg("--version")
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false);
-
-            if wt_ok {
-                println!("[5/5] WebAssembly module ready (wasmtime available)");
-                println!();
-                println!("Build successful!");
-                println!("Output: {}", wasm_output_file.display());
-                println!();
-                println!("Run with: wasmtime {}", wasm_output_file.display());
-                return Ok(());
-            }
-        }
-
         println!();
         println!("Build successful!");
         println!("Output: {}", wasm_output_file.display());
         println!();
-        println!("Run with: wasmtime {}", wasm_output_file.display());
+        println!("Run: {}", "the module imports env.print_i64, env.print_u64, env.print_f64, env.print_bool and env.print_str(ptr, len), and exports main and memory; run it in a browser or Node with WebAssembly.instantiate");
         return Ok(());
     } else if use_llvm {
         // LLVM IR target: write .ll file
@@ -10482,6 +10461,11 @@ fn cmd_compile(
     } else {
         Target::C
     };
+    let wants_wat = target == Target::Wasm
+        && match target_override {
+            Some(t) => t == "wat",
+            None => output.and_then(|p| p.extension()).and_then(|e| e.to_str()) == Some("wat"),
+        };
     reject_unsupported_stdio_mode(stdio_mode, target)?;
 
     // `-o NAME.exe` with no explicit target asks for an executable. It used to
@@ -10517,13 +10501,22 @@ fn cmd_compile(
 
     // Code generation (pass source for macro expansion)
     let mut codegen = CodeGenerator::with_source(&ctx, target, source_file.source().into());
+    codegen.wasm_text = wants_wat;
     codegen.set_stdio_mode(stdio_mode);
     // Enable ReShade boilerplate for .fx output files
     if output_path.extension().and_then(|e| e.to_str()) == Some("fx") {
         codegen.reshade = true;
     }
     let generated = codegen.generate(&ast).map_err(|e| {
-        report_codegen_error(&e, &source_file);
+        let rejected = matches!(
+            e,
+            buildlang::codegen::backend::CodegenError::Rejected { .. }
+        );
+        if target == Target::Wasm && !rejected {
+            eprintln!("error: the wasm target cannot compile this program: {}", e);
+        } else {
+            report_codegen_error(&e, &source_file);
+        }
         1
     })?;
     if !codegen.linear_errors().is_empty() {
@@ -10687,23 +10680,9 @@ fn cmd_compile(
         }
     }
 
-    // WASM: detect wasmtime/wasmer and show run instructions
-    if target == Target::Wasm {
-        let wt = std::process::Command::new("wasmtime")
-            .arg("--version")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
-        if wt {
-            println!("Run: wasmtime {}", output_path.display());
-        } else {
-            println!(
-                "\nWASM at {}. Install wasmtime to run.",
-                output_path.display()
-            );
-        }
+    // WASM: say how to run the module (no external runtime is needed).
+    if target == Target::Wasm && !wants_wat {
+        println!("Run: {}", "the module imports env.print_i64, env.print_u64, env.print_f64, env.print_bool and env.print_str(ptr, len), and exports main and memory; run it in a browser or Node with WebAssembly.instantiate");
     }
 
     Ok(())

@@ -26,6 +26,9 @@ use super::{Backend, CodegenError, CodegenResult, Target};
 use crate::codegen::ir::*;
 use crate::codegen::{GeneratedCode, OutputFormat};
 
+#[path = "wasm_flow.rs"]
+mod flow;
+
 // =============================================================================
 // WASI SYSCALL DEFINITIONS
 // =============================================================================
@@ -192,6 +195,8 @@ pub struct WasmBackend {
     simd: bool,
     /// Enable threads.
     threads: bool,
+    /// Dispatch-loop and binary-encoding state.
+    fl: flow::FlowState,
 }
 
 impl WasmBackend {
@@ -211,6 +216,7 @@ impl WasmBackend {
             bulk_memory: false,
             simd: false,
             threads: false,
+            fl: flow::FlowState::default(),
         }
     }
 
@@ -486,29 +492,6 @@ impl WasmBackend {
         self.output.push('\n');
     }
 
-    /// Generate data section.
-    fn gen_data_section(&mut self, module: &MirModule) {
-        if module.strings.is_empty() {
-            return;
-        }
-
-        self.emit_line(";; =======================================================");
-        self.emit_line(";; Data Section");
-        self.emit_line(";; =======================================================");
-
-        let mut offset = 0u32;
-        for (i, s) in module.strings.iter().enumerate() {
-            let escaped = self.escape_string(s);
-            self.emit_line(&format!(
-                "(data (i32.const {}) \"{}\\00\")",
-                offset, escaped
-            ));
-            self.emit_line(&format!("(global $__str{} i32 (i32.const {}))", i, offset));
-            offset += s.len() as u32 + 1; // +1 for null terminator
-        }
-        self.output.push('\n');
-    }
-
     /// Escape a string for WAT.
     fn escape_string(&self, s: &str) -> String {
         let mut result = String::new();
@@ -689,163 +672,6 @@ impl WasmBackend {
         Ok(())
     }
 
-    /// Generate local variable declarations.
-    fn gen_locals(&mut self, func: &MirFunction) -> CodegenResult<()> {
-        for local in &func.locals {
-            if local.is_param {
-                // Parameters are already declared in function signature
-                let name = format!("$arg{}", local.id.0);
-                self.local_names.insert(local.id, name);
-            } else {
-                let name = if let Some(n) = &local.name {
-                    format!("$local_{}", n)
-                } else {
-                    format!("$local{}", local.id.0)
-                };
-                self.local_names.insert(local.id, name.clone());
-                self.emit_line(&format!("(local {} {})", name, self.emit_type(&local.ty)));
-            }
-        }
-
-        // If any block has a Switch terminator, declare a scratch local
-        // to hold the discriminant value during the case chain.
-        let has_switch = func.blocks.as_ref().map_or(false, |blocks| {
-            blocks
-                .iter()
-                .any(|b| matches!(&b.terminator, Some(MirTerminator::Switch { .. })))
-        });
-        if has_switch {
-            self.emit_line("(local $__switch_val i32)");
-        }
-
-        Ok(())
-    }
-
-    /// Generate function body from MIR blocks.
-    ///
-    /// Uses a "nested block" strategy for structured control flow:
-    /// each MIR basic block gets a WASM `block` label so that forward
-    /// `Goto` terminators can branch with `br`.  A top-level `loop`
-    /// wraps everything so that backward branches are also possible.
-    fn gen_function_body(&mut self, func: &MirFunction) -> CodegenResult<()> {
-        let blocks = match &func.blocks {
-            Some(blocks) => blocks,
-            None => return Ok(()),
-        };
-
-        if blocks.is_empty() {
-            // Empty function - just return default
-            if func.sig.ret != MirType::Void {
-                self.gen_default_value(&func.sig.ret);
-            }
-            return Ok(());
-        }
-
-        // Generate block labels
-        for block in blocks {
-            let label = format!("$bb{}", block.id.0);
-            self.block_labels.insert(block.id, label);
-        }
-
-        let num_blocks = blocks.len();
-
-        // ---------- Structured control-flow wrapper ----------
-        //
-        // Strategy: wrap the entire body in a `loop` so backward
-        // branches work, and nest `block` labels for each MIR BB
-        // so that forward branches (br $bbN) skip to the right place.
-        //
-        // Layout (for N blocks):
-        //
-        //   (loop $loop_top
-        //     (block $bb1          ;; br $bb1 = skip to bb1
-        //       (block $bb2        ;; br $bb2 = skip to bb2
-        //         ...
-        //         ;; bb0 code
-        //         ;; terminator for bb0
-        //       )  ;; $bb1 target
-        //       ;; bb1 code
-        //     )  ;; $bb2 target
-        //     ;; bb2 code
-        //     ...
-        //     br $loop_top  ;; restart loop (needed for backward br)
-        //   )
-
-        if num_blocks == 1 {
-            // Simple case: single block, no control flow wrapping needed.
-            let block = &blocks[0];
-            let label = self
-                .block_labels
-                .get(&block.id)
-                .cloned()
-                .unwrap_or_default();
-            self.emit_line(&format!(";; Block {}", label));
-            for stmt in &block.stmts {
-                self.gen_stmt(stmt, func)?;
-            }
-            if let Some(term) = &block.terminator {
-                self.gen_terminator(term, func, true)?;
-            }
-            return Ok(());
-        }
-
-        // Multi-block function: emit structured wrapper.
-        self.emit_line("(block $fn_exit");
-        self.indent += 1;
-        self.emit_line("(loop $loop_top");
-        self.indent += 1;
-
-        // Open nested blocks for bb1 .. bb(N-1).
-        // (bb0 is emitted at the innermost level)
-        for i in (1..num_blocks).rev() {
-            let label = self
-                .block_labels
-                .get(&BlockId(i as u32))
-                .cloned()
-                .unwrap_or_default();
-            self.emit_line(&format!("(block {}", label));
-            self.indent += 1;
-        }
-
-        // Now emit each basic block's code, closing the nesting after each.
-        for (i, block) in blocks.iter().enumerate() {
-            let is_last = i == num_blocks - 1;
-            let label = self
-                .block_labels
-                .get(&block.id)
-                .cloned()
-                .unwrap_or_default();
-            self.emit_line(&format!(";; Block {}", label));
-
-            for stmt in &block.stmts {
-                self.gen_stmt(stmt, func)?;
-            }
-            if let Some(term) = &block.terminator {
-                self.gen_terminator(term, func, is_last)?;
-            }
-
-            // Close the `block` that was opened for this BB (except for the last one).
-            if i < num_blocks - 1 {
-                self.indent -= 1;
-                let next_label = self
-                    .block_labels
-                    .get(&BlockId((i + 1) as u32))
-                    .cloned()
-                    .unwrap_or_default();
-                self.emit_line(&format!(") ;; end {}", next_label));
-            }
-        }
-
-        // Close the loop and outer block.
-        self.emit_line("br $loop_top");
-        self.indent -= 1;
-        self.emit_line(") ;; end $loop_top");
-        self.indent -= 1;
-        self.emit_line(") ;; end $fn_exit");
-
-        Ok(())
-    }
-
     /// Generate a statement.
     fn gen_stmt(&mut self, stmt: &MirStmt, func: &MirFunction) -> CodegenResult<()> {
         match &stmt.kind {
@@ -932,14 +758,7 @@ impl WasmBackend {
                 self.gen_value(value, func)?;
             }
             MirRValue::BinaryOp { op, left, right } => {
-                // Push operands
-                self.gen_value(left, func)?;
-                self.gen_value(right, func)?;
-
-                // Get the type for proper instruction selection
-                let ty = self.infer_value_type(left, func)?;
-                let instr = self.wasm_binop(*op, &ty);
-                self.emit_line(&instr);
+                self.gen_binop(*op, left, right, func)?;
             }
             MirRValue::UnaryOp { op, operand } => {
                 let ty = self.infer_value_type(operand, func)?;
@@ -1194,7 +1013,8 @@ impl WasmBackend {
                 self.emit_line(&format!("{}.const {}", wasm_ty, v));
             }
             MirConst::Str(idx) => {
-                self.emit_line(&format!("global.get $__str{}", idx));
+                let off = self.str_offset(*idx as usize);
+                self.emit_line(&format!("i32.const {}", off));
             }
             MirConst::ByteStr(_) => {
                 // Push address of byte string in data section
@@ -1279,186 +1099,6 @@ impl WasmBackend {
                     self.emit_line("i32.const 4");
                     self.emit_line("i32.add");
                 }
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Emit a branch to the target block using structured control flow.
-    ///
-    /// For a forward branch (target > current), emit `br $bbN`.
-    /// For a backward branch (target == 0), emit `br $loop_top`.
-    /// For a branch to self (target == current), emit `br $loop_top` for simplicity.
-    fn emit_br_to(&mut self, target: BlockId) {
-        if target.0 == 0 {
-            // Backward branch to the start of the function.
-            self.emit_line("br $loop_top ;; back to bb0");
-        } else {
-            // Forward branch to the target block label.
-            let label = self
-                .block_labels
-                .get(&target)
-                .cloned()
-                .unwrap_or_else(|| format!("$bb{}", target.0));
-            self.emit_line(&format!("br {} ;; goto bb{}", label, target.0));
-        }
-    }
-
-    /// Generate a terminator.
-    fn gen_terminator(
-        &mut self,
-        term: &MirTerminator,
-        func: &MirFunction,
-        _is_last: bool,
-    ) -> CodegenResult<()> {
-        match term {
-            MirTerminator::Goto(target) => {
-                self.emit_br_to(*target);
-            }
-            MirTerminator::If {
-                cond,
-                then_block,
-                else_block,
-            } => {
-                self.gen_value(cond, func)?;
-                self.emit_line("(if");
-                self.indent += 1;
-                self.emit_line("(then");
-                self.indent += 1;
-                self.emit_br_to(*then_block);
-                self.indent -= 1;
-                self.emit_line(")");
-                self.emit_line("(else");
-                self.indent += 1;
-                self.emit_br_to(*else_block);
-                self.indent -= 1;
-                self.emit_line(")");
-                self.indent -= 1;
-                self.emit_line(")");
-            }
-            MirTerminator::Switch {
-                value,
-                targets,
-                default,
-            } => {
-                // Emit switch as a chain of if-then-br comparisons.
-                // We use a dedicated local ($__switch_val) to avoid re-evaluating
-                // the switch discriminant for each case.
-                self.emit_line(";; switch");
-                self.gen_value(value, func)?;
-                // Store discriminant in the function's existing __switch_val
-                // local (declared in gen_locals if a switch is present).
-                self.emit_line("local.set $__switch_val");
-                for (const_val, target) in targets {
-                    let val_str = match const_val {
-                        MirConst::Int(v, _) => v.to_string(),
-                        MirConst::Uint(v, _) => v.to_string(),
-                        _ => "0".to_string(),
-                    };
-                    self.emit_line("local.get $__switch_val");
-                    self.emit_line(&format!("i32.const {}", val_str));
-                    self.emit_line("i32.eq");
-                    self.emit_line("(if");
-                    self.indent += 1;
-                    self.emit_line("(then");
-                    self.indent += 1;
-                    self.emit_br_to(*target);
-                    self.indent -= 1;
-                    self.emit_line(")");
-                    self.indent -= 1;
-                    self.emit_line(")");
-                }
-                // Default case -- unconditional branch.
-                self.emit_br_to(*default);
-            }
-            MirTerminator::Call {
-                func: callee,
-                args,
-                dest,
-                target,
-                ..
-            } => {
-                // Push arguments
-                for arg in args {
-                    self.gen_value(arg, func)?;
-                }
-
-                // Call function
-                match callee {
-                    MirValue::Function(name) => {
-                        self.emit_line(&format!("call ${}", name));
-                    }
-                    _ => {
-                        // Indirect call
-                        self.gen_value(callee, func)?;
-                        self.emit_line("call_indirect");
-                    }
-                }
-
-                // Store result
-                if let Some(dest_local) = dest {
-                    let dest_name = self
-                        .local_names
-                        .get(dest_local)
-                        .ok_or_else(|| {
-                            CodegenError::Internal(format!("Unknown local: {:?}", dest_local))
-                        })?
-                        .clone();
-                    self.emit_line(&format!("local.set {}", dest_name));
-                }
-
-                // Continue to target block
-                if let Some(target) = target {
-                    self.emit_br_to(*target);
-                }
-            }
-            MirTerminator::Return(value) => {
-                if let Some(val) = value {
-                    self.gen_value(val, func)?;
-                }
-                self.emit_line("return");
-            }
-            MirTerminator::Unreachable => {
-                self.emit_line("unreachable");
-            }
-            MirTerminator::Drop { target, .. } => {
-                // Drop is a no-op in WASM (no destructor support yet),
-                // but we still need to branch to the continuation block.
-                self.emit_line(";; drop (no-op)");
-                self.emit_br_to(*target);
-            }
-            MirTerminator::Assert {
-                cond,
-                expected,
-                msg,
-                target,
-                ..
-            } => {
-                self.gen_value(cond, func)?;
-                if !*expected {
-                    self.emit_line("i32.eqz");
-                }
-                self.emit_line("(if");
-                self.indent += 1;
-                self.emit_line("(then)");
-                self.emit_line(&format!("(else ;; assert failed: {}", msg));
-                self.emit_line("  unreachable");
-                self.emit_line(")");
-                self.indent -= 1;
-                self.emit_line(")");
-                self.emit_br_to(*target);
-            }
-            MirTerminator::Resume => {
-                self.emit_line(";; resume unwinding");
-                self.emit_line("unreachable");
-            }
-            MirTerminator::Abort => {
-                if self.wasi {
-                    self.emit_line("i32.const 1");
-                    self.emit_line("call $__wasi_proc_exit");
-                }
-                self.emit_line("unreachable");
             }
         }
 
@@ -1996,68 +1636,6 @@ impl Default for WasmBackend {
     }
 }
 
-impl Backend for WasmBackend {
-    fn generate(&mut self, mir: &MirModule) -> CodegenResult<GeneratedCode> {
-        self.output.clear();
-
-        // Generate module structure
-        self.gen_module_header(mir);
-
-        // WASI imports
-        if self.wasi {
-            self.gen_wasi_imports();
-        }
-
-        // Memory
-        self.gen_memory();
-
-        // Types
-        self.gen_types(mir);
-
-        // Data section
-        self.gen_data_section(mir);
-
-        // Globals
-        self.gen_globals(mir);
-
-        // Table for indirect calls
-        self.gen_table(mir);
-
-        // WASI helpers
-        if self.wasi {
-            self.gen_wasi_helpers();
-        }
-
-        // Functions
-        self.emit_line(";; =======================================================");
-        self.emit_line(";; Functions");
-        self.emit_line(";; =======================================================");
-        self.output.push('\n');
-
-        for func in &mir.functions {
-            self.gen_function(func)?;
-        }
-
-        // WASI _start
-        if self.wasi {
-            self.gen_wasi_start(mir);
-        }
-
-        // Close module
-        self.indent -= 1;
-        self.emit_line(")");
-
-        Ok(GeneratedCode::new(
-            OutputFormat::Wat,
-            self.output.as_bytes().to_vec(),
-        ))
-    }
-
-    fn target(&self) -> Target {
-        Target::Wasm
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2194,7 +1772,7 @@ mod tests {
         let module = create_simple_module();
         let mut backend = WasmBackend::new();
 
-        let result = backend.generate(&module);
+        let result = backend.generate_wat(&module);
         assert!(result.is_ok());
 
         let code = result.unwrap();
@@ -2211,7 +1789,7 @@ mod tests {
         let module = create_simple_module();
         let mut backend = WasmBackend::with_wasi();
 
-        let result = backend.generate(&module);
+        let result = backend.generate_wat(&module);
         assert!(result.is_ok());
 
         let code = result.unwrap();
@@ -2246,7 +1824,7 @@ mod tests {
         module.add_function(func);
 
         let mut backend = WasmBackend::with_wasi();
-        let result = backend.generate(&module);
+        let result = backend.generate_wat(&module);
         assert!(result.is_ok());
 
         let code = result.unwrap();

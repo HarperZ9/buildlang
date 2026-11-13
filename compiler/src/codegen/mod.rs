@@ -80,6 +80,8 @@ pub struct CodeGenerator<'ctx> {
     source: Option<Arc<str>>,
     /// Generate ReShade .fx boilerplate for HLSL target.
     pub reshade: bool,
+    /// Emit WebAssembly text (WAT) instead of a binary module for the wasm target.
+    pub wasm_text: bool,
     /// Errors from the MIR `#[linear]` checker (`codegen::analysis::linear`),
     /// populated by `generate()` right after `lower_module`. Non-empty means
     /// the program is linearity-invalid: callers must treat this as a compile
@@ -100,6 +102,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             mir: None,
             source: None,
             reshade: false,
+            wasm_text: false,
             linear_errors: Vec::new(),
         }
     }
@@ -113,6 +116,7 @@ impl<'ctx> CodeGenerator<'ctx> {
             mir: None,
             source: Some(source),
             reshade: false,
+            wasm_text: false,
             linear_errors: Vec::new(),
         }
     }
@@ -242,7 +246,11 @@ impl<'ctx> CodeGenerator<'ctx> {
             }
             Target::Wasm => {
                 let mut backend = backend::wasm::WasmBackend::new();
-                backend.generate(mir)
+                if self.wasm_text {
+                    backend.generate_wat(mir)
+                } else {
+                    backend.generate(mir)
+                }
             }
             Target::SpirV => {
                 let mut backend = backend::spirv::SpirvBackend::new();
@@ -2075,10 +2083,13 @@ mod tests {
         assert!(result.is_ok());
 
         let generated = result.unwrap();
-        assert_eq!(generated.format, OutputFormat::Wat);
+        assert_eq!(generated.format, OutputFormat::Wasm);
 
-        // WAT output should be valid UTF-8
-        assert!(generated.as_string().is_some());
+        // Binary module: magic word and version 1
+        assert_eq!(
+            &generated.data[..8],
+            &[0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]
+        );
     }
 
     #[test]
