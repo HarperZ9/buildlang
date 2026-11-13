@@ -214,6 +214,7 @@ reference with expected output lives in [USAGE.md](USAGE.md).
 | WASM | `--target wasm` | `.wasm` | Experimental |
 | Rust | `--target rust` | `.rs` | Experimental (subset, validated with rustc) |
 | x86-64 | `--target x86-64` | `.o` | Experimental |
+| x86-64 executable | `--target x86_64-native` (`x86_64-windows`, `x86_64-linux`) | `.exe` / ELF, no outside toolchain | Experimental (integers, control flow, calls, printing) |
 | ARM64 | `--target arm64` | `.o` | Experimental |
 
 `buildc corpus verify` runs an 8-program corpus through the C backend and

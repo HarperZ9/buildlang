@@ -83,6 +83,13 @@ fn parse_codegen_target(target: &str) -> Result<Target, String> {
         "c" => Ok(Target::C),
         "llvm" | "llvm-ir" | "ll" => Ok(Target::LlvmIr),
         "x86-64" | "x86_64" | "x64" => Ok(Target::X86_64),
+        "x86_64-native" | "x86-64-native" | "native" => Ok(if cfg!(windows) {
+            Target::X86_64Pe
+        } else {
+            Target::X86_64Elf
+        }),
+        "x86_64-windows" | "x86-64-windows" => Ok(Target::X86_64Pe),
+        "x86_64-linux" | "x86-64-linux" => Ok(Target::X86_64Elf),
         "arm64" | "aarch64" => Ok(Target::Arm64),
         "wasm" | "wasm32" | "wat" => Ok(Target::Wasm),
         "spirv" | "spir-v" | "spv" => Ok(Target::SpirV),
@@ -90,7 +97,7 @@ fn parse_codegen_target(target: &str) -> Result<Target, String> {
         "glsl" | "opengl" | "gl" => Ok(Target::Glsl),
         "rust" | "rs" => Ok(Target::Rust),
         other => Err(format!(
-            "Unknown target '{}'. Supported: c, llvm, wasm, spirv, hlsl, glsl, rust, x86-64, arm64",
+            "Unknown target '{}'. Supported: c, llvm, wasm, spirv, hlsl, glsl, rust, x86-64, x86_64-native, x86_64-windows, x86_64-linux, arm64",
             other
         )),
     }
@@ -10514,6 +10521,11 @@ fn cmd_compile(
         );
         if target == Target::Wasm && !rejected {
             eprintln!("error: the wasm target cannot compile this program: {}", e);
+        } else if matches!(target, Target::X86_64Pe | Target::X86_64Elf) && !rejected {
+            eprintln!(
+                "error: the x86-64 native target cannot compile this program: {}",
+                e
+            );
         } else {
             report_codegen_error(&e, &source_file);
         }
@@ -10532,6 +10544,11 @@ fn cmd_compile(
         eprintln!("Failed to write output: {}", e);
         1
     })?;
+    #[cfg(unix)]
+    if target == Target::X86_64Elf {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&output_path, std::fs::Permissions::from_mode(0o755));
+    }
 
     println!("Compiled {} -> {}", input.display(), output_path.display());
 
@@ -11388,6 +11405,8 @@ mod tests {
             Target::Wasm => "wasm",
             Target::SpirV => "spirv",
             Target::X86_64 => "x86-64",
+            // Not on the card yet; the card and its SVG are redrawn separately.
+            Target::X86_64Pe | Target::X86_64Elf => "x86_64-native",
             Target::Arm64 => "arm64",
         }
     }

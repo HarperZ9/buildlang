@@ -2,6 +2,26 @@
 
 Last audited: 2026-06-15
 
+2026-11-13 x86-64 native executables: `--target x86_64-native` (also
+`x86_64-windows`, `x86_64-linux`) writes a complete executable with no C
+compiler, assembler or linker. New files: `x86_64_exe.rs` and
+`x86_64_exe_ops.rs` (MIR to machine code, every local in a stack slot),
+`x86_64_exe_asm.rs` (label assembler and runtime routines: write, exit,
+signed and unsigned decimal printing, bool printing) and `x86_64_exe_obj.rs`
+(PE32+ writer with a kernel32 import table, ELF64 writer using syscalls).
+Supported: integer types up to 64 bits and bool, arithmetic including
+wrapping ops, comparisons, locals, if, while, loop, calls and recursion (up to
+4 arguments on Windows, 6 on Linux), `println`/`print` with `{}` holes and the
+`println!`/`print!` macros with plain `%d %u %lld %llu %s` conversions.
+Everything else (floats, i128, structs, arrays, Vec, String values, stderr,
+checked and saturating ops, asserts, indirect calls, runtime calls) is refused
+with a diagnostic naming the construct. Run and tested:
+`tests/native_exe.rs` builds nine programs, runs them, and compares stdout and
+exit code with `buildc run` (C backend): 9 of 9 equal on Windows x64. A
+planted-fault test flips one byte of the digit routine and the comparison
+fails as it should. The ELF path has not been run on Linux yet; CI's Linux job
+is its first run. The older `x86_64.rs` / `x86_64_enc.rs` path is unchanged.
+
 2026-06-15 wind-down assessment: see
 `docs/COMPILER_WIND_DOWN_ASSESSMENT_2026-06-15.md` for the current product
 posture. This backend-local file is retained as an implementation inventory.
