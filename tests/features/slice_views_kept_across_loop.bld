@@ -11,4 +11,15 @@ fn main() ~ Console {
         i = i + 1;
     }
     println!("{} {} {}", first[0], second[0], third[0]);
+    let mut keep: Vec<&[i32]> = Vec::new();
+    let mut j: i64 = 0;
+    while j < 3 {
+        keep.push(window(&v, j));
+        j = j + 1;
+    }
+    let k0 = keep[0];
+    let k1 = keep[1];
+    let k2 = keep[2];
+    println!("{} {} {}", k0[1], k1[1], k2[1]);
+    println!("{} {} {} {}", k0.len(), k1.len(), k2.len(), keep.len());
 }

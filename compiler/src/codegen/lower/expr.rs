@@ -4581,6 +4581,14 @@ impl<'ctx> MirLowerer<'ctx> {
             MirType::Vec(_) => "BuildVecHandle".to_string(),
             MirType::Map(_, _) => "BuildMapHandle".to_string(),
             MirType::Bool => "i32".to_string(),
+            // A view element rides the element-sized wrapper keyed by its
+            // slice struct name (the view is carried by value).
+            MirType::Ptr(inner) if matches!(inner.as_ref(), MirType::Slice(_)) => {
+                match inner.as_ref() {
+                    MirType::Slice(e) => MirType::slice_type_name(e).to_string(),
+                    _ => unreachable!(),
+                }
+            }
             _ => {
                 return Err(CodegenError::Unsupported(format!(
                     "a vector of `{elem_ty}` elements is not supported yet: the Vec \
@@ -4744,7 +4752,9 @@ impl<'ctx> MirLowerer<'ctx> {
                     bt = *inner;
                 }
                 match bt {
-                    MirType::Vec(e) if matches!(index.kind, ExprKind::Range { .. }) => {
+                    MirType::Vec(e) | MirType::Array(e, _) | MirType::Slice(e)
+                        if matches!(index.kind, ExprKind::Range { .. }) =>
+                    {
                         MirType::Ptr(Box::new(MirType::Slice(e)))
                     }
                     MirType::Vec(e) | MirType::Array(e, _) | MirType::Slice(e) => *e,
@@ -10475,6 +10485,11 @@ impl<'ctx> MirLowerer<'ctx> {
             }
             if let Some(view) =
                 self.vec_range_view(&arr_val, start.as_deref(), end.as_deref(), *inclusive)?
+            {
+                return Ok(view);
+            }
+            if let Some(view) =
+                self.slice_range_view(&arr_val, start.as_deref(), end.as_deref(), *inclusive)?
             {
                 return Ok(view);
             }

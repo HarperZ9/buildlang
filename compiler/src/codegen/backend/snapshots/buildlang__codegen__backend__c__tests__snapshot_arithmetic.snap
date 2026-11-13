@@ -761,6 +761,16 @@ static void* build_hvec_range(BuildVecHandle h, size_t es, int64_t start, int64_
     }
     return (char*)h.inner->ptr + (size_t)start * es;
 }
+// The data pointer from `start`, for a `&s[start..end]` view of a slice or a
+// fixed array of `len` elements. start <= end <= len, or the program stops with 101.
+static void* build_slice_range(void* data, int64_t len, size_t es, int64_t start, int64_t end) {
+    if (start < 0 || start > end || end > len) {
+        fprintf(stderr, "range %lld..%lld out of bounds for a slice of length %lld\n",
+                (long long)start, (long long)end, (long long)len);
+        exit(101);
+    }
+    return (char*)data + (size_t)start * es;
+}
 static int32_t build_hvec_pop_i32(BuildVecHandle h) {
     if (h.inner->len == 0) return 0;
     h.inner->len--;
