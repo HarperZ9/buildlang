@@ -11,6 +11,7 @@ use crate::ast;
 use crate::codegen::backend::{CodegenError, CodegenResult};
 use crate::codegen::builder::values;
 use crate::codegen::ir::*;
+use crate::lexer::Span;
 
 use super::MirLowerer;
 
@@ -77,21 +78,33 @@ impl MirLowerer<'_> {
         &mut self,
         receiver: &ast::Expr,
         generics: &[ast::GenericArg],
+        span: Span,
     ) -> CodegenResult<MirValue> {
+        // Both refusals point at the `parse` name, so `check` reports the line.
+        let location = (span.end.0 > span.start.0).then_some((span.start.0, span.end.0));
         let target = match generics.first() {
             Some(ast::GenericArg::Type(t)) => Some(self.lower_type_from_ast(t)),
             _ => self.parse_target_hint.clone(),
         };
         let Some(target) = target else {
-            return Err(CodegenError::TypeError(
-                "`parse` needs its target type here: write `s.parse::<i32>()`".to_string(),
-            ));
+            return Err(CodegenError::Rejected {
+                message: "`parse` needs its target type here".to_string(),
+                location,
+                help: Some(
+                    "write the type: `s.parse::<i32>()`, or annotate the result: \
+                     `let r: Result<i32, str> = s.parse();`"
+                        .to_string(),
+                ),
+            });
         };
         let Some((func, extra)) = parse_call(&target) else {
-            return Err(CodegenError::TypeError(format!(
-                "`parse::<{target}>()` is not supported: parse gives an i8 to i64, \
-                 u8 to u64, isize, usize, f32 or f64"
-            )));
+            return Err(CodegenError::Rejected {
+                message: format!("`parse::<{target}>()` is not supported"),
+                location,
+                help: Some(
+                    "parse gives an i8 to i64, u8 to u64, isize, usize, f32 or f64".to_string(),
+                ),
+            });
         };
         let val = self.lower_expr(receiver)?;
         let val = self.deref_if_pointer(val)?;

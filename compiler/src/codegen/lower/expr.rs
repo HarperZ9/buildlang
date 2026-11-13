@@ -810,7 +810,7 @@ impl<'ctx> MirLowerer<'ctx> {
                 && args.is_empty()
                 && self.is_string_receiver(receiver) =>
             {
-                self.lower_string_parse(receiver, generics)
+                self.lower_string_parse(receiver, generics, method.span)
             }
             ExprKind::MethodCall {
                 receiver,
