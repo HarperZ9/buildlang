@@ -120,6 +120,15 @@ Sharpe, Sortino, Max Drawdown, Calmar, VaR (parametric + historical), CVaR, Beta
 - CSV import/export (Yahoo, TradingView, generic)
 - Synthetic data generation for testing
 
+### Offline Paper Kernel (`live_paper`)
+- Deterministic, offline paper-trading kernel: admission, grouping, features, fusion, risk, mandatory exits, sizing, simulated fills
+- Hash-chained paper accounting with reconciliation invariants
+- Fail-closed deterministic risk authority; model inference is disabled and abstains by design
+- No network access: the package gate verifies the import closure denies sockets, subprocesses, and environment reads
+
+### Crypto Replay (`crypto_replay`)
+- Deterministic offline replay contracts for crypto fills, tested on synthetic fixtures. No real fixture is admitted yet, and the real-fixture gate stays failed until one is
+
 ## GUI
 
 Professional interface matching Calibrate Pro's design:
@@ -156,9 +165,11 @@ build_finance/
   portfolio.py     Portfolio optimization (MV, BL, HRP, RP)
   market_data.py   Yahoo Finance, CoinGecko, CSV I/O
   broker.py        Paper trading + Alpaca API
-  autotrader.py    Automated trading engine
-  cli.py           Command-line interface
-  gui/             PyQt6 professional interface (6 pages)
+   autotrader.py    Automated trading engine
+   cli.py           Command-line interface
+   gui/             PyQt6 professional interface (6 pages)
+   live_paper/      Deterministic offline paper kernel (G2)
+   crypto_replay/   Deterministic crypto replay engine
 ```
 
 ## License

@@ -1,8 +1,20 @@
 /build_finance/crypto_replay/** text eol=lf
 /tests/crypto_replay/** text eol=lf
 /docs/crypto-replay/** text eol=lf
+/build_finance/live_paper/** text eol=lf
+/build_finance/paper_core_loader.py text eol=lf
+# The paper-core manifest pins this one file with CRLF line endings, as it was on the
+# machine that built the reviewed artifact. Keep CRLF on every checkout so the digest holds.
+/build_finance/__init__.py text eol=crlf
+/tests/live_paper/** text eol=lf
+/docs/live-paper/** text eol=lf
 /scripts/capture_crypto_replay_gate.py text eol=lf
 /scripts/verify_crypto_replay_artifacts.py text eol=lf
+/scripts/capture_live_paper_gate.py text eol=lf
+/scripts/capture_paper_core_gate.py text eol=lf
+/scripts/verify_live_paper_artifacts.py text eol=lf
+/scripts/build_paper_core_artifacts.py text eol=lf
+/scripts/run_network_denied.py text eol=lf
 
 # Repo art receipts (docs/art/receipts.json) record the SHA-256 of each output's
 # stored bytes, so Git must not rewrite line endings on checkout. Without this, a

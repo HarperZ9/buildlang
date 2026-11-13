@@ -84,3 +84,48 @@ jobs:
       - uses: actions/checkout@v4
       - name: Verify art receipt digests
         run: python3 scripts/check_art_receipts.py
+
+  g2-paper-core-package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install G2 gate dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install build ruff mypy
+          python -m pip install -e ".[test]"
+      - name: Run deterministic and confinement gates
+        run: |
+          python -m pytest tests/live_paper tests/crypto_replay -q -p no:cacheprovider
+          python scripts/run_network_denied.py --pytest tests/live_paper tests/crypto_replay -q -p no:cacheprovider
+          python scripts/run_network_denied.py --import build_finance.live_paper.kernel
+          python -m build_finance.crypto_replay.schema_codegen --scope full --check
+          python -m build_finance.live_paper.registry --check
+          ruff check build_finance/live_paper tests/live_paper scripts/capture_live_paper_gate.py scripts/capture_paper_core_gate.py scripts/verify_live_paper_artifacts.py scripts/run_network_denied.py scripts/build_paper_core_artifacts.py
+          mypy build_finance/live_paper
+      - name: Build exact paper-core artifact pair
+        run: python scripts/build_paper_core_artifacts.py --out-dir .artifacts/paper-core/dist
+      - name: Freeze paper-core artifact paths
+        id: paper_core_artifacts
+        run: >-
+          python -c "import os; from pathlib import Path; d=Path('.artifacts/paper-core/dist');
+          w=list(d.glob('*.whl')); s=list(d.glob('*.tar.gz'));
+          assert len(w)==len(s)==1, (w,s);
+          open(os.environ['GITHUB_OUTPUT'],'a',encoding='utf-8').write(f'wheel={w[0]}\nsdist={s[0]}\n')"
+      - name: Verify exact paper-core package closure
+        run: |
+          python scripts/verify_crypto_replay_artifacts.py --wheel "${{ steps.paper_core_artifacts.outputs.wheel }}" --sdist "${{ steps.paper_core_artifacts.outputs.sdist }}"
+          python scripts/verify_live_paper_artifacts.py --wheel "${{ steps.paper_core_artifacts.outputs.wheel }}" --sdist "${{ steps.paper_core_artifacts.outputs.sdist }}" --receipt docs/live-paper/evidence/G2-green.json --promotion-status docs/live-paper/promotion-status.json --transcript docs/live-paper/evidence/G2-command-transcript.json
+      - name: Prove byte-identical rebuild
+        run: |
+          python scripts/build_paper_core_artifacts.py --out-dir .artifacts/paper-core/rebuild
+          cmp "${{ steps.paper_core_artifacts.outputs.wheel }}" .artifacts/paper-core/rebuild/*.whl
+          cmp "${{ steps.paper_core_artifacts.outputs.sdist }}" .artifacts/paper-core/rebuild/*.tar.gz
+      - name: Import the exact wheel without dependencies
+        run: |
+          python -m venv .artifacts/paper-core/import-venv
+          .artifacts/paper-core/import-venv/bin/python -m pip install --no-index --no-deps "${{ steps.paper_core_artifacts.outputs.wheel }}"
+          .artifacts/paper-core/import-venv/bin/python -I -c "import build_finance.live_paper.kernel"
