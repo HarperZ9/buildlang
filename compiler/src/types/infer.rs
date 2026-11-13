@@ -140,6 +140,7 @@ pub struct TypeInfer<'ctx> {
     unifier: Unifier,
     /// Collected errors.
     errors: Vec<TypeErrorWithSpan>,
+    resume_tails: Option<Vec<crate::lexer::Span>>,
     /// The expected return type of the current function.
     return_ty: Option<Ty>,
     /// Trait environment for resolution.
@@ -487,6 +488,7 @@ impl<'ctx> TypeInfer<'ctx> {
             ctx,
             unifier: Unifier::new(),
             errors: Vec::new(),
+            resume_tails: None,
             return_ty: None,
             trait_env: None,
             builtin_traits: None,
@@ -536,6 +538,7 @@ impl<'ctx> TypeInfer<'ctx> {
             ctx,
             unifier: Unifier::new(),
             errors: Vec::new(),
+            resume_tails: None,
             return_ty: None,
             trait_env: Some(trait_env),
             builtin_traits: Some(builtin_traits),
@@ -3226,6 +3229,13 @@ impl<'ctx> TypeInfer<'ctx> {
             } => self.infer_handle(effect, body, handlers, expr.span),
 
             ExprKind::Resume(value) => {
+                if !self
+                    .resume_tails
+                    .as_ref()
+                    .is_some_and(|t| t.contains(&expr.span))
+                {
+                    self.error(TypeError::UnsupportedConstruct { construct: "resume outside tail position".to_string(), detail: "`resume(value)` must be the last thing a handler clause does, as in `Ask.ask() => |resume| { resume(4) }`; resuming from anywhere else needs full one-shot continuations, which are not implemented yet".to_string() }, expr.span);
+                }
                 // Resume transfers control back to the handler's continuation.
                 // The value passed to resume must match the operation's return type.
                 if let Some(val) = value {
@@ -5578,7 +5588,13 @@ impl<'ctx> TypeInfer<'ctx> {
                     self.bind_pattern(&p.pattern, &ty);
                 }
                 // Infer the handler body type
+                let (tails, plain) = super::resume_tail::tail_resumes(&handler.body);
+                if !tails.is_empty() && plain {
+                    self.error(TypeError::UnsupportedConstruct { construct: "a handler clause that resumes on some paths only".to_string(), detail: "every exit of a clause that calls `resume` must be `resume(value)`; end each branch with `resume(..)`, or drop `resume` so the clause value ends the `handle`".to_string() }, handler.span);
+                }
+                let saved_tails = self.resume_tails.replace(tails);
                 let _ = self.infer_expr(&handler.body);
+                self.resume_tails = saved_tails;
                 self.pop_scope();
             }
 

@@ -1,0 +1,27 @@
+fn rest(s: &[i32]) -> &[i32] { if s.len() > 1 { return &s[1..]; } s }
+fn pick(s: &[i32], c: bool) -> &[i32] { if c { &s[1..] } else { s } }
+fn first_two(s: &[i32]) -> &[i32] { let t = &s[..2]; t }
+fn tail(s: &[i32]) -> &[i32] { &s[1..] }
+fn mid(s: &[i32]) -> &[i32] { &s[1..=2] }
+fn total(s: &[i32]) -> i32 { let mut t: i32 = 0; for x in s { t = t + *x; } t }
+fn main() ~ Console {
+    let a = [1, 2, 3, 4];
+    let r = rest(&a);
+    println!("{} {} {}", r.len(), r[0], total(r));
+    println!("{} {}", pick(&a, true).len(), pick(&a, false).len());
+    let f = first_two(&a);
+    println!("{} {} {}", f.len(), f[0], f[1]);
+    println!("{} {}", tail(&a)[0], total(tail(tail(&a))));
+    let m = mid(&a);
+    println!("{} {} {}", m.len(), m[0], m[1]);
+    let one = [7];
+    println!("{}", rest(&one).len());
+    let w = &a[2..];
+    println!("{} {}", w.len(), w[1]);
+    let s: &[i32] = &a;
+    let e = &s[2..2];
+    println!("{} {}", e.len(), e.is_empty());
+    let mut n = 0;
+    for x in &a[..3] { n = n + *x; }
+    println!("{}", n);
+}

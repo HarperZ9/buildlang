@@ -122,8 +122,9 @@ impl<'ctx> MirLowerer<'ctx> {
         }
     }
 
-    /// `{ ptr, len }` for a `&[elem]`, and the address of it.
-    fn slice_from_parts(
+    /// `{ ptr, len }` for a `&[elem]`. The C backend carries the view as this
+    /// struct by value, so the address taken here is the struct itself.
+    pub(super) fn slice_from_parts(
         &mut self,
         ptr: MirValue,
         len: MirValue,

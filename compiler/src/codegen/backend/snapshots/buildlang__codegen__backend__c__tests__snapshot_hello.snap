@@ -750,6 +750,27 @@ static void* build_hvec_data(BuildVecHandle h, size_t es) {
     if (h.inner->elem_size != es) bl_vec_layout_fail(h.inner->elem_size, es);
     return h.inner->ptr;
 }
+// The element buffer from `start`, for a `&v[start..end]` view. As in Rust the
+// range must satisfy start <= end <= len, or the program stops with 101.
+static void* build_hvec_range(BuildVecHandle h, size_t es, int64_t start, int64_t end) {
+    if (h.inner->elem_size != es) bl_vec_layout_fail(h.inner->elem_size, es);
+    if (start < 0 || start > end || (uint64_t)end > (uint64_t)h.inner->len) {
+        fprintf(stderr, "range %lld..%lld out of bounds for a vector of length %zu\n",
+                (long long)start, (long long)end, h.inner->len);
+        exit(101);
+    }
+    return (char*)h.inner->ptr + (size_t)start * es;
+}
+// The data pointer from `start`, for a `&s[start..end]` view of a slice or a
+// fixed array of `len` elements. start <= end <= len, or the program stops with 101.
+static void* build_slice_range(void* data, int64_t len, size_t es, int64_t start, int64_t end) {
+    if (start < 0 || start > end || end > len) {
+        fprintf(stderr, "range %lld..%lld out of bounds for a slice of length %lld\n",
+                (long long)start, (long long)end, (long long)len);
+        exit(101);
+    }
+    return (char*)data + (size_t)start * es;
+}
 static int32_t build_hvec_pop_i32(BuildVecHandle h) {
     if (h.inner->len == 0) return 0;
     h.inner->len--;
@@ -2354,6 +2375,10 @@ typedef struct BuildHandler {
     int32_t effect_id;
     void* handler_data;
     struct BuildHandler* parent;
+    int32_t tail_count;
+    int32_t tail_op[8];
+    void* tail_fn[8];
+    void** tail_env[8];
 } BuildHandler;
 
 // Global handler stack
@@ -2363,8 +2388,20 @@ static BuildHandler* __build_handler_stack = NULL;
 static void build_push_handler(BuildHandler* h, int32_t effect_id) {
     h->effect_id = effect_id;
     h->handler_data = NULL;
+    h->tail_count = 0;
     h->parent = __build_handler_stack;
     __build_handler_stack = h;
+}
+
+// A clause that resumes from tail position runs at the perform site:
+// fn(args, caps, result) with args.handler_data = argv, caps.handler_data = env.
+typedef void (*BuildTailClause)(BuildHandler args, BuildHandler caps, void* result);
+static void build_handler_tail(BuildHandler* h, int32_t op_id, void* fn, void** env) {
+    if (h->tail_count >= 8) { fprintf(stderr, "a handle has more than 8 resuming clauses\n"); exit(101); }
+    h->tail_op[h->tail_count] = op_id;
+    h->tail_fn[h->tail_count] = fn;
+    h->tail_env[h->tail_count] = env;
+    h->tail_count++;
 }
 
 // Pop a handler from the stack
@@ -2379,6 +2416,16 @@ static void build_perform(int32_t effect_id, int32_t op_id, void* arg, void* res
     BuildHandler* h = __build_handler_stack;
     while (h) {
         if (h->effect_id == effect_id) {
+            for (int32_t i = 0; i < h->tail_count; i++) {
+                if (h->tail_op[i] != op_id) continue;
+                BuildHandler args = *h; args.handler_data = arg;
+                BuildHandler caps = *h; caps.handler_data = (void*)h->tail_env[i];
+                BuildHandler* saved = __build_handler_stack;
+                __build_handler_stack = h->parent;
+                ((BuildTailClause)h->tail_fn[i])(args, caps, result);
+                __build_handler_stack = saved;
+                return;
+            }
             h->handler_data = arg;
             longjmp(h->env, op_id + 1); // +1 because setjmp returns 0 on first call
         }

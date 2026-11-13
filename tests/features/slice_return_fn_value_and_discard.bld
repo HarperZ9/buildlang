@@ -1,0 +1,11 @@
+fn mid(v: &Vec<i32>) -> &[i32] { &v[1..3] }
+fn sum(s: &[i32]) -> i32 { let mut t: i32 = 0; for x in s { t = t + *x; } t }
+fn apply(f: fn(&Vec<i32>) -> &[i32], v: &Vec<i32>) -> i32 { sum(f(v)) }
+fn main() ~ Console {
+    let v: Vec<i32> = vec![10, 20, 30, 40];
+    let f: fn(&Vec<i32>) -> &[i32] = mid;
+    let s = f(&v);
+    println!("{} {} {}", s.len(), s[0], s[1]);
+    mid(&v);
+    println!("{}", apply(mid, &v));
+}

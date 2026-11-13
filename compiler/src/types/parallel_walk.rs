@@ -73,7 +73,7 @@ pub(super) fn stmt_exprs(stmt: &ast::Stmt, out: &mut Vec<Expr>) {
 }
 
 /// The immediate child expressions of `e`.
-pub(super) fn children(e: &Expr) -> Vec<Expr> {
+pub(crate) fn children(e: &Expr) -> Vec<Expr> {
     let mut out: Vec<Expr> = Vec::new();
     let one = |x: &Expr, out: &mut Vec<Expr>| out.push(x.clone());
     match &e.kind {

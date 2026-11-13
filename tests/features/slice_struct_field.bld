@@ -1,0 +1,8 @@
+struct View { tag: i32, data: &[i32] }
+fn total(s: &[i32]) -> i32 { let mut t: i32 = 0; for x in s { t = t + *x; } t }
+fn make(v: &Vec<i32>) -> View { View { tag: 7, data: &v[1..4] } }
+fn main() ~ Console {
+    let v: Vec<i32> = vec![1, 2, 3, 4, 5];
+    let w = make(&v);
+    println!("{} {} {} {}", w.tag, w.data.len(), w.data[0], total(w.data));
+}

@@ -49,6 +49,8 @@ handle { process_config() } with {
 }
 ```
 
+A handler clause resumes only from tail position. When every exit of the clause is `resume(value)` (the clause body, the last expression of a block, each `if` branch, each `match` arm), the clause runs at the `perform` site as a function: `perform` returns `value` and the code after the `perform` runs. A clause without `resume` ends the `handle`: its value becomes the value of the `handle` expression and the code after the `perform` does not run (setjmp/longjmp on the C backend). A `resume` anywhere else, and a clause that resumes on some paths only, are refused at check time. Full one-shot continuations, with `resume` in any position, are a later step.
+
 ## Why This Matters
 
 **Testing**: Swap the real file system handler for a mock - no dependency injection frameworks needed.
