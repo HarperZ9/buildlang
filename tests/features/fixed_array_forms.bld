@@ -1,0 +1,41 @@
+fn sum(s: &[i32]) -> i32 {
+    let mut t: i32 = 0;
+    for x in s { t = t + *x; }
+    t
+}
+fn count_big(s: &[f64], limit: f64) -> i32 {
+    let mut n: i32 = 0;
+    let mut i: usize = 0;
+    while i < s.len() { if s[i] > limit { n = n + 1; } i = i + 1; }
+    n
+}
+fn first(a: [i32; 3]) -> i32 { a[0] }
+fn bump(a: &mut [i32; 3]) { a[2] = a[2] + 100; }
+fn total(a: &[i32; 3]) -> i32 { a[0] + a[1] + a[2] + (a.len() as i32) }
+fn main() ~ Console {
+    let mut a: [i32; 3] = [1, 2, 3];
+    let z: [i32; 4] = [7; 4];
+    a[1] = 20;
+    println!("{} {} {} {}", a[1], a.len(), z[3], z.len());
+    println!("{} {}", a.is_empty(), z.is_empty());
+    println!("{} {} {}", sum(&a), sum(&z), first(a));
+    bump(&mut a);
+    println!("{} {}", a[2], total(&a));
+    for x in a { print!("{} ", x); }
+    println!("");
+    for x in &z { print!("{} ", *x); }
+    println!("");
+    let s: &[i32] = &a;
+    println!("{} {}", s.len(), s[0]);
+    for x in s { print!("{} ", *x); }
+    println!("");
+    let mut seen: i32 = 0;
+    for x in s { if *x > 10 { break; } seen = seen + 1; }
+    println!("{}", seen);
+    let f: [f64; 3] = [0.5, 2.5, 4.0];
+    println!("{}", count_big(&f, 1.0));
+    let mut i: usize = 0;
+    let mut m: [i32; 5] = [0; 5];
+    while i < m.len() { m[i] = (i as i32) * (i as i32); i = i + 1; }
+    println!("{} {}", m[4], sum(&m));
+}

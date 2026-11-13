@@ -10,7 +10,6 @@ async_await rejected
 const_generic rejected
 drop_trait broken
 effect_resume_value broken
-fixed_array_and_slice rejected
 float_exponent_format rejected
 macro_rules rejected
 trait_object_dyn rejected
