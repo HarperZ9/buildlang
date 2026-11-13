@@ -5191,6 +5191,25 @@ impl<'ctx> MirLowerer<'ctx> {
             (receiver_val, receiver_ty)
         };
 
+        // A fixed array `[T; N]`, held or borrowed, has the length in its type:
+        // `a.len()` is `N` and `a.is_empty()` is `N == 0`. Before, a held
+        // array's `len` was refused with BL0901.
+        let array_len = match &receiver_ty {
+            MirType::Array(_, n) => Some(*n),
+            MirType::Ptr(inner) => match inner.as_ref() {
+                MirType::Array(_, n) => Some(*n),
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some(n) = array_len.filter(|_| args.is_empty()) {
+            match method.name.as_ref() {
+                "len" => return Ok(MirValue::Const(MirConst::Int(n as i128, MirType::usize()))),
+                "is_empty" => return Ok(values::bool(n == 0)),
+                _ => {}
+            }
+        }
+
         // A slice (`&[T]` lowers to `Ptr(Slice(T))`) carries its length:
         // `xs.len()` reads it and `xs.is_empty()` compares it with 0.
         let is_slice = match &receiver_ty {
@@ -8876,6 +8895,20 @@ impl<'ctx> MirLowerer<'ctx> {
         };
         let iter_ty = self.type_of_value(&iter_val);
 
+        // `for x in s` over a slice `&[T]`: a loop to the slice's runtime
+        // length. Before, the check refused it (`cannot iterate over a *[T]`).
+        let slice_elem = match &iter_ty {
+            MirType::Slice(e) => Some((**e).clone()),
+            MirType::Ptr(inner) => match inner.as_ref() {
+                MirType::Slice(e) => Some((**e).clone()),
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some(elem_ty) = slice_elem {
+            return self.lower_for_slice(pattern, iter_val, iter_ty, elem_ty, body, label);
+        }
+
         // Determine if this is an array type and extract element type + length
         let (elem_ty, arr_len) = match &iter_ty {
             MirType::Array(elem, len) => (elem.as_ref().clone(), *len),
@@ -8990,6 +9023,84 @@ impl<'ctx> MirLowerer<'ctx> {
         let builder = self.current_fn.as_mut().unwrap();
         builder.switch_to_block(exit_block);
 
+        Ok(values::unit())
+    }
+
+    /// Lower `for x in s { body }` over a slice to an index loop that reads
+    /// the slice's `len` once and loads each element with the slice's own
+    /// bounds-checked indexing, as `s[i]` does.
+    fn lower_for_slice(
+        &mut self,
+        pattern: &ast::Pattern,
+        iter_val: MirValue,
+        iter_ty: MirType,
+        elem_ty: MirType,
+        body: &ast::Block,
+        label: Option<&ast::Ident>,
+    ) -> CodegenResult<MirValue> {
+        let builder = self
+            .current_fn
+            .as_mut()
+            .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
+        let slice = builder.create_local(iter_ty);
+        builder.assign(slice, MirRValue::Use(iter_val));
+        let len = builder.create_local(MirType::usize());
+        builder.assign(
+            len,
+            MirRValue::FieldAccess {
+                base: values::local(slice),
+                field_name: Arc::from("len"),
+                field_ty: MirType::usize(),
+            },
+        );
+        let idx = builder.create_local(MirType::usize());
+        builder.assign(
+            idx,
+            MirRValue::Use(MirValue::Const(MirConst::Int(0, MirType::usize()))),
+        );
+        let cond_block = builder.create_block();
+        let body_block = builder.create_block();
+        let incr_block = builder.create_block();
+        let exit_block = builder.create_block();
+        self.loop_stack
+            .push((incr_block, exit_block, label_name(label)));
+        let builder = self.current_fn.as_mut().unwrap();
+        builder.goto(cond_block);
+        builder.switch_to_block(cond_block);
+        let cmp = builder.create_local(MirType::Bool);
+        builder.binary_op(cmp, BinOp::Lt, values::local(idx), values::local(len));
+        builder.branch(values::local(cmp), body_block, exit_block);
+
+        builder.switch_to_block(body_block);
+        let elem = builder.create_local(elem_ty.clone());
+        builder.assign(
+            elem,
+            MirRValue::IndexAccess {
+                base: values::local(slice),
+                index: values::local(idx),
+                elem_ty: elem_ty.clone(),
+            },
+        );
+        let saved_vars = self.var_map.clone();
+        self.bind_for_pattern(pattern, elem, &elem_ty)?;
+        self.lower_block(body)?;
+        self.var_map = saved_vars;
+
+        let builder = self.current_fn.as_mut().unwrap();
+        builder.goto(incr_block);
+        builder.switch_to_block(incr_block);
+        let next = builder.create_local(MirType::usize());
+        builder.binary_op(
+            next,
+            BinOp::Add,
+            values::local(idx),
+            MirValue::Const(MirConst::Int(1, MirType::usize())),
+        );
+        builder.assign(idx, MirRValue::Use(values::local(next)));
+        builder.goto(cond_block);
+        self.loop_stack.pop();
+        let builder = self.current_fn.as_mut().unwrap();
+        builder.switch_to_block(exit_block);
         Ok(values::unit())
     }
 
