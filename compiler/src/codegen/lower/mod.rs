@@ -28,6 +28,7 @@ mod lowlevel;
 mod macros;
 mod option_combinators;
 pub(crate) mod parallel;
+mod slice_escape;
 mod string_parse;
 mod tail_resume;
 #[cfg(test)]
@@ -2686,6 +2687,7 @@ impl<'ctx> MirLowerer<'ctx> {
     /// main file, so `format!("hello {}", n)` in a module printed unrelated
     /// text from the main program.
     fn lower_function(&mut self, f: &ast::FnDef, attrs: &[ast::Attribute]) -> CodegenResult<()> {
+        slice_escape::check_fn(f)?;
         let own = crate::lexer::source_text_for_id(f.name.span.source_id)
             .filter(|_| f.name.span.source_id != crate::lexer::SourceId::ANONYMOUS);
         let Some(text) = own else {
