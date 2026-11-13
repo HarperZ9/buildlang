@@ -131,7 +131,7 @@ Sharpe, Sortino, Max Drawdown, Calmar, VaR (parametric + historical), CVaR, Beta
 
 ## Order gate
 
-All order paths submit through `OrderGate` (`build_finance/order_gate.py`). The gate applies a kill switch (`gate.halt()` or a `HALT` file in the state folder; only `gate.clear_halt()` unsets it), stop enforcement (buys without a stop get `stop_loss_pct`, breached stops close through the gate) and idempotent order ids (persisted in the state folder). Pass `state_dir` to `AutoTrader` to keep ids, stops and the halt flag across restarts; without it they live in memory only. `tests/test_order_gate_static.py` fails when a module outside the gate calls a broker's `submit_order`.
+All order paths submit through `OrderGate` (`build_finance/order_gate.py`). The gate applies a kill switch (`gate.halt()` or a `HALT` file in the state folder; only `gate.clear_halt()` unsets it). A halt is a full stop by default and refuses every order; `gate.halt(reason, allow_closes=True)` refuses buys and still sends sells, so stops keep closing positions while nothing new opens. The gate also applies stop enforcement (buys without a stop get `stop_loss_pct`, breached stops close through the gate) and idempotent order ids (persisted in the state folder). Pass `state_dir` to `AutoTrader` to keep ids, stops and the halt flag across restarts; without it they live in memory only. `tests/test_order_gate_static.py` fails when a module outside the gate calls a broker's `submit_order`.
 
 ## GUI
 

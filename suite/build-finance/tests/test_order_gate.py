@@ -76,6 +76,33 @@ class TestStops:
         assert [o["status"] for o in out] == [REFUSED]
         assert len(broker.calls) == 1
 
+    def test_closes_only_halt_refuses_buys_and_lets_stops_close(self, tmp_path):
+        broker = FakeBroker()
+        gate = OrderGate(broker, tmp_path, default_stop_pct=0.05)
+        buy(gate)
+        gate.halt("closes test", allow_closes=True)
+        assert gate.halt_mode() == "closes-only"
+        refused = buy(gate, decision="d2")
+        assert refused["status"] == REFUSED and "closes-only" in refused["reason"]
+        out = gate.enforce_stops({"AAA": 1.0})
+        assert [o["status"] for o in out] == [SENT]
+        assert broker.calls[-1][:3] == ("AAA", "sell", 10) and len(broker.calls) == 2
+
+    def test_halt_mode_persists_and_a_hand_made_file_is_a_full_stop(self, tmp_path):
+        broker = FakeBroker({"AAA": 5})
+        OrderGate(broker, tmp_path).halt("kept", allow_closes=True)
+        second = OrderGate(broker, tmp_path)
+        assert second.halt_mode() == "closes-only" and second.halted_reason() == "kept"
+        assert second.submit("AAA", "sell", 5, decision_id="s1")["status"] == SENT
+        second.halt("now everything")
+        assert OrderGate(broker, tmp_path).halt_mode() == "full-stop"
+        second.clear_halt()
+        (tmp_path / "HALT").write_text("", encoding="utf-8")
+        third = OrderGate(broker, tmp_path)
+        assert third.halt_mode() == "full-stop"
+        assert third.submit("AAA", "buy", 1, decision_id="b9", ref_price=10.0)["status"] == REFUSED
+        assert len(broker.calls) == 1
+
     def test_sell_beyond_holdings_refused(self, tmp_path):
         broker = FakeBroker({"AAA": 3})
         out = OrderGate(broker, tmp_path).submit("AAA", "sell", 4, decision_id="d")

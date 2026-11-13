@@ -5,8 +5,11 @@ action) submits through :class:`OrderGate`.  The gate enforces three rules
 before any broker method is reached:
 
 1. Kill switch: a halt flag held in process and in a file under the state
-   folder.  While set, every submit is refused.  Only :meth:`OrderGate.clear_halt`
-   (a person) unsets it.
+   folder.  A halt has two modes.  The default, a full stop, refuses every
+   submit.  The other, closes only, refuses buys and lets sells through, so
+   stops keep closing positions while nothing new opens.  A person picks the
+   mode with :meth:`OrderGate.halt` and unsets the halt with
+   :meth:`OrderGate.clear_halt`.
 2. Enforced stops: a buy must carry a stop below its reference price, or the
    gate attaches ``default_stop_pct``.  A buy with neither is refused.
    :meth:`OrderGate.enforce_stops` turns a breached stop into a closing sell
@@ -36,6 +39,7 @@ logger = logging.getLogger(__name__)
 SENT = "sent"
 REFUSED = "refused"
 DUPLICATE = "duplicate"
+CLOSES_ONLY = "closes-only"
 
 
 def client_order_id(
@@ -84,6 +88,7 @@ class OrderGate:
         self.broker = broker
         self.default_stop_pct = default_stop_pct
         self._halted_reason: str | None = None
+        self._halt_closes = False
         self._halt_file: Path | None = None
         ids_path = stops_path = None
         if state_dir is not None:
@@ -97,25 +102,51 @@ class OrderGate:
 
     # -- kill switch --------------------------------------------------------
 
-    def halt(self, reason: str = "manual halt") -> None:
-        """Set the halt flag in process and, if a state folder exists, on disk."""
+    def halt(self, reason: str = "manual halt", allow_closes: bool = False) -> None:
+        """Set the halt in process and, if a state folder exists, on disk.
+
+        ``allow_closes=False`` is a full stop.  ``allow_closes=True`` refuses
+        buys and still sends sells.  Calling again changes the mode.
+        """
         self._halted_reason = reason
+        self._halt_closes = allow_closes
         if self._halt_file is not None:
-            self._halt_file.write_text(reason, encoding="utf-8")
-        logger.error("Order gate halted: %s", reason)
+            head = CLOSES_ONLY + chr(10) if allow_closes else ""
+            self._halt_file.write_text(head + reason, encoding="utf-8")
+        logger.error("Order gate halted (%s): %s", self.halt_mode(), reason)
 
     def clear_halt(self) -> None:
         """Clear the halt.  Call this only on a person's decision."""
         self._halted_reason = None
+        self._halt_closes = False
         if self._halt_file is not None and self._halt_file.exists():
             self._halt_file.unlink()
+
+    def _halt_file_text(self) -> str | None:
+        if self._halt_file is not None and self._halt_file.exists():
+            return self._halt_file.read_text(encoding="utf-8")
+        return None
 
     def halted_reason(self) -> str | None:
         if self._halted_reason is not None:
             return self._halted_reason
-        if self._halt_file is not None and self._halt_file.exists():
-            return self._halt_file.read_text(encoding="utf-8") or "halt file present"
-        return None
+        text = self._halt_file_text()
+        if text is None:
+            return None
+        return text.removeprefix(CLOSES_ONLY).strip() or "halt file present"
+
+    def halt_mode(self) -> str | None:
+        """``"full-stop"``, ``"closes-only"`` or ``None`` when not halted.
+
+        A halt file a person made by hand is a full stop unless its first
+        line is ``closes-only``.
+        """
+        if self._halted_reason is not None:
+            return CLOSES_ONLY if self._halt_closes else "full-stop"
+        text = self._halt_file_text()
+        if text is None:
+            return None
+        return CLOSES_ONLY if text.splitlines()[:1] == [CLOSES_ONLY] else "full-stop"
 
     # -- submit -------------------------------------------------------------
 
@@ -132,9 +163,9 @@ class OrderGate:
         limit_price: float | None = None,
     ) -> dict[str, Any]:
         """Submit one order through every check.  A refusal does not raise."""
-        reason = self.halted_reason()
-        if reason is not None:
-            return self._refuse(f"halted: {reason}")
+        mode = self.halt_mode()
+        if mode is not None and not (mode == CLOSES_ONLY and side == "sell"):
+            return self._refuse(f"halted ({mode}): {self.halted_reason()}")
         if side not in ("buy", "sell") or not quantity or quantity <= 0:
             return self._refuse("invalid side or quantity")
         stop = stop_price
