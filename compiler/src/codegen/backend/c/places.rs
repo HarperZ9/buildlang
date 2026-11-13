@@ -23,7 +23,10 @@ fn deref_step(expr: String, ty: Option<MirType>) -> (String, Option<MirType>) {
         Some(MirType::Ptr(inner)) => Some(*inner),
         _ => None,
     };
-    if pointee.as_ref().is_some_and(is_array) {
+    if pointee
+        .as_ref()
+        .is_some_and(|t| is_array(t) || matches!(t, MirType::Slice(_)))
+    {
         (expr, pointee)
     } else {
         (format!("(*{expr})"), pointee)
@@ -37,6 +40,10 @@ fn deref_step(expr: String, ty: Option<MirType>) -> (String, Option<MirType>) {
 fn index_step(expr: &str, idx: &str, ty: Option<&MirType>) -> (String, Option<MirType>) {
     let chk = |len: String| format!("bl_idx_chk((long long)({idx}), {len})");
     let (through_ptr, inner) = match ty {
+        // A view is its slice struct by value: read it with `.`.
+        Some(MirType::Ptr(inner)) if matches!(inner.as_ref(), MirType::Slice(_)) => {
+            (false, Some(inner.as_ref()))
+        }
         Some(MirType::Ptr(inner)) => (true, Some(inner.as_ref())),
         other => (false, other),
     };
@@ -74,7 +81,8 @@ impl CBackend {
                 PlaceProjection::Deref => deref_step(expr, ty),
                 PlaceProjection::Field(_idx, name, fty) => {
                     let field = Self::escape_c_keyword(name);
-                    let through_ptr = matches!(ty, Some(MirType::Ptr(_)));
+                    let through_ptr = matches!(ty, Some(MirType::Ptr(_)))
+                        && !ty.as_ref().is_some_and(Self::is_slice_ref);
                     let sep = if through_ptr { "->" } else { "." };
                     let base = if through_ptr {
                         expr
@@ -112,7 +120,11 @@ impl CBackend {
         locals: &[MirLocal],
     ) -> CodegenResult<String> {
         let (expr, ty) = self.place_to_c_typed(place, locals)?;
-        if ty.as_ref().is_some_and(is_array) {
+        // A slice struct is its own view: a view is carried by value.
+        if ty
+            .as_ref()
+            .is_some_and(|t| is_array(t) || matches!(t, MirType::Slice(_)))
+        {
             Ok(format!("({expr})"))
         } else {
             Ok(format!("&({expr})"))

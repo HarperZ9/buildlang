@@ -201,7 +201,8 @@ impl CBackend {
     ) -> CodegenResult<bool> {
         let base_ty = local_ty(locals, base);
         let field_ty = self.struct_field_type(base_ty, field).cloned();
-        let arrow = matches!(base_ty, Some(MirType::Ptr(_)));
+        let arrow =
+            matches!(base_ty, Some(MirType::Ptr(_))) && !base_ty.is_some_and(Self::is_slice_ref);
         let target = format!(
             "{}{}{}",
             self.local_name(base, locals),

@@ -2862,6 +2862,16 @@ impl<'ctx> MirLowerer<'ctx> {
         let MirType::Slice(elem) = target.as_ref() else {
             return Ok(None);
         };
+        // `&[]` given to a `&[T]`: the empty view `{NULL, 0}` of T.
+        if let ExprKind::Ref { expr: inner, .. } = &arg.kind {
+            if matches!(&inner.kind, ExprKind::Array(elems) if elems.is_empty()) {
+                let null = MirValue::Const(MirConst::Null(MirType::Ptr(elem.clone())));
+                let zero = MirValue::Const(MirConst::Int(0, MirType::usize()));
+                return self
+                    .slice_from_parts(null, zero, elem, target.as_ref())
+                    .map(Some);
+            }
+        }
         let ExprKind::Ref { expr: inner, .. } = &arg.kind else {
             // A reference the function already holds (`v: &Vec<T>`).
             return self.forwarded_ref_as_slice(arg, elem, target.as_ref());
@@ -10721,6 +10731,16 @@ impl<'ctx> MirLowerer<'ctx> {
         // `&GLOBAL` of a mutable global is its address (G35).
         if let Some(ptr) = self.global_ref(inner)? {
             return Ok(ptr);
+        }
+        // `&[]` where a `&[T]` is expected: the empty view `{NULL, 0}` of T.
+        if matches!(&inner.kind, ExprKind::Array(elems) if elems.is_empty()) {
+            if let Some(MirType::Ptr(target)) = self.expected_type.clone() {
+                if let MirType::Slice(elem) = target.as_ref() {
+                    let null = MirValue::Const(MirConst::Null(MirType::Ptr(elem.clone())));
+                    let zero = MirValue::Const(MirConst::Int(0, MirType::usize()));
+                    return self.slice_from_parts(null, zero, elem, target.as_ref());
+                }
+            }
         }
         // `&v[a..b]` on a vector is already a `&[T]` view: no second borrow.
         if let ExprKind::Index { index, .. } = &inner.kind {

@@ -1556,6 +1556,10 @@ impl CBackend {
                         }
                     }
                 }
+                // A view is its slice struct by value.
+                MirType::Ptr(inner) if matches!(inner.as_ref(), MirType::Slice(_)) => {
+                    collect_type_deps(inner, type_names, out);
+                }
                 // Vec/Map/Ptr are behind pointers - no ordering needed
                 _ => {}
             }
@@ -3996,7 +4000,16 @@ impl CBackend {
     /// floats, pointers, and function pointers fit inline in the runtime union;
     /// structs, tuples, arrays, collection handles, and nested Options box so
     /// their value representation round-trips through C without truncation.
+    /// `&[T]` / `&mut [T]`: carried as its slice struct by value in C.
+    pub(super) fn is_slice_ref(ty: &MirType) -> bool {
+        matches!(ty, MirType::Ptr(inner) if matches!(inner.as_ref(), MirType::Slice(_)))
+    }
+
     fn payload_needs_boxing(ty: &MirType) -> bool {
+        // A view is a two-word struct by value, too wide for the union.
+        if Self::is_slice_ref(ty) {
+            return true;
+        }
         !matches!(
             ty,
             MirType::Int(..)
@@ -4074,6 +4087,10 @@ impl CBackend {
             // which decays to the same pointer.
             MirType::Ptr(inner) => match inner.as_ref() {
                 MirType::Array(elem, _) => format!("{}*", self.type_to_c(elem)),
+                // A view (`&[T]`, `&mut [T]`) is carried as the `{ptr, len}`
+                // struct by value: a returned or stored view never names the
+                // frame that built it.
+                MirType::Slice(elem) => MirType::slice_type_name(elem).to_string(),
                 _ => format!("{}*", self.type_to_c(inner)),
             },
             MirType::Array(elem, len) => {
@@ -4405,7 +4422,7 @@ impl CBackend {
                 "{base_str}.ptr[bl_idx_chk((long long)({index_str}), {base_str}.len)]"
             )),
             MirType::Ptr(inner) if matches!(inner.as_ref(), MirType::Slice(_)) => Some(format!(
-                "{base_str}->ptr[bl_idx_chk((long long)({index_str}), {base_str}->len)]"
+                "{base_str}.ptr[bl_idx_chk((long long)({index_str}), {base_str}.len)]"
             )),
             _ => None,
         }
@@ -4611,9 +4628,11 @@ impl CBackend {
                 // with projections composes the lvalue (`&(arr[i].field)`) so a
                 // reference or a projected store writes through, never into a copy.
                 if place.projections.is_empty() {
+                    // An array is its own address in C, and a slice struct is
+                    // its own view (a view is carried by value).
                     let is_array = matches!(
                         locals.get(place.local.0 as usize).map(|l| &l.ty),
-                        Some(MirType::Array(..))
+                        Some(MirType::Array(..)) | Some(MirType::Slice(..))
                     );
                     if is_array {
                         self.local_name(place.local, locals)
@@ -4892,7 +4911,7 @@ impl CBackend {
                 let is_ptr = match base {
                     MirValue::Local(id) => locals
                         .get(id.0 as usize)
-                        .map(|l| l.ty.is_pointer())
+                        .map(|l| l.ty.is_pointer() && !Self::is_slice_ref(&l.ty))
                         .unwrap_or(false),
                     _ => false,
                 };

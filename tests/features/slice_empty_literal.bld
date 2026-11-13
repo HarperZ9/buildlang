@@ -1,0 +1,10 @@
+fn none() -> &[i32] { &[] }
+fn count(s: &[i32]) -> usize { s.len() }
+fn total(s: &[i32]) -> i32 { let mut t: i32 = 0; for x in s { t = t + *x; } t }
+fn main() ~ Console {
+    let e = none();
+    println!("{} {}", e.len(), e.is_empty());
+    println!("{} {}", count(&[]), total(&[]));
+    let b: &[i32] = &[];
+    println!("{} {} {}", b.len(), b.is_empty(), total(b));
+}
