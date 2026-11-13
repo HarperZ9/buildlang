@@ -69,6 +69,12 @@ impl RustBackend {
     }
 
     fn emit_runtime(&mut self) {
+        // The unwrap and expect traps the lowering calls. They stop the program with exit
+        // code 101, as the C runtime does. The Err payload is not printed on this backend.
+        self.writeln("fn bl_unwrap_none<S: AsRef<str>>(what: S) -> ! { eprintln!(\"{}\", what.as_ref()); std::process::exit(101) }");
+        self.writeln("fn bl_expect_none<S: AsRef<str>>(msg: S) -> ! { eprintln!(\"{}\", msg.as_ref()); std::process::exit(101) }");
+        self.writeln("fn bl_unwrap_fail<S: AsRef<str>, R>(what: S, _r: R, _kind: i32) -> ! { eprintln!(\"{}\", what.as_ref()); std::process::exit(101) }");
+        self.writeln("fn bl_expect_fail<S: AsRef<str>, R>(msg: S, _r: R, _kind: i32) -> ! { eprintln!(\"{}\", msg.as_ref()); std::process::exit(101) }");
         self.writeln("fn build_string_new<S: AsRef<str>>(s: S) -> String {");
         self.indent += 1;
         self.writeln("s.as_ref().to_string()");
