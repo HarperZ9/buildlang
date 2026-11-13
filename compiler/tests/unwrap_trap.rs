@@ -38,9 +38,15 @@ fn assert_traps(tag: &str, body: &str, stdout: &str, message: &str) {
     let Some((code, out, err)) = run(tag, body) else {
         return;
     };
-    assert_eq!(code, 101, "{tag}: must stop with 101; stdout {out} stderr {err}");
+    assert_eq!(
+        code, 101,
+        "{tag}: must stop with 101; stdout {out} stderr {err}"
+    );
     assert_eq!(out, stdout, "{tag}: stderr {err}");
-    assert!(err.contains(message), "{tag}: want {message:?} in stderr:\n{err}");
+    assert!(
+        err.contains(message),
+        "{tag}: want {message:?} in stderr:\n{err}"
+    );
 }
 
 #[test]

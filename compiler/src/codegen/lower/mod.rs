@@ -26,12 +26,12 @@ mod limits;
 mod lowlevel;
 mod macros;
 mod option_combinators;
-mod string_parse;
-mod unwrap_trap;
 pub(crate) mod parallel;
+mod string_parse;
 #[cfg(test)]
 mod tests;
 mod types;
+mod unwrap_trap;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;

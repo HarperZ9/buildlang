@@ -22415,13 +22415,19 @@ fn check_rejects_a_method_the_c_backend_cannot_compile() {
         "fn main() ~ Console {\n    let s = \"42\";\n    let n: i32 = s.parse().unwrap();\n    println!(\"{}\", n);\n}\n",
     );
     let (ok, text) = check_output(&fixture);
-    assert!(!ok, "check must reject .parse() with no target type:\n{text}");
+    assert!(
+        !ok,
+        "check must reject .parse() with no target type:\n{text}"
+    );
     assert!(text.contains("`parse` needs its target type"), "{text}");
     assert!(
         text.contains("3:"),
         "diagnostic should point at line 3:\n{text}"
     );
-    assert!(text.contains("help: write the type: `s.parse::<i32>()`"), "{text}");
+    assert!(
+        text.contains("help: write the type: `s.parse::<i32>()`"),
+        "{text}"
+    );
 }
 
 #[test]

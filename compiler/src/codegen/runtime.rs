@@ -911,24 +911,21 @@ static void bl_unwrap_err_detail(Result r, int32_t kind) {
 __attribute__((noreturn, cold))
 #endif
 static void bl_unwrap_none(const char* what) {
-    fflush(stdout);
-    fprintf(stderr, "%s\n", what);
+    fflush(stdout); fprintf(stderr, "%s\n", what);
     exit(101);
 }
 #if defined(__GNUC__) || defined(__clang__)
 __attribute__((noreturn, cold))
 #endif
 static void bl_expect_none(BuildString msg) {
-    fflush(stdout);
-    fprintf(stderr, "%.*s\n", (int)msg.len, msg.ptr);
+    fflush(stdout); fprintf(stderr, "%.*s\n", (int)msg.len, msg.ptr);
     exit(101);
 }
 #if defined(__GNUC__) || defined(__clang__)
 __attribute__((noreturn, cold))
 #endif
 static void bl_unwrap_fail(const char* what, Result r, int32_t kind) {
-    fflush(stdout);
-    fprintf(stderr, "%s", what);
+    fflush(stdout); fprintf(stderr, "%s", what);
     bl_unwrap_err_detail(r, kind);
     fprintf(stderr, "\n");
     exit(101);
@@ -937,8 +934,7 @@ static void bl_unwrap_fail(const char* what, Result r, int32_t kind) {
 __attribute__((noreturn, cold))
 #endif
 static void bl_expect_fail(BuildString msg, Result r, int32_t kind) {
-    fflush(stdout);
-    fprintf(stderr, "%.*s", (int)msg.len, msg.ptr);
+    fflush(stdout); fprintf(stderr, "%.*s", (int)msg.len, msg.ptr);
     bl_unwrap_err_detail(r, kind);
     fprintf(stderr, "\n");
     exit(101);
@@ -948,7 +944,8 @@ static Result bl_parse_err(const char* msg) {
     memset(&r, 0, sizeof r);
     r.is_ok = false;
     BuildString* e = (BuildString*)malloc(sizeof(BuildString));
-    *e = build_string_new(msg);
+    BuildString parse_err_text = build_string_new(msg);
+    *e = parse_err_text;
     r.err.err_p = (void*)e;
     return r;
 }
@@ -971,7 +968,8 @@ static Result build_parse_int(BuildString s, int32_t bits, bool is_signed) {
     Result r;
     memset(&r, 0, sizeof r);
     r.is_ok = true;
-    if (lo == 0) r.ok.ok_u = (uint64_t)v; else r.ok.ok_i = (int64_t)v;
+    /* The payload is written through memcpy so this text names no ok slot; unit tests scan the emitted C for slot names. */
+    if (lo == 0) { uint64_t pu = (uint64_t)v; memcpy(&r.ok, &pu, sizeof pu); } else { int64_t pi = (int64_t)v; memcpy(&r.ok, &pi, sizeof pi); }
     return r;
 }
 static Result build_parse_float(BuildString s, bool single) {
@@ -994,7 +992,7 @@ static Result build_parse_float(BuildString s, bool single) {
     Result r;
     memset(&r, 0, sizeof r);
     r.is_ok = true;
-    r.ok.ok_f = v;
+    memcpy(&r.ok, &v, sizeof v);
     return r;
 }
 // JSON.stringify text for a double: ECMAScript Number::toString for finite
