@@ -21,7 +21,7 @@ fn unsupported<T>(msg: String) -> CodegenResult<T> {
 }
 
 /// (size, load, store) for a scalar element type.
-fn mem_ops(ty: &MirType) -> Option<(u32, &'static str, &'static str)> {
+pub(super) fn mem_ops(ty: &MirType) -> Option<(u32, &'static str, &'static str)> {
     Some(match ty {
         MirType::Bool => (1, "i32.load8_u", "i32.store8"),
         MirType::Int(IntSize::I8, signed) => (
@@ -202,6 +202,9 @@ impl WasmBackend {
         stmt: &MirStmt,
         func: &MirFunction,
     ) -> CodegenResult<bool> {
+        if self.gen_struct_stmt(stmt, func)? {
+            return Ok(true);
+        }
         match &stmt.kind {
             MirStmtKind::IndexStore {
                 base,
@@ -301,11 +304,15 @@ impl WasmBackend {
                 | MirRValue::UnaryOp { .. }
                 | MirRValue::Cast { .. }
                 | MirRValue::IndexAccess { .. }
-                | MirRValue::Repeat { .. } => true,
-                MirRValue::Aggregate { kind, .. } => matches!(kind, AggregateKind::Array(_)),
+                | MirRValue::Repeat { .. }
+                | MirRValue::FieldAccess { .. } => true,
+                MirRValue::Aggregate { kind, .. } => {
+                    matches!(kind, AggregateKind::Array(_) | AggregateKind::Struct(_))
+                }
                 _ => false,
             },
             MirStmtKind::IndexStore { .. }
+            | MirStmtKind::FieldAssign { .. }
             | MirStmtKind::StorageLive(_)
             | MirStmtKind::StorageDead(_)
             | MirStmtKind::Nop => true,

@@ -10,22 +10,16 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const RUNNER: &str = r#"
+const { load } = require(process.argv[1]);
 const fs = require('fs');
-const bytes = fs.readFileSync(process.argv[1]);
-let mem; let out = '';
-const env = {
-  print_i64: v => { out += v.toString(); },
-  print_u64: v => { out += BigInt.asUintN(64, v).toString(); },
-  print_f64: v => { out += String(v); },
-  print_bool: v => { out += v ? 'true' : 'false'; },
-  print_str: (p, l) => { out += Buffer.from(new Uint8Array(mem.buffer, p, l)).toString('utf8'); },
-};
-WebAssembly.instantiate(bytes, { env }).then(({ instance }) => {
-  mem = instance.exports.memory;
-  instance.exports.main();
-  process.stdout.write(out);
-}).catch(e => { console.error(String(e)); process.exit(1); });
+let out = '';
+load(fs.readFileSync(process.argv[2]), { write: (s) => { out += s; } })
+  .then((m) => { m.main(); process.stdout.write(out); })
+  .catch((e) => { console.error(String(e)); process.exit(1); });
 "#;
+
+/// The page loader under test; the Node runs go through it.
+const LOADER: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/wasm/loader.js");
 
 const PROGRAMS: [(&str, &str, &str); 5] = [
     (
@@ -142,6 +136,7 @@ fn run_wasm(wasm: &Path) -> String {
     let out = Command::new("node")
         .arg("-e")
         .arg(RUNNER)
+        .arg(LOADER)
         .arg(wasm)
         .output()
         .expect("spawn node");
@@ -249,6 +244,154 @@ fn sha256_package_digests_match_c_backend_in_node() {
     match run_c(&src) {
         Some(c_out) => assert_eq!(got, c_out, "sha256: WASM and C backends disagree"),
         None => eprintln!("sha256: C comparison skipped; checked against the literal"),
+    }
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// The sha256 package built as a library: the host calls `sha256_hex` with
+/// strings it supplies at run time and checks each digest against Node's crypto.
+#[test]
+fn sha256_library_exports_called_from_node_match_node_crypto() {
+    if !node_available() {
+        eprintln!("SKIP wasm_node: `node` is not on PATH; nothing was run");
+        return;
+    }
+    let host = r#"
+const { load } = require(process.argv[1]);
+const fs = require('fs');
+const crypto = require('crypto');
+let big = '';
+for (let i = 0; i < 1000; i++) big += String.fromCharCode(97 + ((i * 7) % 26));
+const inputs = ['abc', 'The quick brown fox jumps over the lazy dog', big];
+load(fs.readFileSync(process.argv[2]), { write: () => {} }).then((m) => {
+  for (const s of inputs) {
+    const got = m.readStr(m.exports.sha256_hex(m.str(s)));
+    const want = crypto.createHash('sha256').update(s).digest('hex');
+    console.log(s.length + ' ' + got + ' ' + want);
+  }
+}).catch((e) => { console.error(String(e)); process.exit(1); });
+"#;
+    let dir = std::env::temp_dir().join(format!("bl-wasm-shalib-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("create dir");
+    let wasm = dir.join("sha256.wasm");
+    let lib = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../registry/packages/sha256/1.0.0/src/lib.bld"
+    );
+    let build = Command::new(env!("CARGO_BIN_EXE_buildc"))
+        .arg(lib)
+        .args(["--target", "wasm", "-o"])
+        .arg(&wasm)
+        .output()
+        .expect("run buildc");
+    assert!(
+        build.status.success(),
+        "sha256 library build failed: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let out = Command::new("node")
+        .arg("-e")
+        .arg(host)
+        .arg(LOADER)
+        .arg(&wasm)
+        .output()
+        .expect("spawn node");
+    assert!(
+        out.status.success(),
+        "node: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8_lossy(&out.stdout).replace("\r\n", "\n");
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 3, "three digests expected, got {text}");
+    for (line, len) in lines.iter().zip(["3", "43", "1000"]) {
+        let parts: Vec<&str> = line.split(' ').collect();
+        assert_eq!(parts.len(), 3, "{line}");
+        assert_eq!(parts[0], len, "{line}");
+        assert_eq!(parts[1].len(), 64, "{line}");
+        assert_eq!(
+            parts[1], parts[2],
+            "wasm digest differs from Node crypto: {line}"
+        );
+    }
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// The merkle package (which `use`s sha256) built as one library module; the
+/// host builds leaf vectors and compares `merkle_root_hex` with an RFC 6962
+/// root computed by Node's crypto.
+#[test]
+fn merkle_package_root_matches_rfc6962_reference_in_node() {
+    if !node_available() {
+        eprintln!("SKIP wasm_node: `node` is not on PATH; nothing was run");
+        return;
+    }
+    let host = r#"
+const { load } = require(process.argv[1]);
+const fs = require('fs');
+const crypto = require('crypto');
+const h = (...parts) => crypto.createHash('sha256').update(Buffer.concat(parts)).digest();
+const mth = (ls) => {
+  if (ls.length === 1) return h(Buffer.from([0]), ls[0]);
+  let k = 1;
+  while (k * 2 < ls.length) k *= 2;
+  return h(Buffer.from([1]), mth(ls.slice(0, k)), mth(ls.slice(k)));
+};
+const sets = [1, 2, 3, 7, 16].map((n) =>
+  Array.from({ length: n }, (_, i) => Buffer.from('leaf-' + i + '-' + 'x'.repeat(i))));
+load(fs.readFileSync(process.argv[2]), { write: () => {} }).then((m) => {
+  for (const leaves of sets) {
+    const handles = leaves.map((b) => m.bytes(b));
+    const got = m.readStr(m.exports.merkle_root_hex(m.handles(handles)));
+    console.log(leaves.length + ' ' + got + ' ' + mth(leaves).toString('hex'));
+  }
+}).catch((e) => { console.error(String(e)); process.exit(1); });
+"#;
+    let dir = std::env::temp_dir().join(format!("bl-wasm-merkle-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("create dir");
+    let wasm = dir.join("merkle.wasm");
+    let lib = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../registry/packages/merkle/1.0.0/src/lib.bld"
+    );
+    let build = Command::new(env!("CARGO_BIN_EXE_buildc"))
+        .arg(lib)
+        .args(["--target", "wasm", "-o"])
+        .arg(&wasm)
+        .output()
+        .expect("run buildc");
+    assert!(
+        build.status.success(),
+        "merkle library build failed: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let out = Command::new("node")
+        .arg("-e")
+        .arg(host)
+        .arg(LOADER)
+        .arg(&wasm)
+        .output()
+        .expect("spawn node");
+    assert!(
+        out.status.success(),
+        "node: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8_lossy(&out.stdout).replace("\r\n", "\n");
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 5, "five roots expected, got {text}");
+    // The C backend prints this root for the same three leaves (buildc run, 2026-11-13).
+    assert!(lines[2]
+        .starts_with("3 sha256:6268ab34683bcdf98c013555b86bfa156fe3e03a3020aeadb7fc69d36f660290 "));
+    for (line, n) in lines.iter().zip(["1", "2", "3", "7", "16"]) {
+        let parts: Vec<&str> = line.split(' ').collect();
+        assert_eq!(parts.len(), 3, "{line}");
+        assert_eq!(parts[0], n, "{line}");
+        assert_eq!(
+            parts[1],
+            format!("sha256:{}", parts[2]),
+            "wasm root differs from the RFC 6962 reference: {line}"
+        );
     }
     let _ = fs::remove_dir_all(&dir);
 }

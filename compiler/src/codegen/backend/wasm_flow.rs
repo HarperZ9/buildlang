@@ -44,6 +44,7 @@ impl WasmBackend {
         for (n, r) in self.plan_runtime(mir) {
             self.fl.fn_rets.insert(n, r);
         }
+        self.plan_structs(mir);
         for f in &mir.functions {
             if !f.is_declaration() {
                 self.fl
@@ -124,6 +125,7 @@ impl WasmBackend {
         }
         self.plan_frame(func)?;
         self.fl.local_decls.push(("$__fp".into(), "i32"));
+        self.fl.local_decls.push(("$__tmp".into(), "i32"));
         self.fl.local_decls.push(("$__bb".into(), "i32"));
         self.fl.local_decls.push(("$__switch_val".into(), "i64"));
         for (name, ty) in self.fl.local_decls.clone() {
@@ -612,7 +614,7 @@ impl WasmBackend {
             };
             spec.types.push((params, results));
             spec.funcs.push(spec.types.len() as u32 - 1);
-            if f.is_public || &*f.name == "main" {
+            if !f.name.starts_with("__") {
                 spec.exports
                     .push((f.name.to_string(), func_index[&*f.name]));
             }
@@ -641,6 +643,11 @@ impl WasmBackend {
             spec.types.push(ty);
             spec.funcs.push(spec.types.len() as u32 - 1);
             spec.bodies.push(body);
+        }
+        for n in ["__alloc", "__str_new"] {
+            if let Some(i) = func_index.get(n) {
+                spec.exports.push((n.to_string(), *i));
+            }
         }
         let (limit, sp, pages) = self.layout();
         spec.memory_pages = pages;

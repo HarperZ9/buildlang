@@ -32,6 +32,8 @@ mod flow;
 mod mem;
 #[path = "wasm_rt.rs"]
 mod rt;
+#[path = "wasm_struct.rs"]
+mod structs;
 
 // =============================================================================
 // WASI SYSCALL DEFINITIONS
@@ -878,37 +880,9 @@ impl WasmBackend {
                 }
             }
             MirRValue::FieldAccess {
-                base,
-                field_name,
-                field_ty,
+                base, field_name, ..
             } => {
-                // Struct field access: base is a pointer to the struct in memory.
-                // Load the base pointer, add the field offset, then load the value.
-                // We use a simplified fixed-size field layout (4 bytes per field).
-                self.emit_line(&format!(";; field access .{}", field_name));
-                self.gen_value(base, func)?;
-                // Compute field offset: for now, use a hash-based index as a
-                // rough placeholder.  In a real implementation the struct layout
-                // would be looked up from MirTypeDef.
-                let field_offset = field_name
-                    .bytes()
-                    .fold(0u32, |acc, b| acc.wrapping_add(b as u32))
-                    % 64;
-                let elem_size = self.type_size(field_ty);
-                self.emit_line(&format!(
-                    "i32.const {} ;; offset of .{}",
-                    field_offset * elem_size,
-                    field_name
-                ));
-                self.emit_line("i32.add");
-                // Load the field value with the appropriate instruction.
-                let load_instr = match self.emit_type(field_ty) {
-                    "f32" => "f32.load",
-                    "f64" => "f64.load",
-                    "i64" => "i64.load",
-                    _ => "i32.load",
-                };
-                self.emit_line(load_instr);
+                self.gen_field_load(base, field_name, func)?;
             }
             MirRValue::VariantField {
                 base,

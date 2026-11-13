@@ -13,7 +13,10 @@ use super::super::wasm_bin;
 use super::*;
 
 /// (suffix, width, value type, load, store)
-const ELEMS: [(&str, u32, &str, &str, &str); 11] = [
+const ELEMS: [(&str, u32, &str, &str, &str); 14] = [
+    ("struct", 4, "i32", "i32.load", "i32.store"),
+    ("BuildVecHandle", 4, "i32", "i32.load", "i32.store"),
+    ("str", 4, "i32", "i32.load", "i32.store"),
     ("i8", 1, "i32", "i32.load8_s", "i32.store8"),
     ("u8", 1, "i32", "i32.load8_u", "i32.store8"),
     ("i16", 2, "i32", "i32.load16_s", "i32.store16"),
@@ -38,6 +41,7 @@ pub(super) struct RtFunc {
 #[derive(Default)]
 pub(super) struct RtState {
     pub(super) funcs: Vec<RtFunc>,
+    pub(super) structs: HashMap<String, super::structs::StructLayout>,
 }
 
 fn mir_of(valtype: &str) -> MirType {
@@ -60,6 +64,11 @@ pub(super) fn runtime_target(name: &str) -> Option<String> {
     }
     let rest = name.strip_prefix("build_hvec_")?;
     let (op, sfx) = rest.split_once('_')?;
+    let sfx = if sfx.starts_with(|c: char| c.is_ascii_uppercase()) {
+        "struct"
+    } else {
+        sfx
+    };
     let known = ELEMS.iter().any(|e| e.0 == sfx);
     (known && matches!(op, "push" | "get" | "set" | "pop")).then(|| format!("__vec_{op}_{sfx}"))
 }
@@ -104,6 +113,9 @@ pub(super) fn vec_elem_suffix(ty: &MirType) -> Option<&'static str> {
         }
         MirType::Bool => "i32",
         MirType::Float(FloatSize::F64) => "f64",
+        MirType::Vec(_) => "BuildVecHandle",
+        MirType::Struct(n) if n.as_ref() == "BuildString" => "str",
+        MirType::Struct(_) => "struct",
         _ => return None,
     })
 }
@@ -206,6 +218,8 @@ impl WasmBackend {
     /// Collect the runtime helpers this module calls; returns their result types.
     pub(super) fn plan_runtime(&mut self, mir: &MirModule) -> Vec<(String, MirType)> {
         let mut names = BTreeSet::new();
+        // Every module exports an allocator and a string constructor for its host.
+        names.insert("__str_new".to_string());
         for func in &mir.functions {
             for block in func.blocks.iter().flatten() {
                 if let Some(MirTerminator::Call {
