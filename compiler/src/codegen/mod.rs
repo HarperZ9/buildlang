@@ -240,6 +240,15 @@ impl<'ctx> CodeGenerator<'ctx> {
                 let mut backend = backend::x86_64::X86_64Backend::new();
                 backend.generate(mir)
             }
+            Target::X86_64Pe | Target::X86_64Elf => {
+                use backend::x86_64_exe_asm::ExeOs;
+                let os = if self.target == Target::X86_64Pe {
+                    ExeOs::Windows
+                } else {
+                    ExeOs::Linux
+                };
+                backend::x86_64_exe::NativeExeBackend::new(os).generate(mir)
+            }
             Target::Arm64 => {
                 let mut backend = backend::arm64::Arm64Backend::new();
                 backend.generate(mir)

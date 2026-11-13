@@ -21,6 +21,10 @@ pub mod wasm;
 pub mod wasm_bin;
 pub mod x86_64;
 pub mod x86_64_enc;
+pub mod x86_64_exe;
+pub mod x86_64_exe_asm;
+pub mod x86_64_exe_obj;
+mod x86_64_exe_ops;
 
 use std::{fmt, str::FromStr};
 use thiserror::Error;
@@ -35,6 +39,10 @@ pub enum Target {
     C,
     /// x86-64 native code.
     X86_64,
+    /// x86-64 Windows executable (PE32+), written without outside tools.
+    X86_64Pe,
+    /// x86-64 Linux executable (ELF64), written without outside tools.
+    X86_64Elf,
     /// ARM64/AArch64 native code.
     Arm64,
     /// WebAssembly.
@@ -57,6 +65,8 @@ impl Target {
         match self {
             Target::C => "c",
             Target::X86_64 | Target::Arm64 => "o",
+            Target::X86_64Pe => "exe",
+            Target::X86_64Elf => "out",
             Target::Wasm => "wasm",
             Target::SpirV => "spv",
             Target::LlvmIr => "ll",
@@ -70,7 +80,7 @@ impl Target {
     pub fn pointer_size(&self) -> u32 {
         match self {
             Target::C => 64, // Assume 64-bit
-            Target::X86_64 => 64,
+            Target::X86_64 | Target::X86_64Pe | Target::X86_64Elf => 64,
             Target::Arm64 => 64,
             Target::Wasm => 32, // wasm32
             Target::SpirV => 64,
@@ -82,7 +92,10 @@ impl Target {
 
     /// Check if this is a native code target.
     pub fn is_native(&self) -> bool {
-        matches!(self, Target::X86_64 | Target::Arm64)
+        matches!(
+            self,
+            Target::X86_64 | Target::X86_64Pe | Target::X86_64Elf | Target::Arm64
+        )
     }
 
     /// Check if this is an intermediate representation target.
@@ -96,6 +109,8 @@ impl fmt::Display for Target {
         match self {
             Target::C => write!(f, "c"),
             Target::X86_64 => write!(f, "x86_64"),
+            Target::X86_64Pe => write!(f, "x86_64-windows"),
+            Target::X86_64Elf => write!(f, "x86_64-linux"),
             Target::Arm64 => write!(f, "arm64"),
             Target::Wasm => write!(f, "wasm"),
             Target::SpirV => write!(f, "spirv"),
