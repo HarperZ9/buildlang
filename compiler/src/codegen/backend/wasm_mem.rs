@@ -92,6 +92,12 @@ impl WasmBackend {
         self.emit_line(&format!("i32.const {}", self.mem.frame));
         self.emit_line("i32.sub");
         self.emit_line("local.tee $__fp");
+        self.emit_line("global.get $__stack_limit");
+        self.emit_line("i32.lt_u");
+        self.emit_line("if");
+        self.emit_line("unreachable");
+        self.emit_line("end");
+        self.emit_line("local.get $__fp");
         self.emit_line("global.set $__sp");
         let mut slots: Vec<(LocalId, u32)> =
             self.mem.slots.iter().map(|(id, s)| (*id, s.0)).collect();
@@ -159,6 +165,9 @@ impl WasmBackend {
         func: &MirFunction,
     ) -> CodegenResult<()> {
         if self.array_of(base).is_none() {
+            if let MirType::Vec(_) = self.infer_value_type(base, func)? {
+                return self.gen_vec_access("get", base, index, None, elem_ty, func);
+            }
             return unsupported("indexing a value that is not a fixed array local".into());
         }
         let Some((size, load, _)) = mem_ops(elem_ty) else {
@@ -198,6 +207,10 @@ impl WasmBackend {
                 value,
             } => {
                 if self.array_of(base).is_none() {
+                    if let MirType::Vec(_) = self.infer_value_type(base, func)? {
+                        self.gen_vec_access("set", base, index, Some(value), elem_ty, func)?;
+                        return Ok(true);
+                    }
                     return unsupported(
                         "indexed store to a value that is not a fixed array local".into(),
                     );

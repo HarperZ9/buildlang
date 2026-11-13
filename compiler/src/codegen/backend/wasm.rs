@@ -30,6 +30,8 @@ use crate::codegen::{GeneratedCode, OutputFormat};
 mod flow;
 #[path = "wasm_mem.rs"]
 mod mem;
+#[path = "wasm_rt.rs"]
+mod rt;
 
 // =============================================================================
 // WASI SYSCALL DEFINITIONS
@@ -201,6 +203,8 @@ pub struct WasmBackend {
     fl: flow::FlowState,
     /// Shadow stack frame and array slots.
     mem: mem::MemState,
+    /// In-module runtime helpers (heap, Vec).
+    rt: rt::RtState,
 }
 
 impl WasmBackend {
@@ -222,6 +226,7 @@ impl WasmBackend {
             threads: false,
             fl: flow::FlowState::default(),
             mem: mem::MemState::default(),
+            rt: rt::RtState::default(),
         }
     }
 

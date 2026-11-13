@@ -27,7 +27,7 @@ WebAssembly.instantiate(bytes, { env }).then(({ instance }) => {
 }).catch(e => { console.error(String(e)); process.exit(1); });
 "#;
 
-const PROGRAMS: [(&str, &str, &str); 4] = [
+const PROGRAMS: [(&str, &str, &str); 5] = [
     (
         "arith",
         "fn add_mul(a: i64, b: i64) -> i64 {\n    (a + b) * 3 - a / 2\n}\n\nfn main() ~ Console {\n    let r: i64 = add_mul(7, 5);\n    println(\"{}\", r);\n}\n",
@@ -78,6 +78,48 @@ const PROGRAMS: [(&str, &str, &str); 4] = [
 }
 "#,
         "sum 1073741840 bytes 4 cmp 1 div 1333333333 wrap 4\n",
+    ),
+
+    (
+        "vec_u8_u32_shared",
+        r#"fn fill(n: usize) -> Vec<u8> {
+    let mut v: Vec<u8> = Vec::new();
+    let mut i: usize = 0;
+    while i < n {
+        v.push((i % 251) as u8);
+        i = i + 1;
+    }
+    v
+}
+
+fn main() ~ Console {
+    let bytes: Vec<u8> = fill(1000);
+    let mut words: Vec<u32> = Vec::new();
+    let mut i: usize = 0;
+    while i < 100 {
+        words.push((i as u32) * 3000000_u32);
+        i = i + 1;
+    }
+    let mut bsum: u64 = 0;
+    let mut k: usize = 0;
+    while k < vec_len(bytes) {
+        bsum = bsum + (bytes[k] as u64);
+        k = k + 1;
+    }
+    let mut wsum: u32 = 0;
+    let mut j: usize = 0;
+    while j < vec_len(words) {
+        wsum = wsum.wrapping_add(words[j]);
+        j = j + 1;
+    }
+    let last: u32 = vec_pop(words);
+    let alias = words;
+    alias.push(7_u32);
+    println("bytes {} {} words {} {} last {} after {}", vec_len(bytes), bsum, vec_len(words), wsum, last, words[99]);
+}
+"#,
+        "bytes 1000 124506 words 100 1965098112 last 297000000 after 7
+",
     ),
 
 ];

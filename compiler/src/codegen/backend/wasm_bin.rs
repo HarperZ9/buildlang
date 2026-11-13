@@ -322,6 +322,9 @@ pub fn assemble_body(
                     .ok_or_else(|| format!("unknown global `{n}`"))?;
                 uleb(&mut code, *idx as u64);
             }
+            "memory.size" => code.extend([0x3f, 0x00]),
+            "memory.grow" => code.extend([0x40, 0x00]),
+            "memory.copy" => code.extend([0xfc, 0x0a, 0x00, 0x00]),
             "call" => {
                 let n = toks.get(1).ok_or("call without callee")?;
                 let idx = func_index

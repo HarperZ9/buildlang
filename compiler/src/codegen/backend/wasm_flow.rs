@@ -41,6 +41,9 @@ fn unsupported<T>(msg: String) -> CodegenResult<T> {
 impl WasmBackend {
     fn prepare_module(&mut self, mir: &MirModule) {
         self.fl = FlowState::default();
+        for (n, r) in self.plan_runtime(mir) {
+            self.fl.fn_rets.insert(n, r);
+        }
         for f in &mir.functions {
             if !f.is_declaration() {
                 self.fl
@@ -61,6 +64,14 @@ impl WasmBackend {
         let off = POOL_BASE + self.fl.pool.len() as u32;
         self.fl.pool.extend_from_slice(bytes);
         off
+    }
+
+    /// (stack limit, initial stack pointer and heap base, memory pages).
+    /// The shadow stack is 64 KiB above the data pool; the heap starts at its top.
+    fn layout(&self) -> (u32, u32, u32) {
+        let limit = (POOL_BASE + self.fl.pool.len() as u32 + 7) & !7;
+        let sp = limit + 65536;
+        (limit, sp, (sp / 65536 + 1).max(self.memory_pages))
     }
 
     pub(super) fn str_offset(&self, idx: usize) -> u32 {
@@ -275,6 +286,7 @@ impl WasmBackend {
             MirValue::Function(n) | MirValue::Global(n) => n.to_string(),
             _ => return unsupported("indirect calls in the WASM backend".into()),
         };
+        let name = super::rt::runtime_target(&name).unwrap_or(name);
         let ret = match name.as_str() {
             "build_string_new" => {
                 if let (Some(d), Some(MirValue::Const(MirConst::Str(i)))) = (dest, args.first()) {
@@ -291,9 +303,7 @@ impl WasmBackend {
                     Some(r) => r.clone(),
                     None => return unsupported(format!("no WASM runtime for `{}`", name)),
                 };
-                for arg in args {
-                    self.gen_value(arg, func)?;
-                }
+                self.gen_call_args(&name, args, func)?;
                 self.emit_line(&format!("call ${}", name));
                 ret
             }
@@ -461,10 +471,6 @@ impl WasmBackend {
             self.gen_wasi_imports();
         }
         self.gen_memory();
-        self.emit_line(&format!(
-            "(global $__sp (mut i32) (i32.const {}))",
-            self.memory_pages.max(1) * 65536
-        ));
         self.gen_types(mir);
         self.gen_globals(mir);
         self.gen_table(mir);
@@ -475,6 +481,14 @@ impl WasmBackend {
             self.gen_function(func)?;
         }
         self.gen_data_section();
+        self.runtime_wat();
+        let (limit, sp, _) = self.layout();
+        self.emit_line(&format!("(global $__sp (mut i32) (i32.const {}))", sp));
+        self.emit_line(&format!("(global $__heap (mut i32) (i32.const {}))", sp));
+        self.emit_line(&format!(
+            "(global $__stack_limit i32 (i32.const {}))",
+            limit
+        ));
         if self.wasi {
             self.gen_wasi_start(mir);
         }
@@ -499,9 +513,11 @@ impl WasmBackend {
             memory_pages: self.memory_pages.max(1),
             ..Default::default()
         };
-        spec.globals
-            .push((0x7f, true, spec.memory_pages as i64 * 65536));
-        let global_index: HashMap<String, u32> = [("$__sp".to_string(), 0)].into_iter().collect();
+        let global_index: HashMap<String, u32> =
+            [("$__sp", 0), ("$__heap", 1), ("$__stack_limit", 2)]
+                .iter()
+                .map(|(n, i)| (n.to_string(), *i))
+                .collect();
         let mut func_index: HashMap<String, u32> = HashMap::new();
         for (field, params) in PRINT_IMPORTS {
             let p = params
@@ -521,6 +537,10 @@ impl WasmBackend {
             .collect();
         for (i, f) in defined.iter().enumerate() {
             func_index.insert(f.name.to_string(), (spec.imports.len() + i) as u32);
+        }
+        let base = spec.imports.len() + defined.len();
+        for (k, rf) in self.rt.funcs.iter().enumerate() {
+            func_index.insert(rf.name.clone(), (base + k) as u32);
         }
         for f in defined {
             Self::check_binary_subset(f)?;
@@ -557,6 +577,16 @@ impl WasmBackend {
                     .map_err(|e| CodegenError::Unsupported(format!("`{}`: {}", f.name, e)))?;
             spec.bodies.push(body);
         }
+        for (ty, body) in self.runtime_binary(&func_index, &global_index)? {
+            spec.types.push(ty);
+            spec.funcs.push(spec.types.len() as u32 - 1);
+            spec.bodies.push(body);
+        }
+        let (limit, sp, pages) = self.layout();
+        spec.memory_pages = pages;
+        spec.globals.push((0x7f, true, sp as i64));
+        spec.globals.push((0x7f, true, sp as i64));
+        spec.globals.push((0x7f, false, limit as i64));
         if !self.fl.pool.is_empty() {
             spec.data.push((POOL_BASE, self.fl.pool.clone()));
         }
