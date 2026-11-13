@@ -347,9 +347,7 @@ def _safe_relative_path(path: str) -> str:
 def _is_excluded_entry(relative_path: str, relative_directory: str) -> bool:
     if relative_path == ".git":
         return True
-    return any(
-        relative_directory.startswith(prefix) or relative_path.startswith(prefix) for prefix in _EXCLUSION_PREFIXES
-    )
+    return any(relative_directory.startswith(prefix) or relative_path.startswith(prefix) for prefix in _EXCLUSION_PREFIXES)
 
 
 def _lstat(path: str, label: str) -> os.stat_result:
