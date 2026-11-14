@@ -28,11 +28,11 @@ server with completion, hover, diagnostics, and go-to-definition.
 
 ## See it work, step by step
 
-The [animated explainer](https://harperz9.github.io/repo-explainers/buildlang.html)
+The animated explainer in [docs/explainer/index.html](docs/explainer/index.html)
 shows an undeclared file read being rejected, a policy profile that denies it,
 a check receipt catching an edit, HLSL from a fragment function, and a
-heat-equation receipt that verifies while a forged one fails. Its source is
-[docs/explainer/index.html](docs/explainer/index.html).
+heat-equation receipt that verifies while a forged one fails. Open the file in a browser; it is not
+published on the site yet.
 
 ## Highlights
 
@@ -279,6 +279,8 @@ and `#[linear]` types are experimental. Release test results are in
 - [docs/PARALLEL.md](docs/PARALLEL.md): `par_for` and `par_map`, the checks that make a body safe to run in parallel, and measured speed-ups
 - [docs/LINEAR-TYPES.md](docs/LINEAR-TYPES.md): linear types
 - [DESIGN.md](DESIGN.md) and [ARCHITECTURE.md](ARCHITECTURE.md): pipeline and rationale
+- Build suite: [suite/](suite/) holds build-engine, build-ui, build-finance, build-oracle and
+  build-ecosystem, which were separate repositories before November 2026
 - Peers: [build-universe](https://github.com/HarperZ9/build-universe),
   [buildlang-vscode](https://github.com/HarperZ9/buildlang-vscode),
   [buildlang-tmLanguage](https://github.com/HarperZ9/buildlang-tmLanguage)
