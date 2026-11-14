@@ -1,0 +1,89 @@
+name: publish
+
+# Publish the buildlang crate and create the GitHub release when a version tag is pushed.
+#
+# crates.io trusted publishing: GitHub mints a short-lived OIDC identity and crates.io trades it
+# for a token that lasts for this run. No API token is stored in the repository or on a machine.
+#
+# One-time setup on crates.io, by a crate owner:
+#   crates.io -> buildlang -> Settings -> Trusted Publishing -> Add:
+#     Repository owner:  HarperZ9
+#     Repository name:   buildlang
+#     Workflow filename: publish.yml
+#     Environment:       (leave blank)
+#
+# The release PR moves the version in compiler/Cargo.toml and opens the CHANGELOG section first.
+# After it merges and CI is green on main, push the tag: git tag -a vX.Y.Z -m "BuildLang X.Y.Z"
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions: {}
+
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish to crates.io
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write   # trusted publishing (OIDC); no stored token
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Check the tag matches the crate version
+        run: |
+          version=$(grep -m1 '^version = ' compiler/Cargo.toml | sed 's/version = "\(.*\)"/\1/')
+          test "${GITHUB_REF_NAME}" = "v${version}" || { echo "tag ${GITHUB_REF_NAME} does not match crate version ${version}"; exit 1; }
+      - name: Check the tagged commit is on main
+        run: git merge-base --is-ancestor "${GITHUB_SHA}" origin/main
+      - name: Check the CHANGELOG has a section for this version
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          grep -q "^## ${version} " CHANGELOG.md || { echo "CHANGELOG.md has no section for ${version}"; exit 1; }
+      - name: Get a short-lived crates.io token
+        id: auth
+        uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
+      - name: Publish
+        working-directory: compiler
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+        run: cargo publish --locked
+
+  github-release:
+    name: Create the GitHub release
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # create the release
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Write the release notes from the CHANGELOG
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v v="$version" '$0 ~ "^## "v" " {on=1; next} on && /^## / {exit} on {print}' CHANGELOG.md > notes.md
+          test -s notes.md
+      - name: Create the release, or leave an existing one as it is
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          if gh release view "${GITHUB_REF_NAME}" > /dev/null 2>&1; then
+            echo "release ${GITHUB_REF_NAME} already exists; not changed"
+          else
+            gh release create "${GITHUB_REF_NAME}" --verify-tag --title "BuildLang ${version}" --notes-file notes.md
+          fi
