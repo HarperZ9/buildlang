@@ -152,7 +152,8 @@ value carries what it means.
 | 1.12.0 | M5 and P7 pass on a crates.io build | M5, P7 |
 | 1.13.0 | released 2026-11-09 with translation validation of effects and structs and verify V3; M6 not met, it moves to 1.14.0 | M6 |
 | 1.14.0 | released 2026-11-09 with typed vector access, `buildc build-hash`, a differential fuzz target and the `Vec::clear` fix; M6 not met, it moves to 1.15.0 | M6 |
-| 1.15.0 | M6 passes | M6 |
+| 1.15.0 | released 2026-11-14 with experimental x86-64 executable and WebAssembly binary targets, `Drop`, handlers that resume and the `port` tool; M6 not met, it moves to 1.16.0 | M6 |
+| 1.16.0 | M6 passes | M6 |
 | 2.0.0 | stages 1 to 4 pass and F1 to F3 pass | the frozen language |
 | 2.1.0 to 2.3.0 | each verification row passes | V1, V3, S1 to S3; V2, S4; V4, V5 |
 | 2.4.0 to 2.8.0 | each parity row passes, with its dated comparison | P1 to P4, P6 to P8, V6 to V8 |

@@ -11,7 +11,7 @@ Systems language with typed capability effects and native C output.
 cargo install buildlang
 ```
 
-[![version: 1.14.0](https://img.shields.io/badge/version-1.14.0-e6e1d6?style=flat-square&labelColor=1a1712)](https://github.com/HarperZ9/buildlang/releases/latest)
+[![version: 1.15.0](https://img.shields.io/badge/version-1.15.0-e6e1d6?style=flat-square&labelColor=1a1712)](https://github.com/HarperZ9/buildlang/releases/latest)
 [![CI](https://github.com/HarperZ9/buildlang/actions/workflows/ci.yml/badge.svg)](https://github.com/HarperZ9/buildlang/actions/workflows/ci.yml)
 [![license](https://img.shields.io/badge/license-AGPL--3.0--only-e6e1d6?style=flat-square&labelColor=1a1712)](https://github.com/HarperZ9/buildlang/blob/main/LICENSE)
 ![rust edition 2021](https://img.shields.io/badge/rust-edition_2021-e6e1d6?style=flat-square&labelColor=1a1712)
@@ -75,7 +75,7 @@ published on the site yet.
 
 ## Install
 
-From crates.io (installs the `buildc` binary, version 1.14.0):
+From crates.io (installs the `buildc` binary, version 1.15.0):
 
 ```bash
 cargo install buildlang
@@ -265,7 +265,7 @@ harness shim, and Flywheel tool-call receipts (`flywheel.tool-call-receipt/v1`).
 
 ## Status
 
-BuildLang 1.14.0. The C backend, effect checking, HLSL and GLSL output, and
+BuildLang 1.15.0. The C backend, effect checking, HLSL and GLSL output, and
 receipts are the supported core. SPIR-V, LLVM IR, WASM, Rust, x86-64, ARM64, GPU dispatch
 and `#[linear]` types are experimental. Release test results are in
 [STATUS.md](STATUS.md) and changes in [CHANGELOG.md](CHANGELOG.md).
