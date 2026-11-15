@@ -88,7 +88,6 @@ pub(crate) fn run(dir: &Path, early: &mut Option<Diagnostic>) -> Result<CheckOut
         source: input.source,
         ledger,
         origins: Some(&input.line_map),
-        entry: None,
     };
     crate::run_check_unit(unit, early)
 }

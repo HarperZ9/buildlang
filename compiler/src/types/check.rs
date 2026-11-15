@@ -39,87 +39,6 @@ pub struct FunctionEffectSummary {
     pub propagated_effects: BTreeMap<String, BTreeSet<String>>,
 }
 
-/// Whether `name` is a `std::` or `core::` module the compiler provides
-/// itself, with no file behind it.
-pub fn is_builtin_std_module(name: &str) -> bool {
-    BUILTIN_STD_MODULES.contains(&name)
-}
-
-/// The module file a `use` path names: `a/b.bld`, `a/b/lib.bld` or
-/// `a/b/mod.bld` in `start` or one of the seven directories above it. The
-/// driver merges this file; the checker verifies the path against it. Both
-/// call this one function so they cannot disagree about the file.
-pub fn find_use_module_file(start: &std::path::Path, module_segs: &[Arc<str>]) -> Option<PathBuf> {
-    if module_segs.is_empty() {
-        return None;
-    }
-    let mut cur: Option<&std::path::Path> = Some(start);
-    for _ in 0..8 {
-        let root = cur?;
-        if let Some(f) = TypeChecker::use_module_candidate(root, module_segs) {
-            return Some(f);
-        }
-        cur = root.parent();
-    }
-    None
-}
-
-/// The top-level item names of a module file that lexes and parses with no
-/// error, or `None`. A file with a parse error is never merged into the
-/// program that imports it.
-pub fn clean_module_export_names(path: &std::path::Path) -> Option<HashSet<Arc<str>>> {
-    let (names, _) = parse_module_names(path, false)?;
-    Some(names)
-}
-
-/// Lex and parse `path` and return its top-level item names, with the last
-/// name of each of its own `use` paths when `with_imports` is set, and
-/// whether it has a glob `use`. `None` when the file cannot be read, does not
-/// lex, or has a parse error.
-fn parse_module_names(
-    path: &std::path::Path,
-    with_imports: bool,
-) -> Option<(HashSet<Arc<str>>, bool)> {
-    fn walk(tree: &ast::UseTree, names: &mut HashSet<Arc<str>>, glob: &mut bool) {
-        match &tree.kind {
-            ast::UseTreeKind::Simple { path, rename } => {
-                if let Some(r) = rename {
-                    names.insert(r.name.clone());
-                } else if let Some(last) = path.segments.last() {
-                    names.insert(last.ident.name.clone());
-                }
-            }
-            ast::UseTreeKind::Glob(_) => *glob = true,
-            ast::UseTreeKind::Nested { trees, .. } => {
-                for t in trees {
-                    walk(t, names, glob);
-                }
-            }
-        }
-    }
-    let source_text = std::fs::read_to_string(path).ok()?;
-    let source = crate::lexer::SourceFile::new(path.to_string_lossy().as_ref(), source_text);
-    let mut lexer = crate::lexer::Lexer::new(&source);
-    let tokens = lexer.tokenize().ok()?;
-    let mut parser = crate::parser::Parser::new(&source, tokens);
-    let module_ast = parser.parse().ok()?;
-    if !parser.errors().is_empty() {
-        return None;
-    }
-    let mut names: HashSet<Arc<str>> = HashSet::new();
-    let mut glob = false;
-    for item in &module_ast.items {
-        if let ItemKind::Use(u) = &item.kind {
-            if with_imports {
-                walk(&u.tree, &mut names, &mut glob);
-            }
-        } else if let Some(name) = item.name() {
-            names.insert(name.name.clone());
-        }
-    }
-    Some((names, glob))
-}
-
 /// A `use` path of the file being checked, waiting for
 /// [`TypeChecker::verify_use_paths`].
 struct PendingUse {
@@ -233,11 +152,6 @@ pub struct TypeChecker<'ctx> {
     /// root is one of them names something inside this program (an enum's
     /// variants, an inline module), not a module file.
     local_item_names: HashSet<Arc<str>>,
-    /// Names of every top-level item of the program being checked, the items
-    /// of merged module files included, known before the first pass. A `use`
-    /// that names one of them imports the real item: no opaque value is bound
-    /// over it.
-    program_item_names: HashSet<Arc<str>>,
     /// Source text for span-backed token evidence during inference.
     source_text: Option<Arc<str>>,
     /// Source ID associated with `source_text`.
@@ -260,7 +174,6 @@ impl<'ctx> TypeChecker<'ctx> {
             use_module_exports: HashMap::new(),
             pending_uses: Vec::new(),
             local_item_names: HashSet::new(),
-            program_item_names: HashSet::new(),
             source_text: None,
             source_id: None,
             function_effect_summaries: Vec::new(),
@@ -366,12 +279,6 @@ impl<'ctx> TypeChecker<'ctx> {
         // First pass: collect all type definitions
         self.collected_modules.clear();
         self.checked_modules.clear();
-        self.program_item_names = module
-            .items
-            .iter()
-            .filter(|item| !matches!(item.kind, ItemKind::Use(_)))
-            .filter_map(|item| item.name().map(|n| n.name.clone()))
-            .collect();
         for item in &module.items {
             self.collect_item(item);
         }
@@ -1834,11 +1741,6 @@ impl<'ctx> TypeChecker<'ctx> {
                     return;
                 }
                 let module_segs = &segs[..segs.len() - 1];
-                // The driver merged the module file: the item itself is in
-                // the program under this name, with its type or signature.
-                if rename.is_none() && self.program_item_names.contains(&item) {
-                    return;
-                }
                 // First, a module registered by an in-tree `mod NAME;` (real
                 // signatures). Fall back to the file-backed export set, binding
                 // the imported name as an opaque value so it stops reading as
@@ -1879,9 +1781,7 @@ impl<'ctx> TypeChecker<'ctx> {
                 }
                 if let Some(names) = self.module_export_set(&segs) {
                     for name in names {
-                        if !self.program_item_names.contains(&name) {
-                            self.ctx.define_var(name, Ty::fresh_var());
-                        }
+                        self.ctx.define_var(name, Ty::fresh_var());
                     }
                 }
             }
@@ -2002,7 +1902,7 @@ impl<'ctx> TypeChecker<'ctx> {
                 .join("::");
             return match Self::collect_declared_and_imported_names(&file) {
                 None => Some(format!(
-                    "the module `{}` is the file {}, which has a lex or parse error",
+                    "the module `{}` is the file {}, which does not lex or parse",
                     module,
                     file.display()
                 )),
@@ -2047,12 +1947,45 @@ impl<'ctx> TypeChecker<'ctx> {
 
     /// The names a module file declares at its top level together with the
     /// last name of each of its own `use` paths (a re-export), and whether it
-    /// has a glob `use` (then any name may come through it). Read-only.
-    /// `None` when the file does not lex or has a parse error.
+    /// has a glob `use` (then any name may come through it). Read-only, like
+    /// [`Self::collect_export_names`]. `None` when the file does not lex or
+    /// parse.
     fn collect_declared_and_imported_names(
         path: &std::path::Path,
     ) -> Option<(HashSet<Arc<str>>, bool)> {
-        parse_module_names(path, true)
+        fn walk(tree: &ast::UseTree, names: &mut HashSet<Arc<str>>, glob: &mut bool) {
+            match &tree.kind {
+                ast::UseTreeKind::Simple { path, rename } => {
+                    if let Some(r) = rename {
+                        names.insert(r.name.clone());
+                    } else if let Some(last) = path.segments.last() {
+                        names.insert(last.ident.name.clone());
+                    }
+                }
+                ast::UseTreeKind::Glob(_) => *glob = true,
+                ast::UseTreeKind::Nested { trees, .. } => {
+                    for t in trees {
+                        walk(t, names, glob);
+                    }
+                }
+            }
+        }
+        let source_text = std::fs::read_to_string(path).ok()?;
+        let source = crate::lexer::SourceFile::new(path.to_string_lossy().as_ref(), source_text);
+        let mut lexer = crate::lexer::Lexer::new(&source);
+        let tokens = lexer.tokenize().ok()?;
+        let mut parser = crate::parser::Parser::new(&source, tokens);
+        let module_ast = parser.parse().ok()?;
+        let mut names: HashSet<Arc<str>> = HashSet::new();
+        let mut glob = false;
+        for item in &module_ast.items {
+            if let ItemKind::Use(u) = &item.kind {
+                walk(&u.tree, &mut names, &mut glob);
+            } else if let Some(name) = item.name() {
+                names.insert(name.name.clone());
+            }
+        }
+        Some((names, glob))
     }
 
     /// Roots that name the standard library or a path relative to the current
@@ -2102,7 +2035,16 @@ impl<'ctx> TypeChecker<'ctx> {
     /// source directory and its ancestors so a file under `tests/` can reach a
     /// `foundation/` tree sitting beside the corpus root.
     fn resolve_use_module_file(&self, module_segs: &[Arc<str>]) -> Option<PathBuf> {
-        find_use_module_file(self.source_dir.as_ref()?, module_segs)
+        let start = self.source_dir.as_ref()?;
+        let mut cur: Option<&std::path::Path> = Some(start.as_path());
+        for _ in 0..8 {
+            let root = cur?;
+            if let Some(f) = Self::use_module_candidate(root, module_segs) {
+                return Some(f);
+            }
+            cur = root.parent();
+        }
+        None
     }
 
     /// Build candidate files for `segs` under `root` in preference order,

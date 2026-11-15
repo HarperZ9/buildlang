@@ -142,14 +142,12 @@ fn source_records(
             program_path.display()
         )
     })?;
-    resolve_modules_recording_inputs(&mut ast, base_dir, Some(program_path), &mut ledger).map_err(
-        |_| {
-            format!(
-                "module graph failed to resolve modules for {}",
-                program_path.display()
-            )
-        },
-    )?;
+    resolve_modules_recording_inputs(&mut ast, base_dir, &mut ledger).map_err(|_| {
+        format!(
+            "module graph failed to resolve modules for {}",
+            program_path.display()
+        )
+    })?;
     Ok((source_digest, ledger.into_sorted_records()))
 }
 
