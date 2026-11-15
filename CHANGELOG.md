@@ -13,7 +13,8 @@ tracked in `STATUS.md`, `README.md`, and
 ### Editor support in `editors/`
 
 - The `HarperZ9/buildlang-tmLanguage` repository moved in as `editors/tmLanguage/` (its `main` at `d9c3de1`) and `HarperZ9/buildlang-vscode` as `editors/vscode-syntax/` (its `main` at `c7cc292`), each as one commit and each keeping its MIT licence file. `editors/vscode/` already held a larger extension with snippets and the language-server client, so the syntax-only extension sits beside it. The two old repositories stay in place and are not archived: the VS Code Marketplace listing `HarperZ9.quantalang` links to one of them.
-- New `editors` workflow: the grammars and manifests parse, the syntax extension packs, every file its manifest names exists, the art receipts match, and the grammar shared by `tmLanguage/` and `vscode-syntax/` stays byte-identical.
+- New `editors` workflow: the grammars and manifests parse, the syntax extension packs and builds as a `.vsix`, every file its manifest names exists, every path of the grammar's source package exists, the art receipts match, the grammar shared by `tmLanguage/` and `vscode-syntax/` stays byte-identical, and `editors/vscode/` compiles. Nothing compiled `editors/vscode/` in CI before.
+- Fixed on the way in: `vsce package` refused the syntax extension because its README header was an SVG, which the Marketplace packager does not allow. The old repository built the `.vsix` only on a release tag and had not passed that step since the SVG arrived. The README now uses the PNG.
 - Corrected in the moved text: the grammar's README and usage guide said github-linguist includes it. Linguist does not: github-linguist/linguist#7913 was closed without a merge on 2026-04-12.
 - `editors/README.md` lists the three folders and what is published where. Three grammars with two scope names (`source.bld`, `source.build`) is open work.
 
