@@ -12,6 +12,7 @@ tracked in `STATUS.md`, `README.md`, and
 
 ### Compiler
 
+- An import that names nothing is now an error, BL0611 `unresolved import`. `use nowhere::thing::Widget;` and `mod absent;` used to pass `buildc check` with no file behind them; the imported name stayed unknown and later lines failed with errors about something else (`d * s` on an unresolved `Vec3` was typed `f32`, so `o.x` reported a missing field). The check now reports every unresolved path of the file in one run and says where it looked: the module file candidates (`a/b.bld`, `a/b/lib.bld`, `a/b/mod.bld`, beside the source and in the seven directories above it), the item the module file does not declare, or the standard library module that does not exist (`core::simd`, `std::memory`). `crate::`, `self::` and `super::` paths and single-name imports are not checked yet. Programs: `tests/imports`.
 - `Self::name(...)` and `Self::NAME` inside an impl block now resolve to the type the block is for. A call such as `Self::default()` was lowered to a C function named `Self_default`, which nothing defines: 1.14.0 emitted the call and the C build failed, and 1.15.0 refused the program at the check (BL0901). The struct-update form `S { a, ..Self::default() }` builds as well. Feature program `tests/features/self_path_in_impl.bld`. `universe/prism/pbr.bld` passes the check again: 73 of 267 universe files pass, 194 fail.
 
 ### Editor support in `editors/`

@@ -1,0 +1,6 @@
+// No absent.bld and no absent/mod.bld beside this program.
+mod absent;
+
+fn main() ~ Console {
+    println!("{}", 1);
+}
