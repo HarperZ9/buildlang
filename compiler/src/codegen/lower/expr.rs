@@ -597,12 +597,14 @@ impl<'ctx> MirLowerer<'ctx> {
         }
 
         // `let v = vec_new();` with no annotation: the element type is settled
-        // by the first push (see `settle_pending_vec`).
+        // by the first push (see `settle_pending_vec`). `Vec::new()` and
+        // `Vec::with_capacity(n)` are the same vector under their other names.
         let untyped_vec_new = explicit_ty.is_none()
             && matches!(&local.pattern.kind, ast::PatternKind::Ident { .. })
             && local.init.as_ref().is_some_and(|init| {
                 matches!(&init.expr.kind, ExprKind::Call { func, args }
-                    if args.is_empty() && self.extract_call_name(func) == Some("vec_new"))
+                    if (args.is_empty() && self.extract_call_name(func) == Some("vec_new"))
+                        || Self::is_vec_constructor_call(func, args))
             });
         self.untyped_vec_new_binding = untyped_vec_new;
         self.untyped_vec_new_dest = None;
@@ -3263,6 +3265,37 @@ impl<'ctx> MirLowerer<'ctx> {
                 .iter()
                 .map(|s| s.ident.name.as_ref())
                 .collect();
+            // `Vec::with_capacity(n)`: the capacity is a hint, and the vector
+            // runtime grows on its own. Lower `n` for its effects, then build
+            // the vector as `Vec::new()` does. Before, the call was refused:
+            // no C function stood behind `Vec_with_capacity`.
+            if segs.as_slice() == ["Vec", "with_capacity"] && args.len() == 1 {
+                let binding = std::mem::replace(&mut self.untyped_vec_new_binding, false);
+                let expected = self.expected_type.take();
+                let capacity = self.lower_expr(&args[0]);
+                self.expected_type = expected;
+                self.untyped_vec_new_binding = binding;
+                capacity?;
+                let mut as_new = func.clone();
+                if let ExprKind::Path(new_path) = &mut as_new.kind {
+                    if let Some(last) = new_path.segments.last_mut() {
+                        last.ident.name = Arc::from("new");
+                    }
+                }
+                return self.lower_call(&as_new, &[]);
+            }
+            // `let v = Vec::new();` with no annotation: a vector whose element
+            // type the first push settles, as for `vec_new()`. Before, the
+            // local had no vector type and the first `v.push(x)` was refused.
+            if segs.as_slice() == ["Vec", "new"]
+                && args.is_empty()
+                && self.untyped_vec_new_binding
+                && self.expected_type.is_none()
+            {
+                if let Some(done) = self.try_typed_vec_new() {
+                    return done;
+                }
+            }
             // f64::from_bits(u) / f32::from_bits(u): a bit cast (DETMATH's pow2).
             let from_bits = match segs.as_slice() {
                 ["f64", "from_bits"] => Some(("build_f64_from_bits", MirType::f64())),
@@ -3889,6 +3922,21 @@ impl<'ctx> MirLowerer<'ctx> {
     /// strings wrote 16-byte values into 4-byte slots. With an annotation, lower
     /// it like `Vec::new()`, which the C backend constructs from the element
     /// type of the destination. Without one (or for `Vec<i32>`), keep the default.
+    /// True for the calls `Vec::new()` and `Vec::with_capacity(n)`.
+    fn is_vec_constructor_call(func: &ast::Expr, args: &[ast::Expr]) -> bool {
+        let ExprKind::Path(path) = &func.kind else {
+            return false;
+        };
+        if path.segments.len() != 2 || path.segments[0].ident.name.as_ref() != "Vec" {
+            return false;
+        }
+        match path.segments[1].ident.name.as_ref() {
+            "new" => args.is_empty(),
+            "with_capacity" => args.len() == 1,
+            _ => false,
+        }
+    }
+
     fn try_typed_vec_new(&mut self) -> Option<CodegenResult<MirValue>> {
         let resolved = self.resolve_fn_name("vec_new");
         if self.module.find_function(resolved.as_ref()).is_some() {

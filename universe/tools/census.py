@@ -30,6 +30,11 @@ taken out, the functions stubbed, the diagnostics seen by code, and where the wa
               no C function behind them (the names are in the detail column)
     PARSE, LEX, TIMEOUT, LIMIT (more than --max-steps steps)
 
+PASS is necessary for "these diagnostics are all of it", not sufficient: a stubbed function
+shows every type error it has, but only the first refusal of the C backend gate inside it.
+A stub that would break the parse is not applied (the walker's own limit, not the file's);
+the diagnostic it was for then ends the walk as ITEM.
+
 Two tab-separated tables go to stdout between marker lines, and to DIR when --out is
 given: `census.tsv` (one row per file) and `diagnostics.tsv` (one row per diagnostic,
 with the walk step it appeared in). The script never changes a tracked file and removes
@@ -244,37 +249,43 @@ def walk(buildc, rel, max_steps):
     with open(source, encoding="utf-8", errors="replace", newline="") as fh:
         lines = fh.read().split("\n")
     rows = []
-    stage = "types"
     steps = imports = stubbed = 0
+    refused = set()  # bodies whose stub broke the parse: the walker's fault, left alone
 
-    def done(terminal, detail=""):
-        return stage, steps, terminal, detail, imports, stubbed, rows
+    def check(text_lines):
+        with open(scratch, "w", encoding="utf-8", newline="") as fh:
+            fh.write("\n".join(text_lines))
+        return run_check(buildc, scratch_rel)
+
+    def parses(result):
+        return result[0] == 0 or (result[0] != 124 and stage_of(result[2]) == "types")
 
     try:
+        result = check(lines)
+        stage = "types" if result[0] in (0, 124) else stage_of(result[2])
+
+        def done(terminal, detail=""):
+            return stage, steps, terminal, detail, imports, stubbed, rows
+
         while True:
-            with open(scratch, "w", encoding="utf-8", newline="") as fh:
-                fh.write("\n".join(lines))
-            code, diags, out = run_check(buildc, scratch_rel)
+            code, diags, out = result
             if code == 0:
                 return done("PASS")
             if code == 124:
                 return done("TIMEOUT")
-            now = stage_of(out)
-            if steps == 0:
-                stage = now
             if not diags:
                 last = (out.strip().splitlines() or ["no output"])[-1]
                 return done("NODIAG", last[:200])
             for line_no, bl, message in diags:
                 rows.append((rel, steps, line_no, bl, message))
-            if now != "types":
-                return done("PARSE" if now == "parse" else "LEX", str(len(diags)))
+            if stage != "types":
+                return done("PARSE" if stage == "parse" else "LEX", str(len(diags)))
             if steps >= max_steps:
                 return done("LIMIT")
 
             clean = cleaned(lines)
             by_use = {}
-            bodies = []
+            bodies = set()
             outside = []
             no_line = []
             for line_no, bl, message in diags:
@@ -285,26 +296,55 @@ def walk(buildc, rel, max_steps):
                     by_use.setdefault(line_no, set()).add(m.group(1))
                 else:
                     body = function_body(clean, line_no)
-                    if body is None:
+                    if body is None or body[:2] in refused:
                         outside.append(f"line {line_no}: [{bl}] {message}")
                     else:
-                        bodies.append(body)
-            changed = False
-            # Bodies first: dropping an import rewrites lines, which would move columns.
-            if bodies:
-                stub_bodies(lines, bodies)
-                stubbed += len(set(bodies))
-                changed = True
+                        bodies.add(body)
+
+            # Imports first on their own copy; a statement the walker cannot rewrite stays.
+            current = list(lines)
+            dropped = 0
             for line_no, paths in by_use.items():
-                if drop_imports(lines, clean, line_no, paths):
-                    imports += len(paths)
-                    changed = True
+                if drop_imports(current, clean, line_no, paths):
+                    dropped += len(paths)
                 else:
                     outside.append(f"line {line_no}: [BL0611] {sorted(paths)[0]}")
-            if not changed:
+            next_result = None
+            if dropped:
+                trial = check(current)
+                if parses(trial):
+                    next_result = trial
+                else:
+                    current = list(lines)
+                    dropped = 0
+                    outside.append("line 0: [BL0611] the walker could not rewrite a `use` statement")
+
+            applied = 0
+            if bodies:
+                together = list(current)
+                stub_bodies(together, bodies)
+                trial = check(together)
+                if parses(trial):
+                    current, next_result, applied = together, trial, len(bodies)
+                else:
+                    # One stub broke the parse. Apply them one at a time and keep the sound ones.
+                    for body in sorted(bodies, reverse=True)[:120]:
+                        single = list(current)
+                        stub_bodies(single, [body])
+                        trial = check(single)
+                        if parses(trial):
+                            current, next_result = single, trial
+                            applied += 1
+                        else:
+                            refused.add(body[:2])
+            if not dropped and not applied:
                 if outside:
                     return done("ITEM", outside[0][:300])
                 return done("NOLINE", no_line[0][:600])
+            lines = current
+            imports += dropped
+            stubbed += applied
+            result = next_result
             steps += 1
     finally:
         if os.path.exists(scratch):
@@ -326,7 +366,7 @@ def main():
     ap.add_argument("buildc")
     ap.add_argument("files", nargs="*")
     ap.add_argument("--out")
-    ap.add_argument("--max-steps", type=int, default=40)
+    ap.add_argument("--max-steps", type=int, default=120)
     args = ap.parse_args()
     buildc = os.path.abspath(args.buildc)
     files = args.files or listed_files()
