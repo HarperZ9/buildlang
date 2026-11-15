@@ -165,10 +165,7 @@ fn two_files_that_import_each_other_do_not_recurse() {
                 "a.bld",
                 "use b::fb;\n\npub fn fa() -> i64 {\n    fb() + 1\n}\n",
             ),
-            (
-                "b.bld",
-                "use a::fa;\n\npub fn fb() -> i64 {\n    41\n}\n",
-            ),
+            ("b.bld", "use a::fa;\n\npub fn fb() -> i64 {\n    41\n}\n"),
             (
                 "main.bld",
                 "use a::fa;\n\nfn main() ~ Console {\n    println!(\"{}\", fa());\n}\n",
