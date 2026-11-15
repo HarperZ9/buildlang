@@ -33,6 +33,8 @@ if ! "$BUILDC" --version >/dev/null 2>&1; then
 fi
 
 observed=$(mktemp)
+outputs=$(mktemp -d)
+trap 'rm -rf "$outputs"' EXIT
 total=0
 passed=0
 for f in $(find . -name '*.bld' -type f | sed 's#^\./##' | sort); do
@@ -53,6 +55,7 @@ for f in $(find . -name '*.bld' -type f | sed 's#^\./##' | sort); do
     stage=lex
   fi
   echo "$f $stage" >> "$observed"
+  printf '%s\n' "$out" > "$outputs/$(printf '%s' "$f" | tr '/' '_')"
 done
 failed=$((total - passed))
 
@@ -87,6 +90,12 @@ if [ -n "$unlisted" ]; then
   echo
   echo "FAIL: these files fail and CHECK-FAILS.txt does not say so (file, stage):"
   printf '%s\n' "$unlisted" | sed 's/^/  + /'
+  echo
+  echo "First lines the compiler printed for each:"
+  printf '%s\n' "$unlisted" | while read -r f _stage; do
+    echo "  == $f"
+    grep -v -E '^(Lexing|Parsing|Type checking)[.][.][.] OK' "$outputs/$(printf '%s' "$f" | tr '/' '_')" | grep -v '^[[:space:]]*$' | head -6 | sed 's/^/     /'
+  done
   status=1
 fi
 if [ -n "$stale" ]; then

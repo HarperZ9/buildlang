@@ -162,15 +162,11 @@ prism/vegetation.bld types
 prism/volumetrics.bld types
 prism/water.bld types
 profiler/lib.bld lex
-programs/check.bld types
-programs/find.bld types
 programs/http.bld types
-programs/lint.bld types
 programs/loc.bld types
 programs/stdlib/string_utils.bld types
 programs/stdlib/tokenizer.bld types
 programs/test_nested_include.bld types
-programs/watch.bld types
 programs/xargs.bld types
 quantum-finance/backtest.bld types
 quantum-finance/lib.bld types
