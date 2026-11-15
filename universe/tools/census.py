@@ -5,9 +5,10 @@
 
 One run of `buildc check` does not show everything a file holds. An unresolved import
 (BL0611) hides the type errors of the code that uses the name. Type errors hide the C
-backend gate, which runs only on a file with none. The gate (BL0901) reports only its
-first refusal. So "files whose only error is X" cannot be read from one run, and a
-fix chosen from first errors alone can turn no file green.
+backend gate, which runs only on a file with none. The gate (BL0901) reports one
+refusal per function (before PR 302 it reported one per file), and none of the next
+layer. So "files whose only error is X" cannot be read from one run, and a fix
+chosen from first errors alone can turn no file green.
 
 This script walks past each layer on a scratch copy written beside the file:
 

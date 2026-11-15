@@ -28,6 +28,7 @@ mod lowlevel;
 mod macros;
 mod option_combinators;
 pub(crate) mod parallel;
+mod rejections;
 mod slice_escape;
 mod string_parse;
 mod tail_resume;
@@ -319,6 +320,9 @@ pub struct MirLowerer<'ctx> {
     /// the argument-type tuple (concrete winners are emitted under a mangled
     /// `name_<param-tuple>`, a generic winner is monomorphized).
     pub(crate) multi_fns: HashMap<Arc<str>, Vec<MultiFnSig>>,
+    /// Refusals of the body pass, one per top-level function or method,
+    /// in source order (see `rejections.rs`).
+    pub(crate) rejections: Vec<crate::codegen::CodegenError>,
 }
 
 // =============================================================================
@@ -448,6 +452,7 @@ impl<'ctx> MirLowerer<'ctx> {
             linear_type_names: HashSet::new(),
             repr_c_structs: HashSet::new(),
             multi_fns: HashMap::new(),
+            rejections: Vec::new(),
         }
     }
 
@@ -524,6 +529,7 @@ impl<'ctx> MirLowerer<'ctx> {
             linear_type_names: HashSet::new(),
             repr_c_structs: HashSet::new(),
             multi_fns: HashMap::new(),
+            rejections: Vec::new(),
         }
     }
 
@@ -983,7 +989,37 @@ impl<'ctx> MirLowerer<'ctx> {
             .collect()
     }
 
-    pub fn lower_module(mut self, module: &ast::Module) -> CodegenResult<MirModule> {
+    pub fn lower_module(self, module: &ast::Module) -> CodegenResult<MirModule> {
+        self.lower_module_all(module)
+            .map_err(|mut all| all.remove(0))
+    }
+
+    /// Lower a module. On failure the list holds every refusal found: one
+    /// for each top-level function or method the backend cannot compile,
+    /// in source order, or the single error that stopped an earlier pass.
+    /// The list is never empty.
+    pub fn lower_module_all(
+        mut self,
+        module: &ast::Module,
+    ) -> Result<MirModule, Vec<crate::codegen::CodegenError>> {
+        match self.lower_module_passes(module) {
+            Ok(()) if self.rejections.is_empty() => {
+                let mut repr_c: Vec<Arc<str>> = self.repr_c_structs.iter().cloned().collect();
+                repr_c.sort();
+                self.module.module_mut().repr_c = repr_c;
+                Ok(self.module.build())
+            }
+            Ok(()) => Err(self.rejections),
+            Err(err) => {
+                self.keep_rejection(err);
+                Err(self.rejections)
+            }
+        }
+    }
+
+    /// The passes of `lower_module_all`. A refused function body is kept in
+    /// `self.rejections` and the pass goes on; any other failure returns.
+    fn lower_module_passes(&mut self, module: &ast::Module) -> CodegenResult<()> {
         // Register built-in vector math types before user code
         self.register_vector_types();
 
@@ -1050,11 +1086,7 @@ impl<'ctx> MirLowerer<'ctx> {
         for item in &items {
             self.lower_top_level_item(item)?;
         }
-
-        let mut repr_c: Vec<Arc<str>> = self.repr_c_structs.iter().cloned().collect();
-        repr_c.sort();
-        self.module.module_mut().repr_c = repr_c;
-        Ok(self.module.build())
+        Ok(())
     }
 
     // =========================================================================
@@ -2569,6 +2601,12 @@ impl<'ctx> MirLowerer<'ctx> {
                 Ok(())
             }
             ItemKind::Mod(m) => self.lower_inline_mod(m, true),
+            // A refused function is kept and the pass goes on to the next,
+            // so one run reports every function the backend cannot compile.
+            ItemKind::Function(_) => {
+                self.lower_keeping_rejection(|this| this.lower_item(item));
+                Ok(())
+            }
             _ => self.lower_item(item),
         }
     }
@@ -3001,10 +3039,17 @@ impl<'ctx> MirLowerer<'ctx> {
             }
         }
 
-        // PASS 2: Lower method bodies (signatures already declared).
+        // PASS 2: Lower method bodies (signatures already declared). At the
+        // top level a refused method is kept and the next one is lowered;
+        // an impl inside a function body is part of that function's report.
+        let top_level = self.current_fn.is_none();
         for impl_item in &impl_def.items {
             if let ast::ImplItemKind::Function(f) = &impl_item.kind {
-                self.lower_impl_method(&type_name, f)?;
+                if top_level {
+                    self.lower_keeping_rejection(|this| this.lower_impl_method(&type_name, f));
+                } else {
+                    self.lower_impl_method(&type_name, f)?;
+                }
             }
         }
 
