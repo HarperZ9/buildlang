@@ -1,0 +1,9 @@
+.vscode/**
+.github/**
+.warden-safe-cache/**
+AGENTS.md
+.npmignore
+.gitignore
+node_modules
+*.tgz
+*.vsix

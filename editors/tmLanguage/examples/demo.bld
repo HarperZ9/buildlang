@@ -1,0 +1,63 @@
+// Best-effort demo — not runtime-verified by author.
+//
+// This is a BuildLang source file whose only purpose here is to exercise the
+// TextMate grammar in this repository (grammars/buildlang.tmLanguage.json).
+// Open it in an editor that has the grammar installed to see highlighting for
+// the constructs the grammar recognizes. It is NOT compiled or run by this
+// package — the compiler lives in HarperZ9/buildlang.
+//
+// Constructs exercised below (with the scope the grammar assigns):
+//   - doc comments        -> comment.line.documentation.bld
+//   - attributes          -> meta.attribute.bld
+//   - storage types       -> storage.type.bld (struct, enum, let, const, ...)
+//   - primitive types     -> storage.type.primitive.bld (u8, f64, Vec, ...)
+//   - effect keywords     -> keyword.other.effect.bld (with, effect, perform, ...)
+//   - AI primitives       -> keyword.other.ai.bld (ai, neural, infer)
+//   - numbers             -> constant.numeric.*.bld (hex, float, integer, ...)
+//   - string interpolation-> meta.interpolation.bld
+//   - macros              -> entity.name.function.macro.bld (println!, ...)
+
+use foundation::io::println
+
+/// A color in linear RGB.
+#[derive(Clone)]
+struct Color {
+    r: f64,
+    g: f64,
+    b: f64,
+}
+
+const WHITE: Color = Color { r: 1.0, g: 1.0, b: 1.0 };
+
+// Effect declaration + handler keywords are highlighted distinctly.
+effect Log {
+    fn record(msg: str);
+}
+
+// AI primitives: `ai`, `neural`, `infer`.
+fn predict(input: Vec<f64>) -> f64 {
+    let model = neural::load("demo");
+    let score = infer model(input);
+    score
+}
+
+fn luminance(c: Color) -> f64 {
+    0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b
+}
+
+fn main() {
+    // Numbers across several bases, plus typed suffixes.
+    let mask: u32 = 0xFF_u32;
+    let pi = 3.14159_f64;
+    let flags = 0b1010;
+
+    let w = luminance(WHITE);
+
+    // String interpolation: `{w}` and `{mask}` are interpolation scopes.
+    println!("luminance(white) = {w}, mask = {mask}, pi = {pi}, flags = {flags}");
+
+    with Log {
+        let p = predict(vec![1.0, 2.0, 3.0]);
+        println!("prediction = {p}");
+    }
+}

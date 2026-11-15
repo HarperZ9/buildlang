@@ -27,7 +27,9 @@ These points apply to every session and every model working here.
   their history; their old repositories are archived. `universe/` holds the Build Universe
   modules, programs and kernel (the build-universe repository until 2026-11-15, imported as
   one commit); `universe/check.sh` and `universe/CHECK-FAILS.txt` record which of its `.bld`
-  files the compiler accepts. The editor grammars are next. Do not start a new repository for a tool.
+  files the compiler accepts. `editors/` holds the VS Code extensions and the TextMate
+  grammar (`editors/README.md`); the buildlang-vscode and buildlang-tmLanguage repositories
+  stay in place because the Marketplace listing links to one of them. Do not start a new repository for a tool.
 - **Sibling projects:** The Playground (the engine: renderer, type, sound, games) at
   `HarperZ9/superframe`; The Flywheel (accountability and checking) at `HarperZ9/flywheel`;
   The Commons at `HarperZ9/cmmns`; the site at `HarperZ9/HarperZ9.github.io`.

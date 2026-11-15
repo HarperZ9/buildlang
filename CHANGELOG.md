@@ -10,6 +10,13 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+### Editor support in `editors/`
+
+- The `HarperZ9/buildlang-tmLanguage` repository moved in as `editors/tmLanguage/` (its `main` at `d9c3de1`) and `HarperZ9/buildlang-vscode` as `editors/vscode-syntax/` (its `main` at `c7cc292`), each as one commit and each keeping its MIT licence file. `editors/vscode/` already held a larger extension with snippets and the language-server client, so the syntax-only extension sits beside it. The two old repositories stay in place and are not archived: the VS Code Marketplace listing `HarperZ9.quantalang` links to one of them.
+- New `editors` workflow: the grammars and manifests parse, the syntax extension packs, every file its manifest names exists, the art receipts match, and the grammar shared by `tmLanguage/` and `vscode-syntax/` stays byte-identical.
+- Corrected in the moved text: the grammar's README and usage guide said github-linguist includes it. Linguist does not: github-linguist/linguist#7913 was closed without a merge on 2026-04-12.
+- `editors/README.md` lists the three folders and what is published where. Three grammars with two scope names (`source.bld`, `source.build`) is open work.
+
 ### Build Universe in `universe/`
 
 - The `HarperZ9/build-universe` repository moved into this one as `universe/`: the BuildLang modules (`foundation`, `spectrum`, `photon`, `oracle` and the rest), the example programs in `universe/programs`, the BuildOS hobby kernel, the Calibrate Python tree and the frametrace tracer. It is the tree of build-universe `main` at commit `1633fc3`, imported as one commit. The old history stays in the old repository because some of its commits carry personal author addresses. The folder keeps its licence, FSL-1.1-MIT (`universe/LICENSE`, and `NOTICE`).
