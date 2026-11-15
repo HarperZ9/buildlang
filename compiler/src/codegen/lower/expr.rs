@@ -6184,12 +6184,23 @@ impl<'ctx> MirLowerer<'ctx> {
                 arg_vals.push(self.lower_expr(arg)?);
             }
 
-            // Resolve return type from already-lowered function
+            // Resolve return type from already-lowered function. A derived
+            // clone called above its struct is not lowered yet: it returns
+            // the struct the receiver is (or points to).
             let ret_ty = self
                 .module
                 .find_function(&mangled_name)
                 .map(|f| f.sig.ret.clone())
-                .unwrap_or(MirType::i32());
+                .unwrap_or_else(|| {
+                    if self.derived_clone_fns.contains(&mangled_name) {
+                        match &receiver_ty {
+                            MirType::Ptr(inner) => (**inner).clone(),
+                            other => other.clone(),
+                        }
+                    } else {
+                        MirType::i32()
+                    }
+                });
 
             let builder = self
                 .current_fn
