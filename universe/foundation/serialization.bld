@@ -1236,60 +1236,60 @@ pub mod json {
         type SerializeStructVariant = JsonStructVariantSerializer<'a>;
         type SerializeTupleVariant = JsonTupleVariantSerializer<'a>;
 
-        fn serialize_bool(self: mut Self, v: bool) -> Result<(), Error> {
+        fn serialize_bool(mut self, v: bool) -> Result<(), Error> {
             self.output.push_str(if v { "true" } else { "false" });
             Ok(())
         }
 
-        fn serialize_i8(self: mut Self, v: i8) -> Result<(), Error> {
+        fn serialize_i8(mut self, v: i8) -> Result<(), Error> {
             self.serialize_i64(v as i64)
         }
 
-        fn serialize_i16(self: mut Self, v: i16) -> Result<(), Error> {
+        fn serialize_i16(mut self, v: i16) -> Result<(), Error> {
             self.serialize_i64(v as i64)
         }
 
-        fn serialize_i32(self: mut Self, v: i32) -> Result<(), Error> {
+        fn serialize_i32(mut self, v: i32) -> Result<(), Error> {
             self.serialize_i64(v as i64)
         }
 
-        fn serialize_i64(self: mut Self, v: i64) -> Result<(), Error> {
+        fn serialize_i64(mut self, v: i64) -> Result<(), Error> {
             write!(self.output, "{}", v).unwrap();
             Ok(())
         }
 
-        fn serialize_i128(self: mut Self, v: i128) -> Result<(), Error> {
+        fn serialize_i128(mut self, v: i128) -> Result<(), Error> {
             write!(self.output, "{}", v).unwrap();
             Ok(())
         }
 
-        fn serialize_u8(self: mut Self, v: u8) -> Result<(), Error> {
+        fn serialize_u8(mut self, v: u8) -> Result<(), Error> {
             self.serialize_u64(v as u64)
         }
 
-        fn serialize_u16(self: mut Self, v: u16) -> Result<(), Error> {
+        fn serialize_u16(mut self, v: u16) -> Result<(), Error> {
             self.serialize_u64(v as u64)
         }
 
-        fn serialize_u32(self: mut Self, v: u32) -> Result<(), Error> {
+        fn serialize_u32(mut self, v: u32) -> Result<(), Error> {
             self.serialize_u64(v as u64)
         }
 
-        fn serialize_u64(self: mut Self, v: u64) -> Result<(), Error> {
+        fn serialize_u64(mut self, v: u64) -> Result<(), Error> {
             write!(self.output, "{}", v).unwrap();
             Ok(())
         }
 
-        fn serialize_u128(self: mut Self, v: u128) -> Result<(), Error> {
+        fn serialize_u128(mut self, v: u128) -> Result<(), Error> {
             write!(self.output, "{}", v).unwrap();
             Ok(())
         }
 
-        fn serialize_f32(self: mut Self, v: f32) -> Result<(), Error> {
+        fn serialize_f32(mut self, v: f32) -> Result<(), Error> {
             self.serialize_f64(v as f64)
         }
 
-        fn serialize_f64(self: mut Self, v: f64) -> Result<(), Error> {
+        fn serialize_f64(mut self, v: f64) -> Result<(), Error> {
             if v.is_finite() {
                 write!(self.output, "{}", v).unwrap();
             } else {
@@ -1298,41 +1298,41 @@ pub mod json {
             Ok(())
         }
 
-        fn serialize_char(self: mut Self, v: char) -> Result<(), Error> {
+        fn serialize_char(mut self, v: char) -> Result<(), Error> {
             self.serialize_str(&v.to_string())
         }
 
-        fn serialize_str(self: mut Self, v: &str) -> Result<(), Error> {
+        fn serialize_str(mut self, v: &str) -> Result<(), Error> {
             self.write_string(v);
             Ok(())
         }
 
-        fn serialize_bytes(self: mut Self, v: &[u8]) -> Result<(), Error> {
+        fn serialize_bytes(mut self, v: &[u8]) -> Result<(), Error> {
             // Encode as base64
             let encoded = base64_encode(v);
             self.serialize_str(&encoded)
         }
 
-        fn serialize_none(self: mut Self) -> Result<(), Error> {
+        fn serialize_none(mut self) -> Result<(), Error> {
             self.output.push_str("null");
             Ok(())
         }
 
-        fn serialize_some<T: Serialize>(self: mut Self, value: &T) -> Result<(), Error> {
+        fn serialize_some<T: Serialize>(mut self, value: &T) -> Result<(), Error> {
             value.serialize(self)
         }
 
-        fn serialize_unit(self: mut Self) -> Result<(), Error> {
+        fn serialize_unit(mut self) -> Result<(), Error> {
             self.output.push_str("null");
             Ok(())
         }
 
-        fn serialize_unit_struct(self: mut Self, _name: &'static str) -> Result<(), Error> {
+        fn serialize_unit_struct(mut self, _name: &'static str) -> Result<(), Error> {
             self.serialize_unit()
         }
 
         fn serialize_unit_variant(
-            self: mut Self,
+            mut self,
             _name: &'static str,
             _variant_index: u32,
             variant: &'static str,
@@ -1341,7 +1341,7 @@ pub mod json {
         }
 
         fn serialize_newtype_struct<T: Serialize>(
-            self: mut Self,
+            mut self,
             _name: &'static str,
             value: &T,
         ) -> Result<(), Error> {
@@ -1349,7 +1349,7 @@ pub mod json {
         }
 
         fn serialize_newtype_variant<T: Serialize>(
-            self: mut Self,
+            mut self,
             _name: &'static str,
             _variant_index: u32,
             variant: &'static str,
@@ -1363,7 +1363,7 @@ pub mod json {
             Ok(())
         }
 
-        fn serialize_seq(self: mut Self, _len: Option<usize>) -> Result<Self::SerializeSeq, Error> {
+        fn serialize_seq(mut self, _len: Option<usize>) -> Result<Self::SerializeSeq, Error> {
             self.output.push('[');
             self.current_indent += self.indent;
             Ok(JsonSeqSerializer {
@@ -1375,12 +1375,12 @@ pub mod json {
             })
         }
 
-        fn serialize_tuple(self: mut Self, len: usize) -> Result<Self::SerializeSeq, Error> {
+        fn serialize_tuple(mut self, len: usize) -> Result<Self::SerializeSeq, Error> {
             self.serialize_seq(Some(len))
         }
 
         fn serialize_tuple_struct(
-            self: mut Self,
+            mut self,
             _name: &'static str,
             len: usize,
         ) -> Result<Self::SerializeSeq, Error> {
@@ -1388,7 +1388,7 @@ pub mod json {
         }
 
         fn serialize_tuple_variant(
-            self: mut Self,
+            mut self,
             _name: &'static str,
             _variant_index: u32,
             variant: &'static str,
@@ -1407,7 +1407,7 @@ pub mod json {
             })
         }
 
-        fn serialize_map(self: mut Self, _len: Option<usize>) -> Result<Self::SerializeMap, Error> {
+        fn serialize_map(mut self, _len: Option<usize>) -> Result<Self::SerializeMap, Error> {
             self.output.push('{');
             self.current_indent += self.indent;
             Ok(JsonMapSerializer {
@@ -1420,7 +1420,7 @@ pub mod json {
         }
 
         fn serialize_struct(
-            self: mut Self,
+            mut self,
             _name: &'static str,
             _len: usize,
         ) -> Result<Self::SerializeStruct, Error> {
@@ -1436,7 +1436,7 @@ pub mod json {
         }
 
         fn serialize_struct_variant(
-            self: mut Self,
+            mut self,
             _name: &'static str,
             _variant_index: u32,
             variant: &'static str,
@@ -1487,7 +1487,7 @@ pub mod json {
             })
         }
 
-        fn end(self: mut Self) -> Result<(), Error> {
+        fn end(mut self) -> Result<(), Error> {
             self.current_indent -= self.indent;
             if self.pretty && !self.first {
                 self.output.push('\n');
@@ -1545,7 +1545,7 @@ pub mod json {
             })
         }
 
-        fn end(self: mut Self) -> Result<(), Error> {
+        fn end(mut self) -> Result<(), Error> {
             self.current_indent -= self.indent;
             if self.pretty && !self.first {
                 self.output.push('\n');
@@ -1603,7 +1603,7 @@ pub mod json {
             })
         }
 
-        fn end(self: mut Self) -> Result<(), Error> {
+        fn end(mut self) -> Result<(), Error> {
             self.current_indent -= self.indent;
             if self.pretty && !self.first {
                 self.output.push('\n');
@@ -1660,7 +1660,7 @@ pub mod json {
             })
         }
 
-        fn end(self: mut Self) -> Result<(), Error> {
+        fn end(mut self) -> Result<(), Error> {
             self.current_indent -= self.indent * 2;
             if self.pretty && !self.first {
                 self.output.push('\n');
@@ -1705,7 +1705,7 @@ pub mod json {
             })
         }
 
-        fn end(self: mut Self) -> Result<(), Error> {
+        fn end(mut self) -> Result<(), Error> {
             self.current_indent -= self.indent;
             if self.pretty && !self.first {
                 self.output.push('\n');
@@ -2300,12 +2300,12 @@ pub mod msgpack {
         type SerializeStructVariant = MsgPackStructVariantSerializer<'a>;
         type SerializeTupleVariant = MsgPackTupleVariantSerializer<'a>;
 
-        fn serialize_bool(self: mut Self, v: bool) -> Result<(), Error> {
+        fn serialize_bool(mut self, v: bool) -> Result<(), Error> {
             self.write_u8(if v { TRUE } else { FALSE });
             Ok(())
         }
 
-        fn serialize_i8(self: mut Self, v: i8) -> Result<(), Error> {
+        fn serialize_i8(mut self, v: i8) -> Result<(), Error> {
             if v >= -32 {
                 self.write_u8(v as u8);
             } else {
@@ -2315,7 +2315,7 @@ pub mod msgpack {
             Ok(())
         }
 
-        fn serialize_i16(self: mut Self, v: i16) -> Result<(), Error> {
+        fn serialize_i16(mut self, v: i16) -> Result<(), Error> {
             if v >= i8::MIN as i16 && v <= i8::MAX as i16 {
                 self.serialize_i8(v as i8)
             } else {
@@ -2325,7 +2325,7 @@ pub mod msgpack {
             }
         }
 
-        fn serialize_i32(self: mut Self, v: i32) -> Result<(), Error> {
+        fn serialize_i32(mut self, v: i32) -> Result<(), Error> {
             if v >= i16::MIN as i32 && v <= i16::MAX as i32 {
                 self.serialize_i16(v as i16)
             } else {
@@ -2335,7 +2335,7 @@ pub mod msgpack {
             }
         }
 
-        fn serialize_i64(self: mut Self, v: i64) -> Result<(), Error> {
+        fn serialize_i64(mut self, v: i64) -> Result<(), Error> {
             if v >= i32::MIN as i64 && v <= i32::MAX as i64 {
                 self.serialize_i32(v as i32)
             } else {
@@ -2345,7 +2345,7 @@ pub mod msgpack {
             }
         }
 
-        fn serialize_i128(self: mut Self, v: i128) -> Result<(), Error> {
+        fn serialize_i128(mut self, v: i128) -> Result<(), Error> {
             if v >= i64::MIN as i128 && v <= i64::MAX as i128 {
                 self.serialize_i64(v as i64)
             } else {
@@ -2353,7 +2353,7 @@ pub mod msgpack {
             }
         }
 
-        fn serialize_u8(self: mut Self, v: u8) -> Result<(), Error> {
+        fn serialize_u8(mut self, v: u8) -> Result<(), Error> {
             if v <= FIXINT_POS_MAX {
                 self.write_u8(v);
             } else {
@@ -2363,7 +2363,7 @@ pub mod msgpack {
             Ok(())
         }
 
-        fn serialize_u16(self: mut Self, v: u16) -> Result<(), Error> {
+        fn serialize_u16(mut self, v: u16) -> Result<(), Error> {
             if v <= u8::MAX as u16 {
                 self.serialize_u8(v as u8)
             } else {
@@ -2373,7 +2373,7 @@ pub mod msgpack {
             }
         }
 
-        fn serialize_u32(self: mut Self, v: u32) -> Result<(), Error> {
+        fn serialize_u32(mut self, v: u32) -> Result<(), Error> {
             if v <= u16::MAX as u32 {
                 self.serialize_u16(v as u16)
             } else {
@@ -2383,7 +2383,7 @@ pub mod msgpack {
             }
         }
 
-        fn serialize_u64(self: mut Self, v: u64) -> Result<(), Error> {
+        fn serialize_u64(mut self, v: u64) -> Result<(), Error> {
             if v <= u32::MAX as u64 {
                 self.serialize_u32(v as u32)
             } else {
@@ -2393,7 +2393,7 @@ pub mod msgpack {
             }
         }
 
-        fn serialize_u128(self: mut Self, v: u128) -> Result<(), Error> {
+        fn serialize_u128(mut self, v: u128) -> Result<(), Error> {
             if v <= u64::MAX as u128 {
                 self.serialize_u64(v as u64)
             } else {
@@ -2401,25 +2401,25 @@ pub mod msgpack {
             }
         }
 
-        fn serialize_f32(self: mut Self, v: f32) -> Result<(), Error> {
+        fn serialize_f32(mut self, v: f32) -> Result<(), Error> {
             self.write_u8(FLOAT32);
             self.write_u32(v.to_bits());
             Ok(())
         }
 
-        fn serialize_f64(self: mut Self, v: f64) -> Result<(), Error> {
+        fn serialize_f64(mut self, v: f64) -> Result<(), Error> {
             self.write_u8(FLOAT64);
             self.write_u64(v.to_bits());
             Ok(())
         }
 
-        fn serialize_char(self: mut Self, v: char) -> Result<(), Error> {
+        fn serialize_char(mut self, v: char) -> Result<(), Error> {
             let mut buf = [0u8; 4];
             let s = v.encode_utf8(&mut buf);
             self.serialize_str(s)
         }
 
-        fn serialize_str(self: mut Self, v: &str) -> Result<(), Error> {
+        fn serialize_str(mut self, v: &str) -> Result<(), Error> {
             let len = v.len();
             if len <= 31 {
                 self.write_u8(FIXSTR_MIN | len as u8);
@@ -2437,7 +2437,7 @@ pub mod msgpack {
             Ok(())
         }
 
-        fn serialize_bytes(self: mut Self, v: &[u8]) -> Result<(), Error> {
+        fn serialize_bytes(mut self, v: &[u8]) -> Result<(), Error> {
             let len = v.len();
             if len <= u8::MAX as usize {
                 self.write_u8(BIN8);
@@ -2453,26 +2453,26 @@ pub mod msgpack {
             Ok(())
         }
 
-        fn serialize_none(self: mut Self) -> Result<(), Error> {
+        fn serialize_none(mut self) -> Result<(), Error> {
             self.write_u8(NIL);
             Ok(())
         }
 
-        fn serialize_some<T: Serialize>(self: mut Self, value: &T) -> Result<(), Error> {
+        fn serialize_some<T: Serialize>(mut self, value: &T) -> Result<(), Error> {
             value.serialize(self)
         }
 
-        fn serialize_unit(self: mut Self) -> Result<(), Error> {
+        fn serialize_unit(mut self) -> Result<(), Error> {
             self.write_u8(NIL);
             Ok(())
         }
 
-        fn serialize_unit_struct(self: mut Self, _name: &'static str) -> Result<(), Error> {
+        fn serialize_unit_struct(mut self, _name: &'static str) -> Result<(), Error> {
             self.serialize_unit()
         }
 
         fn serialize_unit_variant(
-            self: mut Self,
+            mut self,
             _name: &'static str,
             variant_index: u32,
             _variant: &'static str,
@@ -2481,7 +2481,7 @@ pub mod msgpack {
         }
 
         fn serialize_newtype_struct<T: Serialize>(
-            self: mut Self,
+            mut self,
             _name: &'static str,
             value: &T,
         ) -> Result<(), Error> {
@@ -2489,7 +2489,7 @@ pub mod msgpack {
         }
 
         fn serialize_newtype_variant<T: Serialize>(
-            self: mut Self,
+            mut self,
             _name: &'static str,
             variant_index: u32,
             _variant: &'static str,
@@ -2501,7 +2501,7 @@ pub mod msgpack {
             value.serialize(MsgPackSerializer::new(self.output))
         }
 
-        fn serialize_seq(self: mut Self, len: Option<usize>) -> Result<Self::SerializeSeq, Error> {
+        fn serialize_seq(mut self, len: Option<usize>) -> Result<Self::SerializeSeq, Error> {
             let len = len.expect("sequence length required for msgpack");
             if len <= 15 {
                 self.write_u8(FIXARRAY_MIN | len as u8);
@@ -2515,12 +2515,12 @@ pub mod msgpack {
             Ok(MsgPackSeqSerializer { output: self.output })
         }
 
-        fn serialize_tuple(self: mut Self, len: usize) -> Result<Self::SerializeSeq, Error> {
+        fn serialize_tuple(mut self, len: usize) -> Result<Self::SerializeSeq, Error> {
             self.serialize_seq(Some(len))
         }
 
         fn serialize_tuple_struct(
-            self: mut Self,
+            mut self,
             _name: &'static str,
             len: usize,
         ) -> Result<Self::SerializeSeq, Error> {
@@ -2528,7 +2528,7 @@ pub mod msgpack {
         }
 
         fn serialize_tuple_variant(
-            self: mut Self,
+            mut self,
             _name: &'static str,
             variant_index: u32,
             _variant: &'static str,
@@ -2550,7 +2550,7 @@ pub mod msgpack {
             Ok(MsgPackTupleVariantSerializer { output: self.output })
         }
 
-        fn serialize_map(self: mut Self, len: Option<usize>) -> Result<Self::SerializeMap, Error> {
+        fn serialize_map(mut self, len: Option<usize>) -> Result<Self::SerializeMap, Error> {
             let len = len.expect("map length required for msgpack");
             if len <= 15 {
                 self.write_u8(FIXMAP_MIN | len as u8);
@@ -2565,7 +2565,7 @@ pub mod msgpack {
         }
 
         fn serialize_struct(
-            self: mut Self,
+            mut self,
             _name: &'static str,
             len: usize,
         ) -> Result<Self::SerializeStruct, Error> {
@@ -2582,7 +2582,7 @@ pub mod msgpack {
         }
 
         fn serialize_struct_variant(
-            self: mut Self,
+            mut self,
             _name: &'static str,
             variant_index: u32,
             _variant: &'static str,

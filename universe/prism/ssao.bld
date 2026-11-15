@@ -1,8 +1,8 @@
 // BUILD-UNIVERSE Prism: Screen-Space Ambient Occlusion Shaders
 // Comprehensive SSAO implementations including SSAO, HBAO, GTAO, and more
 
-import prism::lib::*;
-import spectrum::color::*;
+use prism::lib::*;
+use spectrum::color::*;
 
 // ============================================================================
 // SSAO CONFIGURATION

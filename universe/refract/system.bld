@@ -3,14 +3,14 @@
 // Main integration system tying together all ENB components
 // ============================================================================
 
-import core::sync
-import refract::lib
-import refract::hooks
-import refract::effects
-import refract::weather
-import refract::particle_lights
-import refract::skylighting
-import refract::presets
+use core::sync
+use refract::lib
+use refract::hooks
+use refract::effects
+use refract::weather
+use refract::particle_lights
+use refract::skylighting
+use refract::presets
 
 // ============================================================================
 // SYSTEM CONFIGURATION
@@ -531,7 +531,7 @@ impl ENBSystem {
         }
     }
 
-    pub fn initialize(&mut self, device: &Device, width: u32, height: u32) -> Result<(), SystemError> {
+    pub fn initialize(&mut self, device: &Device, width: u32, height: u32) -> Result<(), SystemError> ~ Console {
         self.state = SystemState::Initializing;
 
         // Create render resources

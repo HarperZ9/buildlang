@@ -3,9 +3,9 @@
 // Mod profile management for different configurations and presets
 // ============================================================================
 
-import nexus::lib::{ModMetadata, Version};
-import nexus::config::ModConfig;
-import nexus::loader::LoadState;
+use nexus::lib::{ModMetadata, Version};
+use nexus::config::ModConfig;
+use nexus::loader::LoadState;
 
 // ============================================================================
 // REGION: Profile Types

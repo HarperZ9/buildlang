@@ -44,24 +44,24 @@ pub struct AtomicBool {
 
 impl AtomicBool {
     /// Create a new atomic bool
-    pub const fn new(value: bool) -> Self {
+    pub const fn new(value: bool) -> Self ~ Foreign {
         Self {
             value: intrinsic::atomic_bool_new(value),
         }
     }
 
     /// Load the value
-    pub fn load(self: &Self, ordering: Ordering) -> bool {
+    pub fn load(self: &Self, ordering: Ordering) -> bool ~ Foreign {
         intrinsic::atomic_bool_load(&self.value, ordering)
     }
 
     /// Store a value
-    pub fn store(self: &Self, value: bool, ordering: Ordering) {
+    pub fn store(self: &Self, value: bool, ordering: Ordering) ~ Foreign {
         intrinsic::atomic_bool_store(&self.value, value, ordering)
     }
 
     /// Swap values, returning old value
-    pub fn swap(self: &Self, value: bool, ordering: Ordering) -> bool {
+    pub fn swap(self: &Self, value: bool, ordering: Ordering) -> bool ~ Foreign {
         intrinsic::atomic_bool_swap(&self.value, value, ordering)
     }
 
@@ -72,7 +72,7 @@ impl AtomicBool {
         new: bool,
         success: Ordering,
         failure: Ordering,
-    ) -> Result<bool, bool> {
+    ) -> Result<bool, bool> ~ Foreign {
         intrinsic::atomic_bool_compare_exchange(&self.value, current, new, success, failure)
     }
 
@@ -83,27 +83,27 @@ impl AtomicBool {
         new: bool,
         success: Ordering,
         failure: Ordering,
-    ) -> Result<bool, bool> {
+    ) -> Result<bool, bool> ~ Foreign {
         intrinsic::atomic_bool_compare_exchange_weak(&self.value, current, new, success, failure)
     }
 
     /// Fetch and logical AND
-    pub fn fetch_and(self: &Self, value: bool, ordering: Ordering) -> bool {
+    pub fn fetch_and(self: &Self, value: bool, ordering: Ordering) -> bool ~ Foreign {
         intrinsic::atomic_bool_fetch_and(&self.value, value, ordering)
     }
 
     /// Fetch and logical OR
-    pub fn fetch_or(self: &Self, value: bool, ordering: Ordering) -> bool {
+    pub fn fetch_or(self: &Self, value: bool, ordering: Ordering) -> bool ~ Foreign {
         intrinsic::atomic_bool_fetch_or(&self.value, value, ordering)
     }
 
     /// Fetch and logical XOR
-    pub fn fetch_xor(self: &Self, value: bool, ordering: Ordering) -> bool {
+    pub fn fetch_xor(self: &Self, value: bool, ordering: Ordering) -> bool ~ Foreign {
         intrinsic::atomic_bool_fetch_xor(&self.value, value, ordering)
     }
 
     /// Fetch and logical NAND
-    pub fn fetch_nand(self: &Self, value: bool, ordering: Ordering) -> bool {
+    pub fn fetch_nand(self: &Self, value: bool, ordering: Ordering) -> bool ~ Foreign {
         intrinsic::atomic_bool_fetch_nand(&self.value, value, ordering)
     }
 }
@@ -115,24 +115,24 @@ pub struct AtomicUsize {
 
 impl AtomicUsize {
     /// Create a new atomic usize
-    pub const fn new(value: usize) -> Self {
+    pub const fn new(value: usize) -> Self ~ Foreign {
         Self {
             value: intrinsic::atomic_usize_new(value),
         }
     }
 
     /// Load the value
-    pub fn load(self: &Self, ordering: Ordering) -> usize {
+    pub fn load(self: &Self, ordering: Ordering) -> usize ~ Foreign {
         intrinsic::atomic_usize_load(&self.value, ordering)
     }
 
     /// Store a value
-    pub fn store(self: &Self, value: usize, ordering: Ordering) {
+    pub fn store(self: &Self, value: usize, ordering: Ordering) ~ Foreign {
         intrinsic::atomic_usize_store(&self.value, value, ordering)
     }
 
     /// Swap values, returning old value
-    pub fn swap(self: &Self, value: usize, ordering: Ordering) -> usize {
+    pub fn swap(self: &Self, value: usize, ordering: Ordering) -> usize ~ Foreign {
         intrinsic::atomic_usize_swap(&self.value, value, ordering)
     }
 
@@ -143,7 +143,7 @@ impl AtomicUsize {
         new: usize,
         success: Ordering,
         failure: Ordering,
-    ) -> Result<usize, usize> {
+    ) -> Result<usize, usize> ~ Foreign {
         intrinsic::atomic_usize_compare_exchange(&self.value, current, new, success, failure)
     }
 
@@ -154,42 +154,42 @@ impl AtomicUsize {
         new: usize,
         success: Ordering,
         failure: Ordering,
-    ) -> Result<usize, usize> {
+    ) -> Result<usize, usize> ~ Foreign {
         intrinsic::atomic_usize_compare_exchange_weak(&self.value, current, new, success, failure)
     }
 
     /// Fetch and add
-    pub fn fetch_add(self: &Self, value: usize, ordering: Ordering) -> usize {
+    pub fn fetch_add(self: &Self, value: usize, ordering: Ordering) -> usize ~ Foreign {
         intrinsic::atomic_usize_fetch_add(&self.value, value, ordering)
     }
 
     /// Fetch and subtract
-    pub fn fetch_sub(self: &Self, value: usize, ordering: Ordering) -> usize {
+    pub fn fetch_sub(self: &Self, value: usize, ordering: Ordering) -> usize ~ Foreign {
         intrinsic::atomic_usize_fetch_sub(&self.value, value, ordering)
     }
 
     /// Fetch and bitwise AND
-    pub fn fetch_and(self: &Self, value: usize, ordering: Ordering) -> usize {
+    pub fn fetch_and(self: &Self, value: usize, ordering: Ordering) -> usize ~ Foreign {
         intrinsic::atomic_usize_fetch_and(&self.value, value, ordering)
     }
 
     /// Fetch and bitwise OR
-    pub fn fetch_or(self: &Self, value: usize, ordering: Ordering) -> usize {
+    pub fn fetch_or(self: &Self, value: usize, ordering: Ordering) -> usize ~ Foreign {
         intrinsic::atomic_usize_fetch_or(&self.value, value, ordering)
     }
 
     /// Fetch and bitwise XOR
-    pub fn fetch_xor(self: &Self, value: usize, ordering: Ordering) -> usize {
+    pub fn fetch_xor(self: &Self, value: usize, ordering: Ordering) -> usize ~ Foreign {
         intrinsic::atomic_usize_fetch_xor(&self.value, value, ordering)
     }
 
     /// Fetch max
-    pub fn fetch_max(self: &Self, value: usize, ordering: Ordering) -> usize {
+    pub fn fetch_max(self: &Self, value: usize, ordering: Ordering) -> usize ~ Foreign {
         intrinsic::atomic_usize_fetch_max(&self.value, value, ordering)
     }
 
     /// Fetch min
-    pub fn fetch_min(self: &Self, value: usize, ordering: Ordering) -> usize {
+    pub fn fetch_min(self: &Self, value: usize, ordering: Ordering) -> usize ~ Foreign {
         intrinsic::atomic_usize_fetch_min(&self.value, value, ordering)
     }
 }
@@ -201,34 +201,34 @@ pub struct AtomicIsize {
 
 impl AtomicIsize {
     /// Create a new atomic isize
-    pub const fn new(value: isize) -> Self {
+    pub const fn new(value: isize) -> Self ~ Foreign {
         Self {
             value: intrinsic::atomic_isize_new(value),
         }
     }
 
     /// Load the value
-    pub fn load(self: &Self, ordering: Ordering) -> isize {
+    pub fn load(self: &Self, ordering: Ordering) -> isize ~ Foreign {
         intrinsic::atomic_isize_load(&self.value, ordering)
     }
 
     /// Store a value
-    pub fn store(self: &Self, value: isize, ordering: Ordering) {
+    pub fn store(self: &Self, value: isize, ordering: Ordering) ~ Foreign {
         intrinsic::atomic_isize_store(&self.value, value, ordering)
     }
 
     /// Swap values
-    pub fn swap(self: &Self, value: isize, ordering: Ordering) -> isize {
+    pub fn swap(self: &Self, value: isize, ordering: Ordering) -> isize ~ Foreign {
         intrinsic::atomic_isize_swap(&self.value, value, ordering)
     }
 
     /// Fetch and add
-    pub fn fetch_add(self: &Self, value: isize, ordering: Ordering) -> isize {
+    pub fn fetch_add(self: &Self, value: isize, ordering: Ordering) -> isize ~ Foreign {
         intrinsic::atomic_isize_fetch_add(&self.value, value, ordering)
     }
 
     /// Fetch and subtract
-    pub fn fetch_sub(self: &Self, value: isize, ordering: Ordering) -> isize {
+    pub fn fetch_sub(self: &Self, value: isize, ordering: Ordering) -> isize ~ Foreign {
         intrinsic::atomic_isize_fetch_sub(&self.value, value, ordering)
     }
 }
@@ -381,7 +381,7 @@ impl<'a, T> DerefMut for MutexGuard<'a, T> {
 }
 
 impl<'a, T> Drop for MutexGuard<'a, T> {
-    fn drop(self: &mut Self) {
+    fn drop(self: &mut Self) ~ Foreign {
         if std::thread::panicking() {
             self.mutex.poisoned.store(true, Ordering::Relaxed);
         }
@@ -507,7 +507,7 @@ impl<'a, T> Deref for RwLockReadGuard<'a, T> {
 }
 
 impl<'a, T> Drop for RwLockReadGuard<'a, T> {
-    fn drop(self: &mut Self) {
+    fn drop(self: &mut Self) ~ Foreign {
         intrinsic::rwlock_read_unlock(&self.lock.inner);
     }
 }
@@ -532,7 +532,7 @@ impl<'a, T> DerefMut for RwLockWriteGuard<'a, T> {
 }
 
 impl<'a, T> Drop for RwLockWriteGuard<'a, T> {
-    fn drop(self: &mut Self) {
+    fn drop(self: &mut Self) ~ Foreign {
         if std::thread::panicking() {
             self.lock.poisoned.store(true, Ordering::Relaxed);
         }
@@ -551,7 +551,7 @@ pub struct Condvar {
 
 impl Condvar {
     /// Create a new condition variable
-    pub fn new() -> Self {
+    pub fn new() -> Self ~ Foreign {
         Self {
             inner: intrinsic::condvar_new(),
         }
@@ -561,7 +561,7 @@ impl Condvar {
     pub fn wait<'a, T>(
         self: &Self,
         guard: MutexGuard<'a, T>,
-    ) -> Result<MutexGuard<'a, T>, PoisonError<MutexGuard<'a, T>>> {
+    ) -> Result<MutexGuard<'a, T>, PoisonError<MutexGuard<'a, T>>> ~ Foreign {
         let mutex = guard.mutex;
         // Release the lock temporarily
         intrinsic::condvar_wait(&self.inner, &mutex.inner);
@@ -578,7 +578,7 @@ impl Condvar {
         self: &Self,
         guard: MutexGuard<'a, T>,
         timeout: Duration,
-    ) -> Result<(MutexGuard<'a, T>, WaitTimeoutResult), PoisonError<(MutexGuard<'a, T>, WaitTimeoutResult)>> {
+    ) -> Result<(MutexGuard<'a, T>, WaitTimeoutResult), PoisonError<(MutexGuard<'a, T>, WaitTimeoutResult)>> ~ Foreign {
         let mutex = guard.mutex;
         let timed_out = intrinsic::condvar_wait_timeout(&self.inner, &mutex.inner, timeout);
         let result = WaitTimeoutResult { timed_out };
@@ -598,7 +598,7 @@ impl Condvar {
         mut guard: MutexGuard<'a, T>,
         mut condition: F,
     ) -> Result<MutexGuard<'a, T>, PoisonError<MutexGuard<'a, T>>>
-    where
+ ~ Foreign where
         F: FnMut(&mut T) -> bool,
     {
         while condition(&mut *guard) {
@@ -614,7 +614,7 @@ impl Condvar {
         timeout: Duration,
         mut condition: F,
     ) -> Result<(MutexGuard<'a, T>, WaitTimeoutResult), PoisonError<(MutexGuard<'a, T>, WaitTimeoutResult)>>
-    where
+ ~ Foreign where
         F: FnMut(&mut T) -> bool,
     {
         let start = Instant::now();
@@ -634,12 +634,12 @@ impl Condvar {
     }
 
     /// Wake one waiting thread
-    pub fn notify_one(self: &Self) {
+    pub fn notify_one(self: &Self) ~ Foreign {
         intrinsic::condvar_notify_one(&self.inner);
     }
 
     /// Wake all waiting threads
-    pub fn notify_all(self: &Self) {
+    pub fn notify_all(self: &Self) ~ Foreign {
         intrinsic::condvar_notify_all(&self.inner);
     }
 }
@@ -674,7 +674,7 @@ struct BarrierState {
 
 impl Barrier {
     /// Create a barrier for n threads
-    pub fn new(n: usize) -> Self {
+    pub fn new(n: usize) -> Self ~ Foreign {
         Self {
             lock: Mutex::new(BarrierState {
                 count: 0,
@@ -686,7 +686,7 @@ impl Barrier {
     }
 
     /// Wait at the barrier
-    pub fn wait(self: &Self) -> BarrierWaitResult {
+    pub fn wait(self: &Self) -> BarrierWaitResult ~ Foreign {
         let mut state = self.lock.lock().unwrap();
         let generation = state.generation;
 
@@ -737,7 +737,7 @@ const ONCE_POISONED: usize = 3;
 
 impl Once {
     /// Create a new Once
-    pub const fn new() -> Self {
+    pub const fn new() -> Self ~ Foreign {
         Self {
             state: AtomicUsize::new(ONCE_INCOMPLETE),
             inner: intrinsic::once_new(),
@@ -745,7 +745,7 @@ impl Once {
     }
 
     /// Call the function exactly once
-    pub fn call_once<F: FnOnce()>(self: &Self, f: F) {
+    pub fn call_once<F: FnOnce()>(self: &Self, f: F) ~ Foreign {
         if self.state.load(Ordering::Acquire) == ONCE_COMPLETE {
             return;
         }
@@ -753,7 +753,7 @@ impl Once {
     }
 
     #[cold]
-    fn call_once_slow<F: FnOnce()>(self: &Self, f: F) {
+    fn call_once_slow<F: FnOnce()>(self: &Self, f: F) ~ Foreign {
         loop {
             match self.state.compare_exchange(
                 ONCE_INCOMPLETE,
@@ -782,7 +782,7 @@ impl Once {
     }
 
     /// Call once, catching panics
-    pub fn call_once_force<F: FnOnce(&OnceState)>(self: &Self, f: F) {
+    pub fn call_once_force<F: FnOnce(&OnceState)>(self: &Self, f: F) ~ Foreign {
         if self.state.load(Ordering::Acquire) == ONCE_COMPLETE {
             return;
         }
@@ -790,7 +790,7 @@ impl Once {
     }
 
     #[cold]
-    fn call_once_force_slow<F: FnOnce(&OnceState)>(self: &Self, f: F) {
+    fn call_once_force_slow<F: FnOnce(&OnceState)>(self: &Self, f: F) ~ Foreign {
         loop {
             let state = self.state.load(Ordering::Acquire);
             match self.state.compare_exchange(
@@ -820,7 +820,7 @@ impl Once {
     }
 
     /// Check if initialization is complete
-    pub fn is_completed(self: &Self) -> bool {
+    pub fn is_completed(self: &Self) -> bool ~ Foreign {
         self.state.load(Ordering::Acquire) == ONCE_COMPLETE
     }
 }
@@ -830,7 +830,7 @@ struct OnceGuard<'a> {
 }
 
 impl<'a> Drop for OnceGuard<'a> {
-    fn drop(self: &mut Self) {
+    fn drop(self: &mut Self) ~ Foreign {
         self.once.state.store(ONCE_POISONED, Ordering::Release);
         intrinsic::once_wake(&self.once.inner);
     }
@@ -1467,7 +1467,7 @@ type Job = Box<dyn FnOnce() + Send + 'static>;
 
 impl ThreadPool {
     /// Create a new thread pool with the specified number of threads
-    pub fn new(size: usize) -> Self {
+    pub fn new(size: usize) -> Self ~ Foreign {
         assert!(size > 0, "Thread pool must have at least one thread");
 
         let (sender, receiver) = channel();
@@ -1486,7 +1486,7 @@ impl ThreadPool {
     }
 
     /// Create a thread pool with one thread per CPU core
-    pub fn with_cpus() -> Self {
+    pub fn with_cpus() -> Self ~ Foreign {
         Self::new(intrinsic::num_cpus())
     }
 
@@ -1512,7 +1512,7 @@ impl ThreadPool {
     }
 
     /// Shutdown and wait for completion
-    pub fn join(self: mut Self) {
+    pub fn join(mut self) {
         self.shutdown.store(true, Ordering::SeqCst);
         // Signal workers to stop
         for worker in self.workers.drain(..) {
@@ -1563,7 +1563,7 @@ impl Worker {
         }
     }
 
-    fn join(self: mut Self) {
+    fn join(mut self) {
         if let Some(thread) = self.thread.take() {
             thread.join().unwrap();
         }
@@ -1585,7 +1585,7 @@ pub struct WorkStealingPool {
 
 impl WorkStealingPool {
     /// Create a new work-stealing pool
-    pub fn new(size: usize) -> Self {
+    pub fn new(size: usize) -> Self ~ Foreign {
         assert!(size > 0);
 
         let shutdown = Arc::new(AtomicBool::new(false));
@@ -1620,7 +1620,7 @@ impl WorkStealingPool {
 
     /// Submit a task
     pub fn submit<F>(self: &Self, f: F)
-    where
+ ~ Foreign where
         F: FnOnce() + Send + 'static,
     {
         let job = Box::new(f);
@@ -1634,7 +1634,7 @@ impl WorkStealingPool {
     }
 
     /// Shutdown the pool
-    pub fn shutdown(self: mut Self) {
+    pub fn shutdown(mut self) {
         self.shutdown.store(true, Ordering::SeqCst);
         for worker in self.workers.drain(..) {
             worker.join();
@@ -1794,7 +1794,7 @@ impl StealingWorker {
         }
     }
 
-    fn join(self: mut Self) {
+    fn join(mut self) {
         if let Some(thread) = self.thread.take() {
             thread.join().unwrap();
         }
@@ -1832,7 +1832,7 @@ pub struct Runtime {
 
 impl Runtime {
     /// Create a new runtime with default settings
-    pub fn new() -> Self {
+    pub fn new() -> Self ~ Foreign {
         let thread_pool = ThreadPool::with_cpus();
         Self {
             executor: Arc::new(Executor::new()),
@@ -1841,7 +1841,7 @@ impl Runtime {
     }
 
     /// Create a runtime with specified thread count
-    pub fn with_threads(n: usize) -> Self {
+    pub fn with_threads(n: usize) -> Self ~ Foreign {
         Self {
             executor: Arc::new(Executor::new()),
             thread_pool: ThreadPool::new(n),
@@ -1945,7 +1945,7 @@ struct Executor {
 }
 
 impl Executor {
-    fn new() -> Self {
+    fn new() -> Self ~ Foreign {
         Self {
             ready_queue: Mutex::new(VecDeque::new()),
             condvar: Condvar::new(),
@@ -1977,13 +1977,13 @@ impl Executor {
         }
     }
 
-    fn schedule(self: &Self, task: Arc<Task>) {
+    fn schedule(self: &Self, task: Arc<Task>) ~ Foreign {
         let mut queue = self.ready_queue.lock().unwrap();
         queue.push_back(task);
         self.condvar.notify_one();
     }
 
-    fn block_on<F: Future>(self: &Arc<Self>, future: F) -> F::Output {
+    fn block_on<F: Future>(self: &Arc<Self>, future: F) -> F::Output ~ Foreign {
         let waker = intrinsic::noop_waker();
         let mut cx = Context::from_waker(&waker);
         let mut future = std::pin::pin!(future);
@@ -2017,7 +2017,7 @@ struct Task {
 }
 
 impl Task {
-    fn poll(self: &Arc<Self>) {
+    fn poll(self: &Arc<Self>) ~ Foreign {
         let waker = task_waker(self.clone());
         let mut cx = Context::from_waker(&waker);
 
@@ -2026,7 +2026,7 @@ impl Task {
     }
 }
 
-fn task_waker(task: Arc<Task>) -> intrinsic::Waker {
+fn task_waker(task: Arc<Task>) -> intrinsic::Waker ~ Foreign {
     intrinsic::waker_from_task(task)
 }
 
@@ -2198,7 +2198,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_atomic_bool() {
+    fn test_atomic_bool() ~ Foreign {
         let flag = AtomicBool::new(false);
         assert_eq!(flag.load(Ordering::SeqCst), false);
 
@@ -2211,7 +2211,7 @@ mod tests {
     }
 
     #[test]
-    fn test_atomic_usize() {
+    fn test_atomic_usize() ~ Foreign {
         let counter = AtomicUsize::new(0);
 
         counter.fetch_add(5, Ordering::SeqCst);
@@ -2294,7 +2294,7 @@ mod tests {
     }
 
     #[test]
-    fn test_barrier() {
+    fn test_barrier() ~ Foreign {
         let barrier = Arc::new(Barrier::new(3));
         let mut handles = vec![];
 
@@ -2338,7 +2338,7 @@ mod tests {
     }
 
     #[test]
-    fn test_thread_pool() {
+    fn test_thread_pool() ~ Foreign {
         let pool = ThreadPool::new(4);
         let (tx, rx) = bounded(10);
 

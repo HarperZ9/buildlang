@@ -1,8 +1,8 @@
 // BUILD-UNIVERSE Prism: Motion Blur Shaders
 // Comprehensive motion blur implementations including per-object, camera, and tile-based techniques
 
-import prism::lib::*;
-import spectrum::color::*;
+use prism::lib::*;
+use spectrum::color::*;
 
 // ============================================================================
 // MOTION BLUR CONFIGURATION

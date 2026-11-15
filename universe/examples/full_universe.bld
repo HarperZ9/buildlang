@@ -103,7 +103,7 @@ pub struct BuildApplication {
 }
 
 impl BuildApplication {
-    pub fn new() -> Result<Self, Error> {
+    pub fn new() -> Result<Self, Error> ~ Console {
         println!("╔═══════════════════════════════════════════════════════════════╗");
         println!("║  BUILD-UNIVERSE Full Integration                             ║");
         println!("║  All 22 Modules Working Together                              ║");
@@ -188,7 +188,7 @@ impl BuildApplication {
     }
 
     /// Run the main application loop
-    pub fn run(&mut self) {
+    pub fn run(&mut self) ~ Console {
         self.running = true;
         println!("\nStarting main application loop...\n");
 
@@ -222,7 +222,7 @@ impl BuildApplication {
         self.print_final_report();
     }
 
-    fn process_scheduler(&mut self) {
+    fn process_scheduler(&mut self) ~ Console {
         println!("  [BuildOS] Scheduling processes...");
 
         // Create and schedule some tasks
@@ -236,7 +236,7 @@ impl BuildApplication {
         println!("    ✓ {} tasks scheduled", scheduled);
     }
 
-    fn render_frame(&mut self) {
+    fn render_frame(&mut self) ~ Console {
         self.frame_count += 1;
         println!("  [Photon] Rendering frame {}...", self.frame_count);
 
@@ -260,7 +260,7 @@ impl BuildApplication {
         println!("    ✓ Frame {} complete", self.frame_count);
     }
 
-    fn process_trading(&mut self) {
+    fn process_trading(&mut self) ~ Console {
         println!("  [Quantum Finance] Processing market...");
 
         // Create market tensor
@@ -295,7 +295,7 @@ impl BuildApplication {
         println!("    ✓ Portfolio: ${:.2}", value);
     }
 
-    fn run_ai(&mut self) {
+    fn run_ai(&mut self) ~ Console {
         println!("  [Intelligence] Running AI systems...");
 
         // Differentiable programming with Axiom
@@ -320,7 +320,7 @@ impl BuildApplication {
         f(dual).derivative()
     }
 
-    fn sync_state(&mut self) {
+    fn sync_state(&mut self) ~ Console {
         println!("  [Entangle] Syncing state...");
 
         // Sync settings
@@ -339,7 +339,7 @@ impl BuildApplication {
         println!("    ✓ Sync complete");
     }
 
-    fn profile_cycle(&mut self, cycle: usize) {
+    fn profile_cycle(&mut self, cycle: usize) ~ Console {
         println!("  [Forge] Profiling cycle {}...", cycle);
 
         let report = self.profiler.capture();
@@ -349,7 +349,7 @@ impl BuildApplication {
         self.profiler.add_marker(&format!("cycle_{}", cycle));
     }
 
-    fn print_final_report(&self) {
+    fn print_final_report(&self) ~ Console {
         println!();
         println!("╔═══════════════════════════════════════════════════════════════╗");
         println!("║  BUILD-UNIVERSE Session Report                               ║");
@@ -445,7 +445,7 @@ fn rand() -> f64 {
 // MAIN
 // ═══════════════════════════════════════════════════════════════════════════════
 
-fn main() -> Result<(), Error> {
+fn main() -> Result<(), Error> ~ Console {
     let mut app = BuildApplication::new()?;
     app.run();
     Ok(())

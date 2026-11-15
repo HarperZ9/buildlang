@@ -441,7 +441,7 @@ impl DependencyGraph {
 }
 
 impl ModuleRegistry {
-    pub fn new() -> Self {
+    pub fn new() -> Self ~ Console {
         let mut registry = ModuleRegistry {
             modules: HashMap::new(),
             load_order: Vec::new(),
@@ -453,7 +453,7 @@ impl ModuleRegistry {
         registry
     }
 
-    fn register_all_modules(&mut self) {
+    fn register_all_modules(&mut self) ~ Console {
         // Layer 0: Foundation
         self.register(ModuleRegistration {
             name: "buildlang",
@@ -866,7 +866,7 @@ impl ModuleRegistry {
         self.version += 1;
     }
 
-    fn compute_load_order(&mut self) {
+    fn compute_load_order(&mut self) ~ Console {
         match self.dependency_graph.topological_sort() {
             Ok(order) => {
                 // Reverse because we want dependencies first
@@ -1444,11 +1444,11 @@ pub enum UniverseEventType {
 
 impl Universe {
     /// Create a new Universe instance
-    pub fn new() -> Self {
+    pub fn new() -> Self ~ Console {
         Self::with_config(UniverseConfig::default())
     }
 
-    pub fn with_config(config: UniverseConfig) -> Self {
+    pub fn with_config(config: UniverseConfig) -> Self ~ Console {
         Universe {
             registry: RwLock::new(ModuleRegistry::new()),
             message_bus: Arc::new(MessageBus::new()),
@@ -1523,7 +1523,7 @@ impl Universe {
     }
 
     /// Shutdown the universe gracefully
-    pub fn shutdown(&self) -> Result<(), String> {
+    pub fn shutdown(&self) -> Result<(), String> ~ Console {
         if !self.initialized.load(Ordering::SeqCst) {
             return Err("Universe not initialized".to_string());
         }
@@ -5122,7 +5122,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_module_registry() {
+    fn test_module_registry() ~ Console {
         let registry = ModuleRegistry::new();
 
         assert!(registry.get_module("buildlang").is_some());
@@ -5135,7 +5135,7 @@ mod tests {
     }
 
     #[test]
-    fn test_load_order() {
+    fn test_load_order() ~ Console {
         let registry = ModuleRegistry::new();
         let order = registry.get_load_order();
 
@@ -5176,7 +5176,7 @@ mod tests {
     }
 
     #[test]
-    fn test_universe_layers() {
+    fn test_universe_layers() ~ Console {
         let registry = ModuleRegistry::new();
 
         let foundation = registry.get_modules_by_layer(Layer::Foundation);

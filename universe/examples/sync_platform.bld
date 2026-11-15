@@ -60,7 +60,7 @@ impl Default for SyncConfig {
 }
 
 impl SyncPlatform {
-    pub fn new(config: SyncConfig) -> Self {
+    pub fn new(config: SyncConfig) -> Self ~ Console {
         println!("Initializing Sync Platform...");
 
         let sync_engine = SyncEngine::new(&config.device_name);
@@ -81,7 +81,7 @@ impl SyncPlatform {
     }
 
     /// Start the sync service
-    pub fn start(&mut self) {
+    pub fn start(&mut self) ~ Console {
         println!("\nStarting Entangle Sync Service...");
 
         // Discover devices on the network
@@ -94,7 +94,7 @@ impl SyncPlatform {
         self.sync_loop();
     }
 
-    fn discover_devices(&mut self) {
+    fn discover_devices(&mut self) ~ Console {
         println!("  Discovering devices...");
 
         // Simulate device discovery
@@ -112,7 +112,7 @@ impl SyncPlatform {
         println!("  {} devices found", self.devices.len());
     }
 
-    fn init_profiles(&mut self) {
+    fn init_profiles(&mut self) ~ Console {
         println!("  Initializing sync profiles...");
 
         // Settings sync profile
@@ -148,7 +148,7 @@ impl SyncPlatform {
         println!("  {} profiles initialized", self.profiles.len());
     }
 
-    fn sync_loop(&mut self) {
+    fn sync_loop(&mut self) ~ Console {
         println!("\nRunning sync cycle...");
 
         for (name, profile) in &self.profiles {
@@ -185,7 +185,7 @@ impl SyncPlatform {
         }
     }
 
-    fn resolve_conflict(&self, conflict: &str, profile: &SyncProfile) {
+    fn resolve_conflict(&self, conflict: &str, profile: &SyncProfile) ~ Console {
         let resolver = ConflictResolver::new(profile.conflict_strategy);
         let resolution = resolver.resolve(conflict);
         println!("      Resolved: {}", resolution);
@@ -224,7 +224,7 @@ pub struct DisplayCalibrationSystem {
 }
 
 impl DisplayCalibrationSystem {
-    pub fn new() -> Self {
+    pub fn new() -> Self ~ Console {
         println!("Initializing Display Calibration System...");
 
         let calibrator = DisplayCalibrator::new();
@@ -237,7 +237,7 @@ impl DisplayCalibrationSystem {
     }
 
     /// Detect connected displays
-    pub fn detect_displays(&mut self) {
+    pub fn detect_displays(&mut self) ~ Console {
         println!("  Detecting displays...");
 
         // Simulate display detection
@@ -271,7 +271,7 @@ impl DisplayCalibrationSystem {
     }
 
     /// Calibrate a display
-    pub fn calibrate(&mut self, display_id: &str) -> Result<CalibrationResult, String> {
+    pub fn calibrate(&mut self, display_id: &str) -> Result<CalibrationResult, String> ~ Console {
         println!("\nCalibrating display: {}", display_id);
 
         let display = self.displays.iter()
@@ -349,7 +349,7 @@ pub struct PresetManager {
 }
 
 impl PresetManager {
-    pub fn new() -> Self {
+    pub fn new() -> Self ~ Console {
         println!("Initializing Preset Manager...");
 
         PresetManager {
@@ -361,7 +361,7 @@ impl PresetManager {
     }
 
     /// Load all presets from disk
-    pub fn load_presets(&mut self, path: &str) {
+    pub fn load_presets(&mut self, path: &str) ~ Console {
         println!("  Loading presets from {}...", path);
 
         // Simulate loading presets
@@ -383,7 +383,7 @@ impl PresetManager {
     }
 
     /// Auto-detect running game and apply preset
-    pub fn auto_apply(&mut self) {
+    pub fn auto_apply(&mut self) ~ Console {
         println!("\n  Auto-detecting game...");
 
         if let Some(game) = self.detector.detect() {
@@ -413,7 +413,7 @@ impl PresetManager {
         mappings.get(game.name.as_str()).map(|s| s.to_string())
     }
 
-    pub fn apply_preset(&mut self, name: &str) {
+    pub fn apply_preset(&mut self, name: &str) ~ Console {
         if let Some(preset) = self.presets.get(name) {
             self.engine.apply(preset);
             self.active_preset = Some(name.to_string());
@@ -428,7 +428,7 @@ impl PresetManager {
     }
 
     /// Create a new preset from current settings
-    pub fn create_preset(&mut self, name: &str, category: PresetCategory) {
+    pub fn create_preset(&mut self, name: &str, category: PresetCategory) ~ Console {
         println!("  Creating new preset: {}", name);
 
         let current_settings = self.engine.capture_current();
@@ -497,7 +497,7 @@ impl PerformanceMonitor {
         self.samples.push(sample);
     }
 
-    pub fn report(&self) {
+    pub fn report(&self) ~ Console {
         if self.samples.is_empty() {
             return;
         }
@@ -540,7 +540,7 @@ fn rand() -> f64 {
 // MAIN
 // ═══════════════════════════════════════════════════════════════════════════════
 
-fn main() {
+fn main() ~ Console {
     println!("╔═══════════════════════════════════════════════════════════════╗");
     println!("║  Cross-Platform Sync Demo                                     ║");
     println!("║  Powered by BUILD-UNIVERSE                                   ║");

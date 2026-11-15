@@ -3,8 +3,8 @@
 // Loading, saving, interpolation, and hot-reloading of ENB presets
 // ============================================================================
 
-import core::io
-import core::collections
+use core::io
+use core::collections
 
 // ============================================================================
 // INI FILE PARSING

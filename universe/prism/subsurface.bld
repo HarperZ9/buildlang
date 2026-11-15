@@ -1,8 +1,8 @@
 // BUILD-UNIVERSE Prism: Subsurface Scattering Shaders
 // Comprehensive SSS implementations including screen-space, separable, and pre-integrated techniques
 
-import prism::lib::*;
-import spectrum::color::*;
+use prism::lib::*;
+use spectrum::color::*;
 
 // ============================================================================
 // SSS CONFIGURATION
@@ -30,7 +30,7 @@ enum SSSTechnique {
     SeparableSSS,           // Separable gaussian approximation (Jimenez 2015)
     RayMarched,             // Ray-marched SSS
     DeferredTexturing,      // Deferred texturing approach
-    Random Walk,            // Path-traced random walk (offline)
+    RandomWalk,             // Path-traced random walk (offline)
 }
 
 enum SSSQuality {

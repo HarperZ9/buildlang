@@ -522,7 +522,7 @@ impl ModuleBridge {
     }
 
     /// Send data through a connection
-    pub fn send(&self, source_module: &str, source_port: &str, data: &[u8]) -> Result<(), String> {
+    pub fn send(&self, source_module: &str, source_port: &str, data: &[u8]) -> Result<(), String> ~ Console {
         let connections = self.connections.read().unwrap();
         let transformers = self.transformers.read().unwrap();
 
@@ -739,7 +739,7 @@ impl InterconnectManager {
     }
 
     /// Initialize the interconnection layer
-    pub fn initialize(&self) -> Result<(), String> {
+    pub fn initialize(&self) -> Result<(), String> ~ Console {
         println!("Initializing Interconnect Manager...");
 
         // Setup default bridges
@@ -819,7 +819,7 @@ pub struct InterconnectStats {
 
 static mut INTERCONNECT: Option<Arc<InterconnectManager>> = None;
 
-pub fn init_interconnect() -> Result<Arc<InterconnectManager>, String> {
+pub fn init_interconnect() -> Result<Arc<InterconnectManager>, String> ~ Console {
     unsafe {
         if INTERCONNECT.is_none() {
             let manager = InterconnectManager::new();

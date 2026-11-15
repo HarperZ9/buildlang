@@ -300,12 +300,12 @@ pub struct BuildRuntime {
 
 impl BuildRuntime {
     /// Create a new runtime with default configuration
-    pub fn new() -> Self {
+    pub fn new() -> Self ~ Console {
         Self::with_config(RuntimeConfig::default())
     }
 
     /// Create a new runtime with custom configuration
-    pub fn with_config(config: RuntimeConfig) -> Self {
+    pub fn with_config(config: RuntimeConfig) -> Self ~ Console {
         println!("╔═══════════════════════════════════════════════════════════════╗");
         println!("║  BUILD-UNIVERSE Runtime v2.0.0                               ║");
         println!("╚═══════════════════════════════════════════════════════════════╝");
@@ -384,7 +384,7 @@ impl BuildRuntime {
     }
 
     /// Start the runtime
-    pub fn start(&self) -> Result<(), RuntimeError> {
+    pub fn start(&self) -> Result<(), RuntimeError> ~ Console {
         if self.running.swap(true, Ordering::SeqCst) {
             return Err(RuntimeError::AlreadyRunning);
         }
@@ -418,7 +418,7 @@ impl BuildRuntime {
     }
 
     /// Stop the runtime
-    pub fn stop(&self) -> Result<(), RuntimeError> {
+    pub fn stop(&self) -> Result<(), RuntimeError> ~ Console {
         if !self.running.swap(false, Ordering::SeqCst) {
             return Err(RuntimeError::NotRunning);
         }
@@ -1595,7 +1595,7 @@ impl ModuleLoader {
         }
     }
 
-    pub fn load(&self, name: &str) -> Result<ModuleHandle, RuntimeError> {
+    pub fn load(&self, name: &str) -> Result<ModuleHandle, RuntimeError> ~ Console {
         let mut modules = self.modules.write().unwrap();
 
         if let Some(module) = modules.get(name) {
@@ -1635,7 +1635,7 @@ impl ModuleLoader {
         Ok(handle)
     }
 
-    fn load_dependencies(&self, name: &str) -> Result<(), RuntimeError> {
+    fn load_dependencies(&self, name: &str) -> Result<(), RuntimeError> ~ Console {
         let deps = {
             let dependencies = self.dependencies.read().unwrap();
             dependencies.get(name).cloned().unwrap_or_default()
@@ -1648,7 +1648,7 @@ impl ModuleLoader {
         Ok(())
     }
 
-    pub fn unload(&self, handle: ModuleHandle) -> Result<(), RuntimeError> {
+    pub fn unload(&self, handle: ModuleHandle) -> Result<(), RuntimeError> ~ Console {
         let mut modules = self.modules.write().unwrap();
 
         let name = modules.iter()
@@ -1843,11 +1843,11 @@ impl GarbageCollector {
         roots.remove(&address);
     }
 
-    pub fn collect(&self) {
+    pub fn collect(&self) ~ Console {
         self.collect_generation(Generation::Young);
     }
 
-    pub fn collect_generation(&self, generation: Generation) {
+    pub fn collect_generation(&self, generation: Generation) ~ Console {
         let start = Instant::now();
 
         match generation {
@@ -2255,12 +2255,12 @@ pub struct ProfileReport {
 static mut RUNTIME: Option<Arc<BuildRuntime>> = None;
 
 /// Initialize the global runtime
-pub fn init() -> Result<Arc<BuildRuntime>, RuntimeError> {
+pub fn init() -> Result<Arc<BuildRuntime>, RuntimeError> ~ Console {
     init_with_config(RuntimeConfig::default())
 }
 
 /// Initialize the global runtime with custom config
-pub fn init_with_config(config: RuntimeConfig) -> Result<Arc<BuildRuntime>, RuntimeError> {
+pub fn init_with_config(config: RuntimeConfig) -> Result<Arc<BuildRuntime>, RuntimeError> ~ Console {
     unsafe {
         if RUNTIME.is_none() {
             let runtime = BuildRuntime::with_config(config);

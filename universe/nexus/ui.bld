@@ -3,9 +3,9 @@
 // User interface for mod configuration and management
 // ============================================================================
 
-import nexus::lib::{ModMetadata, Version};
-import nexus::config::{ModConfig, ConfigValue, ConfigSchema};
-import nexus::loader::{ModLoader, ModInstance, LoadState};
+use nexus::lib::{ModMetadata, Version};
+use nexus::config::{ModConfig, ConfigValue, ConfigSchema};
+use nexus::loader::{ModLoader, ModInstance, LoadState};
 
 // ============================================================================
 // REGION: UI Theme

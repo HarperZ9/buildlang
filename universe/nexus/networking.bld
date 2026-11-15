@@ -3,8 +3,8 @@
 // Network communication for mod repositories and multiplayer mod sync
 // ============================================================================
 
-import nexus::lib::{ModMetadata, Version};
-import nexus::compatibility::VersionRange;
+use nexus::lib::{ModMetadata, Version};
+use nexus::compatibility::VersionRange;
 
 // ============================================================================
 // REGION: Network Error Types

@@ -2,11 +2,11 @@
 // Part of the Photon Rendering Module
 // Implements irradiance probes, radiance caching, light probe grids, and real-time GI approximation
 
-import std::collections::{HashMap, Vec, VecDeque, BinaryHeap}
-import std::math::{Vec2, Vec3, Vec4, Mat3, Mat4, Quaternion, sqrt, pow, exp, sin, cos, PI, floor, ceil, clamp, lerp, min, max, abs, dot, cross, normalize, length}
-import std::memory::{Arena, Pool, Box, Arc, Rc}
-import std::sync::{Mutex, RwLock, Atomic}
-import std::simd::{f32x4, f32x8, i32x4, i32x8}
+use std::collections::{HashMap, Vec, VecDeque, BinaryHeap}
+use std::math::{Vec2, Vec3, Vec4, Mat3, Mat4, Quaternion, sqrt, pow, exp, sin, cos, PI, floor, ceil, clamp, lerp, min, max, abs, dot, cross, normalize, length}
+use std::memory::{Arena, Pool, Box, Arc, Rc}
+use std::sync::{Mutex, RwLock, Atomic}
+use std::simd::{f32x4, f32x8, i32x4, i32x8}
 
 // ============================================================================
 // SPHERICAL HARMONICS
@@ -774,7 +774,7 @@ struct SsgiRenderer {
 }
 
 impl SsgiRenderer {
-    fn new(device: &Device, width: u32, height: u32, config: SsgiConfig) -> Self {
+    fn new(device: &Device, width: u32, height: u32, config: SsgiConfig) -> Self ~ FileSystem {
         let scale = config.quality.resolution_scale();
         let scaled_width = (width as f32 * scale) as u32;
         let scaled_height = (height as f32 * scale) as u32;
@@ -1736,7 +1736,7 @@ struct IndirectLightingManager {
 }
 
 impl IndirectLightingManager {
-    fn new(device: &Device, config: IndirectLightingConfig, scene_bounds: (Vec3, Vec3)) -> Self {
+    fn new(device: &Device, config: IndirectLightingConfig, scene_bounds: (Vec3, Vec3)) -> Self ~ FileSystem {
         let (bounds_min, bounds_max) = scene_bounds;
 
         let probe_grid = match config.technique {

@@ -195,6 +195,7 @@ impl DeviceMesh {
     pub fn connected_devices(&self) -> Vec<Device> {
         Vec::new()
     }
+}
 
 /// AI agent configuration
 #[derive(Debug, Clone)]

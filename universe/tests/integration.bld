@@ -726,7 +726,7 @@ fn test_color_processing_pipeline() -> TestResult {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// Test forge project lifecycle
-fn test_forge_project_lifecycle() -> TestResult {
+fn test_forge_project_lifecycle() -> TestResult ~ FileSystem {
     use forge::{ProjectGenerator, ProjectTemplate, BuildSystem, TestRunner};
 
     // Create temp project directory
@@ -1158,7 +1158,7 @@ struct MarketBar {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// Main entry point for running integration tests
-pub fn main() -> i32 {
+pub fn main() -> i32 ~ Console {
     let config = IntegrationTestConfig::default();
     let suite = run_all_integration_tests(&config);
 

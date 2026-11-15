@@ -5221,7 +5221,7 @@ pub mod neural_rendering {
             let extent = centroid_bounds.max.sub(&centroid_bounds.min);
             let axis = if extent.x >= extent.y && extent.x >= extent.z { 0 } else if extent.y >= extent.z { 1 } else { 2 };
             let mid = (centroid_bounds.min.x + centroid_bounds.max.x) * 0.5 * if axis == 0 { 1.0 } else { 0.0 } + (centroid_bounds.min.y + centroid_bounds.max.y) * 0.5 * if axis == 1 { 1.0 } else { 0.0 } + (centroid_bounds.min.z + centroid_bounds.max.z) * 0.5 * if axis == 2 { 1.0 } else { 0.0 };
-            let (mut left_indices, mut right_indices): (Vec<usize>, Vec<usize>) = indices.iter().partition(|&&idx| { let c = primitives[idx].bounding_box().centroid(); match axis { 0 => c.x, 1 => c.y, _ => c.z } < mid });
+            let (mut left_indices, mut right_indices): (Vec<usize>, Vec<usize>) = indices.iter().partition(|&&idx| { let c = primitives[idx].bounding_box().centroid(); (match axis { 0 => c.x, 1 => c.y, _ => c.z }) < mid });
             if left_indices.is_empty() || right_indices.is_empty() { let split = indices.len() / 2; left_indices = indices[..split].to_vec(); right_indices = indices[split..].to_vec(); }
             let left = Box::new(Self::build(primitives, &mut left_indices, max_prims_per_leaf));
             let right = Box::new(Self::build(primitives, &mut right_indices, max_prims_per_leaf));

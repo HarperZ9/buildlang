@@ -7339,7 +7339,7 @@ impl CounterfactualPredictor {
         result
     }
 
-    fn forward_simulate(self, values: mut HashMap<string, f64>, noise: HashMap<string, f64>) {
+    fn forward_simulate(self, values: &mut HashMap<string, f64>, noise: HashMap<string, f64>) {
         let order = self.topological_sort();
         for node_name in order {
             if let Some(eq) = self.structural_model.equations.get(&node_name) {

@@ -6346,7 +6346,7 @@ impl AstVisualizer {
         html
     }
 
-    fn render_node(self, html: mut string, node: AstNode, depth: usize) {
+    fn render_node(self, html: &mut string, node: AstNode, depth: usize) {
         if depth > self.max_depth { return; }
         let class = match node.kind {
             Function => "function", Struct => "struct", Expression => "expression", _ => "statement"
@@ -6679,7 +6679,7 @@ impl Patcher {
         hunks
     }
 
-    fn apply_hunk(self, lines: mut [string], hunk: PatchHunk) -> Result<(), string> {
+    fn apply_hunk(self, lines: &mut [string], hunk: PatchHunk) -> Result<(), string> {
         let start = hunk.old_start.saturating_sub(1);
         let mut new_lines = vec![];
         for line in hunk.lines.iter() {

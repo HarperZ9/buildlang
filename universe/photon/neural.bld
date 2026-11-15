@@ -7,10 +7,10 @@
 // Based on Harper Engine WP-055-060, WP-070, WP-101, WP-105, WP-110, WP-115.
 // =============================================================================
 
-import core::memory::{Arena, Pool, Buffer, GpuBuffer};
-import core::math::{Vec2, Vec3, Vec4, Mat4, Quaternion, Transform};
-import core::simd::{f32x4, f32x8, SimdMath};
-import photon::gpu::{ComputeShader, RenderPipeline, Texture, Sampler};
+use core::memory::{Arena, Pool, Buffer, GpuBuffer};
+use core::math::{Vec2, Vec3, Vec4, Mat4, Quaternion, Transform};
+use core::simd::{f32x4, f32x8, SimdMath};
+use photon::gpu::{ComputeShader, RenderPipeline, Texture, Sampler};
 
 // =============================================================================
 // REGION: NEURAL NETWORK INFERENCE

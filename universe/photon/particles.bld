@@ -884,7 +884,7 @@ pub enum CollisionMode {
     None,
     World { depth_buffer: TextureHandle },
     Planes { planes: Vec<Plane> },
-    Signed Distance Fields { sdf_texture: TextureHandle },
+    SignedDistanceFields { sdf_texture: TextureHandle },
     Mesh { collision_mesh: u64 },
     Heightmap { heightmap: TextureHandle, scale: Vec3 },
 }

@@ -174,57 +174,57 @@ impl Path {
     }
 
     /// Check if path exists
-    pub fn exists(self: &Self) -> bool {
+    pub fn exists(self: &Self) -> bool ~ Foreign {
         metadata(self).is_ok()
     }
 
     /// Check if path is a file
-    pub fn is_file(self: &Self) -> bool {
+    pub fn is_file(self: &Self) -> bool ~ Foreign {
         metadata(self).map(|m| m.is_file()).unwrap_or(false)
     }
 
     /// Check if path is a directory
-    pub fn is_dir(self: &Self) -> bool {
+    pub fn is_dir(self: &Self) -> bool ~ Foreign {
         metadata(self).map(|m| m.is_dir()).unwrap_or(false)
     }
 
     /// Check if path is a symbolic link
-    pub fn is_symlink(self: &Self) -> bool {
+    pub fn is_symlink(self: &Self) -> bool ~ Foreign {
         symlink_metadata(self).map(|m| m.is_symlink()).unwrap_or(false)
     }
 
     /// Get metadata
-    pub fn metadata(self: &Self) -> Result<Metadata, IoError> {
+    pub fn metadata(self: &Self) -> Result<Metadata, IoError> ~ Foreign {
         metadata(self)
     }
 
     /// Get symlink metadata
-    pub fn symlink_metadata(self: &Self) -> Result<Metadata, IoError> {
+    pub fn symlink_metadata(self: &Self) -> Result<Metadata, IoError> ~ Foreign {
         symlink_metadata(self)
     }
 
     /// Read the entire file to string
-    pub fn read_to_string(self: &Self) -> Result<String, IoError> {
+    pub fn read_to_string(self: &Self) -> Result<String, IoError> ~ Foreign {
         read_to_string(self)
     }
 
     /// Read the entire file to bytes
-    pub fn read(self: &Self) -> Result<Vec<u8>, IoError> {
+    pub fn read(self: &Self) -> Result<Vec<u8>, IoError> ~ Foreign {
         read(self)
     }
 
     /// Canonicalize the path (resolve symlinks and normalize)
-    pub fn canonicalize(self: &Self) -> Result<PathBuf, IoError> {
+    pub fn canonicalize(self: &Self) -> Result<PathBuf, IoError> ~ Foreign {
         canonicalize(self)
     }
 
     /// Read link target
-    pub fn read_link(self: &Self) -> Result<PathBuf, IoError> {
+    pub fn read_link(self: &Self) -> Result<PathBuf, IoError> ~ Foreign {
         read_link(self)
     }
 
     /// Iterate directory entries
-    pub fn read_dir(self: &Self) -> Result<ReadDir, IoError> {
+    pub fn read_dir(self: &Self) -> Result<ReadDir, IoError> ~ Foreign {
         read_dir(self)
     }
 
@@ -518,39 +518,39 @@ impl File {
     }
 
     /// Sync all OS-internal metadata to disk
-    pub fn sync_all(self: &Self) -> Result<(), IoError> {
+    pub fn sync_all(self: &Self) -> Result<(), IoError> ~ Foreign {
         intrinsic::fsync(self.handle, true)
     }
 
     /// Sync data to disk (not necessarily metadata)
-    pub fn sync_data(self: &Self) -> Result<(), IoError> {
+    pub fn sync_data(self: &Self) -> Result<(), IoError> ~ Foreign {
         intrinsic::fsync(self.handle, false)
     }
 
     /// Set the file length
-    pub fn set_len(self: &Self, size: u64) -> Result<(), IoError> {
+    pub fn set_len(self: &Self, size: u64) -> Result<(), IoError> ~ Foreign {
         intrinsic::ftruncate(self.handle, size)
     }
 
     /// Get file metadata
-    pub fn metadata(self: &Self) -> Result<Metadata, IoError> {
+    pub fn metadata(self: &Self) -> Result<Metadata, IoError> ~ Foreign {
         intrinsic::fmetadata(self.handle)
     }
 
     /// Try to clone the file handle
-    pub fn try_clone(self: &Self) -> Result<File, IoError> {
+    pub fn try_clone(self: &Self) -> Result<File, IoError> ~ Foreign {
         Ok(File {
             handle: intrinsic::dup(self.handle)?,
         })
     }
 
     /// Set permissions
-    pub fn set_permissions(self: &Self, perm: Permissions) -> Result<(), IoError> {
+    pub fn set_permissions(self: &Self, perm: Permissions) -> Result<(), IoError> ~ Foreign {
         intrinsic::fchmod(self.handle, perm)
     }
 
     /// Set file times
-    pub fn set_times(self: &Self, times: FileTimes) -> Result<(), IoError> {
+    pub fn set_times(self: &Self, times: FileTimes) -> Result<(), IoError> ~ Foreign {
         intrinsic::futimens(self.handle, times)
     }
 }
@@ -578,7 +578,7 @@ impl Seek for File {
 }
 
 impl Drop for File {
-    fn drop(self: &mut Self) {
+    fn drop(self: &mut Self) ~ Foreign {
         let _ = intrinsic::close(self.handle);
     }
 }
@@ -614,49 +614,49 @@ impl OpenOptions {
     }
 
     /// Set read access
-    pub fn read(self: mut Self, read: bool) -> Self {
+    pub fn read(mut self, read: bool) -> Self {
         self.read = read;
         self
     }
 
     /// Set write access
-    pub fn write(self: mut Self, write: bool) -> Self {
+    pub fn write(mut self, write: bool) -> Self {
         self.write = write;
         self
     }
 
     /// Set append mode
-    pub fn append(self: mut Self, append: bool) -> Self {
+    pub fn append(mut self, append: bool) -> Self {
         self.append = append;
         self
     }
 
     /// Set truncate mode
-    pub fn truncate(self: mut Self, truncate: bool) -> Self {
+    pub fn truncate(mut self, truncate: bool) -> Self {
         self.truncate = truncate;
         self
     }
 
     /// Set create mode
-    pub fn create(self: mut Self, create: bool) -> Self {
+    pub fn create(mut self, create: bool) -> Self {
         self.create = create;
         self
     }
 
     /// Set create_new mode (fail if exists)
-    pub fn create_new(self: mut Self, create_new: bool) -> Self {
+    pub fn create_new(mut self, create_new: bool) -> Self {
         self.create_new = create_new;
         self
     }
 
     /// Set Unix permissions mode
-    pub fn mode(self: mut Self, mode: u32) -> Self {
+    pub fn mode(mut self, mode: u32) -> Self {
         self.mode = mode;
         self
     }
 
     /// Open the file
-    pub fn open<P: AsRef<Path>>(self: &Self, path: P) -> Result<File, IoError> {
+    pub fn open<P: AsRef<Path>>(self: &Self, path: P) -> Result<File, IoError> ~ Foreign {
         let handle = intrinsic::open(path.as_ref(), self)?;
         Ok(File { handle })
     }
@@ -913,13 +913,13 @@ impl FileTimes {
     }
 
     /// Set access time
-    pub fn set_accessed(self: mut Self, t: SystemTime) -> Self {
+    pub fn set_accessed(mut self, t: SystemTime) -> Self {
         self.accessed = Some(t);
         self
     }
 
     /// Set modification time
-    pub fn set_modified(self: mut Self, t: SystemTime) -> Self {
+    pub fn set_modified(mut self, t: SystemTime) -> Self {
         self.modified = Some(t);
         self
     }
@@ -949,12 +949,12 @@ impl DirEntry {
     }
 
     /// Get metadata
-    pub fn metadata(self: &Self) -> Result<Metadata, IoError> {
+    pub fn metadata(self: &Self) -> Result<Metadata, IoError> ~ Foreign {
         metadata(&self.path)
     }
 
     /// Get file type
-    pub fn file_type(self: &Self) -> Result<FileType, IoError> {
+    pub fn file_type(self: &Self) -> Result<FileType, IoError> ~ Foreign {
         if let Some(ft) = self.file_type {
             Ok(ft)
         } else {
@@ -982,7 +982,7 @@ pub struct ReadDir {
 impl Iterator for ReadDir {
     type Item = Result<DirEntry, IoError>;
 
-    fn next(self: &mut Self) -> Option<Self::Item> {
+    fn next(self: &mut Self) -> Option<Self::Item> ~ Foreign {
         match intrinsic::readdir_next(&mut self.inner) {
             Ok(Some((name, file_type, ino))) => {
                 let path = self.parent.join(Path::new(&name));
@@ -1012,7 +1012,7 @@ pub fn read<P: AsRef<Path>>(path: P) -> Result<Vec<u8>, IoError> {
 }
 
 /// Read entire file to string
-pub fn read_to_string<P: AsRef<Path>>(path: P) -> Result<String, IoError> {
+pub fn read_to_string<P: AsRef<Path>>(path: P) -> Result<String, IoError> ~ Foreign {
     let bytes = read(path)?;
     String::from_utf8(bytes).map_err(|_| IoError::InvalidData("invalid UTF-8".to_string()))
 }
@@ -1024,17 +1024,17 @@ pub fn write<P: AsRef<Path>, C: AsRef<[u8]>>(path: P, contents: C) -> Result<(),
 }
 
 /// Get metadata
-pub fn metadata<P: AsRef<Path>>(path: P) -> Result<Metadata, IoError> {
+pub fn metadata<P: AsRef<Path>>(path: P) -> Result<Metadata, IoError> ~ Foreign {
     intrinsic::metadata(path.as_ref())
 }
 
 /// Get symlink metadata
-pub fn symlink_metadata<P: AsRef<Path>>(path: P) -> Result<Metadata, IoError> {
+pub fn symlink_metadata<P: AsRef<Path>>(path: P) -> Result<Metadata, IoError> ~ Foreign {
     intrinsic::symlink_metadata(path.as_ref())
 }
 
 /// Read directory
-pub fn read_dir<P: AsRef<Path>>(path: P) -> Result<ReadDir, IoError> {
+pub fn read_dir<P: AsRef<Path>>(path: P) -> Result<ReadDir, IoError> ~ Foreign {
     let inner = intrinsic::opendir(path.as_ref())?;
     Ok(ReadDir {
         inner,
@@ -1043,12 +1043,12 @@ pub fn read_dir<P: AsRef<Path>>(path: P) -> Result<ReadDir, IoError> {
 }
 
 /// Create a directory
-pub fn create_dir<P: AsRef<Path>>(path: P) -> Result<(), IoError> {
+pub fn create_dir<P: AsRef<Path>>(path: P) -> Result<(), IoError> ~ Foreign {
     intrinsic::mkdir(path.as_ref())
 }
 
 /// Create directory and all parent directories
-pub fn create_dir_all<P: AsRef<Path>>(path: P) -> Result<(), IoError> {
+pub fn create_dir_all<P: AsRef<Path>>(path: P) -> Result<(), IoError> ~ Foreign {
     let path = path.as_ref();
     if path.is_dir() {
         return Ok(());
@@ -1064,17 +1064,17 @@ pub fn create_dir_all<P: AsRef<Path>>(path: P) -> Result<(), IoError> {
 }
 
 /// Remove a file
-pub fn remove_file<P: AsRef<Path>>(path: P) -> Result<(), IoError> {
+pub fn remove_file<P: AsRef<Path>>(path: P) -> Result<(), IoError> ~ Foreign {
     intrinsic::unlink(path.as_ref())
 }
 
 /// Remove an empty directory
-pub fn remove_dir<P: AsRef<Path>>(path: P) -> Result<(), IoError> {
+pub fn remove_dir<P: AsRef<Path>>(path: P) -> Result<(), IoError> ~ Foreign {
     intrinsic::rmdir(path.as_ref())
 }
 
 /// Remove a directory and all contents
-pub fn remove_dir_all<P: AsRef<Path>>(path: P) -> Result<(), IoError> {
+pub fn remove_dir_all<P: AsRef<Path>>(path: P) -> Result<(), IoError> ~ Foreign {
     let path = path.as_ref();
 
     for entry in read_dir(path)? {
@@ -1091,7 +1091,7 @@ pub fn remove_dir_all<P: AsRef<Path>>(path: P) -> Result<(), IoError> {
 }
 
 /// Rename a file or directory
-pub fn rename<P: AsRef<Path>, Q: AsRef<Path>>(from: P, to: Q) -> Result<(), IoError> {
+pub fn rename<P: AsRef<Path>, Q: AsRef<Path>>(from: P, to: Q) -> Result<(), IoError> ~ Foreign {
     intrinsic::rename(from.as_ref(), to.as_ref())
 }
 
@@ -1116,33 +1116,33 @@ pub fn copy<P: AsRef<Path>, Q: AsRef<Path>>(from: P, to: Q) -> Result<u64, IoErr
 }
 
 /// Create a hard link
-pub fn hard_link<P: AsRef<Path>, Q: AsRef<Path>>(original: P, link: Q) -> Result<(), IoError> {
+pub fn hard_link<P: AsRef<Path>, Q: AsRef<Path>>(original: P, link: Q) -> Result<(), IoError> ~ Foreign {
     intrinsic::link(original.as_ref(), link.as_ref())
 }
 
 /// Create a symbolic link
 #[cfg(unix)]
-pub fn symlink<P: AsRef<Path>, Q: AsRef<Path>>(original: P, link: Q) -> Result<(), IoError> {
+pub fn symlink<P: AsRef<Path>, Q: AsRef<Path>>(original: P, link: Q) -> Result<(), IoError> ~ Foreign {
     intrinsic::symlink(original.as_ref(), link.as_ref())
 }
 
 /// Read symbolic link target
-pub fn read_link<P: AsRef<Path>>(path: P) -> Result<PathBuf, IoError> {
+pub fn read_link<P: AsRef<Path>>(path: P) -> Result<PathBuf, IoError> ~ Foreign {
     intrinsic::readlink(path.as_ref())
 }
 
 /// Canonicalize path
-pub fn canonicalize<P: AsRef<Path>>(path: P) -> Result<PathBuf, IoError> {
+pub fn canonicalize<P: AsRef<Path>>(path: P) -> Result<PathBuf, IoError> ~ Foreign {
     intrinsic::realpath(path.as_ref())
 }
 
 /// Set permissions
-pub fn set_permissions<P: AsRef<Path>>(path: P, perm: Permissions) -> Result<(), IoError> {
+pub fn set_permissions<P: AsRef<Path>>(path: P, perm: Permissions) -> Result<(), IoError> ~ Foreign {
     intrinsic::chmod(path.as_ref(), perm)
 }
 
 /// Check if two paths point to the same file
-pub fn same_file<P: AsRef<Path>, Q: AsRef<Path>>(path1: P, path2: Q) -> Result<bool, IoError> {
+pub fn same_file<P: AsRef<Path>, Q: AsRef<Path>>(path1: P, path2: Q) -> Result<bool, IoError> ~ Foreign {
     let m1 = metadata(path1)?;
     let m2 = metadata(path2)?;
 
@@ -1160,22 +1160,22 @@ pub fn same_file<P: AsRef<Path>, Q: AsRef<Path>>(path1: P, path2: Q) -> Result<b
 }
 
 /// Get current working directory
-pub fn current_dir() -> Result<PathBuf, IoError> {
+pub fn current_dir() -> Result<PathBuf, IoError> ~ Foreign {
     intrinsic::getcwd()
 }
 
 /// Set current working directory
-pub fn set_current_dir<P: AsRef<Path>>(path: P) -> Result<(), IoError> {
+pub fn set_current_dir<P: AsRef<Path>>(path: P) -> Result<(), IoError> ~ Foreign {
     intrinsic::chdir(path.as_ref())
 }
 
 /// Get temporary directory
-pub fn temp_dir() -> PathBuf {
+pub fn temp_dir() -> PathBuf ~ Foreign {
     intrinsic::temp_dir()
 }
 
 /// Get home directory
-pub fn home_dir() -> Option<PathBuf> {
+pub fn home_dir() -> Option<PathBuf> ~ Foreign {
     intrinsic::home_dir()
 }
 
@@ -1193,7 +1193,7 @@ pub struct WalkDir {
 
 impl WalkDir {
     /// Create a new directory walker
-    pub fn new<P: AsRef<Path>>(path: P) -> Self {
+    pub fn new<P: AsRef<Path>>(path: P) -> Self ~ Foreign {
         let iter = read_dir(path).ok();
         WalkDir {
             stack: iter.into_iter().collect(),
@@ -1204,13 +1204,13 @@ impl WalkDir {
     }
 
     /// Follow symbolic links
-    pub fn follow_symlinks(self: mut Self, follow: bool) -> Self {
+    pub fn follow_symlinks(mut self, follow: bool) -> Self {
         self.follow_symlinks = follow;
         self
     }
 
     /// Set maximum depth
-    pub fn max_depth(self: mut Self, depth: usize) -> Self {
+    pub fn max_depth(mut self, depth: usize) -> Self {
         self.max_depth = Some(depth);
         self
     }
@@ -1219,7 +1219,7 @@ impl WalkDir {
 impl Iterator for WalkDir {
     type Item = Result<DirEntry, IoError>;
 
-    fn next(self: &mut Self) -> Option<Self::Item> {
+    fn next(self: &mut Self) -> Option<Self::Item> ~ Foreign {
         loop {
             let iter = self.stack.last_mut()?;
 
@@ -1293,7 +1293,7 @@ fn glob_match_impl(pattern: &[u8], path: &[u8]) -> bool {
 }
 
 /// Expand a glob pattern to matching paths
-pub fn glob<P: AsRef<Path>>(pattern: P) -> Result<Vec<PathBuf>, IoError> {
+pub fn glob<P: AsRef<Path>>(pattern: P) -> Result<Vec<PathBuf>, IoError> ~ Foreign {
     let pattern = pattern.as_ref().as_str();
     let mut results = Vec::new();
 

@@ -515,7 +515,7 @@ impl HtmlGenerator {
     }
 
     /// Generate documentation for a crate
-    pub fn generate(&self, crate_doc: &CrateDoc) -> Result<(), DocError> {
+    pub fn generate(&self, crate_doc: &CrateDoc) -> Result<(), DocError> ~ Console {
         println!("Generating documentation for {}...", crate_doc.name);
 
         // Create output directory
@@ -912,7 +912,7 @@ fn html_escape(s: &str) -> String {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// Generate documentation for a project
-pub fn generate(project_path: &str, output_dir: &str) -> Result<(), DocError> {
+pub fn generate(project_path: &str, output_dir: &str) -> Result<(), DocError> ~ Console {
     println!("╔═══════════════════════════════════════════════════════════════╗");
     println!("║  Quark Doc - BUILD-UNIVERSE Documentation Generator         ║");
     println!("╚═══════════════════════════════════════════════════════════════╝");
@@ -954,7 +954,7 @@ pub fn generate(project_path: &str, output_dir: &str) -> Result<(), DocError> {
     Ok(())
 }
 
-pub fn main() {
+pub fn main() ~ Console {
     if let Err(e) = generate(".", "target/doc") {
         println!("Error: {:?}", e);
     }
@@ -1769,7 +1769,7 @@ fn markdown_to_html_simple(md: &str) -> String {
 }
 
 /// Generate comprehensive API documentation for BUILD-UNIVERSE
-pub fn generate_api_docs(project_path: &str, output_dir: &str) -> Result<(), DocError> {
+pub fn generate_api_docs(project_path: &str, output_dir: &str) -> Result<(), DocError> ~ Console {
     println!("╔═══════════════════════════════════════════════════════════════╗");
     println!("║  BUILD-UNIVERSE API Documentation Generator                  ║");
     println!("╚═══════════════════════════════════════════════════════════════╝");
@@ -3678,7 +3678,7 @@ impl DoctestRunner {
     }
 
     /// Run all extracted doctests
-    pub fn run_doctests(&mut self, doctests: Vec<Doctest>) -> DoctestSummary {
+    pub fn run_doctests(&mut self, doctests: Vec<Doctest>) -> DoctestSummary ~ Console {
         println!("\nRunning {} doctests...\n", doctests.len());
 
         let mut passed = 0;
@@ -5581,7 +5581,7 @@ impl DocExporter {
     }
 
     /// Export documentation to the configured format
-    pub fn export(&self, html_content: &str, output_path: &str) -> Result<(), DocError> {
+    pub fn export(&self, html_content: &str, output_path: &str) -> Result<(), DocError> ~ Console {
         match self.config.output_format {
             ExportFormat::Pdf => self.export_pdf(html_content, output_path),
             ExportFormat::Epub => self.export_epub(html_content, output_path),
@@ -5590,7 +5590,7 @@ impl DocExporter {
         }
     }
 
-    fn export_pdf(&self, html_content: &str, output_path: &str) -> Result<(), DocError> {
+    fn export_pdf(&self, html_content: &str, output_path: &str) -> Result<(), DocError> ~ Console {
         // Generate PDF-ready HTML with CSS
         let pdf_html = self.wrap_for_pdf(html_content);
 
@@ -5669,7 +5669,7 @@ impl DocExporter {
         (html.len() / 3000).max(1)
     }
 
-    fn export_epub(&self, html_content: &str, output_path: &str) -> Result<(), DocError> {
+    fn export_epub(&self, html_content: &str, output_path: &str) -> Result<(), DocError> ~ Console {
         println!("Generating EPUB: {}", output_path);
 
         // EPUB is a ZIP file with specific structure
@@ -5722,7 +5722,7 @@ impl DocExporter {
         Ok(())
     }
 
-    fn export_mobi(&self, html_content: &str, output_path: &str) -> Result<(), DocError> {
+    fn export_mobi(&self, html_content: &str, output_path: &str) -> Result<(), DocError> ~ Console {
         println!("Generating MOBI: {}", output_path);
         println!("  Note: MOBI export requires KindleGen tool");
 
@@ -5735,7 +5735,7 @@ impl DocExporter {
         Ok(())
     }
 
-    fn export_docx(&self, html_content: &str, output_path: &str) -> Result<(), DocError> {
+    fn export_docx(&self, html_content: &str, output_path: &str) -> Result<(), DocError> ~ Console {
         println!("Generating DOCX: {}", output_path);
 
         // DOCX is also a ZIP with XML files
@@ -5857,7 +5857,7 @@ impl IncrementalDocBuilder {
     }
 
     /// Build documentation incrementally
-    pub fn build(&mut self) -> Result<BuildResult, DocError> {
+    pub fn build(&mut self) -> Result<BuildResult, DocError> ~ Console {
         println!("Building documentation incrementally...\n");
 
         // Load cache
@@ -6105,7 +6105,7 @@ impl DiagramGenerator {
     }
 
     /// Generate a diagram from DOT/Graphviz source
-    pub fn generate_graphviz(&self, source: &str, name: &str) -> Result<String, DocError> {
+    pub fn generate_graphviz(&self, source: &str, name: &str) -> Result<String, DocError> ~ Console {
         let output_path = format!("{}/{}.svg", self.config.output_dir, name);
 
         // Would use graphviz/dot command

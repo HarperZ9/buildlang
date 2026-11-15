@@ -2,11 +2,11 @@
 // Part of the Photon Rendering Module
 // Implements position-based dynamics cloth simulation, GPU cloth rendering, and fabric materials
 
-import std::collections::{HashMap, Vec, VecDeque, HashSet}
-import std::math::{Vec2, Vec3, Vec4, Mat3, Mat4, Quaternion, sqrt, pow, exp, sin, cos, PI, floor, ceil, clamp, lerp, min, max, abs, dot, cross, normalize, length}
-import std::memory::{Arena, Pool, Box, Arc, Rc}
-import std::sync::{Mutex, RwLock, Atomic}
-import std::simd::{f32x4, f32x8, i32x4, i32x8}
+use std::collections::{HashMap, Vec, VecDeque, HashSet}
+use std::math::{Vec2, Vec3, Vec4, Mat3, Mat4, Quaternion, sqrt, pow, exp, sin, cos, PI, floor, ceil, clamp, lerp, min, max, abs, dot, cross, normalize, length}
+use std::memory::{Arena, Pool, Box, Arc, Rc}
+use std::sync::{Mutex, RwLock, Atomic}
+use std::simd::{f32x4, f32x8, i32x4, i32x8}
 
 // ============================================================================
 // CLOTH PARTICLE REPRESENTATION
@@ -911,7 +911,7 @@ struct GpuClothSimulation {
 }
 
 impl GpuClothSimulation {
-    fn new(device: &Device, mesh: &ClothMesh) -> Self {
+    fn new(device: &Device, mesh: &ClothMesh) -> Self ~ FileSystem {
         // Pack particle data
         let gpu_particles: Vec<GpuClothParticle> = mesh.particles.iter()
             .map(|p| GpuClothParticle::from_particle(p))
@@ -1105,7 +1105,7 @@ struct ClothRenderer {
 }
 
 impl ClothRenderer {
-    fn new(device: &Device, config: ClothRenderConfig) -> Self {
+    fn new(device: &Device, config: ClothRenderConfig) -> Self ~ FileSystem {
         let pipeline = device.create_render_pipeline(&RenderPipelineDescriptor {
             vertex_shader: include_str!("shaders/cloth_vertex.wgsl"),
             fragment_shader: include_str!("shaders/cloth_fragment.wgsl"),

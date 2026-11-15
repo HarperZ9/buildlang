@@ -247,7 +247,7 @@ fn grade_pixel(srgb_input: &RGB, settings: &GradeSettings) -> RGB {
     encode_srgb(&clamped)
 }
 
-fn main() {
+fn main() ~ Console {
     println!("=== Color Grading Pipeline — Written in BuildLang ===");
     println!("");
 

@@ -556,7 +556,7 @@ impl<W: Write> BufWriter<W> {
     }
 
     /// Consume and return the inner writer, flushing first
-    pub fn into_inner(self: mut Self) -> Result<W, IntoInnerError<BufWriter<W>>> {
+    pub fn into_inner(mut self) -> Result<W, IntoInnerError<BufWriter<W>>> {
         match self.flush_buf() {
             Ok(()) => Ok(self.inner.take().unwrap()),
             Err(e) => Err(IntoInnerError { error: e, writer: self }),
@@ -808,48 +808,48 @@ impl MmapOptions {
     }
 
     /// Set offset
-    pub fn offset(self: mut Self, offset: u64) -> Self {
+    pub fn offset(mut self, offset: u64) -> Self {
         self.offset = offset;
         self
     }
 
     /// Set length
-    pub fn len(self: mut Self, len: usize) -> Self {
+    pub fn len(mut self, len: usize) -> Self {
         self.len = Some(len);
         self
     }
 
     /// Set protection mode
-    pub fn protection(self: mut Self, prot: Protection) -> Self {
+    pub fn protection(mut self, prot: Protection) -> Self {
         self.protection = prot;
         self
     }
 
     /// Enable page prefaulting
-    pub fn populate(self: mut Self) -> Self {
+    pub fn populate(mut self) -> Self {
         self.populate = true;
         self
     }
 
     /// Enable huge pages
-    pub fn huge_pages(self: mut Self, size: HugePageSize) -> Self {
+    pub fn huge_pages(mut self, size: HugePageSize) -> Self {
         self.huge_pages = Some(size);
         self
     }
 
     /// Lock pages in memory
-    pub fn lock(self: mut Self) -> Self {
+    pub fn lock(mut self) -> Self {
         self.lock = true;
         self
     }
 
     /// Create mapping from file
-    pub fn map(self: &Self, file: &File) -> Result<Mmap, IoError> {
+    pub fn map(self: &Self, file: &File) -> Result<Mmap, IoError> ~ Foreign {
         Mmap::from_file_with_options(file, self)
     }
 
     /// Create mutable mapping from file
-    pub fn map_mut(self: &Self, file: &File) -> Result<MmapMut, IoError> {
+    pub fn map_mut(self: &Self, file: &File) -> Result<MmapMut, IoError> ~ Foreign {
         MmapMut::from_file_with_options(file, self)
     }
 }
@@ -875,12 +875,12 @@ pub struct Mmap {
 
 impl Mmap {
     /// Create anonymous mapping
-    pub fn anonymous(len: usize) -> Result<Self, IoError> {
+    pub fn anonymous(len: usize) -> Result<Self, IoError> ~ Foreign {
         Self::anonymous_with_protection(len, Protection::Read)
     }
 
     /// Create anonymous mapping with protection
-    pub fn anonymous_with_protection(len: usize, prot: Protection) -> Result<Self, IoError> {
+    pub fn anonymous_with_protection(len: usize, prot: Protection) -> Result<Self, IoError> ~ Foreign {
         if len == 0 {
             return Err(IoError::InvalidInput("length must be non-zero".to_string()));
         }
@@ -900,12 +900,12 @@ impl Mmap {
     }
 
     /// Map entire file
-    pub fn from_file(file: &File) -> Result<Self, IoError> {
+    pub fn from_file(file: &File) -> Result<Self, IoError> ~ Foreign {
         MmapOptions::new().map(file)
     }
 
     /// Map file with options
-    pub fn from_file_with_options(file: &File, opts: &MmapOptions) -> Result<Self, IoError> {
+    pub fn from_file_with_options(file: &File, opts: &MmapOptions) -> Result<Self, IoError> ~ Foreign {
         let file_len = file.metadata()?.len();
         let len = opts.len.unwrap_or((file_len - opts.offset) as usize);
 
@@ -938,28 +938,28 @@ impl Mmap {
     }
 
     /// Make mapping executable (if allowed by protection)
-    pub fn make_exec(self: &mut Self) -> Result<(), IoError> {
+    pub fn make_exec(self: &mut Self) -> Result<(), IoError> ~ Foreign {
         intrinsic::mprotect(self.ptr as *mut u8, self.len, Protection::ReadWriteExecute)
     }
 
     /// Lock pages in memory
-    pub fn lock(self: &Self) -> Result<(), IoError> {
+    pub fn lock(self: &Self) -> Result<(), IoError> ~ Foreign {
         intrinsic::mlock(self.ptr, self.len)
     }
 
     /// Unlock pages
-    pub fn unlock(self: &Self) -> Result<(), IoError> {
+    pub fn unlock(self: &Self) -> Result<(), IoError> ~ Foreign {
         intrinsic::munlock(self.ptr, self.len)
     }
 
     /// Advise kernel about access pattern
-    pub fn advise(self: &Self, advice: MmapAdvice) -> Result<(), IoError> {
+    pub fn advise(self: &Self, advice: MmapAdvice) -> Result<(), IoError> ~ Foreign {
         intrinsic::madvise(self.ptr, self.len, advice)
     }
 }
 
 impl Drop for Mmap {
-    fn drop(self: &mut Self) {
+    fn drop(self: &mut Self) ~ Foreign {
         if !self.ptr.is_null() {
             let _ = intrinsic::munmap(self.ptr as *mut u8, self.len);
         }
@@ -984,7 +984,7 @@ pub struct MmapMut {
 
 impl MmapMut {
     /// Create anonymous mutable mapping
-    pub fn anonymous(len: usize) -> Result<Self, IoError> {
+    pub fn anonymous(len: usize) -> Result<Self, IoError> ~ Foreign {
         if len == 0 {
             return Err(IoError::InvalidInput("length must be non-zero".to_string()));
         }
@@ -993,12 +993,12 @@ impl MmapMut {
     }
 
     /// Map entire file mutably
-    pub fn from_file(file: &File) -> Result<Self, IoError> {
+    pub fn from_file(file: &File) -> Result<Self, IoError> ~ Foreign {
         MmapOptions::new().protection(Protection::ReadWrite).map_mut(file)
     }
 
     /// Map file with options
-    pub fn from_file_with_options(file: &File, opts: &MmapOptions) -> Result<Self, IoError> {
+    pub fn from_file_with_options(file: &File, opts: &MmapOptions) -> Result<Self, IoError> ~ Foreign {
         let file_len = file.metadata()?.len();
         let len = opts.len.unwrap_or((file_len - opts.offset) as usize);
 
@@ -1040,17 +1040,17 @@ impl MmapMut {
     }
 
     /// Flush changes to disk
-    pub fn flush(self: &Self) -> Result<(), IoError> {
+    pub fn flush(self: &Self) -> Result<(), IoError> ~ Foreign {
         intrinsic::msync(self.ptr, self.len, MsyncFlags::Sync)
     }
 
     /// Flush changes asynchronously
-    pub fn flush_async(self: &Self) -> Result<(), IoError> {
+    pub fn flush_async(self: &Self) -> Result<(), IoError> ~ Foreign {
         intrinsic::msync(self.ptr, self.len, MsyncFlags::Async)
     }
 
     /// Flush a range to disk
-    pub fn flush_range(self: &Self, offset: usize, len: usize) -> Result<(), IoError> {
+    pub fn flush_range(self: &Self, offset: usize, len: usize) -> Result<(), IoError> ~ Foreign {
         if offset + len > self.len {
             return Err(IoError::InvalidInput("flush range out of bounds".to_string()));
         }
@@ -1058,7 +1058,7 @@ impl MmapMut {
     }
 
     /// Make read-only
-    pub fn make_read_only(self) -> Result<Mmap, IoError> {
+    pub fn make_read_only(self) -> Result<Mmap, IoError> ~ Foreign {
         intrinsic::mprotect(self.ptr, self.len, Protection::Read)?;
         Ok(Mmap {
             ptr: self.ptr,
@@ -1070,7 +1070,7 @@ impl MmapMut {
 }
 
 impl Drop for MmapMut {
-    fn drop(self: &mut Self) {
+    fn drop(self: &mut Self) ~ Foreign {
         if !self.ptr.is_null() {
             let _ = self.flush();
             let _ = intrinsic::munmap(self.ptr, self.len);
@@ -1824,7 +1824,7 @@ pub struct TlsConnector {
 
 impl TlsConnector {
     /// Create a new TLS connector with system root certificates
-    pub fn new() -> Result<Self, TlsError> {
+    pub fn new() -> Result<Self, TlsError> ~ Foreign {
         Ok(Self {
             root_certs: intrinsic::load_system_root_certs()?,
             client_cert: None,
@@ -1884,7 +1884,7 @@ impl TlsConnector {
     }
 
     /// Connect to a server
-    pub fn connect<S: Read + Write>(self: &Self, hostname: &str, stream: S) -> Result<TlsStream<S>, TlsError> {
+    pub fn connect<S: Read + Write>(self: &Self, hostname: &str, stream: S) -> Result<TlsStream<S>, TlsError> ~ Foreign {
         let mut tls = TlsState::new_client(self, hostname)?;
         let mut stream = TlsStream {
             inner: stream,
@@ -1904,7 +1904,7 @@ impl TlsConnector {
         self: &Self,
         hostname: &str,
         stream: S
-    ) -> Result<TlsStream<S>, TlsError> {
+    ) -> Result<TlsStream<S>, TlsError> ~ Foreign {
         let tls = TlsState::new_client(self, hostname)?;
         let mut stream = TlsStream {
             inner: stream,
@@ -1976,7 +1976,7 @@ impl TlsAcceptor {
     }
 
     /// Accept a TLS connection
-    pub fn accept<S: Read + Write>(self: &Self, stream: S) -> Result<TlsStream<S>, TlsError> {
+    pub fn accept<S: Read + Write>(self: &Self, stream: S) -> Result<TlsStream<S>, TlsError> ~ Foreign {
         let tls = TlsState::new_server(self)?;
         let mut stream = TlsStream {
             inner: stream,
@@ -1995,7 +1995,7 @@ impl TlsAcceptor {
     pub async fn accept_async<S: AsyncRead + AsyncWrite>(
         self: &Self,
         stream: S
-    ) -> Result<TlsStream<S>, TlsError> {
+    ) -> Result<TlsStream<S>, TlsError> ~ Foreign {
         let tls = TlsState::new_server(self)?;
         let mut stream = TlsStream {
             inner: stream,
@@ -2018,12 +2018,12 @@ pub struct Certificate {
 
 impl Certificate {
     /// Parse certificate from PEM
-    pub fn from_pem(pem: &[u8]) -> Result<Vec<Self>, TlsError> {
+    pub fn from_pem(pem: &[u8]) -> Result<Vec<Self>, TlsError> ~ Foreign {
         intrinsic::parse_pem_certs(pem)
     }
 
     /// Parse certificate from DER
-    pub fn from_der(der: Vec<u8>) -> Result<Self, TlsError> {
+    pub fn from_der(der: Vec<u8>) -> Result<Self, TlsError> ~ Foreign {
         // Validate DER encoding
         intrinsic::validate_cert_der(&der)?;
         Ok(Self { der })
@@ -2035,32 +2035,32 @@ impl Certificate {
     }
 
     /// Get subject name
-    pub fn subject(self: &Self) -> Result<String, TlsError> {
+    pub fn subject(self: &Self) -> Result<String, TlsError> ~ Foreign {
         intrinsic::cert_subject(&self.der)
     }
 
     /// Get issuer name
-    pub fn issuer(self: &Self) -> Result<String, TlsError> {
+    pub fn issuer(self: &Self) -> Result<String, TlsError> ~ Foreign {
         intrinsic::cert_issuer(&self.der)
     }
 
     /// Get not-before timestamp
-    pub fn not_before(self: &Self) -> Result<DateTime, TlsError> {
+    pub fn not_before(self: &Self) -> Result<DateTime, TlsError> ~ Foreign {
         intrinsic::cert_not_before(&self.der)
     }
 
     /// Get not-after timestamp
-    pub fn not_after(self: &Self) -> Result<DateTime, TlsError> {
+    pub fn not_after(self: &Self) -> Result<DateTime, TlsError> ~ Foreign {
         intrinsic::cert_not_after(&self.der)
     }
 
     /// Get serial number
-    pub fn serial_number(self: &Self) -> Result<Vec<u8>, TlsError> {
+    pub fn serial_number(self: &Self) -> Result<Vec<u8>, TlsError> ~ Foreign {
         intrinsic::cert_serial(&self.der)
     }
 
     /// Check if certificate is valid at given time
-    pub fn is_valid_at(self: &Self, time: DateTime) -> Result<bool, TlsError> {
+    pub fn is_valid_at(self: &Self, time: DateTime) -> Result<bool, TlsError> ~ Foreign {
         let not_before = self.not_before()?;
         let not_after = self.not_after()?;
         Ok(time >= not_before && time <= not_after)
@@ -2075,12 +2075,12 @@ pub struct PrivateKey {
 
 impl PrivateKey {
     /// Parse private key from PEM
-    pub fn from_pem(pem: &[u8]) -> Result<Self, TlsError> {
+    pub fn from_pem(pem: &[u8]) -> Result<Self, TlsError> ~ Foreign {
         intrinsic::parse_pem_private_key(pem)
     }
 
     /// Parse private key from DER (PKCS#8 format)
-    pub fn from_der(der: Vec<u8>) -> Result<Self, TlsError> {
+    pub fn from_der(der: Vec<u8>) -> Result<Self, TlsError> ~ Foreign {
         let algorithm = intrinsic::detect_key_algorithm(&der)?;
         Ok(Self { der, algorithm })
     }
@@ -2296,47 +2296,47 @@ struct TlsState {
 }
 
 impl TlsState {
-    fn new_client(connector: &TlsConnector, hostname: &str) -> Result<Self, TlsError> {
+    fn new_client(connector: &TlsConnector, hostname: &str) -> Result<Self, TlsError> ~ Foreign {
         Ok(Self {
             inner: intrinsic::tls_client_state(connector, hostname)?,
         })
     }
 
-    fn new_server(acceptor: &TlsAcceptor) -> Result<Self, TlsError> {
+    fn new_server(acceptor: &TlsAcceptor) -> Result<Self, TlsError> ~ Foreign {
         Ok(Self {
             inner: intrinsic::tls_server_state(acceptor)?,
         })
     }
 
-    fn handshake_step(self: &mut Self) -> Result<HandshakeStatus, TlsError> {
+    fn handshake_step(self: &mut Self) -> Result<HandshakeStatus, TlsError> ~ Foreign {
         intrinsic::tls_handshake_step(&mut self.inner)
     }
 
-    fn receive_bytes(self: &mut Self, data: &[u8]) -> Result<(), TlsError> {
+    fn receive_bytes(self: &mut Self, data: &[u8]) -> Result<(), TlsError> ~ Foreign {
         intrinsic::tls_receive_bytes(&mut self.inner, data)
     }
 
-    fn encrypt(self: &mut Self, plaintext: &[u8]) -> Result<Vec<u8>, TlsError> {
+    fn encrypt(self: &mut Self, plaintext: &[u8]) -> Result<Vec<u8>, TlsError> ~ Foreign {
         intrinsic::tls_encrypt(&mut self.inner, plaintext)
     }
 
-    fn decrypt(self: &mut Self, ciphertext: &[u8]) -> Result<Vec<u8>, TlsError> {
+    fn decrypt(self: &mut Self, ciphertext: &[u8]) -> Result<Vec<u8>, TlsError> ~ Foreign {
         intrinsic::tls_decrypt(&mut self.inner, ciphertext)
     }
 
-    fn close_notify(self: &mut Self) -> Result<Vec<u8>, TlsError> {
+    fn close_notify(self: &mut Self) -> Result<Vec<u8>, TlsError> ~ Foreign {
         intrinsic::tls_close_notify(&mut self.inner)
     }
 
-    fn alpn_protocol(self: &Self) -> Option<&str> {
+    fn alpn_protocol(self: &Self) -> Option<&str> ~ Foreign {
         intrinsic::tls_alpn_protocol(&self.inner)
     }
 
-    fn version(self: &Self) -> TlsVersion {
+    fn version(self: &Self) -> TlsVersion ~ Foreign {
         intrinsic::tls_version(&self.inner)
     }
 
-    fn peer_certificate(self: &Self) -> Option<&Certificate> {
+    fn peer_certificate(self: &Self) -> Option<&Certificate> ~ Foreign {
         intrinsic::tls_peer_certificate(&self.inner)
     }
 }
@@ -2362,34 +2362,34 @@ pub struct Poller {
 
 impl Poller {
     /// Create a new poller
-    pub fn new() -> Result<Self, IoError> {
+    pub fn new() -> Result<Self, IoError> ~ Foreign {
         Ok(Self {
             inner: intrinsic::poller_new()?,
         })
     }
 
     /// Register a source for events
-    pub fn register(self: &Self, source: &impl Source, token: usize, interests: Interest) -> Result<(), IoError> {
+    pub fn register(self: &Self, source: &impl Source, token: usize, interests: Interest) -> Result<(), IoError> ~ Foreign {
         intrinsic::poller_register(&self.inner, source.raw_source(), token, interests)
     }
 
     /// Modify registration
-    pub fn modify(self: &Self, source: &impl Source, token: usize, interests: Interest) -> Result<(), IoError> {
+    pub fn modify(self: &Self, source: &impl Source, token: usize, interests: Interest) -> Result<(), IoError> ~ Foreign {
         intrinsic::poller_modify(&self.inner, source.raw_source(), token, interests)
     }
 
     /// Deregister a source
-    pub fn deregister(self: &Self, source: &impl Source) -> Result<(), IoError> {
+    pub fn deregister(self: &Self, source: &impl Source) -> Result<(), IoError> ~ Foreign {
         intrinsic::poller_deregister(&self.inner, source.raw_source())
     }
 
     /// Poll for events
-    pub fn poll(self: &Self, events: &mut Events, timeout: Option<Duration>) -> Result<usize, IoError> {
+    pub fn poll(self: &Self, events: &mut Events, timeout: Option<Duration>) -> Result<usize, IoError> ~ Foreign {
         intrinsic::poller_poll(&self.inner, events, timeout)
     }
 
     /// Wake up the poller
-    pub fn wake(self: &Self) -> Result<(), IoError> {
+    pub fn wake(self: &Self) -> Result<(), IoError> ~ Foreign {
         intrinsic::poller_wake(&self.inner)
     }
 }

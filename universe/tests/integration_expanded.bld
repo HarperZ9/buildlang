@@ -59,19 +59,19 @@ fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     abs(a - b) < tol
 }
 
-fn assert_approx(a: f64, b: f64, tol: f64) {
+fn assert_approx(a: f64, b: f64, tol: f64) ~ Console {
     if !approx_eq(a, b, tol) {
         println!("  FAIL: expected {} ~= {} (tol={}), diff={}", a, b, tol, abs(a - b));
     }
 }
 
-fn assert_in_range(val: f64, lo: f64, hi: f64) {
+fn assert_in_range(val: f64, lo: f64, hi: f64) ~ Console {
     if val < lo || val > hi {
         println!("  FAIL: {} not in [{}, {}]", val, lo, hi);
     }
 }
 
-fn assert_true(cond: bool, msg: &str) {
+fn assert_true(cond: bool, msg: &str) ~ Console {
     if !cond {
         println!("  FAIL: {}", msg);
     }
@@ -84,7 +84,7 @@ fn assert_true(cond: bool, msg: &str) {
 
 /// Foundation math generates tristimulus values; Spectrum converts them
 /// through the full sRGB <-> XYZ <-> Lab <-> OKLab roundtrip.
-fn test_foundation_to_spectrum_xyz_roundtrip() {
+fn test_foundation_to_spectrum_xyz_roundtrip() ~ Console {
     // Use foundation trig to generate a set of spectral-like energy values
     let wavelengths: Vec<f64> = (0..8).map(|i| 380.0 + (i as f64) * 50.0).collect();
     let energies: Vec<f64> = wavelengths.iter()
@@ -143,7 +143,7 @@ fn test_foundation_to_spectrum_xyz_roundtrip() {
 }
 
 /// Foundation pow/exp feeding spectrum tonemapping
-fn test_foundation_to_spectrum_tonemapping() {
+fn test_foundation_to_spectrum_tonemapping() ~ Console {
     // Generate HDR scene values using foundation exponentials
     let hdr_values: Vec<f64> = (0..10).map(|i| {
         exp((i as f64) * 0.5) * 0.1  // Exponentially increasing brightness
@@ -189,7 +189,7 @@ fn test_foundation_to_spectrum_tonemapping() {
 }
 
 /// Foundation linear algebra feeds spectrum color matrix transforms
-fn test_foundation_to_spectrum_matrix_chain() {
+fn test_foundation_to_spectrum_matrix_chain() ~ Console {
     // Use foundation math to build a chromatic adaptation matrix (Bradford)
     // This demonstrates math -> color science integration
     let src_white = XYZ::d65_white();
@@ -230,7 +230,7 @@ fn test_foundation_to_spectrum_matrix_chain() {
 // =============================================================================
 
 /// Spectrum color types feed into Calibrate display profiling
-fn test_spectrum_to_calibrate_profile() {
+fn test_spectrum_to_calibrate_profile() ~ Console {
     // Create display primaries using Spectrum's known color space definitions
     let srgb_primaries = DisplayPrimaries::srgb();
     let p3_primaries = DisplayPrimaries::dci_p3();
@@ -277,7 +277,7 @@ fn test_spectrum_to_calibrate_profile() {
 }
 
 /// Spectrum gamma curves are used by Calibrate for display correction
-fn test_spectrum_to_calibrate_gamma() {
+fn test_spectrum_to_calibrate_gamma() ~ Console {
     // Test sRGB gamma curve through calibrate's GammaCurve type
     let srgb_curve = GammaCurve::SRGB;
 
@@ -320,7 +320,7 @@ fn test_spectrum_to_calibrate_gamma() {
 }
 
 /// Spectrum Lab perceptual color feeds calibrate's Delta E validation
-fn test_spectrum_to_calibrate_delta_e() {
+fn test_spectrum_to_calibrate_delta_e() ~ Console {
     // Calibrate verifies color accuracy using spectrum's Lab and Delta E
     // Target: D65 white in Lab space
     let target = Lab::new(100.0, 0.0, 0.0);
@@ -355,7 +355,7 @@ fn test_spectrum_to_calibrate_delta_e() {
 // =============================================================================
 
 /// Foundation trig generates synthetic time series for Oracle forecasting
-fn test_foundation_to_oracle_timeseries() {
+fn test_foundation_to_oracle_timeseries() ~ Console {
     // Use foundation math to create a time series with known properties:
     // trend + seasonal + noise
     let n: usize = 100;
@@ -397,7 +397,7 @@ fn test_foundation_to_oracle_timeseries() {
 }
 
 /// Foundation exponential/log feed Oracle's statistical computations
-fn test_foundation_to_oracle_statistics() {
+fn test_foundation_to_oracle_statistics() ~ Console {
     // Generate log-normal distributed data using foundation math
     let n: usize = 50;
     let mut log_returns: Vec<f64> = Vec::new();
@@ -446,7 +446,7 @@ fn test_foundation_to_oracle_statistics() {
 // =============================================================================
 
 /// Oracle predictions drive Quantum-Finance trading signals
-fn test_oracle_to_finance_forecast_signals() {
+fn test_oracle_to_finance_forecast_signals() ~ Console {
     // Create a synthetic time series with upward trend
     let n: usize = 60;
     let mut prices: Vec<f64> = Vec::new();
@@ -491,7 +491,7 @@ fn test_oracle_to_finance_forecast_signals() {
 }
 
 /// Oracle anomaly detection feeds Quantum-Finance risk management
-fn test_oracle_to_finance_anomaly_risk() {
+fn test_oracle_to_finance_anomaly_risk() ~ Console {
     // Create a time series with a volatility spike (anomaly)
     let n: usize = 80;
     let mut returns: Vec<f64> = Vec::new();
@@ -556,7 +556,7 @@ fn test_oracle_to_finance_anomaly_risk() {
 // =============================================================================
 
 /// Foundation math ops populate and transform market tensors
-fn test_foundation_to_field_tensor_populate() {
+fn test_foundation_to_field_tensor_populate() ~ Console {
     // Create a market tensor for 20 time steps, 3 assets, 4 features, 2 derivatives
     let tensor = MarketTensor4D::new(20, 3, 4, 2);
 
@@ -614,7 +614,7 @@ fn test_foundation_to_field_tensor_populate() {
 }
 
 /// Foundation linear algebra operations on field-tensor cross-sections
-fn test_foundation_to_field_tensor_covariance() {
+fn test_foundation_to_field_tensor_covariance() ~ Console {
     // Create tensor and populate with correlated asset returns
     let n_time: usize = 50;
     let n_assets: usize = 3;
@@ -678,7 +678,7 @@ fn test_foundation_to_field_tensor_covariance() {
 // =============================================================================
 
 /// Photon's rendering pipeline consumes Spectrum color types and transforms
-fn test_photon_to_spectrum_color_pipeline() {
+fn test_photon_to_spectrum_color_pipeline() ~ Console {
     // Photon renders a scene with linear RGB values (pre-tonemapping)
     // These are high dynamic range pixel values from the rendering engine
     let scene_pixels: Vec<RGB> = vec![
@@ -750,7 +750,7 @@ fn test_photon_to_spectrum_color_pipeline() {
 }
 
 /// Photon uses Spectrum's OKLab for perceptual color manipulation
-fn test_photon_to_spectrum_oklab() {
+fn test_photon_to_spectrum_oklab() ~ Console {
     // Photon wants to shift hue of rendered pixels perceptually
     // Use Spectrum's OKLab conversion matrices
 
@@ -796,7 +796,7 @@ fn test_photon_to_spectrum_oklab() {
 // =============================================================================
 
 /// Oracle's tensor operations produce forecasts stored in field-tensor format
-fn test_oracle_to_field_tensor_forecast_embedding() {
+fn test_oracle_to_field_tensor_forecast_embedding() ~ Console {
     // Oracle produces forecast vectors using its Tensor type
     let n_assets: usize = 3;
     let horizon: usize = 5;
@@ -854,7 +854,7 @@ fn test_oracle_to_field_tensor_forecast_embedding() {
 // =============================================================================
 
 /// Full chain: math generates data, oracle predicts, finance trades
-fn test_full_chain_predict_and_trade() {
+fn test_full_chain_predict_and_trade() ~ Console {
     // Stage 1: Foundation generates synthetic market data
     let n: usize = 100;
     let mut prices: Vec<f64> = Vec::new();
@@ -917,7 +917,7 @@ fn test_full_chain_predict_and_trade() {
 // =============================================================================
 
 /// Full chain: spectrum defines colors, photon renders, calibrate corrects
-fn test_full_chain_color_to_display() {
+fn test_full_chain_color_to_display() ~ Console {
     // Stage 1: Spectrum defines scene colors in linear sRGB
     let scene_color = RGB::new(0.6, 0.3, 0.1);  // Warm orange, linear
 
@@ -983,7 +983,7 @@ fn test_full_chain_color_to_display() {
 // =============================================================================
 
 /// Full chain: tensor data drives trades, oracle analyzes performance
-fn test_full_chain_trading_feedback() {
+fn test_full_chain_trading_feedback() ~ Console {
     // Stage 1: Field-Tensor contains market state
     let n_time: usize = 40;
     let n_assets: usize = 2;
@@ -1060,7 +1060,7 @@ fn test_full_chain_trading_feedback() {
 // MAIN: Run all cross-module integration tests
 // =============================================================================
 
-fn main() {
+fn main() ~ Console {
     println("=== BUILD-UNIVERSE Cross-Module Integration Tests ===");
     println("");
 

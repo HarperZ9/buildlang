@@ -56,7 +56,7 @@ fn approx_relaxed(a: f64, b: f64) -> bool {
 // MATH: BASIC FUNCTIONS
 // ═══════════════════════════════════════════════════════════════════════════════
 
-fn test_math_basic() {
+fn test_math_basic() ~ Console {
     // abs
     assert(abs(-5.0) == 5.0);
     assert(abs(5.0) == 5.0);
@@ -95,7 +95,7 @@ fn test_math_basic() {
 // MATH: CONSTANTS
 // ═══════════════════════════════════════════════════════════════════════════════
 
-fn test_math_constants() {
+fn test_math_constants() ~ Console {
     assert(approx(PI, 3.14159265358979323846));
     assert(approx(TAU, 2.0 * PI));
     assert(approx(E, 2.71828182845904523536));
@@ -112,7 +112,7 @@ fn test_math_constants() {
 // MATH: POWERS AND ROOTS
 // ═══════════════════════════════════════════════════════════════════════════════
 
-fn test_math_powers() {
+fn test_math_powers() ~ Console {
     // sqrt
     assert(approx(sqrt(25.0), 5.0));
     assert(approx(sqrt(2.0), SQRT_2));
@@ -170,7 +170,7 @@ fn test_math_powers() {
 // MATH: TRIGONOMETRIC
 // ═══════════════════════════════════════════════════════════════════════════════
 
-fn test_math_trig() {
+fn test_math_trig() ~ Console {
     // sin / cos / tan at key angles
     assert(approx(sin(0.0), 0.0));
     assert(approx(cos(0.0), 1.0));
@@ -215,7 +215,7 @@ fn test_math_trig() {
 // MATH: HYPERBOLIC
 // ═══════════════════════════════════════════════════════════════════════════════
 
-fn test_math_hyperbolic() {
+fn test_math_hyperbolic() ~ Console {
     // sinh / cosh / tanh at zero
     assert(approx(sinh(0.0), 0.0));
     assert(approx(cosh(0.0), 1.0));
@@ -241,7 +241,7 @@ fn test_math_hyperbolic() {
 // MATH: ROUNDING
 // ═══════════════════════════════════════════════════════════════════════════════
 
-fn test_math_rounding() {
+fn test_math_rounding() ~ Console {
     // floor
     assert(floor(2.7) == 2.0);
     assert(floor(-2.3) == -3.0);
@@ -279,7 +279,7 @@ fn test_math_rounding() {
 // MATH: INTERPOLATION
 // ═══════════════════════════════════════════════════════════════════════════════
 
-fn test_math_interpolation() {
+fn test_math_interpolation() ~ Console {
     // lerp
     assert(approx(lerp(0.0, 10.0, 0.0), 0.0));
     assert(approx(lerp(0.0, 10.0, 0.5), 5.0));
@@ -319,7 +319,7 @@ fn test_math_interpolation() {
 // MATH: SPECIAL FUNCTIONS
 // ═══════════════════════════════════════════════════════════════════════════════
 
-fn test_math_special() {
+fn test_math_special() ~ Console {
     // factorial
     assert(approx(factorial(0), 1.0));
     assert(approx(factorial(1), 1.0));
@@ -371,7 +371,7 @@ fn test_math_special() {
 // MATH: PREDICATES
 // ═══════════════════════════════════════════════════════════════════════════════
 
-fn test_math_predicates() {
+fn test_math_predicates() ~ Console {
     // is_nan
     assert(is_nan(0.0 / 0.0));
     assert(!is_nan(1.0));
@@ -409,7 +409,7 @@ fn test_math_predicates() {
 // MATH: NUMERIC UTILITIES
 // ═══════════════════════════════════════════════════════════════════════════════
 
-fn test_math_numeric_utils() {
+fn test_math_numeric_utils() ~ Console {
     // gcd
     assert(gcd(12, 8) == 4);
     assert(gcd(17, 13) == 1);
@@ -459,7 +459,7 @@ fn test_math_numeric_utils() {
 // MATH: VEC3 OPERATIONS
 // ═══════════════════════════════════════════════════════════════════════════════
 
-fn test_math_vec3() {
+fn test_math_vec3() ~ Console {
     // Construction
     let v = Vec3::new(1.0, 2.0, 3.0);
     assert(v.x == 1.0);
@@ -524,7 +524,7 @@ fn test_math_vec3() {
 // MATH: MAT4 IDENTITY
 // ═══════════════════════════════════════════════════════════════════════════════
 
-fn test_math_mat4() {
+fn test_math_mat4() ~ Console {
     // Identity matrix
     let id = Mat4::identity();
     assert(id.m[0][0] == 1.0 && id.m[1][1] == 1.0);
@@ -539,7 +539,7 @@ fn test_math_mat4() {
 // COLLECTIONS: VEC
 // ═══════════════════════════════════════════════════════════════════════════════
 
-fn test_collections_vec() {
+fn test_collections_vec() ~ Console {
     // Construction and push
     let mut v: Vec<i32> = Vec::new();
     assert(v.len() == 0);
@@ -600,7 +600,7 @@ fn test_collections_vec() {
 // COLLECTIONS: VEC SORT & REVERSE
 // ═══════════════════════════════════════════════════════════════════════════════
 
-fn test_collections_vec_sort() {
+fn test_collections_vec_sort() ~ Console {
     let mut v = vec![5, 2, 8, 1, 9, 3];
     v.sort();
     assert(*v.get(0).unwrap() == 1);
@@ -628,7 +628,7 @@ fn test_collections_vec_sort() {
 // COLLECTIONS: VEC ITERATORS
 // ═══════════════════════════════════════════════════════════════════════════════
 
-fn test_collections_vec_iter() {
+fn test_collections_vec_iter() ~ Console {
     let v = vec![1, 2, 3, 4, 5];
 
     // iter + fold (sum)
@@ -656,7 +656,7 @@ fn test_collections_vec_iter() {
 // COLLECTIONS: HASHMAP
 // ═══════════════════════════════════════════════════════════════════════════════
 
-fn test_collections_hashmap() {
+fn test_collections_hashmap() ~ Console {
     let mut map: HashMap<String, i32> = HashMap::new();
     assert(map.len() == 0);
     assert(map.is_empty());
@@ -701,7 +701,7 @@ fn test_collections_hashmap() {
 // COLLECTIONS: HASHSET
 // ═══════════════════════════════════════════════════════════════════════════════
 
-fn test_collections_hashset() {
+fn test_collections_hashset() ~ Console {
     let mut set: HashSet<i32> = HashSet::new();
     assert(set.len() == 0);
     assert(set.is_empty());
@@ -758,7 +758,7 @@ fn test_collections_hashset() {
 // COLLECTIONS: VECDEQUE
 // ═══════════════════════════════════════════════════════════════════════════════
 
-fn test_collections_vecdeque() {
+fn test_collections_vecdeque() ~ Console {
     let mut dq: VecDeque<i32> = VecDeque::new();
     assert(dq.len() == 0);
     assert(dq.is_empty());
@@ -799,7 +799,7 @@ fn test_collections_vecdeque() {
 // COLLECTIONS: BINARYHEAP
 // ═══════════════════════════════════════════════════════════════════════════════
 
-fn test_collections_binaryheap() {
+fn test_collections_binaryheap() ~ Console {
     let mut heap: BinaryHeap<i32> = BinaryHeap::new();
     assert(heap.len() == 0);
     assert(heap.is_empty());
@@ -829,7 +829,7 @@ fn test_collections_binaryheap() {
 // COLLECTIONS: BTREEMAP
 // ═══════════════════════════════════════════════════════════════════════════════
 
-fn test_collections_btreemap() {
+fn test_collections_btreemap() ~ Console {
     let mut bt: BTreeMap<i32, String> = BTreeMap::new();
     assert(bt.len() == 0);
     assert(bt.is_empty());
@@ -869,7 +869,7 @@ fn test_collections_btreemap() {
 // TEXT: STRING EXTENSIONS
 // ═══════════════════════════════════════════════════════════════════════════════
 
-fn test_text_string_ext() {
+fn test_text_string_ext() ~ Console {
     // is_blank
     assert("".is_blank());
     assert("   ".is_blank());
@@ -935,7 +935,7 @@ fn test_text_string_ext() {
 // TEXT: CASE CONVERSION
 // ═══════════════════════════════════════════════════════════════════════════════
 
-fn test_text_case() {
+fn test_text_case() ~ Console {
     // snake_case
     assert(case::to_snake_case("HelloWorld") == "hello_world");
     assert(case::to_snake_case("helloWorld") == "hello_world");
@@ -972,7 +972,7 @@ fn test_text_case() {
 // TEXT: SIMILARITY
 // ═══════════════════════════════════════════════════════════════════════════════
 
-fn test_text_similarity() {
+fn test_text_similarity() ~ Console {
     // Levenshtein
     assert(similarity::levenshtein("kitten", "sitting") == 3);
     assert(similarity::levenshtein("", "abc") == 3);
@@ -1002,7 +1002,7 @@ fn test_text_similarity() {
 // RANDOM: PRNG DETERMINISM
 // ═══════════════════════════════════════════════════════════════════════════════
 
-fn test_random_determinism() {
+fn test_random_determinism() ~ Console {
     // SplitMix64: same seed => same sequence
     let mut rng1 = SplitMix64::new(42);
     let mut rng2 = SplitMix64::new(42);
@@ -1049,7 +1049,7 @@ fn test_random_determinism() {
 // RANDOM: DISTRIBUTION BOUNDS
 // ═══════════════════════════════════════════════════════════════════════════════
 
-fn test_random_bounds() {
+fn test_random_bounds() ~ Console {
     let mut rng = Xoshiro256StarStar::new(42);
 
     // next_f64 in [0, 1)
@@ -1097,7 +1097,7 @@ fn test_random_bounds() {
 // RANDOM: FILL BYTES
 // ═══════════════════════════════════════════════════════════════════════════════
 
-fn test_random_fill_bytes() {
+fn test_random_fill_bytes() ~ Console {
     let mut rng = SplitMix64::new(42);
     let mut buf = [0u8; 32];
     rng.fill_bytes(&mut buf);
@@ -1126,7 +1126,7 @@ fn test_random_fill_bytes() {
 // ERROR: SIMPLE ERROR
 // ═══════════════════════════════════════════════════════════════════════════════
 
-fn test_error_simple() {
+fn test_error_simple() ~ Console {
     // Create simple error
     let err = SimpleError::new("something went wrong");
     assert(err.message() == "something went wrong");
@@ -1150,7 +1150,7 @@ fn test_error_simple() {
 // ERROR: CODED ERROR
 // ═══════════════════════════════════════════════════════════════════════════════
 
-fn test_error_coded() {
+fn test_error_coded() ~ Console {
     let err = CodedError::new(404, "not found");
     assert(err.code == 404);
     assert(err.message == "not found");
@@ -1165,7 +1165,7 @@ fn test_error_coded() {
 // ERROR: RESULT CONTEXT
 // ═══════════════════════════════════════════════════════════════════════════════
 
-fn test_error_context() {
+fn test_error_context() ~ Console {
     // Ok passes through
     let ok_result: Result<i32, SimpleError> = Ok(42);
     let with_ctx = ok_result.context("extra context");
@@ -1194,7 +1194,7 @@ fn test_error_context() {
 // ERROR: BACKTRACE STATUS
 // ═══════════════════════════════════════════════════════════════════════════════
 
-fn test_error_backtrace() {
+fn test_error_backtrace() ~ Console {
     use foundation::error::Backtrace;
 
     // Disabled backtrace
@@ -1213,7 +1213,7 @@ fn test_error_backtrace() {
 // SERIALIZATION: JSON VALUE
 // ═══════════════════════════════════════════════════════════════════════════════
 
-fn test_json_value() {
+fn test_json_value() ~ Console {
     // Type constructors
     let null = Value::Null;
     assert(null.is_null());
@@ -1249,7 +1249,7 @@ fn test_json_value() {
 // SERIALIZATION: JSON PARSE
 // ═══════════════════════════════════════════════════════════════════════════════
 
-fn test_json_parse() {
+fn test_json_parse() ~ Console {
     // Parse null
     let v = json::parse("null").unwrap();
     assert(v.is_null());
@@ -1300,7 +1300,7 @@ fn test_json_parse() {
 // ENCODING: HEX
 // ═══════════════════════════════════════════════════════════════════════════════
 
-fn test_encoding_hex() {
+fn test_encoding_hex() ~ Console {
     // Encode
     let data: Vec<u8> = vec![0x48, 0x65, 0x6c, 0x6c, 0x6f]; // "Hello"
     let encoded = hex::encode(&data);
@@ -1340,7 +1340,7 @@ fn test_encoding_hex() {
 // ENCODING: BASE64
 // ═══════════════════════════════════════════════════════════════════════════════
 
-fn test_encoding_base64() {
+fn test_encoding_base64() ~ Console {
     // Standard encode/decode roundtrip
     let data = b"Hello, World!";
     let encoded = base64::encode(data);
@@ -1391,7 +1391,7 @@ fn test_encoding_base64() {
 // ENCODING: BASE32
 // ═══════════════════════════════════════════════════════════════════════════════
 
-fn test_encoding_base32() {
+fn test_encoding_base32() ~ Console {
     // Roundtrip
     let data = b"Hello";
     let encoded = base32::encode(data);
@@ -1412,7 +1412,7 @@ fn test_encoding_base32() {
 // CROSS-FEATURE: ENUM + MATCH
 // ═══════════════════════════════════════════════════════════════════════════════
 
-fn test_enum_match() {
+fn test_enum_match() ~ Console {
     #[derive(Debug, PartialEq)]
     enum Shape {
         Circle(f64),
@@ -1447,7 +1447,7 @@ fn test_enum_match() {
 // CROSS-FEATURE: STRUCT + METHODS
 // ═══════════════════════════════════════════════════════════════════════════════
 
-fn test_struct_methods() {
+fn test_struct_methods() ~ Console {
     struct Counter {
         count: i32,
         max: i32,
@@ -1501,7 +1501,7 @@ fn test_struct_methods() {
 // CROSS-FEATURE: TUPLE DESTRUCTURING
 // ═══════════════════════════════════════════════════════════════════════════════
 
-fn test_tuple_destructuring() {
+fn test_tuple_destructuring() ~ Console {
     // Basic tuple
     let pair: (i32, f64) = (42, 3.14);
     let (a, b) = pair;
@@ -1536,7 +1536,7 @@ fn test_tuple_destructuring() {
 // CROSS-FEATURE: CLOSURES + ITERATORS
 // ═══════════════════════════════════════════════════════════════════════════════
 
-fn test_closures_iterators() {
+fn test_closures_iterators() ~ Console {
     let data = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
 
     // map
@@ -1574,7 +1574,7 @@ fn test_closures_iterators() {
 // CROSS-FEATURE: FOR / WHILE LOOPS
 // ═══════════════════════════════════════════════════════════════════════════════
 
-fn test_loops() {
+fn test_loops() ~ Console {
     // For loop with range
     let mut sum = 0;
     for i in 0..10 {
@@ -1616,7 +1616,7 @@ fn test_loops() {
 // MAIN: RUN ALL TESTS
 // ═══════════════════════════════════════════════════════════════════════════════
 
-fn main() {
+fn main() ~ Console {
     println("Foundation Unit Tests");
     println("=====================");
     println("");

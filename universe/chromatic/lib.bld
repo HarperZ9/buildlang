@@ -1856,9 +1856,9 @@ struct ICCProfile {
 }
 
 struct ToneCurve {
-    gamma: f64?,
-    curve_points: [f64]?,
-    parametric: ParametricCurve?
+    gamma: Option<f64>,
+    curve_points: Option<[f64]>,
+    parametric: Option<ParametricCurve>
 }
 
 struct ParametricCurve {
@@ -1945,7 +1945,7 @@ struct ColorTransform {
     dest_profile: ICCProfile,
     intent: RenderingIntent,
     black_point_compensation: bool,
-    gamut_warning_color: (f64, f64, f64)?
+    gamut_warning_color: Option<(f64, f64, f64)>
 }
 
 impl ColorTransform {

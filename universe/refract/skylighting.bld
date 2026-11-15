@@ -3,9 +3,9 @@
 // Advanced sky-based ambient lighting with atmospheric scattering
 // ============================================================================
 
-import core::simd
-import prism::compute
-import prism::sampling
+use core::simd
+use prism::compute
+use prism::sampling
 
 // ============================================================================
 // SKY VISIBILITY AND SAMPLING

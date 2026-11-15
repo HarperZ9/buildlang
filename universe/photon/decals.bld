@@ -6,12 +6,12 @@
 // Based on Harper Engine rendering techniques for dynamic surface details.
 // =============================================================================
 
-import core::memory::{Arena, Pool, Buffer, GpuBuffer};
-import core::math::{Vec2, Vec3, Vec4, Mat4, Quaternion, Transform, AABB, OBB};
-import core::simd::{f32x4, f32x8, SimdMath};
-import photon::gpu::{ComputeShader, RenderPipeline, Texture, Sampler};
-import photon::gbuffer::{GBuffer, GBufferChannel};
-import photon::materials::{DisneyMaterial, PBRTextureSet};
+use core::memory::{Arena, Pool, Buffer, GpuBuffer};
+use core::math::{Vec2, Vec3, Vec4, Mat4, Quaternion, Transform, AABB, OBB};
+use core::simd::{f32x4, f32x8, SimdMath};
+use photon::gpu::{ComputeShader, RenderPipeline, Texture, Sampler};
+use photon::gbuffer::{GBuffer, GBufferChannel};
+use photon::materials::{DisneyMaterial, PBRTextureSet};
 
 // =============================================================================
 // REGION: DECAL TYPES AND ENUMS

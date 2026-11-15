@@ -3,11 +3,11 @@
 // Advanced mod loading with async support and dependency resolution
 // ============================================================================
 
-import nexus::lib::{ModMetadata, ModPackage, ModDependency, Version};
-import nexus::compatibility::{CompatibilityChecker, VersionRange};
-import nexus::sandbox::{Sandbox, SandboxPolicy};
-import nexus::hooks::HookManager;
-import nexus::events::EventBus;
+use nexus::lib::{ModMetadata, ModPackage, ModDependency, Version};
+use nexus::compatibility::{CompatibilityChecker, VersionRange};
+use nexus::sandbox::{Sandbox, SandboxPolicy};
+use nexus::hooks::HookManager;
+use nexus::events::EventBus;
 
 // ============================================================================
 // REGION: Load State Machine

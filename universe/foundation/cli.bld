@@ -530,15 +530,15 @@ impl Terminal {
     pub fn width(self: &Self) -> usize { self.width }
     pub fn height(self: &Self) -> usize { self.height }
 
-    pub fn clear_screen(self: &Self) { print!("\x1b[2J\x1b[H"); }
-    pub fn clear_line(self: &Self) { print!("\x1b[2K"); }
-    pub fn move_cursor(self: &Self, row: usize, col: usize) {
+    pub fn clear_screen(self: &Self) ~ Console { print!("\x1b[2J\x1b[H"); }
+    pub fn clear_line(self: &Self) ~ Console { print!("\x1b[2K"); }
+    pub fn move_cursor(self: &Self, row: usize, col: usize) ~ Console {
         print!("\x1b[{};{}H", row, col);
     }
-    pub fn hide_cursor(self: &Self) { print!("\x1b[?25l"); }
-    pub fn show_cursor(self: &Self) { print!("\x1b[?25h"); }
-    pub fn save_cursor(self: &Self) { print!("\x1b[s"); }
-    pub fn restore_cursor(self: &Self) { print!("\x1b[u"); }
+    pub fn hide_cursor(self: &Self) ~ Console { print!("\x1b[?25l"); }
+    pub fn show_cursor(self: &Self) ~ Console { print!("\x1b[?25h"); }
+    pub fn save_cursor(self: &Self) ~ Console { print!("\x1b[s"); }
+    pub fn restore_cursor(self: &Self) ~ Console { print!("\x1b[u"); }
 }
 
 // ============================================================================
@@ -575,21 +575,21 @@ impl ProgressBar {
     pub fn fill(mut self: Self, c: char) -> Self { self.fill_char = c; self }
     pub fn empty(mut self: Self, c: char) -> Self { self.empty_char = c; self }
 
-    pub fn set(self: &mut Self, current: u64) {
+    pub fn set(self: &mut Self, current: u64) ~ Console {
         self.current = current.min(self.total);
         self.draw();
     }
 
-    pub fn inc(self: &mut Self, delta: u64) {
+    pub fn inc(self: &mut Self, delta: u64) ~ Console {
         self.set(self.current + delta);
     }
 
-    pub fn finish(self: &mut Self) {
+    pub fn finish(self: &mut Self) ~ Console {
         self.set(self.total);
         println!();
     }
 
-    fn draw(self: &Self) {
+    fn draw(self: &Self) ~ Console {
         let progress = self.current as f64 / self.total as f64;
         let filled = (progress * self.width as f64) as usize;
         let empty = self.width - filled;
@@ -646,13 +646,13 @@ impl Spinner {
         self.message = m.to_string(); self
     }
 
-    pub fn tick(self: &mut Self) {
+    pub fn tick(self: &mut Self) ~ Console {
         self.current = (self.current + 1) % self.frames.len();
         print!("\r{} {}", self.frames[self.current], self.message);
         let _ = std::io::stdout().flush();
     }
 
-    pub fn finish(self: &mut Self, message: &str) {
+    pub fn finish(self: &mut Self, message: &str) ~ Console {
         print!("\r{} {}\n", color::GREEN, message);
         print!("{}", color::RESET);
     }
@@ -758,7 +758,7 @@ impl Table {
         result
     }
 
-    pub fn print(self: &Self) {
+    pub fn print(self: &Self) ~ Console {
         print!("{}", self.to_string());
     }
 }
@@ -768,7 +768,7 @@ impl Table {
 // ============================================================================
 
 /// Read a line from stdin
-pub fn prompt(message: &str) -> String {
+pub fn prompt(message: &str) -> String ~ Console {
     print!("{}", message);
     let _ = std::io::stdout().flush();
 
@@ -778,7 +778,7 @@ pub fn prompt(message: &str) -> String {
 }
 
 /// Ask a yes/no question
-pub fn confirm(message: &str, default: bool) -> bool {
+pub fn confirm(message: &str, default: bool) -> bool ~ Console {
     let suffix = if default { " [Y/n]: " } else { " [y/N]: " };
     let input = prompt(&format!("{}{}", message, suffix)).to_lowercase();
 
@@ -791,7 +791,7 @@ pub fn confirm(message: &str, default: bool) -> bool {
 }
 
 /// Select from a list of options
-pub fn select(message: &str, options: &[&str]) -> Option<usize> {
+pub fn select(message: &str, options: &[&str]) -> Option<usize> ~ Console {
     println!("{}", message);
     for (i, option) in options.iter().enumerate() {
         println!("  {}. {}", i + 1, option);
@@ -802,7 +802,7 @@ pub fn select(message: &str, options: &[&str]) -> Option<usize> {
 }
 
 /// Prompt for password (hidden input)
-pub fn password(message: &str) -> String {
+pub fn password(message: &str) -> String ~ Console {
     print!("{}", message);
     let _ = std::io::stdout().flush();
     intrinsics::read_password().unwrap_or_default()

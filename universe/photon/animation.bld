@@ -2,11 +2,11 @@
 // Part of the Photon Rendering Module
 // Implements skeletal animation, GPU skinning, blend shapes, animation blending, and IK
 
-import std::collections::{HashMap, Vec, VecDeque, BinaryHeap}
-import std::math::{Vec2, Vec3, Vec4, Mat3, Mat4, Quaternion, sqrt, pow, exp, sin, cos, tan, acos, PI, floor, ceil, clamp, lerp, min, max, abs, dot, cross, normalize, length}
-import std::memory::{Arena, Pool, Box, Arc, Rc}
-import std::sync::{Mutex, RwLock, Atomic}
-import std::simd::{f32x4, f32x8, i32x4, i32x8}
+use std::collections::{HashMap, Vec, VecDeque, BinaryHeap}
+use std::math::{Vec2, Vec3, Vec4, Mat3, Mat4, Quaternion, sqrt, pow, exp, sin, cos, tan, acos, PI, floor, ceil, clamp, lerp, min, max, abs, dot, cross, normalize, length}
+use std::memory::{Arena, Pool, Box, Arc, Rc}
+use std::sync::{Mutex, RwLock, Atomic}
+use std::simd::{f32x4, f32x8, i32x4, i32x8}
 
 // ============================================================================
 // SKELETON SYSTEM
@@ -877,7 +877,7 @@ struct GpuSkinning {
 }
 
 impl GpuSkinning {
-    fn new(device: &Device, max_bones: u32) -> Self {
+    fn new(device: &Device, max_bones: u32) -> Self ~ FileSystem {
         let compute_pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
             shader: include_str!("shaders/skinning.wgsl"),
             entry_point: "skin_vertices",
@@ -939,7 +939,7 @@ struct BlendShapeManager {
 }
 
 impl BlendShapeManager {
-    fn new(device: &Device, targets: Vec<BlendShapeTarget>) -> Self {
+    fn new(device: &Device, targets: Vec<BlendShapeTarget>) -> Self ~ FileSystem {
         let target_count = targets.len();
 
         // Pack all deltas into a buffer
@@ -1305,7 +1305,7 @@ impl IkSolver for FabrikSolver {
 }
 
 impl AnimationSystem {
-    fn new(device: &Device, max_bones: u32) -> Self {
+    fn new(device: &Device, max_bones: u32) -> Self ~ FileSystem {
         Self {
             skeletons: HashMap::new(),
             clips: HashMap::new(),

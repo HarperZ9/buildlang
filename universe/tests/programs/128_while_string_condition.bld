@@ -1,4 +1,4 @@
-fn main() {
+fn main() ~ Console {
     let mut s = "hello";
     let mut count = 0;
 

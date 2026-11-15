@@ -9617,15 +9617,15 @@ pub mod sharpen {
         }
 
         fn overlay_blend(&self, a: f32, b: f32) -> f32 {
-            if a < 0.5 {
+            (if a < 0.5 {
                 2.0 * a * b
             } else {
                 1.0 - 2.0 * (1.0 - a) * (1.0 - b)
-            }.clamp(0.0, 1.0)
+            }).clamp(0.0, 1.0)
         }
 
         fn soft_light_blend(&self, a: f32, b: f32) -> f32 {
-            if b < 0.5 {
+            (if b < 0.5 {
                 a - (1.0 - 2.0 * b) * a * (1.0 - a)
             } else {
                 let d = if a < 0.25 {
@@ -9634,17 +9634,17 @@ pub mod sharpen {
                     a.sqrt()
                 };
                 a + (2.0 * b - 1.0) * (d - a)
-            }.clamp(0.0, 1.0)
+            }).clamp(0.0, 1.0)
         }
 
         fn vivid_light_blend(&self, a: f32, b: f32) -> f32 {
-            if b < 0.5 {
+            (if b < 0.5 {
                 // Color burn
                 if b > 0.0 { 1.0 - (1.0 - a) / (2.0 * b) } else { 0.0 }
             } else {
                 // Color dodge
                 if b < 1.0 { a / (2.0 * (1.0 - b)) } else { 1.0 }
-            }.clamp(0.0, 1.0)
+            }).clamp(0.0, 1.0)
         }
     }
 }

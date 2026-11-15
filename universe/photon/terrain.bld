@@ -904,7 +904,7 @@ pub enum FractalType {
     Ridged,
     Billow,
     Hybrid,
-    Domain Warping,
+    DomainWarping,
 }
 
 /// Procedural terrain generator

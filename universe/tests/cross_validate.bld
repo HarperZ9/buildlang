@@ -94,7 +94,7 @@ fn ciede2000_simple(l1: f64, a1: f64, b1: f64, l2: f64, a2: f64, b2: f64) -> f64
     sqrt(dl * dl + da * da + db * db)
 }
 
-fn main() {
+fn main() ~ Console {
     println!("=== BuildLang Cross-Validation Output ===");
     println!("Compare these values with Python build-color");
     println!("");

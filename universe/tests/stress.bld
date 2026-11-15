@@ -58,7 +58,7 @@ impl StressTestConfig {
 
 /// Test serialization with large data structures
 #[test]
-fn stress_large_json_serialization() -> TestResult {
+fn stress_large_json_serialization() -> TestResult ~ Console {
     let start = Instant::now();
 
     // Create large nested structure
@@ -98,7 +98,7 @@ fn stress_large_json_serialization() -> TestResult {
 
 /// Test MessagePack with large binary data
 #[test]
-fn stress_large_msgpack_binary() -> TestResult {
+fn stress_large_msgpack_binary() -> TestResult ~ Console {
     let start = Instant::now();
 
     // Create large binary payload
@@ -122,7 +122,7 @@ fn stress_large_msgpack_binary() -> TestResult {
 
 /// Test Protocol Buffers with deeply nested messages
 #[test]
-fn stress_deep_protobuf_nesting() -> TestResult {
+fn stress_deep_protobuf_nesting() -> TestResult ~ Console {
     let start = Instant::now();
 
     // Create deeply nested structure (100 levels deep)
@@ -166,7 +166,7 @@ fn stress_deep_protobuf_nesting() -> TestResult {
 
 /// Test large market tensor operations
 #[test]
-fn stress_large_tensor_operations() -> TestResult {
+fn stress_large_tensor_operations() -> TestResult ~ Console {
     let start = Instant::now();
 
     // Create large tensor: 5000 time steps, 500 assets, 32 features, 8 derivatives
@@ -216,7 +216,7 @@ fn stress_large_tensor_operations() -> TestResult {
 
 /// Test collection operations at scale
 #[test]
-fn stress_large_collections() -> TestResult {
+fn stress_large_collections() -> TestResult ~ Console {
     let start = Instant::now();
 
     // Test HashMap with 10M entries
@@ -413,7 +413,7 @@ fn stress_parallel_trading_engines() -> TestResult {
 
 /// Test async task spawning under load
 #[test]
-fn stress_async_task_spawning() -> TestResult {
+fn stress_async_task_spawning() -> TestResult ~ Console {
     use foundation::sync::{spawn, channel};
 
     let num_tasks = 10_000;
@@ -478,7 +478,7 @@ fn stress_memory_allocation_churn() -> TestResult {
 
 /// Test string interning under pressure
 #[test]
-fn stress_string_interning() -> TestResult {
+fn stress_string_interning() -> TestResult ~ Console {
     let mut strings = HashSet::new();
 
     // Insert many unique strings
@@ -508,7 +508,7 @@ fn stress_string_interning() -> TestResult {
 
 /// Test arena allocation patterns
 #[test]
-fn stress_arena_allocation() -> TestResult {
+fn stress_arena_allocation() -> TestResult ~ Console {
     // Simulate arena-like allocation with VecDeque
     let mut arena = VecDeque::with_capacity(10_000_000);
 
@@ -715,7 +715,7 @@ fn stress_matrix_edge_cases() -> TestResult {
 
 /// Test serialization performance bounds
 #[test]
-fn stress_serialization_performance() -> TestResult {
+fn stress_serialization_performance() -> TestResult ~ Console {
     let sizes = vec![1_000, 10_000, 100_000, 1_000_000];
 
     for size in sizes {
@@ -760,7 +760,7 @@ fn stress_serialization_performance() -> TestResult {
 
 /// Test matrix operation performance scaling
 #[test]
-fn stress_matrix_performance_scaling() -> TestResult {
+fn stress_matrix_performance_scaling() -> TestResult ~ Console {
     let sizes = vec![10, 50, 100, 200, 500];
 
     for size in sizes {
@@ -800,7 +800,7 @@ fn stress_matrix_performance_scaling() -> TestResult {
 
 /// Test neural network inference throughput
 #[test]
-fn stress_neural_network_throughput() -> TestResult {
+fn stress_neural_network_throughput() -> TestResult ~ Console {
     use axiom::{Dense, Activation};
 
     // Create network
@@ -841,7 +841,7 @@ fn stress_neural_network_throughput() -> TestResult {
 
 /// Test encryption/decryption throughput
 #[test]
-fn stress_crypto_throughput() -> TestResult {
+fn stress_crypto_throughput() -> TestResult ~ Console {
     let data_sizes = vec![1_000, 10_000, 100_000, 1_000_000];
 
     for size in data_sizes {
@@ -946,7 +946,7 @@ pub fn run_all_stress_tests(config: &StressTestConfig) -> TestSuite {
 }
 
 /// Main entry point
-pub fn main() -> i32 {
+pub fn main() -> i32 ~ Console {
     let config = StressTestConfig::default();
     let suite = run_all_stress_tests(&config);
 

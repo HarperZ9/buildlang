@@ -155,7 +155,7 @@ pub fn aces_pipeline(scene: Color3, exp: f64, sat: f64, slope: Color3, offset: C
 
 // === DEMO ===
 
-fn main() {
+fn main() ~ Console {
     let scene = Color3::new(2.5, 1.8, 0.6);
     println!("=== ACES Color Pipeline — Written in BuildLang ===");
     println!("Scene (linear):  R={} G={} B={}", scene.r, scene.g, scene.b);

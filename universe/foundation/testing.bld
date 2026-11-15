@@ -227,7 +227,7 @@ impl TestReport {
     pub fn total(self: &Self) -> usize { self.passed + self.failed + self.skipped }
     pub fn success(self: &Self) -> bool { self.failed == 0 }
 
-    pub fn print_summary(self: &Self) {
+    pub fn print_summary(self: &Self) ~ Console {
         println!("\n========== Test Summary ==========");
         println!("Passed:  {} ", self.passed);
         println!("Failed:  {} ", self.failed);
@@ -735,7 +735,7 @@ pub struct BenchmarkResult {
 }
 
 impl BenchmarkResult {
-    pub fn print(self: &Self) {
+    pub fn print(self: &Self) ~ Console {
         println!("Benchmark: {}", self.name);
         println!("  Mean:   {:.2} ns", self.mean_ns);
         println!("  Median: {:.2} ns", self.median_ns);
@@ -769,7 +769,7 @@ impl BenchmarkSuite {
         self.benchmarks.push((name.to_string(), Box::new(f)));
     }
 
-    pub fn run(self: &mut Self) -> Vec<BenchmarkResult> {
+    pub fn run(self: &mut Self) -> Vec<BenchmarkResult> ~ Console {
         println!("\n========== {} ==========", self.name);
         let mut results = Vec::new();
 

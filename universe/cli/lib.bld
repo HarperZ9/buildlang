@@ -38,7 +38,7 @@ impl CLI {
     }
 
     /// Parse and execute command
-    pub fn run(&mut self) -> Result<i32, String> {
+    pub fn run(&mut self) -> Result<i32, String> ~ Console {
         if self.args.len() < 2 {
             self.print_help();
             return Ok(0);
@@ -98,7 +98,7 @@ impl CLI {
     // COMMANDS
     // ═══════════════════════════════════════════════════════════════════════════
 
-    fn cmd_init(&self) -> Result<i32, String> {
+    fn cmd_init(&self) -> Result<i32, String> ~ Console {
         println!("Initializing BUILD-UNIVERSE project...");
 
         // Create default configuration
@@ -137,7 +137,7 @@ fn main() {
         Ok(0)
     }
 
-    fn cmd_build(&self) -> Result<i32, String> {
+    fn cmd_build(&self) -> Result<i32, String> ~ Console {
         let profile = if self.has_flag("--release", "-r") {
             Profile::Release
         } else if self.has_flag("--dist", "-d") {
@@ -191,7 +191,7 @@ fn main() {
         }
     }
 
-    fn cmd_test(&self) -> Result<i32, String> {
+    fn cmd_test(&self) -> Result<i32, String> ~ Console {
         println!("Running BUILD-UNIVERSE tests...\n");
 
         let mut runner = TestRunner::new();
@@ -204,7 +204,7 @@ fn main() {
         }
     }
 
-    fn cmd_run(&self) -> Result<i32, String> {
+    fn cmd_run(&self) -> Result<i32, String> ~ Console {
         // First build
         self.cmd_build()?;
 
@@ -217,7 +217,7 @@ fn main() {
         Ok(0)
     }
 
-    fn cmd_clean(&self) -> Result<i32, String> {
+    fn cmd_clean(&self) -> Result<i32, String> ~ Console {
         println!("Cleaning build artifacts...");
 
         let config = BuildConfig::default();
@@ -237,7 +237,7 @@ fn main() {
         Ok(0)
     }
 
-    fn cmd_list(&self) -> Result<i32, String> {
+    fn cmd_list(&self) -> Result<i32, String> ~ Console {
         universe::init().ok();
         let uni = universe::universe();
 
@@ -292,7 +292,7 @@ fn main() {
         Ok(0)
     }
 
-    fn cmd_info(&self) -> Result<i32, String> {
+    fn cmd_info(&self) -> Result<i32, String> ~ Console {
         let module_name = self.get_arg(2)
             .ok_or_else(|| "Usage: build info <module>".to_string())?;
 
@@ -334,7 +334,7 @@ fn main() {
         }
     }
 
-    fn cmd_status(&self) -> Result<i32, String> {
+    fn cmd_status(&self) -> Result<i32, String> ~ Console {
         universe::init().ok();
         let uni = universe::universe();
 
@@ -368,7 +368,7 @@ fn main() {
         Ok(0)
     }
 
-    fn cmd_config(&self) -> Result<i32, String> {
+    fn cmd_config(&self) -> Result<i32, String> ~ Console {
         let subcommand = self.get_arg(2).unwrap_or("show");
 
         match subcommand {
@@ -413,7 +413,7 @@ fn main() {
         Ok(0)
     }
 
-    fn cmd_doctor(&self) -> Result<i32, String> {
+    fn cmd_doctor(&self) -> Result<i32, String> ~ Console {
         println!("╔═══════════════════════════════════════════════════════════════╗");
         println!("║  BUILD-UNIVERSE Doctor                                       ║");
         println!("╚═══════════════════════════════════════════════════════════════╝");
@@ -465,7 +465,7 @@ fn main() {
         Ok(if issues == 0 { 0 } else { 1 })
     }
 
-    fn cmd_repl(&self) -> Result<i32, String> {
+    fn cmd_repl(&self) -> Result<i32, String> ~ Console {
         println!("BUILD-UNIVERSE REPL v2.0.0");
         println!("Type 'help' for commands, 'exit' to quit.\n");
 
@@ -515,7 +515,7 @@ fn main() {
         Ok(0)
     }
 
-    fn cmd_new(&self) -> Result<i32, String> {
+    fn cmd_new(&self) -> Result<i32, String> ~ Console {
         let name = self.get_arg(2)
             .ok_or_else(|| "Usage: build new <project-name>".to_string())?;
 
@@ -531,7 +531,7 @@ fn main() {
         self.cmd_init()
     }
 
-    fn cmd_add(&self) -> Result<i32, String> {
+    fn cmd_add(&self) -> Result<i32, String> ~ Console {
         let module = self.get_arg(2)
             .ok_or_else(|| "Usage: build add <module>".to_string())?;
 
@@ -548,7 +548,7 @@ fn main() {
         Ok(0)
     }
 
-    fn cmd_remove(&self) -> Result<i32, String> {
+    fn cmd_remove(&self) -> Result<i32, String> ~ Console {
         let module = self.get_arg(2)
             .ok_or_else(|| "Usage: build remove <module>".to_string())?;
 
@@ -558,7 +558,7 @@ fn main() {
         Ok(0)
     }
 
-    fn cmd_update(&self) -> Result<i32, String> {
+    fn cmd_update(&self) -> Result<i32, String> ~ Console {
         println!("Updating BUILD-UNIVERSE modules...\n");
 
         // In real implementation, this would check for updates
@@ -576,7 +576,7 @@ fn main() {
     // HELP & VERSION
     // ═══════════════════════════════════════════════════════════════════════════
 
-    fn print_help(&self) {
+    fn print_help(&self) ~ Console {
         println!(r#"
 BUILD-UNIVERSE CLI v2.0.0
 The Complete Physics-Inspired Software Universe
@@ -630,7 +630,7 @@ For more information, visit: https://build-universe.dev
 "#);
     }
 
-    fn print_version(&self) {
+    fn print_version(&self) ~ Console {
         println!("BUILD-UNIVERSE CLI v2.0.0");
         println!("BuildLang Compiler v1.0.0");
         println!();
@@ -643,7 +643,7 @@ For more information, visit: https://build-universe.dev
 // MAIN ENTRY POINT
 // ═══════════════════════════════════════════════════════════════════════════════
 
-pub fn main() -> i32 {
+pub fn main() -> i32 ~ Console {
     let mut cli = CLI::new();
 
     match cli.run() {
@@ -1422,7 +1422,7 @@ impl Spinner {
         self.current = 0;
     }
 
-    pub fn tick(&mut self) {
+    pub fn tick(&mut self) ~ Console {
         if !self.running { return; }
 
         print!("\r{} {} ",
@@ -1434,22 +1434,22 @@ impl Spinner {
         self.current = (self.current + 1) % self.frames.len();
     }
 
-    pub fn succeed(&mut self, message: &str) {
+    pub fn succeed(&mut self, message: &str) ~ Console {
         self.running = false;
         println!("\r{}", self.style.success(message));
     }
 
-    pub fn fail(&mut self, message: &str) {
+    pub fn fail(&mut self, message: &str) ~ Console {
         self.running = false;
         println!("\r{}", self.style.error(message));
     }
 
-    pub fn warn(&mut self, message: &str) {
+    pub fn warn(&mut self, message: &str) ~ Console {
         self.running = false;
         println!("\r{}", self.style.warning(message));
     }
 
-    pub fn stop(&mut self) {
+    pub fn stop(&mut self) ~ Console {
         self.running = false;
         print!("\r\x1b[K"); // Clear line
     }
@@ -1501,17 +1501,17 @@ impl ProgressBar {
         self
     }
 
-    pub fn set(&mut self, value: u64) {
+    pub fn set(&mut self, value: u64) ~ Console {
         self.current = value.min(self.total);
         self.draw();
     }
 
-    pub fn inc(&mut self, delta: u64) {
+    pub fn inc(&mut self, delta: u64) ~ Console {
         self.current = (self.current + delta).min(self.total);
         self.draw();
     }
 
-    fn draw(&self) {
+    fn draw(&self) ~ Console {
         let percent = if self.total > 0 {
             self.current as f64 / self.total as f64
         } else {
@@ -1554,11 +1554,11 @@ impl ProgressBar {
         std::io::stdout().flush().ok();
     }
 
-    pub fn finish(&self) {
+    pub fn finish(&self) ~ Console {
         println!();
     }
 
-    pub fn finish_with_message(&self, msg: &str) {
+    pub fn finish_with_message(&self, msg: &str) ~ Console {
         println!("\r{}", self.style.success(msg));
     }
 }
@@ -1600,7 +1600,7 @@ impl MultiProgress {
         }
     }
 
-    pub fn finish(&self) {
+    pub fn finish(&self) ~ Console {
         for _ in 0..self.lines {
             println!();
         }
@@ -1672,7 +1672,7 @@ impl FileWatcher {
 
     /// Start watching for file changes (blocking)
     pub fn run<F>(&mut self, mut callback: F)
-    where
+ ~ Console where
         F: FnMut(&[FileChange]),
     {
         let style = TermStyle::new();
@@ -1959,7 +1959,7 @@ impl PluginManager {
 
 impl CLI {
     /// Watch mode - rebuild on file changes
-    pub fn cmd_watch(&self) -> Result<i32, String> {
+    pub fn cmd_watch(&self) -> Result<i32, String> ~ Console {
         let style = TermStyle::new();
         println!("{}", style.bold("BUILD-UNIVERSE Watch Mode"));
         println!("Watching for changes...\n");
@@ -1990,7 +1990,7 @@ impl CLI {
     }
 
     /// Format code
-    pub fn cmd_fmt(&self) -> Result<i32, String> {
+    pub fn cmd_fmt(&self) -> Result<i32, String> ~ Console {
         let style = TermStyle::new();
         println!("{}", style.bold("Formatting BUILD-UNIVERSE code..."));
 
@@ -2022,7 +2022,7 @@ impl CLI {
     }
 
     /// Lint code
-    pub fn cmd_lint(&self) -> Result<i32, String> {
+    pub fn cmd_lint(&self) -> Result<i32, String> ~ Console {
         let style = TermStyle::new();
         println!("{}", style.bold("Linting BUILD-UNIVERSE code..."));
 
@@ -2053,7 +2053,7 @@ impl CLI {
     }
 
     /// Type check without building
-    pub fn cmd_check(&self) -> Result<i32, String> {
+    pub fn cmd_check(&self) -> Result<i32, String> ~ Console {
         let style = TermStyle::new();
         println!("{}", style.bold("Checking BUILD-UNIVERSE types..."));
 
@@ -2068,7 +2068,7 @@ impl CLI {
     }
 
     /// Generate documentation
-    pub fn cmd_doc(&self) -> Result<i32, String> {
+    pub fn cmd_doc(&self) -> Result<i32, String> ~ Console {
         let style = TermStyle::new();
         println!("{}", style.bold("Generating documentation..."));
 
@@ -2093,7 +2093,7 @@ impl CLI {
     }
 
     /// Show dependency tree
-    pub fn cmd_tree(&self) -> Result<i32, String> {
+    pub fn cmd_tree(&self) -> Result<i32, String> ~ Console {
         let style = TermStyle::new();
         println!("{}", style.bold("BUILD-UNIVERSE Dependency Tree"));
         println!();
@@ -2117,7 +2117,7 @@ impl CLI {
     }
 
     /// Search registry
-    pub fn cmd_search(&self) -> Result<i32, String> {
+    pub fn cmd_search(&self) -> Result<i32, String> ~ Console {
         let query = self.get_arg(2)
             .ok_or_else(|| "Usage: build search <query>".to_string())?;
 
@@ -2134,7 +2134,7 @@ impl CLI {
     }
 
     /// Publish package
-    pub fn cmd_publish(&self) -> Result<i32, String> {
+    pub fn cmd_publish(&self) -> Result<i32, String> ~ Console {
         let style = TermStyle::new();
         println!("{}", style.bold("Publishing to BUILD-UNIVERSE registry..."));
 
@@ -2162,7 +2162,7 @@ impl CLI {
     }
 
     /// Benchmark command
-    pub fn cmd_bench(&self) -> Result<i32, String> {
+    pub fn cmd_bench(&self) -> Result<i32, String> ~ Console {
         let style = TermStyle::new();
         println!("{}", style.bold("Running BUILD-UNIVERSE benchmarks..."));
         println!();
@@ -2180,7 +2180,7 @@ impl CLI {
     }
 
     /// Profile command
-    pub fn cmd_profile(&self) -> Result<i32, String> {
+    pub fn cmd_profile(&self) -> Result<i32, String> ~ Console {
         let style = TermStyle::new();
         println!("{}", style.bold("Profiling BUILD-UNIVERSE application..."));
 
@@ -2195,7 +2195,7 @@ impl CLI {
     }
 
     /// Deploy command
-    pub fn cmd_deploy(&self) -> Result<i32, String> {
+    pub fn cmd_deploy(&self) -> Result<i32, String> ~ Console {
         let target = self.get_arg(2).unwrap_or("production");
         let style = TermStyle::new();
 
@@ -2219,7 +2219,7 @@ impl CLI {
     }
 
     /// Generate shell completions
-    pub fn cmd_completions(&self) -> Result<i32, String> {
+    pub fn cmd_completions(&self) -> Result<i32, String> ~ Console {
         let shell = match self.get_arg(2) {
             Some("bash") => Shell::Bash,
             Some("zsh") => Shell::Zsh,
@@ -2532,7 +2532,7 @@ impl Prompt {
     }
 
     /// Ask for text input
-    pub fn input(&self, message: &str) -> Result<String, String> {
+    pub fn input(&self, message: &str) -> Result<String, String> ~ Console {
         print!("{} ", self.style.cyan(message));
         std::io::stdout().flush().ok();
 
@@ -2544,7 +2544,7 @@ impl Prompt {
     }
 
     /// Ask for text with default value
-    pub fn input_with_default(&self, message: &str, default: &str) -> Result<String, String> {
+    pub fn input_with_default(&self, message: &str, default: &str) -> Result<String, String> ~ Console {
         print!("{} [{}]: ", self.style.cyan(message), self.style.dim(default));
         std::io::stdout().flush().ok();
 
@@ -2561,7 +2561,7 @@ impl Prompt {
     }
 
     /// Ask yes/no question
-    pub fn confirm(&self, message: &str) -> Result<bool, String> {
+    pub fn confirm(&self, message: &str) -> Result<bool, String> ~ Console {
         print!("{} [y/N]: ", self.style.cyan(message));
         std::io::stdout().flush().ok();
 
@@ -2574,7 +2574,7 @@ impl Prompt {
     }
 
     /// Select from list
-    pub fn select(&self, message: &str, options: &[&str]) -> Result<usize, String> {
+    pub fn select(&self, message: &str, options: &[&str]) -> Result<usize, String> ~ Console {
         println!("{}", self.style.cyan(message));
 
         for (i, option) in options.iter().enumerate() {
@@ -2599,7 +2599,7 @@ impl Prompt {
     }
 
     /// Multi-select from list
-    pub fn multi_select(&self, message: &str, options: &[&str]) -> Result<Vec<usize>, String> {
+    pub fn multi_select(&self, message: &str, options: &[&str]) -> Result<Vec<usize>, String> ~ Console {
         println!("{}", self.style.cyan(message));
         println!("(Enter comma-separated numbers, e.g., 1,3,4)");
 
@@ -2623,7 +2623,7 @@ impl Prompt {
     }
 
     /// Password input (hidden)
-    pub fn password(&self, message: &str) -> Result<String, String> {
+    pub fn password(&self, message: &str) -> Result<String, String> ~ Console {
         print!("{} ", self.style.cyan(message));
         std::io::stdout().flush().ok();
 
@@ -2792,7 +2792,7 @@ impl RemoteCliServer {
         self
     }
 
-    pub fn start(&mut self) -> Result<(), String> {
+    pub fn start(&mut self) -> Result<(), String> ~ Console {
         println!("Starting remote CLI server on {}:{}", self.address, self.port);
 
         // In real implementation, start TCP/TLS server
@@ -3195,7 +3195,7 @@ impl TaskScheduler {
         self.tasks.retain(|t| t.id != id);
     }
 
-    pub fn start(&mut self) {
+    pub fn start(&mut self) ~ Console {
         self.running = true;
 
         while self.running {
@@ -3223,7 +3223,7 @@ impl TaskScheduler {
         self.running = false;
     }
 
-    fn run_task(&self, task: &ScheduledTask) {
+    fn run_task(&self, task: &ScheduledTask) ~ Console {
         println!("Running scheduled task: {}", task.name);
         // Execute task command
     }
@@ -3835,7 +3835,7 @@ impl PipelineManager {
         Ok(())
     }
 
-    pub fn run_pipeline(&mut self, name: &str) -> Result<PipelineRun, String> {
+    pub fn run_pipeline(&mut self, name: &str) -> Result<PipelineRun, String> ~ Console {
         let pipeline = self.pipelines.get(name)
             .ok_or_else(|| format!("Pipeline '{}' not found", name))?;
 
@@ -3856,7 +3856,7 @@ impl PipelineManager {
         Ok(run)
     }
 
-    fn run_stage(&self, stage: &PipelineStage, run: &PipelineRun) -> Result<(), String> {
+    fn run_stage(&self, stage: &PipelineStage, run: &PipelineRun) -> Result<(), String> ~ Console {
         println!("Running stage: {}", stage.name);
 
         if stage.parallel {
@@ -3874,7 +3874,7 @@ impl PipelineManager {
         Ok(())
     }
 
-    fn run_job(&self, job: &PipelineJob) -> Result<JobRunResult, String> {
+    fn run_job(&self, job: &PipelineJob) -> Result<JobRunResult, String> ~ Console {
         println!("  Running job: {}", job.name);
 
         // Execute before_script
@@ -4056,7 +4056,7 @@ impl ContainerManager {
         self
     }
 
-    pub fn build(&self, dockerfile: &str, tag: &str) -> Result<Image, String> {
+    pub fn build(&self, dockerfile: &str, tag: &str) -> Result<Image, String> ~ Console {
         println!("Building image {}...", tag);
 
         // In real implementation, call container runtime API
@@ -4069,7 +4069,7 @@ impl ContainerManager {
         })
     }
 
-    pub fn push(&self, image: &str) -> Result<(), String> {
+    pub fn push(&self, image: &str) -> Result<(), String> ~ Console {
         println!("Pushing image {}...", image);
 
         // Login if credentials provided
@@ -4081,7 +4081,7 @@ impl ContainerManager {
         Ok(())
     }
 
-    pub fn pull(&self, image: &str) -> Result<Image, String> {
+    pub fn pull(&self, image: &str) -> Result<Image, String> ~ Console {
         println!("Pulling image {}...", image);
 
         Ok(Image {
@@ -4098,7 +4098,7 @@ impl ContainerManager {
         Ok(())
     }
 
-    pub fn run(&self, image: &str, options: RunOptions) -> Result<Container, String> {
+    pub fn run(&self, image: &str, options: RunOptions) -> Result<Container, String> ~ Console {
         println!("Running container from {}...", image);
 
         let container = Container {
@@ -4115,12 +4115,12 @@ impl ContainerManager {
         Ok(container)
     }
 
-    pub fn stop(&self, container_id: &str) -> Result<(), String> {
+    pub fn stop(&self, container_id: &str) -> Result<(), String> ~ Console {
         println!("Stopping container {}...", container_id);
         Ok(())
     }
 
-    pub fn remove(&self, container_id: &str) -> Result<(), String> {
+    pub fn remove(&self, container_id: &str) -> Result<(), String> ~ Console {
         println!("Removing container {}...", container_id);
         Ok(())
     }
@@ -4130,7 +4130,7 @@ impl ContainerManager {
         Ok(String::new())
     }
 
-    pub fn exec(&self, container_id: &str, command: &[&str]) -> Result<String, String> {
+    pub fn exec(&self, container_id: &str, command: &[&str]) -> Result<String, String> ~ Console {
         println!("Executing in container {}: {:?}", container_id, command);
         Ok(String::new())
     }
@@ -4263,19 +4263,19 @@ impl KubernetesClient {
         self
     }
 
-    pub fn apply(&self, manifest: &str) -> Result<(), String> {
+    pub fn apply(&self, manifest: &str) -> Result<(), String> ~ Console {
         println!("Applying manifest...");
         // In real implementation, call Kubernetes API
         Ok(())
     }
 
-    pub fn apply_file(&self, path: &str) -> Result<(), String> {
+    pub fn apply_file(&self, path: &str) -> Result<(), String> ~ Console {
         let manifest = std::fs::read_to_string(path)
             .map_err(|e| format!("Failed to read manifest: {}", e))?;
         self.apply(&manifest)
     }
 
-    pub fn delete(&self, kind: &str, name: &str) -> Result<(), String> {
+    pub fn delete(&self, kind: &str, name: &str) -> Result<(), String> ~ Console {
         println!("Deleting {} {}...", kind, name);
         Ok(())
     }
@@ -4301,12 +4301,12 @@ impl KubernetesClient {
         Ok(String::new())
     }
 
-    pub fn port_forward(&self, pod: &str, local_port: u16, remote_port: u16) -> Result<(), String> {
+    pub fn port_forward(&self, pod: &str, local_port: u16, remote_port: u16) -> Result<(), String> ~ Console {
         println!("Forwarding {}:{} -> {}", local_port, pod, remote_port);
         Ok(())
     }
 
-    pub fn scale(&self, deployment: &str, replicas: u32) -> Result<(), String> {
+    pub fn scale(&self, deployment: &str, replicas: u32) -> Result<(), String> ~ Console {
         println!("Scaling {} to {} replicas", deployment, replicas);
         Ok(())
     }
@@ -4320,7 +4320,7 @@ impl KubernetesClient {
         })
     }
 
-    pub fn rollback(&self, deployment: &str, revision: Option<u32>) -> Result<(), String> {
+    pub fn rollback(&self, deployment: &str, revision: Option<u32>) -> Result<(), String> ~ Console {
         println!("Rolling back {}", deployment);
         Ok(())
     }
@@ -4474,7 +4474,7 @@ impl CloudProvider for AwsProvider {
         ]
     }
 
-    fn deploy(&self, config: &DeployConfig) -> Result<DeployResult, String> {
+    fn deploy(&self, config: &DeployConfig) -> Result<DeployResult, String> ~ Console {
         println!("Deploying to AWS {}...", self.region);
         Ok(DeployResult {
             deployment_id: generate_uuid(),
@@ -4492,7 +4492,7 @@ impl CloudProvider for AwsProvider {
         Ok(String::new())
     }
 
-    fn destroy(&self, deployment_id: &str) -> Result<(), String> {
+    fn destroy(&self, deployment_id: &str) -> Result<(), String> ~ Console {
         println!("Destroying AWS deployment {}...", deployment_id);
         Ok(())
     }
@@ -4525,7 +4525,7 @@ impl CloudProvider for GcpProvider {
         ]
     }
 
-    fn deploy(&self, config: &DeployConfig) -> Result<DeployResult, String> {
+    fn deploy(&self, config: &DeployConfig) -> Result<DeployResult, String> ~ Console {
         println!("Deploying to GCP {}...", self.region);
         Ok(DeployResult {
             deployment_id: generate_uuid(),
@@ -4564,7 +4564,7 @@ impl CloudProvider for AzureProvider {
         ]
     }
 
-    fn deploy(&self, config: &DeployConfig) -> Result<DeployResult, String> {
+    fn deploy(&self, config: &DeployConfig) -> Result<DeployResult, String> ~ Console {
         println!("Deploying to Azure {}...", self.region);
         Ok(DeployResult {
             deployment_id: generate_uuid(),
@@ -4876,7 +4876,7 @@ impl SlackChannel {
 impl NotificationChannel for SlackChannel {
     fn name(&self) -> &str { "slack" }
 
-    fn send(&self, notification: &Notification) -> Result<(), String> {
+    fn send(&self, notification: &Notification) -> Result<(), String> ~ Console {
         // In real implementation, send HTTP request to Slack webhook
         println!("Slack: [{}] {} - {}",
             match notification.severity {
@@ -4924,7 +4924,7 @@ impl EmailChannel {
 impl NotificationChannel for EmailChannel {
     fn name(&self) -> &str { "email" }
 
-    fn send(&self, notification: &Notification) -> Result<(), String> {
+    fn send(&self, notification: &Notification) -> Result<(), String> ~ Console {
         // In real implementation, send email via SMTP
         println!("Email to {:?}: {} - {}",
             self.to, notification.title, notification.message);

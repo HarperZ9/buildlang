@@ -79,7 +79,7 @@ use forge::{Debugger, Profiler, MemoryAnalyzer}
 // MAIN APPLICATION
 // ═══════════════════════════════════════════════════════════════════════════════
 
-fn main() -> Result<(), Error> {
+fn main() -> Result<(), Error> ~ Console {
     // Print banner
     print_banner();
 
@@ -107,7 +107,7 @@ fn main() -> Result<(), Error> {
     Ok(())
 }
 
-fn print_banner() {
+fn print_banner() ~ Console {
     println!(r#"
     ╔═══════════════════════════════════════════════════════════════════════════════╗
     ║                                                                               ║
@@ -138,7 +138,7 @@ fn print_banner() {
 // LAYER DEMONSTRATIONS
 // ═══════════════════════════════════════════════════════════════════════════════
 
-fn demo_foundation() -> Result<(), Error> {
+fn demo_foundation() -> Result<(), Error> ~ Console {
     println!("┌─────────────────────────────────────────────────────────────────┐");
     println!("│  LAYER 0: FOUNDATION                                            │");
     println!("└─────────────────────────────────────────────────────────────────┘");
@@ -160,7 +160,7 @@ fn demo_foundation() -> Result<(), Error> {
     Ok(())
 }
 
-fn demo_rendering() -> Result<(), Error> {
+fn demo_rendering() -> Result<(), Error> ~ Console {
     println!("┌─────────────────────────────────────────────────────────────────┐");
     println!("│  LAYER 2: RENDERING                                             │");
     println!("└─────────────────────────────────────────────────────────────────┘");
@@ -186,7 +186,7 @@ fn demo_rendering() -> Result<(), Error> {
     Ok(())
 }
 
-fn demo_trading() -> Result<(), Error> {
+fn demo_trading() -> Result<(), Error> ~ Console {
     println!("┌─────────────────────────────────────────────────────────────────┐");
     println!("│  LAYER 3: TRADING                                               │");
     println!("└─────────────────────────────────────────────────────────────────┘");
@@ -218,7 +218,7 @@ fn demo_trading() -> Result<(), Error> {
     Ok(())
 }
 
-fn demo_intelligence() -> Result<(), Error> {
+fn demo_intelligence() -> Result<(), Error> ~ Console {
     println!("┌─────────────────────────────────────────────────────────────────┐");
     println!("│  LAYER 4: INTELLIGENCE                                          │");
     println!("└─────────────────────────────────────────────────────────────────┘");
@@ -243,7 +243,7 @@ fn demo_intelligence() -> Result<(), Error> {
     Ok(())
 }
 
-fn demo_integration() -> Result<(), Error> {
+fn demo_integration() -> Result<(), Error> ~ Console {
     println!("┌─────────────────────────────────────────────────────────────────┐");
     println!("│  LAYER 5: INTEGRATION                                           │");
     println!("└─────────────────────────────────────────────────────────────────┘");
@@ -282,7 +282,7 @@ pub fn build() -> Result<(), Error> {
 }
 
 /// Display module information
-pub fn info(module: &str) -> Result<(), Error> {
+pub fn info(module: &str) -> Result<(), Error> ~ Console {
     let uni = universe();
 
     if let Some(m) = uni.get_module(module) {
@@ -301,7 +301,7 @@ pub fn info(module: &str) -> Result<(), Error> {
 }
 
 /// List all modules
-pub fn list_modules() {
+pub fn list_modules() ~ Console {
     let uni = universe();
     let modules = uni.list_modules();
 
@@ -332,7 +332,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_main_initialization() {
+    fn test_main_initialization() ~ Console {
         // Should not panic
         let result = main();
         assert!(result.is_ok());

@@ -5807,7 +5807,7 @@ impl EnhancedLanguageServer {
     }
 
     fn code_action_kind_to_string(&self, kind: &CodeActionKind) -> String {
-        match kind {
+        (match kind {
             CodeActionKind::QuickFix => "quickfix",
             CodeActionKind::Refactor => "refactor",
             CodeActionKind::RefactorExtract => "refactor.extract",
@@ -5816,7 +5816,7 @@ impl EnhancedLanguageServer {
             CodeActionKind::Source => "source",
             CodeActionKind::SourceOrganizeImports => "source.organizeImports",
             CodeActionKind::SourceFixAll => "source.fixAll",
-        }.to_string()
+        }).to_string()
     }
 
     fn make_result_response(&self, id: Option<i64>, result: JsonValue) -> String {

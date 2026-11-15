@@ -302,24 +302,24 @@ pub struct Instant {
 
 impl Instant {
     /// Get current instant
-    pub fn now() -> Self {
+    pub fn now() -> Self ~ Foreign {
         Instant {
             inner: intrinsic::monotonic_now(),
         }
     }
 
     /// Get elapsed time since this instant
-    pub fn elapsed(self: &Self) -> Duration {
+    pub fn elapsed(self: &Self) -> Duration ~ Foreign {
         Instant::now().duration_since(*self)
     }
 
     /// Get duration between two instants
-    pub fn duration_since(self: &Self, earlier: Instant) -> Duration {
+    pub fn duration_since(self: &Self, earlier: Instant) -> Duration ~ Foreign {
         self.checked_duration_since(earlier).unwrap_or(Duration::ZERO)
     }
 
     /// Checked duration between two instants
-    pub fn checked_duration_since(self: &Self, earlier: Instant) -> Option<Duration> {
+    pub fn checked_duration_since(self: &Self, earlier: Instant) -> Option<Duration> ~ Foreign {
         if self.inner >= earlier.inner {
             Some(intrinsic::instant_to_duration(self.inner - earlier.inner))
         } else {
@@ -328,18 +328,18 @@ impl Instant {
     }
 
     /// Saturating duration since
-    pub fn saturating_duration_since(self: &Self, earlier: Instant) -> Duration {
+    pub fn saturating_duration_since(self: &Self, earlier: Instant) -> Duration ~ Foreign {
         self.checked_duration_since(earlier).unwrap_or(Duration::ZERO)
     }
 
     /// Add duration to instant
-    pub fn checked_add(self: &Self, duration: Duration) -> Option<Instant> {
+    pub fn checked_add(self: &Self, duration: Duration) -> Option<Instant> ~ Foreign {
         let nanos = intrinsic::duration_to_nanos(&duration);
         self.inner.checked_add(nanos).map(|inner| Instant { inner })
     }
 
     /// Subtract duration from instant
-    pub fn checked_sub(self: &Self, duration: Duration) -> Option<Instant> {
+    pub fn checked_sub(self: &Self, duration: Duration) -> Option<Instant> ~ Foreign {
         let nanos = intrinsic::duration_to_nanos(&duration);
         self.inner.checked_sub(nanos).map(|inner| Instant { inner })
     }
@@ -348,7 +348,7 @@ impl Instant {
 impl std::ops::Add<Duration> for Instant {
     type Output = Instant;
 
-    fn add(self, rhs: Duration) -> Instant {
+    fn add(self, rhs: Duration) -> Instant ~ Foreign {
         self.checked_add(rhs).expect("overflow when adding duration to instant")
     }
 }
@@ -356,7 +356,7 @@ impl std::ops::Add<Duration> for Instant {
 impl std::ops::Sub<Duration> for Instant {
     type Output = Instant;
 
-    fn sub(self, rhs: Duration) -> Instant {
+    fn sub(self, rhs: Duration) -> Instant ~ Foreign {
         self.checked_sub(rhs).expect("overflow when subtracting duration from instant")
     }
 }
@@ -364,7 +364,7 @@ impl std::ops::Sub<Duration> for Instant {
 impl std::ops::Sub<Instant> for Instant {
     type Output = Duration;
 
-    fn sub(self, rhs: Instant) -> Duration {
+    fn sub(self, rhs: Instant) -> Duration ~ Foreign {
         self.duration_since(rhs)
     }
 }
@@ -400,12 +400,12 @@ impl SystemTime {
     pub const UNIX_EPOCH: SystemTime = SystemTime { secs: 0, nanos: 0 };
 
     /// Get current system time
-    pub fn now() -> Self {
+    pub fn now() -> Self ~ Foreign {
         intrinsic::system_time_now()
     }
 
     /// Duration elapsed since this time
-    pub fn elapsed(self: &Self) -> Result<Duration, SystemTimeError> {
+    pub fn elapsed(self: &Self) -> Result<Duration, SystemTimeError> ~ Foreign {
         SystemTime::now().duration_since(*self)
     }
 
@@ -559,13 +559,13 @@ impl DateTime {
     }
 
     /// Get current UTC time
-    pub fn now_utc() -> Self {
+    pub fn now_utc() -> Self ~ Foreign {
         let st = SystemTime::now();
         Self::from_timestamp(st.secs, st.nanos)
     }
 
     /// Get current local time
-    pub fn now_local() -> Self {
+    pub fn now_local() -> Self ~ Foreign {
         let mut dt = Self::now_utc();
         let offset = intrinsic::local_tz_offset();
         dt.tz_offset = offset;
@@ -1095,7 +1095,7 @@ pub struct Timer {
 
 impl Timer {
     /// Create and start a new timer
-    pub fn start() -> Self {
+    pub fn start() -> Self ~ Foreign {
         Timer {
             start: Instant::now(),
             laps: Vec::new(),
@@ -1103,12 +1103,12 @@ impl Timer {
     }
 
     /// Get elapsed time since start
-    pub fn elapsed(self: &Self) -> Duration {
+    pub fn elapsed(self: &Self) -> Duration ~ Foreign {
         self.start.elapsed()
     }
 
     /// Record a lap
-    pub fn lap(self: &mut Self) -> Duration {
+    pub fn lap(self: &mut Self) -> Duration ~ Foreign {
         let elapsed = self.elapsed();
         let last_lap = self.laps.last().copied().unwrap_or(Duration::ZERO);
         let lap_duration = elapsed.saturating_sub(last_lap);
@@ -1122,7 +1122,7 @@ impl Timer {
     }
 
     /// Reset the timer
-    pub fn reset(self: &mut Self) {
+    pub fn reset(self: &mut Self) ~ Foreign {
         self.start = Instant::now();
         self.laps.clear();
     }
@@ -1130,7 +1130,7 @@ impl Timer {
 
 /// Measure execution time of a function
 pub fn measure<F, T>(f: F) -> (T, Duration)
-where
+ ~ Foreign where
     F: FnOnce() -> T,
 {
     let start = Instant::now();
@@ -1140,12 +1140,12 @@ where
 }
 
 /// Sleep for a duration
-pub fn sleep(duration: Duration) {
+pub fn sleep(duration: Duration) ~ Foreign {
     intrinsic::sleep(duration);
 }
 
 /// Sleep until an instant
-pub fn sleep_until(deadline: Instant) {
+pub fn sleep_until(deadline: Instant) ~ Foreign {
     let now = Instant::now();
     if let Some(duration) = deadline.checked_duration_since(now) {
         sleep(duration);
@@ -1164,7 +1164,7 @@ pub struct Interval {
 
 impl Interval {
     /// Create a new interval timer
-    pub fn new(period: Duration) -> Self {
+    pub fn new(period: Duration) -> Self ~ Foreign {
         Interval {
             period,
             next: Instant::now() + period,
@@ -1172,7 +1172,7 @@ impl Interval {
     }
 
     /// Wait for next tick
-    pub fn tick(self: &mut Self) -> Instant {
+    pub fn tick(self: &mut Self) -> Instant ~ Foreign {
         let now = Instant::now();
         if now < self.next {
             sleep_until(self.next);
@@ -1188,7 +1188,7 @@ impl Interval {
     }
 
     /// Reset the interval
-    pub fn reset(self: &mut Self) {
+    pub fn reset(self: &mut Self) ~ Foreign {
         self.next = Instant::now() + self.period;
     }
 }
@@ -1204,26 +1204,26 @@ pub struct Timeout {
 
 impl Timeout {
     /// Create a new timeout
-    pub fn new(duration: Duration) -> Self {
+    pub fn new(duration: Duration) -> Self ~ Foreign {
         Timeout {
             deadline: Instant::now() + duration,
         }
     }
 
     /// Create a timeout that never expires
-    pub fn never() -> Self {
+    pub fn never() -> Self ~ Foreign {
         Timeout {
             deadline: Instant::now() + Duration::from_secs(u64::MAX / 2),
         }
     }
 
     /// Check if expired
-    pub fn is_expired(self: &Self) -> bool {
+    pub fn is_expired(self: &Self) -> bool ~ Foreign {
         Instant::now() >= self.deadline
     }
 
     /// Get remaining time
-    pub fn remaining(self: &Self) -> Duration {
+    pub fn remaining(self: &Self) -> Duration ~ Foreign {
         self.deadline.saturating_duration_since(Instant::now())
     }
 
@@ -1253,7 +1253,7 @@ impl Stopwatch {
     }
 
     /// Create and start a new stopwatch
-    pub fn start_new() -> Self {
+    pub fn start_new() -> Self ~ Foreign {
         Stopwatch {
             accumulated: Duration::ZERO,
             start: Some(Instant::now()),
@@ -1261,7 +1261,7 @@ impl Stopwatch {
     }
 
     /// Start or resume the stopwatch
-    pub fn start(self: &mut Self) {
+    pub fn start(self: &mut Self) ~ Foreign {
         if self.start.is_none() {
             self.start = Some(Instant::now());
         }
@@ -1281,7 +1281,7 @@ impl Stopwatch {
     }
 
     /// Restart (reset and start)
-    pub fn restart(self: &mut Self) {
+    pub fn restart(self: &mut Self) ~ Foreign {
         self.accumulated = Duration::ZERO;
         self.start = Some(Instant::now());
     }
@@ -1317,7 +1317,7 @@ pub struct RateLimiter {
 
 impl RateLimiter {
     /// Create a new rate limiter
-    pub fn new(max_tokens: f64, refill_rate: f64) -> Self {
+    pub fn new(max_tokens: f64, refill_rate: f64) -> Self ~ Foreign {
         RateLimiter {
             tokens: max_tokens,
             max_tokens,
@@ -1327,7 +1327,7 @@ impl RateLimiter {
     }
 
     /// Try to acquire tokens
-    pub fn try_acquire(self: &mut Self, tokens: f64) -> bool {
+    pub fn try_acquire(self: &mut Self, tokens: f64) -> bool ~ Foreign {
         self.refill();
         if self.tokens >= tokens {
             self.tokens -= tokens;
@@ -1338,7 +1338,7 @@ impl RateLimiter {
     }
 
     /// Acquire tokens, blocking if necessary
-    pub fn acquire(self: &mut Self, tokens: f64) {
+    pub fn acquire(self: &mut Self, tokens: f64) ~ Foreign {
         self.refill();
         if self.tokens < tokens {
             let needed = tokens - self.tokens;
@@ -1350,13 +1350,13 @@ impl RateLimiter {
     }
 
     /// Get available tokens
-    pub fn available(self: &mut Self) -> f64 {
+    pub fn available(self: &mut Self) -> f64 ~ Foreign {
         self.refill();
         self.tokens
     }
 
     /// Refill tokens based on elapsed time
-    fn refill(self: &mut Self) {
+    fn refill(self: &mut Self) ~ Foreign {
         let now = Instant::now();
         let elapsed = now.duration_since(self.last_update);
         let new_tokens = elapsed.as_secs_f64() * self.refill_rate;
@@ -1501,7 +1501,7 @@ mod tests {
     }
 
     #[test]
-    fn test_stopwatch() {
+    fn test_stopwatch() ~ Foreign {
         let mut sw = Stopwatch::new();
         assert!(!sw.is_running());
 
@@ -1517,7 +1517,7 @@ mod tests {
     }
 
     #[test]
-    fn test_timer() {
+    fn test_timer() ~ Foreign {
         let mut timer = Timer::start();
 
         let lap1 = timer.lap();

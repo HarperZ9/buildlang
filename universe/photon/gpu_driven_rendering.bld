@@ -6,10 +6,10 @@
 // GPU-side scene management for maximum throughput and minimal CPU overhead.
 // ============================================================================
 
-import core::types::*;
-import core::memory::*;
-import photon::gpu_culling::*;
-import photon::material::*;
+use core::types::*;
+use core::memory::*;
+use photon::gpu_culling::*;
+use photon::material::*;
 
 // ============================================================================
 // MESHLET STRUCTURES

@@ -1524,7 +1524,7 @@ pub struct FormatResult {
 }
 
 /// Run the formatter
-pub fn run_formatter(options: FormatOptions) -> Result<FormatResult, FormatError> {
+pub fn run_formatter(options: FormatOptions) -> Result<FormatResult, FormatError> ~ Console {
     let config = if let Some(path) = &options.config_path {
         FormatConfig::load(path)?
     } else {
@@ -1579,7 +1579,7 @@ pub fn run_formatter(options: FormatOptions) -> Result<FormatResult, FormatError
 }
 
 /// Process a single file
-fn process_file(path: &Path, formatter: &mut Formatter, options: &FormatOptions) -> Result<bool, FormatError> {
+fn process_file(path: &Path, formatter: &mut Formatter, options: &FormatOptions) -> Result<bool, FormatError> ~ Console {
     let source = fs::read_to_string(path)
         .map_err(|e| FormatError::IoError(format!("Failed to read {}: {}", path.display(), e)))?;
 
@@ -1658,7 +1658,7 @@ fn collect_files_recursive(dir: &Path, files: &mut Vec<PathBuf>, config: &Format
 // =============================================================================
 
 /// Main formatter entry point
-pub fn main() {
+pub fn main() ~ Console + Process {
     let args: Vec<String> = std::env::args().collect();
 
     let mut options = FormatOptions::default();
@@ -1719,7 +1719,7 @@ pub fn main() {
     }
 }
 
-fn print_help() {
+fn print_help() ~ Console {
     println!("buildfmt - BuildLang Code Formatter
 
 USAGE:
@@ -4584,7 +4584,7 @@ impl FormatStats {
     }
 
     /// Print summary
-    pub fn print_summary(&self) {
+    pub fn print_summary(&self) ~ Console {
         println!("Format Statistics:");
         println!("  Files processed: {}", self.files_processed);
         println!("  Files changed: {}", self.files_changed);

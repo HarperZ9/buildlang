@@ -49,7 +49,7 @@ fn pq_oetf(linear: f64) -> f64 {
     pow(num / den, PQ_M2)
 }
 
-fn main() {
+fn main() ~ Console {
     println!("=== EXTENDED CROSS-VALIDATION (BuildLang) ===");
     println!("");
 

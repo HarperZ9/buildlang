@@ -2,11 +2,11 @@
 // Part of the Photon Rendering Module
 // Implements GPU instancing for foliage, wind animation, grass rendering, and procedural vegetation
 
-import std::collections::{HashMap, Vec, VecDeque, BinaryHeap}
-import std::math::{Vec2, Vec3, Vec4, Mat3, Mat4, Quaternion, sqrt, pow, exp, sin, cos, tan, PI, floor, ceil, clamp, lerp, min, max, abs, dot, cross, normalize, length}
-import std::memory::{Arena, Pool, Box, Arc, Rc}
-import std::sync::{Mutex, RwLock, Atomic}
-import std::simd::{f32x4, f32x8, i32x4, i32x8}
+use std::collections::{HashMap, Vec, VecDeque, BinaryHeap}
+use std::math::{Vec2, Vec3, Vec4, Mat3, Mat4, Quaternion, sqrt, pow, exp, sin, cos, tan, PI, floor, ceil, clamp, lerp, min, max, abs, dot, cross, normalize, length}
+use std::memory::{Arena, Pool, Box, Arc, Rc}
+use std::sync::{Mutex, RwLock, Atomic}
+use std::simd::{f32x4, f32x8, i32x4, i32x8}
 
 // ============================================================================
 // FOLIAGE INSTANCE REPRESENTATION
@@ -541,7 +541,7 @@ struct ProceduralGrass {
 }
 
 impl ProceduralGrass {
-    fn new(device: &Device, chunk_size: f32, density: f32) -> Self {
+    fn new(device: &Device, chunk_size: f32, density: f32) -> Self ~ FileSystem {
         let max_instances = (chunk_size * chunk_size * density) as usize;
 
         let indirect_buffer = device.create_buffer(&BufferDescriptor {
@@ -976,7 +976,7 @@ struct FoliageManager {
 }
 
 impl FoliageManager {
-    fn new(device: &Device, config: FoliageManagerConfig) -> Self {
+    fn new(device: &Device, config: FoliageManagerConfig) -> Self ~ FileSystem {
         let indirect_buffer = device.create_buffer(&BufferDescriptor {
             size: 1024 * 16, // Space for multiple draw calls
             usage: BufferUsage::INDIRECT | BufferUsage::STORAGE,

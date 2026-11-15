@@ -3,8 +3,8 @@
 // Debugging, profiling, and monitoring tools for mods
 // ============================================================================
 
-import nexus::lib::{ModMetadata, Version};
-import nexus::loader::{ModInstance, LoadState};
+use nexus::lib::{ModMetadata, Version};
+use nexus::loader::{ModInstance, LoadState};
 
 // ============================================================================
 // REGION: Log Levels
@@ -304,7 +304,7 @@ impl Logger {
         entry.level >= self.config.min_level
     }
 
-    fn log(&mut self, entry: LogEntry) {
+    fn log(&mut self, entry: LogEntry) ~ Console {
         if !self.should_log(&entry) {
             return;
         }
@@ -334,27 +334,27 @@ impl Logger {
         }
     }
 
-    fn trace(&mut self, category: &str, message: &str) {
+    fn trace(&mut self, category: &str, message: &str) ~ Console {
         self.log(LogEntry::new(LogLevel::Trace, category, message));
     }
 
-    fn debug(&mut self, category: &str, message: &str) {
+    fn debug(&mut self, category: &str, message: &str) ~ Console {
         self.log(LogEntry::new(LogLevel::Debug, category, message));
     }
 
-    fn info(&mut self, category: &str, message: &str) {
+    fn info(&mut self, category: &str, message: &str) ~ Console {
         self.log(LogEntry::new(LogLevel::Info, category, message));
     }
 
-    fn warn(&mut self, category: &str, message: &str) {
+    fn warn(&mut self, category: &str, message: &str) ~ Console {
         self.log(LogEntry::new(LogLevel::Warn, category, message));
     }
 
-    fn error(&mut self, category: &str, message: &str) {
+    fn error(&mut self, category: &str, message: &str) ~ Console {
         self.log(LogEntry::new(LogLevel::Error, category, message));
     }
 
-    fn fatal(&mut self, category: &str, message: &str) {
+    fn fatal(&mut self, category: &str, message: &str) ~ Console {
         self.log(LogEntry::new(LogLevel::Fatal, category, message));
     }
 

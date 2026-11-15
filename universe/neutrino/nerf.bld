@@ -2,16 +2,16 @@
 // Neural Radiance Fields (NeRF) and Novel View Synthesis
 // Implements NeRF, Instant-NGP, 3D Gaussian Splatting, and real-time rendering
 
-import core::memory::{Buffer, Arena, MemoryPool};
-import core::math::{Vec2, Vec3, Vec4, Mat3, Mat4, Quaternion};
-import core::simd::{float4, float8, int4};
-import lib::{
+use core::memory::{Buffer, Arena, MemoryPool};
+use core::math::{Vec2, Vec3, Vec4, Mat3, Mat4, Quaternion};
+use core::simd::{float4, float8, int4};
+use lib::{
     Tensor, TensorShape, DataType, Device,
     Layer, Sequential, Activation, ActivationType,
     Linear, Conv2D, LayerNorm, BatchNorm,
     Optimizer, SGD, Adam, LearningRateScheduler
 };
-import inference::{InferenceEngine, ExecutionContext};
+use inference::{InferenceEngine, ExecutionContext};
 
 // ============================================================================
 // POSITIONAL ENCODING
@@ -24,6 +24,9 @@ struct PositionalEncoding {
     log_sampling: bool,
     periodic_fns: Array<fn(f32) -> f32>,
 
+}
+
+impl PositionalEncoding {
     fn create(num_frequencies: u32, include_input: bool = true) -> Self {
         let periodic_fns = [Math.sin, Math.cos];
 
@@ -81,6 +84,9 @@ struct IntegratedPositionalEncoding {
     num_frequencies: u32,
     diag_cov: bool,
 
+}
+
+impl IntegratedPositionalEncoding {
     fn create(num_frequencies: u32) -> Self {
         Self {
             num_frequencies,
@@ -126,6 +132,9 @@ struct HashEncoding {
     finest_resolution: u32,
     hash_tables: Array<Tensor>,  // Per-level hash tables
 
+}
+
+impl HashEncoding {
     fn create(
         num_levels: u32 = 16,
         features_per_level: u32 = 2,
@@ -284,6 +293,9 @@ struct HashEncoding {
 struct SphericalHarmonicsEncoding {
     degree: u32,
 
+}
+
+impl SphericalHarmonicsEncoding {
     fn create(degree: u32 = 4) -> Self {
         Self { degree }
     }
@@ -378,6 +390,9 @@ struct NeRFMLP {
     // Skip connection
     skip_layer: u32,
 
+}
+
+impl NeRFMLP {
     fn create(
         pos_frequencies: u32 = 10,
         dir_frequencies: u32 = 4,
@@ -481,6 +496,9 @@ struct InstantNGPNetwork {
     density_net: Sequential,
     color_net: Sequential,
 
+}
+
+impl InstantNGPNetwork {
     fn create(
         num_levels: u32 = 16,
         features_per_level: u32 = 2,
@@ -553,6 +571,9 @@ struct MipNeRFNetwork {
 
     mlp: NeRFMLP,
 
+}
+
+impl MipNeRFNetwork {
     fn create(
         num_frequencies: u32 = 16,
         dir_frequencies: u32 = 4,
@@ -630,6 +651,9 @@ struct RayBatch {
     near: Tensor,         // [batch, 1]
     far: Tensor,          // [batch, 1]
 
+}
+
+impl RayBatch {
     fn sample_points(self, num_samples: u32, stratified: bool = true) -> (Tensor, Tensor) {
         // Sample points along rays
         let batch_size = self.origins.shape[0];
@@ -726,6 +750,9 @@ struct VolumeRenderer {
     white_background: bool,
     raw_noise_std: f32,
 
+}
+
+impl VolumeRenderer {
     fn create(white_background: bool = false) -> Self {
         Self {
             white_background,
@@ -808,6 +835,9 @@ struct OccupancyGrid {
     grid: Tensor,  // [res, res, res] occupancy values
     density_threshold: f32,
 
+}
+
+impl OccupancyGrid {
     fn create(resolution: u32, aabb_min: Vec3, aabb_max: Vec3) -> Self {
         let grid = Tensor.ones([resolution, resolution, resolution]);
 
@@ -1001,6 +1031,9 @@ struct GaussianCloud {
     sh_coeffs: Tensor,        // [N, (sh_degree+1)^2, 3]
     sh_degree: u32,
 
+}
+
+impl GaussianCloud {
     fn create(num_points: u32, sh_degree: u32 = 3) -> Self {
         let num_sh = (sh_degree + 1) * (sh_degree + 1);
 
@@ -1114,6 +1147,9 @@ struct GaussianRasterizer {
     fov_y: f32,
     tile_size: u32,
 
+}
+
+impl GaussianRasterizer {
     fn create(width: u32, height: u32, fov_x: f32, fov_y: f32) -> Self {
         Self {
             image_width: width,
@@ -1541,6 +1577,9 @@ struct AdaptiveDensityControl {
     densify_interval: u32,
     opacity_reset_interval: u32,
 
+}
+
+impl AdaptiveDensityControl {
     fn create() -> Self {
         Self {
             grad_threshold: 0.0002,
@@ -1684,6 +1723,9 @@ struct GaussianSplattingTrainer {
     lr_opacity: f32,
     lr_sh: f32,
 
+}
+
+impl GaussianSplattingTrainer {
     fn create(
         initial_points: &Tensor,
         initial_colors: &Tensor,
@@ -1825,6 +1867,9 @@ struct NeRFTrainConfig {
     use_viewdirs: bool,
     white_background: bool,
 
+}
+
+impl NeRFTrainConfig {
     fn default() -> Self {
         Self {
             num_coarse_samples: 64,
@@ -1848,6 +1893,9 @@ struct NeRFTrainer {
     scheduler: LearningRateScheduler,
     config: NeRFTrainConfig,
 
+}
+
+impl NeRFTrainer {
     fn create(config: NeRFTrainConfig) -> Self {
         let coarse_network = NeRFMLP.create(
             pos_frequencies: 10,
@@ -2036,6 +2084,9 @@ struct InstantNGPTrainer {
     renderer: VolumeRenderer,
     optimizer: Adam,
 
+}
+
+impl InstantNGPTrainer {
     fn create(aabb_min: Vec3, aabb_max: Vec3) -> Self {
         let network = InstantNGPNetwork.create(
             num_levels: 16,
@@ -2174,6 +2225,9 @@ struct Camera {
     near: f32,
     far: f32,
 
+}
+
+impl Camera {
     fn create(position: Vec3, look_at: Vec3, up: Vec3, fov_y: f32, aspect: f32) -> Self {
         let forward = (look_at - position).normalize();
         let right = forward.cross(&up).normalize();
@@ -2255,6 +2309,9 @@ struct NeRFDataset {
     cameras: Array<Camera>,       // Camera parameters
     bounds: (f32, f32),          // Near/far bounds
 
+}
+
+impl NeRFDataset {
     fn load_blender(path: &str) -> Self {
         // Load Blender synthetic dataset format
         let transforms_path = path + "/transforms.json";
@@ -2439,6 +2496,9 @@ struct RealTimeNeRFRenderer {
     temporal_buffer: Tensor,
     frame_index: u32,
 
+}
+
+impl RealTimeNeRFRenderer {
     fn create(
         network: InstantNGPNetwork,
         occupancy_grid: OccupancyGrid,
@@ -2620,6 +2680,9 @@ struct RealTimeGaussianRenderer {
     frame_index: u32,
     enable_taa: bool,
 
+}
+
+impl RealTimeGaussianRenderer {
     fn create(
         gaussians: GaussianCloud,
         width: u32,
@@ -2692,6 +2755,9 @@ struct NeuralScene {
     // Lighting
     environment_map: Option<Tensor>,
 
+}
+
+impl NeuralScene {
     fn create(background_type: BackgroundType) -> Self {
         let background = match background_type {
             BackgroundType.NeRF => NeuralBackground.NeRF(InstantNGPNetwork.create()),
@@ -2883,6 +2949,9 @@ struct NeuralObject {
     transform: Mat4,
     bounding_box: (Vec3, Vec3),
 
+}
+
+impl NeuralObject {
     fn render(self, camera: &Camera, width: u32, height: u32, device: Device) -> Tensor {
         // Transform camera to object space
         let inv_transform = self.transform.inverse();

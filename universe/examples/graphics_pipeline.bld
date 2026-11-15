@@ -75,7 +75,7 @@ pub struct PipelineStats {
 }
 
 impl GraphicsPipeline {
-    pub fn new(config: PipelineConfig) -> Self {
+    pub fn new(config: PipelineConfig) -> Self ~ Console {
         println!("Initializing Graphics Pipeline...");
 
         // Initialize the Omniscient Engine
@@ -114,7 +114,7 @@ impl GraphicsPipeline {
     }
 
     /// Render a complete frame
-    pub fn render_frame(&mut self, scene: &Scene) -> Frame {
+    pub fn render_frame(&mut self, scene: &Scene) -> Frame ~ Console {
         self.stats.frames_rendered += 1;
 
         // Step 1: Render at internal resolution
@@ -281,7 +281,7 @@ pub struct PostProcessPipeline {
 }
 
 impl PostProcessPipeline {
-    pub fn new(effect_names: &[String]) -> Self {
+    pub fn new(effect_names: &[String]) -> Self ~ Console {
         let mut effects = EffectChain::new();
 
         for name in effect_names {
@@ -466,7 +466,7 @@ pub struct Scene {
 // MAIN
 // ═══════════════════════════════════════════════════════════════════════════════
 
-fn main() {
+fn main() ~ Console {
     println!("╔═══════════════════════════════════════════════════════════════╗");
     println!("║  Graphics Pipeline Demo                                       ║");
     println!("║  Powered by BUILD-UNIVERSE                                   ║");

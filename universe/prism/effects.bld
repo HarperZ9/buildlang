@@ -5,9 +5,9 @@
 // Part of the BUILD-UNIVERSE Rendering Stack
 // =============================================================================
 
-@module prism::effects
-@version 1.0.0
-@author BUILD Team
+// @module prism::effects
+// @version 1.0.0
+// @author BUILD Team
 
 // =============================================================================
 // PARTICLE SYSTEM DATA STRUCTURES

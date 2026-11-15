@@ -109,7 +109,7 @@ impl CalibrationSession {
     }
 
     /// Run automatic calibration on all connected monitors
-    pub fn run(&mut self) -> &Vec<CalibrationResult> {
+    pub fn run(&mut self) -> &Vec<CalibrationResult> ~ Console {
         println!("═══════════════════════════════════════════════════════════════");
         println!("  Calibrate Automatic Display Calibration");
         println!("  NeuralUX AI-Powered Sensorless Calibration");
@@ -302,7 +302,7 @@ impl CalibrationSession {
 // MAIN ENTRY POINT
 // ═══════════════════════════════════════════════════════════════════════════════
 
-pub fn main() -> Result<(), Error> {
+pub fn main() -> Result<(), Error> ~ Console {
     // Default calibration: D65 white point, 120 nits, gamma 2.2
     let mut session = CalibrationSession::new()
         .target_white_point(6500.0)  // D65 daylight
@@ -319,7 +319,7 @@ pub fn main() -> Result<(), Error> {
 // CLI INTERFACE
 // ═══════════════════════════════════════════════════════════════════════════════
 
-pub fn cli_main() -> Result<(), Error> {
+pub fn cli_main() -> Result<(), Error> ~ Console {
     let args: Vec<String> = env::args().collect();
 
     let mut white_point = 6500.0;
@@ -372,7 +372,7 @@ pub fn cli_main() -> Result<(), Error> {
     Ok(())
 }
 
-fn print_help() {
+fn print_help() ~ Console {
     println!("Calibrate - Automatic Display Calibration");
     println!();
     println!("USAGE:");

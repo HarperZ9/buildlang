@@ -1143,7 +1143,7 @@ fn bench_concurrency(b: &mut Bencher) {
 // MAIN ENTRY POINT
 // ═══════════════════════════════════════════════════════════════════════════════
 
-pub fn main() {
+pub fn main() ~ Console {
     println!("╔═══════════════════════════════════════════════════════════════════════════╗");
     println!("║  BUILD-UNIVERSE Comprehensive Benchmark Suite v2.0.0                    ║");
     println!("║  Copyright (c) 2024-2025 Zain Dana Harper. All Rights Reserved.           ║");

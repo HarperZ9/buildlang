@@ -3,8 +3,8 @@
 // Save/load system for mod data and state persistence
 // ============================================================================
 
-import nexus::lib::{ModMetadata, Version};
-import nexus::config::ConfigValue;
+use nexus::lib::{ModMetadata, Version};
+use nexus::config::ConfigValue;
 
 // ============================================================================
 // REGION: Persistence Error Types

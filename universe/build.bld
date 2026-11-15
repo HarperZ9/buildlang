@@ -289,7 +289,7 @@ impl BuildEngine {
     }
 
     /// Build the entire universe
-    pub fn build_all(&mut self) -> Result<BuildStats, String> {
+    pub fn build_all(&mut self) -> Result<BuildStats, String> ~ Console {
         println!("╔═══════════════════════════════════════════════════════════════╗");
         println!("║  BUILD-UNIVERSE Build System v2.0.0                          ║");
         println!("║  Building {} modules...                                        ║", self.graph.build_order.len());
@@ -465,7 +465,7 @@ impl BuildEngine {
     }
 
     /// Clean build artifacts
-    pub fn clean(&self) -> Result<(), String> {
+    pub fn clean(&self) -> Result<(), String> ~ Console {
         println!("Cleaning build artifacts...");
         if self.config.output_dir.exists() {
             remove_dir_all(&self.config.output_dir)
@@ -486,7 +486,7 @@ impl BuildEngine {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// Parse command line arguments and run the build
-pub fn main() -> Result<(), String> {
+pub fn main() -> Result<(), String> ~ Console {
     let args: Vec<String> = env::args().collect();
 
     let mut config = BuildConfig::default();

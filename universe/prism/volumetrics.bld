@@ -1,8 +1,8 @@
 // BUILD-UNIVERSE Prism: Volumetric Rendering Shaders
 // Comprehensive volumetric effects including fog, god rays, clouds, and participating media
 
-import prism::lib::*;
-import spectrum::color::*;
+use prism::lib::*;
+use spectrum::color::*;
 
 // ============================================================================
 // VOLUMETRIC CONFIGURATION

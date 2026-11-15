@@ -203,7 +203,7 @@ module photon::water_ocean {
     }
 
     impl FftOcean {
-        pub fn new(device: &gpu::Device, config: FftOceanConfig, spectrum: OceanSpectrum) -> Self {
+        pub fn new(device: &gpu::Device, config: FftOceanConfig, spectrum: OceanSpectrum) -> Self ~ FileSystem {
             let resolution = config.resolution;
 
             // Create cascades with different patch sizes
@@ -620,7 +620,7 @@ module photon::water_ocean {
     }
 
     impl CausticsRenderer {
-        pub fn new(device: &gpu::Device, resolution: u32) -> Self {
+        pub fn new(device: &gpu::Device, resolution: u32) -> Self ~ FileSystem {
             let caustics_texture = device.create_texture(&gpu::TextureDesc {
                 width: resolution,
                 height: resolution,
@@ -709,7 +709,7 @@ module photon::water_ocean {
     }
 
     impl UnderwaterRenderer {
-        pub fn new(device: &gpu::Device, width: u32, height: u32) -> Self {
+        pub fn new(device: &gpu::Device, width: u32, height: u32) -> Self ~ FileSystem {
             let distortion_texture = device.create_texture(&gpu::TextureDesc {
                 width,
                 height,

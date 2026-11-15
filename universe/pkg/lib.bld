@@ -309,7 +309,7 @@ impl Registry {
     }
 
     /// Publish a package
-    pub fn publish(&self, tarball: &[u8], manifest: &Manifest) -> Result<(), RegistryError> {
+    pub fn publish(&self, tarball: &[u8], manifest: &Manifest) -> Result<(), RegistryError> ~ Console {
         let token = self.config.auth_token.as_ref()
             .ok_or(RegistryError::AuthRequired)?;
 
@@ -324,7 +324,7 @@ impl Registry {
     }
 
     /// Yank a version (mark as not recommended)
-    pub fn yank(&self, name: &str, version: &Version) -> Result<(), RegistryError> {
+    pub fn yank(&self, name: &str, version: &Version) -> Result<(), RegistryError> ~ Console {
         let token = self.config.auth_token.as_ref()
             .ok_or(RegistryError::AuthRequired)?;
 
@@ -438,7 +438,7 @@ impl Resolver {
     }
 
     /// Resolve all dependencies
-    pub fn resolve(&mut self, manifest: &Manifest) -> Result<Resolution, ResolveError> {
+    pub fn resolve(&mut self, manifest: &Manifest) -> Result<Resolution, ResolveError> ~ Console {
         println!("Resolving dependencies...");
 
         let mut resolution = Resolution {
@@ -551,7 +551,7 @@ impl PackageManager {
     }
 
     /// Initialize a new package
-    pub fn init(&self, name: &str, path: &str) -> Result<(), PackageError> {
+    pub fn init(&self, name: &str, path: &str) -> Result<(), PackageError> ~ Console {
         println!("Creating package '{}'...", name);
 
         create_dir_all(path)?;
@@ -618,7 +618,7 @@ mod tests {{
     }
 
     /// Add a dependency
-    pub fn add(&self, manifest_path: &str, name: &str, version: Option<&str>) -> Result<(), PackageError> {
+    pub fn add(&self, manifest_path: &str, name: &str, version: Option<&str>) -> Result<(), PackageError> ~ Console {
         let mut manifest = Manifest::load(manifest_path)?;
 
         // Get latest version if not specified
@@ -653,7 +653,7 @@ mod tests {{
     }
 
     /// Remove a dependency
-    pub fn remove(&self, manifest_path: &str, name: &str) -> Result<(), PackageError> {
+    pub fn remove(&self, manifest_path: &str, name: &str) -> Result<(), PackageError> ~ Console {
         let mut manifest = Manifest::load(manifest_path)?;
 
         if manifest.dependencies.remove(name).is_some() {
@@ -666,7 +666,7 @@ mod tests {{
     }
 
     /// Install all dependencies
-    pub fn install(&mut self, manifest_path: &str) -> Result<(), PackageError> {
+    pub fn install(&mut self, manifest_path: &str) -> Result<(), PackageError> ~ Console {
         let manifest = Manifest::load(manifest_path)?;
 
         println!("Installing dependencies for {}...", manifest.package.name);
@@ -695,7 +695,7 @@ mod tests {{
     }
 
     /// Update dependencies
-    pub fn update(&mut self, manifest_path: &str, name: Option<&str>) -> Result<(), PackageError> {
+    pub fn update(&mut self, manifest_path: &str, name: Option<&str>) -> Result<(), PackageError> ~ Console {
         let manifest = Manifest::load(manifest_path)?;
 
         if let Some(pkg_name) = name {
@@ -713,7 +713,7 @@ mod tests {{
     }
 
     /// Search for packages
-    pub fn search(&self, query: &str) -> Result<(), PackageError> {
+    pub fn search(&self, query: &str) -> Result<(), PackageError> ~ Console {
         let results = self.registry.search(query)?;
 
         println!("Search results for '{}':", query);
@@ -732,7 +732,7 @@ mod tests {{
     }
 
     /// Publish the package
-    pub fn publish(&self, manifest_path: &str) -> Result<(), PackageError> {
+    pub fn publish(&self, manifest_path: &str) -> Result<(), PackageError> ~ Console {
         let manifest = Manifest::load(manifest_path)?;
 
         println!("Publishing {} v{}...", manifest.package.name, manifest.package.version);
@@ -813,7 +813,7 @@ pub enum PackageError {
 // CLI COMMANDS
 // ═══════════════════════════════════════════════════════════════════════════════
 
-pub fn run_cli(args: Vec<String>) -> Result<(), PackageError> {
+pub fn run_cli(args: Vec<String>) -> Result<(), PackageError> ~ Console {
     let config = PackageManagerConfig::default();
     let mut pm = PackageManager::new(config);
 
@@ -863,7 +863,7 @@ pub fn run_cli(args: Vec<String>) -> Result<(), PackageError> {
     Ok(())
 }
 
-fn print_help() {
+fn print_help() ~ Console {
     println!("╔═══════════════════════════════════════════════════════════════╗");
     println!("║  Quark - BUILD-UNIVERSE Package Manager                      ║");
     println!("╚═══════════════════════════════════════════════════════════════╝");
@@ -1243,7 +1243,7 @@ impl PubGrubResolver {
     }
 
     /// Resolve dependencies using PubGrub algorithm
-    pub fn resolve(&mut self, root_package: &str, root_deps: &HashMap<String, VersionReq>) -> Result<Resolution, ResolveError> {
+    pub fn resolve(&mut self, root_package: &str, root_deps: &HashMap<String, VersionReq>) -> Result<Resolution, ResolveError> ~ Console {
         println!("Resolving with PubGrub SAT-solver...");
 
         // Add root incompatibility
@@ -1564,7 +1564,7 @@ impl Workspace {
 
     /// Run command for all workspace members
     pub fn for_each<F>(&self, f: F) -> Result<(), WorkspaceError>
-    where F: Fn(&WorkspaceMember) -> Result<(), PackageError>
+ ~ Console where F: Fn(&WorkspaceMember) -> Result<(), PackageError>
     {
         for member in self.build_order()? {
             println!("Processing {}...", member.manifest.package.name);
@@ -1755,7 +1755,7 @@ impl SecurityAuditor {
     }
 
     /// Update advisory database
-    pub fn update_database(&mut self) -> Result<(), AuditError> {
+    pub fn update_database(&mut self) -> Result<(), AuditError> ~ Console {
         println!("Updating security advisory database...");
 
         let client = HttpClient::new();
@@ -1771,7 +1771,7 @@ impl SecurityAuditor {
     }
 
     /// Audit resolved packages for vulnerabilities
-    pub fn audit(&self, resolution: &Resolution) -> Result<AuditReport, AuditError> {
+    pub fn audit(&self, resolution: &Resolution) -> Result<AuditReport, AuditError> ~ Console {
         println!("Auditing {} packages for security vulnerabilities...", resolution.packages.len());
 
         let mut vulnerabilities = Vec::new();
@@ -1820,7 +1820,7 @@ impl SecurityAuditor {
     }
 
     /// Print audit report
-    pub fn print_report(&self, report: &AuditReport) {
+    pub fn print_report(&self, report: &AuditReport) ~ Console {
         println!();
         println!("╔════════════════════════════════════════════════════════════════╗");
         println!("║  Security Audit Report                                         ║");
@@ -1976,7 +1976,7 @@ impl LicenseChecker {
     }
 
     /// Check licenses for all resolved packages
-    pub fn check(&self, resolution: &Resolution, registry: &Registry) -> Result<LicenseReport, PackageError> {
+    pub fn check(&self, resolution: &Resolution, registry: &Registry) -> Result<LicenseReport, PackageError> ~ Console {
         println!("Checking licenses for {} packages...", resolution.packages.len());
 
         let mut packages = Vec::new();
@@ -2063,7 +2063,7 @@ impl PackageLinker {
     }
 
     /// Create a global link for a package
-    pub fn link(&mut self, manifest_path: &str) -> Result<(), PackageError> {
+    pub fn link(&mut self, manifest_path: &str) -> Result<(), PackageError> ~ Console {
         let manifest = Manifest::load(manifest_path)?;
         let package_name = &manifest.package.name;
         let package_dir = manifest_path.trim_end_matches("/quark.toml");
@@ -2082,7 +2082,7 @@ impl PackageLinker {
     }
 
     /// Use a linked package in current project
-    pub fn link_to(&self, package_name: &str, target_dir: &str) -> Result<(), PackageError> {
+    pub fn link_to(&self, package_name: &str, target_dir: &str) -> Result<(), PackageError> ~ Console {
         let link_source = format!("{}/{}", self.global_links_dir, package_name);
 
         if !exists(&link_source) {
@@ -2099,7 +2099,7 @@ impl PackageLinker {
     }
 
     /// Remove a global link
-    pub fn unlink(&mut self, package_name: &str) -> Result<(), PackageError> {
+    pub fn unlink(&mut self, package_name: &str) -> Result<(), PackageError> ~ Console {
         let link_path = format!("{}/{}", self.global_links_dir, package_name);
 
         if exists(&link_path) {
@@ -2166,12 +2166,12 @@ impl DependencyTree {
     }
 
     /// Print ASCII tree
-    pub fn print(&self, root: &str) {
+    pub fn print(&self, root: &str) ~ Console {
         println!("{}", root);
         self.print_deps(root, "", true);
     }
 
-    fn print_deps(&self, package: &str, prefix: &str, is_last: bool) {
+    fn print_deps(&self, package: &str, prefix: &str, is_last: bool) ~ Console {
         if let Some(pkg) = self.resolution.packages.iter().find(|p| p.name == package) {
             for (i, dep) in pkg.dependencies.iter().enumerate() {
                 let is_last_dep = i == pkg.dependencies.len() - 1;
@@ -2192,7 +2192,7 @@ impl DependencyTree {
     }
 
     /// Print inverted tree (show what depends on a package)
-    pub fn print_inverted(&self, package: &str) {
+    pub fn print_inverted(&self, package: &str) ~ Console {
         println!("{}", package);
         println!("Depended on by:");
 
@@ -2361,7 +2361,7 @@ impl BuildCache {
     }
 
     /// Clear cache
-    pub fn clear(&mut self) -> Result<(), CacheError> {
+    pub fn clear(&mut self) -> Result<(), CacheError> ~ Console {
         remove_dir_all(&self.cache_dir)?;
         create_dir_all(&self.cache_dir)?;
         println!("Cache cleared");
@@ -2498,7 +2498,7 @@ impl ScriptRunner {
     }
 
     /// Run a script
-    pub fn run(&self, name: &str, args: &[&str]) -> Result<i32, ScriptError> {
+    pub fn run(&self, name: &str, args: &[&str]) -> Result<i32, ScriptError> ~ Console {
         let script = self.scripts.get(name)
             .ok_or_else(|| ScriptError::NotFound(name.to_string()))?;
 
@@ -2529,7 +2529,7 @@ impl ScriptRunner {
         self.scripts.values().collect()
     }
 
-    fn execute(&self, command: &str, args: &[&str]) -> Result<i32, ScriptError> {
+    fn execute(&self, command: &str, args: &[&str]) -> Result<i32, ScriptError> ~ Console {
         // Build command with environment
         let mut full_command = command.to_string();
         for arg in args {
@@ -2599,7 +2599,7 @@ impl OutdatedChecker {
     }
 
     /// Check for outdated packages
-    pub fn check(&self, manifest: &Manifest, resolution: &Resolution) -> Result<OutdatedReport, PackageError> {
+    pub fn check(&self, manifest: &Manifest, resolution: &Resolution) -> Result<OutdatedReport, PackageError> ~ Console {
         println!("Checking for outdated packages...");
 
         let mut outdated = Vec::new();
@@ -2674,7 +2674,7 @@ impl OutdatedChecker {
     }
 
     /// Print outdated report
-    pub fn print_report(&self, report: &OutdatedReport) {
+    pub fn print_report(&self, report: &OutdatedReport) ~ Console {
         println!();
         println!("╔════════════════════════════════════════════════════════════════╗");
         println!("║  Outdated Dependencies Report                                  ║");
@@ -2729,7 +2729,7 @@ pub struct VirtualEnv {
 
 impl VirtualEnv {
     /// Create a new virtual environment
-    pub fn create(path: &str, name: &str) -> Result<Self, VenvError> {
+    pub fn create(path: &str, name: &str) -> Result<Self, VenvError> ~ Console {
         println!("Creating virtual environment '{}'...", name);
 
         let venv_path = format!("{}/{}", path, name);
@@ -2776,7 +2776,7 @@ impl VirtualEnv {
     }
 
     /// Install packages into virtual environment
-    pub fn install(&mut self, pm: &mut PackageManager, packages: &[&str]) -> Result<(), VenvError> {
+    pub fn install(&mut self, pm: &mut PackageManager, packages: &[&str]) -> Result<(), VenvError> ~ Console {
         for pkg in packages {
             println!("Installing {} into virtual environment...", pkg);
             // Would install to venv path
@@ -2785,7 +2785,7 @@ impl VirtualEnv {
     }
 
     /// Remove virtual environment
-    pub fn remove(path: &str) -> Result<(), VenvError> {
+    pub fn remove(path: &str) -> Result<(), VenvError> ~ Console {
         if exists(&format!("{}/.quark-venv", path)) {
             remove_dir_all(path)?;
             println!("Removed virtual environment at {}", path);
@@ -3046,7 +3046,7 @@ impl ExtendedPackageManager {
     }
 
     /// Install with caching
-    pub fn install_cached(&mut self, manifest_path: &str) -> Result<(), PackageError> {
+    pub fn install_cached(&mut self, manifest_path: &str) -> Result<(), PackageError> ~ Console {
         let manifest = Manifest::load(manifest_path)?;
 
         // Resolve with PubGrub if available
@@ -3084,7 +3084,7 @@ impl ExtendedPackageManager {
     }
 
     /// Full audit
-    pub fn full_audit(&mut self, manifest_path: &str) -> Result<(), PackageError> {
+    pub fn full_audit(&mut self, manifest_path: &str) -> Result<(), PackageError> ~ Console {
         let manifest = Manifest::load(manifest_path)?;
         let resolution = self.inner.resolver.resolve(&manifest)?;
 
@@ -3109,7 +3109,7 @@ impl ExtendedPackageManager {
     }
 
     /// Show dependency tree
-    pub fn tree(&mut self, manifest_path: &str) -> Result<(), PackageError> {
+    pub fn tree(&mut self, manifest_path: &str) -> Result<(), PackageError> ~ Console {
         let manifest = Manifest::load(manifest_path)?;
         let resolution = self.inner.resolver.resolve(&manifest)?;
 
@@ -3127,7 +3127,7 @@ impl ExtendedPackageManager {
     }
 
     /// Run script
-    pub fn run_script(&self, manifest_path: &str, script_name: &str, args: &[&str]) -> Result<i32, PackageError> {
+    pub fn run_script(&self, manifest_path: &str, script_name: &str, args: &[&str]) -> Result<i32, PackageError> ~ Console {
         let manifest = Manifest::load(manifest_path)?;
         let mut runner = ScriptRunner::new();
         runner.load_from_manifest(&manifest)?;
@@ -3137,18 +3137,18 @@ impl ExtendedPackageManager {
     }
 
     /// Create virtual environment
-    pub fn create_venv(&self, path: &str, name: &str) -> Result<VirtualEnv, PackageError> {
+    pub fn create_venv(&self, path: &str, name: &str) -> Result<VirtualEnv, PackageError> ~ Console {
         VirtualEnv::create(path, name)
             .map_err(|e| PackageError::IoError(format!("{:?}", e)))
     }
 
     /// Link package
-    pub fn link(&mut self, manifest_path: &str) -> Result<(), PackageError> {
+    pub fn link(&mut self, manifest_path: &str) -> Result<(), PackageError> ~ Console {
         self.linker.link(manifest_path)
     }
 
     /// Clean caches and artifacts
-    pub fn clean(&mut self, manifest_path: &str, all: bool) -> Result<(), PackageError> {
+    pub fn clean(&mut self, manifest_path: &str, all: bool) -> Result<(), PackageError> ~ Console {
         let manifest = Manifest::load(manifest_path)?;
 
         println!("Cleaning {}...", manifest.package.name);
@@ -3182,7 +3182,7 @@ impl ExtendedPackageManager {
 // EXTENDED CLI
 // ═══════════════════════════════════════════════════════════════════════════════
 
-pub fn run_extended_cli(args: Vec<String>) -> Result<(), PackageError> {
+pub fn run_extended_cli(args: Vec<String>) -> Result<(), PackageError> ~ Console {
     let config = PackageManagerConfig::default();
     let mut pm = ExtendedPackageManager::new(config);
 
@@ -3281,7 +3281,7 @@ pub fn run_extended_cli(args: Vec<String>) -> Result<(), PackageError> {
     Ok(())
 }
 
-fn print_extended_help() {
+fn print_extended_help() ~ Console {
     println!("╔═══════════════════════════════════════════════════════════════╗");
     println!("║  Quark - BUILD-UNIVERSE Package Manager                      ║");
     println!("║  Advanced Package Management with Security & Performance      ║");
@@ -3400,7 +3400,7 @@ impl PrivateRegistry {
         self
     }
 
-    pub fn publish(&mut self, package: &Package, tarball_path: &str) -> Result<(), PackageError> {
+    pub fn publish(&mut self, package: &Package, tarball_path: &str) -> Result<(), PackageError> ~ Console {
         // Verify package signing if required
         if self.config.require_signing && package.signature.is_none() {
             return Err(PackageError::NetworkError("Package signing required".to_string()));
@@ -3513,7 +3513,7 @@ impl RegistryMirror {
         }
     }
 
-    pub fn sync(&mut self) -> Result<SyncResult, PackageError> {
+    pub fn sync(&mut self) -> Result<SyncResult, PackageError> ~ Console {
         println!("Syncing from {}...", self.source_url);
 
         let mut result = SyncResult {
@@ -3915,7 +3915,7 @@ impl MonorepoManager {
         Ok(())
     }
 
-    pub fn install_all(&self) -> Result<(), PackageError> {
+    pub fn install_all(&self) -> Result<(), PackageError> ~ Console {
         let order = self.build_order()?;
 
         for name in order {
@@ -3929,7 +3929,7 @@ impl MonorepoManager {
         Ok(())
     }
 
-    pub fn build_all(&self) -> Result<(), PackageError> {
+    pub fn build_all(&self) -> Result<(), PackageError> ~ Console {
         let order = self.build_order()?;
 
         for name in order {
@@ -4661,7 +4661,7 @@ audit:
 "#.to_string()
     }
 
-    pub fn setup_cache(&self) -> Result<(), PackageError> {
+    pub fn setup_cache(&self) -> Result<(), PackageError> ~ Console {
         match self.provider {
             CiProvider::GitHub => {
                 // GitHub Actions handles caching via actions/cache
@@ -4676,7 +4676,7 @@ audit:
         Ok(())
     }
 
-    pub fn report_status(&self, status: &str, message: &str) {
+    pub fn report_status(&self, status: &str, message: &str) ~ Console {
         match self.provider {
             CiProvider::GitHub => {
                 println!("::notice::{}: {}", status, message);
@@ -4690,7 +4690,7 @@ audit:
         }
     }
 
-    pub fn create_annotations(&self, violations: &[PolicyViolation]) {
+    pub fn create_annotations(&self, violations: &[PolicyViolation]) ~ Console {
         for violation in violations {
             match self.provider {
                 CiProvider::GitHub => {
@@ -4750,7 +4750,7 @@ impl PackageExporter {
         self
     }
 
-    pub fn export(&self, manifest_path: &str) -> Result<ExportResult, PackageError> {
+    pub fn export(&self, manifest_path: &str) -> Result<ExportResult, PackageError> ~ Console {
         let manifest = Manifest::load(manifest_path)?;
 
         println!("Exporting packages from {}...", manifest_path);
@@ -4801,7 +4801,7 @@ impl PackageImporter {
         }
     }
 
-    pub fn import(&self) -> Result<ImportResult, PackageError> {
+    pub fn import(&self) -> Result<ImportResult, PackageError> ~ Console {
         println!("Importing packages from {}...", self.source_path);
 
         // Read index
@@ -5333,7 +5333,7 @@ impl PackageMigrator {
         self
     }
 
-    pub fn migrate_package(&self, package_name: &str) -> Result<MigrationResult, PackageError> {
+    pub fn migrate_package(&self, package_name: &str) -> Result<MigrationResult, PackageError> ~ Console {
         println!("Migrating package: {}", package_name);
 
         // Fetch from source registry
@@ -5402,7 +5402,7 @@ impl PackageMigrator {
         Ok(data.clone())
     }
 
-    fn publish_to_target(&self, data: &PackageData) -> Result<(), PackageError> {
+    fn publish_to_target(&self, data: &PackageData) -> Result<(), PackageError> ~ Console {
         println!("Publishing {} to target registry", data.name);
         Ok(())
     }
@@ -5456,7 +5456,7 @@ impl BulkMigrator {
         self
     }
 
-    pub fn execute(&mut self) -> Result<BulkMigrationResult, PackageError> {
+    pub fn execute(&mut self) -> Result<BulkMigrationResult, PackageError> ~ Console {
         let total = self.packages.len();
         let mut successful = 0;
         let mut failed = 0;

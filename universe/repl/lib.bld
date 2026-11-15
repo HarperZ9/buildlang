@@ -490,7 +490,7 @@ impl Evaluator {
         Evaluator { context }
     }
 
-    pub fn eval(&mut self, input: &str) -> Result<EvalResult, EvalError> {
+    pub fn eval(&mut self, input: &str) -> Result<EvalResult, EvalError> ~ Console {
         let input = input.trim();
 
         // Handle REPL commands
@@ -553,7 +553,7 @@ impl Evaluator {
         }
     }
 
-    fn eval_let(&mut self, input: &str) -> Result<EvalResult, EvalError> {
+    fn eval_let(&mut self, input: &str) -> Result<EvalResult, EvalError> ~ Console {
         // Parse: let [mut] name [: type] = expr
         let input = input.strip_prefix("let ").unwrap().trim();
 
@@ -583,7 +583,7 @@ impl Evaluator {
         }
     }
 
-    fn eval_expr(&mut self, input: &str) -> Result<EvalResult, EvalError> {
+    fn eval_expr(&mut self, input: &str) -> Result<EvalResult, EvalError> ~ Console {
         // Simple expression evaluator
         let input = input.trim();
 
@@ -623,7 +623,7 @@ impl Evaluator {
         Err(EvalError::SyntaxError(format!("Cannot evaluate: {}", input)))
     }
 
-    fn eval_binary_op(&mut self, input: &str) -> Option<Result<EvalResult, EvalError>> {
+    fn eval_binary_op(&mut self, input: &str) -> Option<Result<EvalResult, EvalError>> ~ Console {
         let ops = ["+", "-", "*", "/", "%", "==", "!=", "<", ">", "<=", ">=", "&&", "||"];
 
         for op in ops {
@@ -676,7 +676,7 @@ impl Evaluator {
         None
     }
 
-    fn eval_function_call(&mut self, input: &str) -> Result<EvalResult, EvalError> {
+    fn eval_function_call(&mut self, input: &str) -> Result<EvalResult, EvalError> ~ Console {
         let paren_idx = input.find('(').unwrap();
         let func_name = input[..paren_idx].trim();
         let args_str = &input[paren_idx + 1..input.len() - 1];
@@ -822,7 +822,7 @@ impl Repl {
     }
 
     /// Run the REPL
-    pub fn run(&mut self) {
+    pub fn run(&mut self) ~ Console {
         self.print_banner();
 
         // Load history
@@ -898,7 +898,7 @@ impl Repl {
         let _ = self.history.save(&self.config.history_file);
     }
 
-    fn print_banner(&self) {
+    fn print_banner(&self) ~ Console {
         println!("╔═══════════════════════════════════════════════════════════════╗");
         println!("║  BUILD-UNIVERSE REPL v2.0.0                                  ║");
         println!("║  \"Quantum Shell\"                                              ║");
@@ -908,7 +908,7 @@ impl Repl {
         println!();
     }
 
-    fn read_multiline(&mut self, first_line: &str) -> String {
+    fn read_multiline(&mut self, first_line: &str) -> String ~ Console {
         let mut input = first_line.to_string();
 
         // Check if we need more lines (unclosed braces, parens, etc.)
@@ -964,7 +964,7 @@ impl Repl {
 // MAIN ENTRY POINT
 // ═══════════════════════════════════════════════════════════════════════════════
 
-pub fn main() {
+pub fn main() ~ Console {
     let mut repl = Repl::new();
     repl.run();
 }
@@ -1279,7 +1279,7 @@ impl LineMagic for ResetMagic {
 pub struct ClearMagic;
 
 impl LineMagic for ClearMagic {
-    fn execute(&self, args: &str, ctx: &mut ReplContext) -> Result<MagicResult, MagicError> {
+    fn execute(&self, args: &str, ctx: &mut ReplContext) -> Result<MagicResult, MagicError> ~ Console {
         print!("\x1b[2J\x1b[H");
         Ok(MagicResult::None)
     }
@@ -2148,7 +2148,7 @@ impl JupyterKernel {
     }
 
     /// Handle execute_request
-    pub fn execute(&mut self, code: &str, silent: bool, store_history: bool) -> ExecuteResult {
+    pub fn execute(&mut self, code: &str, silent: bool, store_history: bool) -> ExecuteResult ~ Console {
         self.execution_count += 1;
 
         let mut evaluator = Evaluator::new(ReplContext::new());
@@ -3709,7 +3709,7 @@ mod tests {
     }
 
     #[test]
-    fn test_jupyter_kernel() {
+    fn test_jupyter_kernel() ~ Console {
         let mut kernel = JupyterKernel::new();
 
         // Test execute

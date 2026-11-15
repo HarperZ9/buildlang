@@ -239,7 +239,7 @@ module photon::subsurface_scattering {
     }
 
     impl SeparableSssRenderer {
-        pub fn new(device: &gpu::Device, width: u32, height: u32, config: SssssConfig) -> Self {
+        pub fn new(device: &gpu::Device, width: u32, height: u32, config: SssssConfig) -> Self ~ FileSystem {
             let intermediate_texture = device.create_texture(&gpu::TextureDesc {
                 width,
                 height,
@@ -528,7 +528,7 @@ module photon::subsurface_scattering {
     }
 
     impl ThicknessMapGenerator {
-        pub fn new(device: &gpu::Device, num_rays: u32) -> Self {
+        pub fn new(device: &gpu::Device, num_rays: u32) -> Self ~ FileSystem {
             let compute_pipeline = device.create_compute_pipeline(&gpu::ComputePipelineDesc {
                 shader: include_str!("shaders/thickness_map_generate.wgsl"),
                 entry_point: "compute_thickness",

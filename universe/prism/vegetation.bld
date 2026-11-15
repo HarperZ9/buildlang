@@ -1,8 +1,8 @@
 // BUILD-UNIVERSE Prism: Vegetation Rendering Shaders
 // Comprehensive vegetation system including grass, foliage, trees, and procedural generation
 
-import prism::lib::*;
-import spectrum::color::*;
+use prism::lib::*;
+use spectrum::color::*;
 
 // ============================================================================
 // VEGETATION CONFIGURATION

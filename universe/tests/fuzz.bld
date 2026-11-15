@@ -116,7 +116,7 @@ fn generate_random_json(rng: &mut Rng, depth: usize) -> String {
 
 /// Fuzz JSON parser with valid inputs
 #[test]
-fn fuzz_json_valid() -> TestResult {
+fn fuzz_json_valid() -> TestResult ~ Console {
     let mut rng = Rng::new(42);
     let iterations = 1000;
     let mut parse_failures = 0;
@@ -670,7 +670,7 @@ pub fn run_all_fuzz_tests() -> TestSuite {
 }
 
 /// Main entry point
-pub fn main() -> i32 {
+pub fn main() -> i32 ~ Console {
     let suite = run_all_fuzz_tests();
     let results = suite.run();
 

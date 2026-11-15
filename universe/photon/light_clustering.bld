@@ -454,7 +454,7 @@ module photon::light_clustering {
     }
 
     impl ClusteredLightingData {
-        pub fn new(device: &gpu::Device, config: ClusterConfig) -> Self {
+        pub fn new(device: &gpu::Device, config: ClusterConfig) -> Self ~ FileSystem {
             let num_clusters = config.num_clusters() as usize;
 
             // Create cluster AABB buffer
@@ -520,14 +520,14 @@ module photon::light_clustering {
             }
         }
 
-        fn create_cluster_build_pipeline(device: &gpu::Device) -> ComputePipeline {
+        fn create_cluster_build_pipeline(device: &gpu::Device) -> ComputePipeline ~ FileSystem {
             device.create_compute_pipeline(&gpu::ComputePipelineDesc {
                 shader: include_str!("shaders/cluster_build.wgsl"),
                 entry_point: "build_clusters",
             })
         }
 
-        fn create_light_cull_pipeline(device: &gpu::Device) -> ComputePipeline {
+        fn create_light_cull_pipeline(device: &gpu::Device) -> ComputePipeline ~ FileSystem {
             device.create_compute_pipeline(&gpu::ComputePipelineDesc {
                 shader: include_str!("shaders/light_cull.wgsl"),
                 entry_point: "cull_lights",
@@ -668,7 +668,7 @@ module photon::light_clustering {
     }
 
     impl TiledDeferredLighting {
-        pub fn new(device: &gpu::Device, config: TileConfig) -> Self {
+        pub fn new(device: &gpu::Device, config: TileConfig) -> Self ~ FileSystem {
             let (width, height) = (config.screen_width, config.screen_height);
 
             // Create G-Buffer textures
@@ -774,7 +774,7 @@ module photon::light_clustering {
             }
         }
 
-        fn create_depth_prepass_pipeline(device: &gpu::Device) -> Pipeline {
+        fn create_depth_prepass_pipeline(device: &gpu::Device) -> Pipeline ~ FileSystem {
             device.create_render_pipeline(&gpu::RenderPipelineDesc {
                 vertex_shader: include_str!("shaders/depth_prepass.wgsl"),
                 fragment_shader: None,
@@ -783,28 +783,28 @@ module photon::light_clustering {
             })
         }
 
-        fn create_tile_depth_bounds_pipeline(device: &gpu::Device) -> ComputePipeline {
+        fn create_tile_depth_bounds_pipeline(device: &gpu::Device) -> ComputePipeline ~ FileSystem {
             device.create_compute_pipeline(&gpu::ComputePipelineDesc {
                 shader: include_str!("shaders/tile_depth_bounds.wgsl"),
                 entry_point: "compute_tile_depth_bounds",
             })
         }
 
-        fn create_light_cull_pipeline(device: &gpu::Device) -> ComputePipeline {
+        fn create_light_cull_pipeline(device: &gpu::Device) -> ComputePipeline ~ FileSystem {
             device.create_compute_pipeline(&gpu::ComputePipelineDesc {
                 shader: include_str!("shaders/tiled_light_cull.wgsl"),
                 entry_point: "cull_lights_to_tiles",
             })
         }
 
-        fn create_lighting_pipeline(device: &gpu::Device) -> ComputePipeline {
+        fn create_lighting_pipeline(device: &gpu::Device) -> ComputePipeline ~ FileSystem {
             device.create_compute_pipeline(&gpu::ComputePipelineDesc {
                 shader: include_str!("shaders/tiled_deferred_lighting.wgsl"),
                 entry_point: "deferred_lighting",
             })
         }
 
-        fn create_composite_pipeline(device: &gpu::Device) -> Pipeline {
+        fn create_composite_pipeline(device: &gpu::Device) -> Pipeline ~ FileSystem {
             device.create_render_pipeline(&gpu::RenderPipelineDesc {
                 vertex_shader: include_str!("shaders/fullscreen_quad.wgsl"),
                 fragment_shader: Some(include_str!("shaders/composite.wgsl")),
@@ -888,7 +888,7 @@ module photon::light_clustering {
     }
 
     impl FptlLighting {
-        pub fn new(device: &gpu::Device, config: FptlConfig) -> Self {
+        pub fn new(device: &gpu::Device, config: FptlConfig) -> Self ~ FileSystem {
             let num_coarse_tiles = ((config.screen_width + config.coarse_tile_size - 1) /
                                     config.coarse_tile_size) *
                                    ((config.screen_height + config.coarse_tile_size - 1) /
@@ -1176,7 +1176,7 @@ module photon::light_clustering {
     }
 
     impl ClusteredLightProbes {
-        pub fn new(device: &gpu::Device, max_probes: usize) -> Self {
+        pub fn new(device: &gpu::Device, max_probes: usize) -> Self ~ FileSystem {
             let probe_grid = device.create_buffer(&gpu::BufferDesc {
                 size: max_probes * 16, // Vec4 per probe position
                 usage: gpu::BufferUsage::STORAGE | gpu::BufferUsage::COPY_DST,
@@ -1370,7 +1370,7 @@ module photon::light_clustering {
 
     impl VirtualShadowMap {
         pub fn new(device: &gpu::Device, virtual_resolution: u32,
-                   physical_pool_pages: u32, page_size: u32) -> Self {
+                   physical_pool_pages: u32, page_size: u32) -> Self ~ FileSystem {
             let page_table_size = virtual_resolution / page_size;
 
             let page_table = device.create_texture(&gpu::TextureDesc {
@@ -1485,7 +1485,7 @@ module photon::light_clustering {
     }
 
     impl LightManager {
-        pub fn new(device: &gpu::Device, screen_width: u32, screen_height: u32) -> Self {
+        pub fn new(device: &gpu::Device, screen_width: u32, screen_height: u32) -> Self ~ FileSystem {
             let cluster_config = ClusterConfig::new(screen_width, screen_height);
             let tile_config = TileConfig::new(screen_width, screen_height);
 

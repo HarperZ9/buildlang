@@ -6,11 +6,11 @@
 // Based on Harper Engine WP-012, WP-080-083, WP-107, WP-115, WP-135-137.
 // =============================================================================
 
-import core::memory::{Arena, Pool, Buffer, GpuBuffer};
-import core::math::{Vec2, Vec3, Vec4, Mat4, Color, Spectrum};
-import core::simd::{f32x4, f32x8, SimdMath};
-import photon::gpu::{Shader, Texture, Sampler, UniformBuffer};
-import photon::texture::{TextureArray, TextureCube};
+use core::memory::{Arena, Pool, Buffer, GpuBuffer};
+use core::math::{Vec2, Vec3, Vec4, Mat4, Color, Spectrum};
+use core::simd::{f32x4, f32x8, SimdMath};
+use photon::gpu::{Shader, Texture, Sampler, UniformBuffer};
+use photon::texture::{TextureArray, TextureCube};
 
 // =============================================================================
 // REGION: CONSTANTS AND UTILITIES

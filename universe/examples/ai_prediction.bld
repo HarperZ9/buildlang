@@ -63,7 +63,7 @@ impl Default for PredictionConfig {
 }
 
 impl AIPredictionEngine {
-    pub fn new(config: PredictionConfig) -> Self {
+    pub fn new(config: PredictionConfig) -> Self ~ Console {
         println!("Initializing AI Prediction Engine...");
 
         // Create Prophetic Ensemble with multiple models
@@ -100,7 +100,7 @@ impl AIPredictionEngine {
     }
 
     /// Train on historical data
-    pub fn train(&mut self, data: &TimeSeries) {
+    pub fn train(&mut self, data: &TimeSeries) ~ Console {
         println!("\nTraining AI Prediction Engine...");
 
         // Train Oracle models
@@ -125,7 +125,7 @@ impl AIPredictionEngine {
     }
 
     /// Generate predictions with confidence intervals
-    pub fn predict(&self, data: &TimeSeries) -> PredictionResult {
+    pub fn predict(&self, data: &TimeSeries) -> PredictionResult ~ Console {
         println!("\nGenerating predictions...");
 
         // Get Oracle predictions
@@ -197,7 +197,7 @@ impl AIPredictionEngine {
         variance.sqrt()
     }
 
-    fn evolve_hyperparameters(&mut self, data: &TimeSeries) {
+    fn evolve_hyperparameters(&mut self, data: &TimeSeries) ~ Console {
         // Use Build Evolution Equation: ∂P/∂t = -∇L + η·Mutation + λ·Simplicity
 
         for gen in 0..self.config.evolution_generations {
@@ -288,7 +288,7 @@ impl MLEnsemble {
         }
     }
 
-    pub fn train(&mut self, features: &[Vec<f64>], targets: &[f64]) {
+    pub fn train(&mut self, features: &[Vec<f64>], targets: &[f64]) ~ Console {
         for (i, model) in self.models.iter_mut().enumerate() {
             println!("    Training model {}/{}...", i + 1, self.models.len());
             model.fit(features, targets);
@@ -375,7 +375,7 @@ impl NASEngine {
     }
 
     /// Search for optimal architecture
-    pub fn search(&mut self, data: &TimeSeries, budget: usize) -> Architecture {
+    pub fn search(&mut self, data: &TimeSeries, budget: usize) -> Architecture ~ Console {
         println!("\nSearching for optimal neural architecture...");
 
         for i in 0..budget {
@@ -575,7 +575,7 @@ pub struct AudioAnalysisResult {
 // MAIN
 // ═══════════════════════════════════════════════════════════════════════════════
 
-fn main() {
+fn main() ~ Console {
     println!("╔═══════════════════════════════════════════════════════════════╗");
     println!("║  AI Prediction System Demo                                    ║");
     println!("║  Powered by BUILD-UNIVERSE                                   ║");

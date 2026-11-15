@@ -1045,21 +1045,21 @@ impl LutPipeline {
         let original = (r, g, b);
 
         // Apply pre-LUT
-        let (mut r, mut g, mut b) = if let Some(lut) = &self.pre_lut {
+        let (r, g, b) = if let Some(lut) = &self.pre_lut {
             lut.apply(r, g, b)
         } else {
             (r, g, b)
         };
 
         // Apply main 3D LUT
-        (r, g, b) = if let Some(lut) = &self.main_lut {
+        let (r, g, b) = if let Some(lut) = &self.main_lut {
             lut.apply(r, g, b)
         } else {
             (r, g, b)
         };
 
         // Apply post-LUT
-        (r, g, b) = if let Some(lut) = &self.post_lut {
+        let (r, g, b) = if let Some(lut) = &self.post_lut {
             lut.apply(r, g, b)
         } else {
             (r, g, b)

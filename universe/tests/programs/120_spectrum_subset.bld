@@ -446,7 +446,7 @@ pub mod tonemap {
 // MAIN — Integration test
 // ═══════════════════════════════════════════════════════════════════════════════
 
-fn main() {
+fn main() ~ Console {
     // --- Test 1: Vec3 operations (structs + &self methods) ---
     let v1 = Vec3::new(1.0, 0.0, 0.0);
     let v2 = Vec3::new(0.0, 1.0, 0.0);

@@ -962,7 +962,7 @@ impl SymbolicRegression {
     }
     
     /// Fit to data
-    pub fn fit(&mut self, x: &[HashMap<String, f64>], y: &[f64], generations: usize) -> Program {
+    pub fn fit(&mut self, x: &[HashMap<String, f64>], y: &[f64], generations: usize) -> Program ~ Console {
         for gen in 0..generations {
             // Evaluate fitness (negative MSE)
             let fitness_fn = |p: &Program| {

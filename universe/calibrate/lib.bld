@@ -2910,7 +2910,7 @@ struct Spectrophotometer {
     bandwidth: f64,
     integration_time: Duration,
     calibration_date: DateTime,
-    white_reference: SpectralData?
+    white_reference: Option<SpectralData>
 }
 
 enum SpectroType {
@@ -3016,7 +3016,7 @@ struct MeasuredUniformityReport {
     chromaticity_deviation: f64,
     worst_corner: (usize, usize),
     uniformity_grade: UniformityGrade,
-    compensation_lut: LUT3D?
+    compensation_lut: Option<LUT3D>
 }
 
 enum UniformityGrade {
@@ -3538,7 +3538,7 @@ impl AmbientCompensator {
 
 struct PatchGenerator {
     patch_type: PatchSetType,
-    custom_patches: [RGB]?
+    custom_patches: Option<[RGB]>
 }
 
 enum PatchSetType {

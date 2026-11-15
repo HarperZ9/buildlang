@@ -1,8 +1,8 @@
 // BUILD-UNIVERSE Prism: Screen-Space Reflections
 // Comprehensive SSR implementations including Hi-Z tracing, stochastic SSR, and hybrid approaches
 
-import prism::lib::*;
-import spectrum::color::*;
+use prism::lib::*;
+use spectrum::color::*;
 
 // ============================================================================
 // SSR CONFIGURATION

@@ -1,8 +1,8 @@
 // BUILD-UNIVERSE Prism: Depth of Field Shaders
 // Comprehensive DOF implementations including bokeh, physically-based COC, and various blur techniques
 
-import prism::lib::*;
-import spectrum::color::*;
+use prism::lib::*;
+use spectrum::color::*;
 
 // ============================================================================
 // DOF CONFIGURATION

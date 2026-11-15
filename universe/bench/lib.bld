@@ -246,7 +246,7 @@ impl Bencher {
 
     /// Run a benchmark
     pub fn bench<F>(&mut self, name: &str, mut f: F)
-    where
+ ~ Console where
         F: FnMut(&mut Iteration),
     {
         print!("Benchmarking {}... ", name);
@@ -319,7 +319,7 @@ impl Bencher {
 
     /// Run a benchmark with throughput measurement
     pub fn bench_throughput<F>(&mut self, name: &str, size: u64, unit: ThroughputUnit, mut f: F)
-    where
+ ~ Console where
         F: FnMut(&mut Iteration),
     {
         self.bench(name, |iter| f(iter));
@@ -335,7 +335,7 @@ impl Bencher {
     }
 
     /// Print summary of all benchmarks
-    pub fn summary(&self) {
+    pub fn summary(&self) ~ Console {
         println!();
         println!("╔═══════════════════════════════════════════════════════════════╗");
         println!("║  Benchmark Summary                                            ║");
@@ -350,7 +350,7 @@ impl Bencher {
         }
     }
 
-    fn print_pretty(&self) {
+    fn print_pretty(&self) ~ Console {
         let mut current_group: Option<&str> = None;
 
         for result in &self.results {
@@ -378,7 +378,7 @@ impl Bencher {
         println!();
     }
 
-    fn print_markdown(&self) {
+    fn print_markdown(&self) ~ Console {
         println!("| Benchmark | Mean | Std Dev | Min | Max |");
         println!("|-----------|------|---------|-----|-----|");
 
@@ -392,7 +392,7 @@ impl Bencher {
         }
     }
 
-    fn print_csv(&self) {
+    fn print_csv(&self) ~ Console {
         println!("name,mean_ns,std_dev_ns,min_ns,max_ns,iterations");
 
         for result in &self.results {
@@ -406,7 +406,7 @@ impl Bencher {
         }
     }
 
-    fn print_json(&self) {
+    fn print_json(&self) ~ Console {
         println!("{{");
         println!("  \"benchmarks\": [");
 
@@ -431,7 +431,7 @@ impl Bencher {
     }
 
     /// Save results as new baseline
-    pub fn save_baseline(&self, path: &str) -> Result<(), String> {
+    pub fn save_baseline(&self, path: &str) -> Result<(), String> ~ Console {
         let mut content = String::new();
 
         for result in &self.results {
@@ -512,7 +512,7 @@ fn load_baseline(path: &str) -> Result<HashMap<String, f64>, String> {
 
 /// Create a benchmark suite
 pub fn benchmark_suite<F>(name: &str, f: F)
-where
+ ~ Console where
     F: FnOnce(&mut Bencher),
 {
     println!("╔═══════════════════════════════════════════════════════════════╗");
@@ -529,7 +529,7 @@ where
 // EXAMPLE BENCHMARKS
 // ═══════════════════════════════════════════════════════════════════════════════
 
-pub fn run_example_benchmarks() {
+pub fn run_example_benchmarks() ~ Console {
     benchmark_suite("BUILD-UNIVERSE", |b| {
         // Memory allocation benchmarks
         b.group("Memory Operations");
@@ -1302,7 +1302,7 @@ impl AsyncBencher {
 
     /// Benchmark an async function
     pub fn bench_async<F, Fut>(&mut self, name: &str, mut f: F)
-    where
+ ~ Console where
         F: FnMut() -> Fut,
         Fut: Future<Output = ()>,
     {
@@ -1930,7 +1930,7 @@ impl ExtendedBencher {
 
     /// Run parametric benchmark across multiple sizes
     pub fn bench_parametric<F>(&mut self, name: &str, config: &ParametricConfig, mut f: F)
-    where
+ ~ Console where
         F: FnMut(u64, &mut Iteration),
     {
         println!("\n{} (parametric)", name);
@@ -1968,7 +1968,7 @@ impl ExtendedBencher {
 
     /// Benchmark with memory profiling
     pub fn bench_with_memory<F>(&mut self, name: &str, mut f: F) -> MemoryProfile
-    where
+ ~ Console where
         F: FnMut(&mut Iteration),
     {
         self.memory_profiler.start();
@@ -1978,7 +1978,7 @@ impl ExtendedBencher {
 
     /// Benchmark with hardware performance counters
     pub fn bench_with_perf<F>(&mut self, name: &str, mut f: F) -> Option<PerfCounters>
-    where
+ ~ Console where
         F: FnMut(&mut Iteration),
     {
         if !PerfProfiler::is_available() {
@@ -2066,7 +2066,7 @@ impl<'a> CriterionGroup<'a> {
     }
 
     pub fn bench_function<F>(&mut self, name: &str, mut f: F) -> &mut Self
-    where
+ ~ Console where
         F: FnMut(&mut Iteration),
     {
         self.bencher.bench(name, |iter| f(iter));
@@ -2074,7 +2074,7 @@ impl<'a> CriterionGroup<'a> {
     }
 
     pub fn bench_with_input<I, F>(&mut self, name: &str, input: I, mut f: F) -> &mut Self
-    where
+ ~ Console where
         I: Clone,
         F: FnMut(&mut Iteration, I),
     {
@@ -2109,7 +2109,7 @@ impl<'a> Drop for CriterionGroup<'a> {
 
 /// Criterion-style main function
 pub fn criterion_main<F>(f: F)
-where
+ ~ Console where
     F: FnOnce(&mut Bencher),
 {
     let mut bencher = Bencher::new();
@@ -2138,7 +2138,7 @@ impl<'a> ComparisonBench<'a> {
     }
 
     pub fn compare<F>(&mut self, impl_name: &str, mut f: F) -> &mut Self
-    where
+ ~ Console where
         F: FnMut(&mut Iteration),
     {
         let bench_name = format!("{}/{}", self.name, impl_name);
@@ -2151,7 +2151,7 @@ impl<'a> ComparisonBench<'a> {
         self
     }
 
-    pub fn summary(&self) {
+    pub fn summary(&self) ~ Console {
         if self.results.is_empty() { return; }
 
         println!("\n{} Comparison:", self.name);
@@ -2648,7 +2648,7 @@ pub struct LatencyReport {
 }
 
 impl LatencyReport {
-    pub fn print(&self) {
+    pub fn print(&self) ~ Console {
         println!("\n╔═══════════════════════════════════════════════════════════════╗");
         println!("║  Latency Distribution: {}", self.name);
         println!("╚═══════════════════════════════════════════════════════════════╝");
@@ -2774,7 +2774,7 @@ impl ConcurrentBencher {
 
     /// Run a concurrent benchmark
     pub fn bench_concurrent<F>(&mut self, name: &str, f: F) -> ConcurrentResult
-    where
+ ~ Console where
         F: Fn(usize) + Send + Sync + Clone,
     {
         println!("Concurrent benchmark: {} ({} threads)", name, self.config.thread_count);
@@ -2861,7 +2861,7 @@ impl ConcurrentBencher {
 
     /// Scalability benchmark (vary thread count)
     pub fn bench_scalability<F>(&mut self, name: &str, max_threads: usize, f: F) -> ScalabilityResult
-    where
+ ~ Console where
         F: Fn(usize) + Send + Sync + Clone,
     {
         println!("\nScalability benchmark: {}", name);
@@ -2899,7 +2899,7 @@ impl ConcurrentBencher {
     }
 
     /// Print summary of all concurrent benchmarks
-    pub fn summary(&self) {
+    pub fn summary(&self) ~ Console {
         println!("\n╔═══════════════════════════════════════════════════════════════╗");
         println!("║  Concurrent Benchmark Summary                                 ║");
         println!("╚═══════════════════════════════════════════════════════════════╝\n");
@@ -2932,7 +2932,7 @@ pub struct ScalabilityResult {
 }
 
 impl ScalabilityResult {
-    pub fn print_report(&self) {
+    pub fn print_report(&self) ~ Console {
         println!("\nScalability Report: {}", self.name);
         println!("{}", "─".repeat(60));
         println!("{:>10} {:>15} {:>15} {:>12}", "Threads", "Throughput", "p99 Latency", "Efficiency");
@@ -2991,7 +2991,7 @@ pub struct EnergyProfile {
 }
 
 impl EnergyProfile {
-    pub fn print(&self) {
+    pub fn print(&self) ~ Console {
         println!("\n╔═══════════════════════════════════════════════════════════════╗");
         println!("║  Energy Profile: {}", self.name);
         println!("╚═══════════════════════════════════════════════════════════════╝");
@@ -3171,7 +3171,7 @@ pub struct IoResult {
 }
 
 impl IoResult {
-    pub fn print(&self) {
+    pub fn print(&self) ~ Console {
         println!("\n╔═══════════════════════════════════════════════════════════════╗");
         println!("║  I/O Benchmark: {}", self.name);
         println!("╚═══════════════════════════════════════════════════════════════╝");
@@ -3210,7 +3210,7 @@ impl IoBenchSuite {
     }
 
     /// Run sequential read benchmark
-    pub fn bench_sequential_read(&self) -> IoResult {
+    pub fn bench_sequential_read(&self) -> IoResult ~ Console {
         let mut config = self.config.clone();
         config.access_pattern = IoAccessPattern::Sequential;
         config.read_ratio = 1.0;
@@ -3219,7 +3219,7 @@ impl IoBenchSuite {
     }
 
     /// Run sequential write benchmark
-    pub fn bench_sequential_write(&self) -> IoResult {
+    pub fn bench_sequential_write(&self) -> IoResult ~ Console {
         let mut config = self.config.clone();
         config.access_pattern = IoAccessPattern::Sequential;
         config.read_ratio = 0.0;
@@ -3228,7 +3228,7 @@ impl IoBenchSuite {
     }
 
     /// Run random read benchmark
-    pub fn bench_random_read(&self) -> IoResult {
+    pub fn bench_random_read(&self) -> IoResult ~ Console {
         let mut config = self.config.clone();
         config.access_pattern = IoAccessPattern::Random;
         config.read_ratio = 1.0;
@@ -3237,7 +3237,7 @@ impl IoBenchSuite {
     }
 
     /// Run random write benchmark
-    pub fn bench_random_write(&self) -> IoResult {
+    pub fn bench_random_write(&self) -> IoResult ~ Console {
         let mut config = self.config.clone();
         config.access_pattern = IoAccessPattern::Random;
         config.read_ratio = 0.0;
@@ -3246,7 +3246,7 @@ impl IoBenchSuite {
     }
 
     /// Run mixed random read/write benchmark
-    pub fn bench_random_mixed(&self, read_ratio: f64) -> IoResult {
+    pub fn bench_random_mixed(&self, read_ratio: f64) -> IoResult ~ Console {
         let mut config = self.config.clone();
         config.access_pattern = IoAccessPattern::Random;
         config.read_ratio = read_ratio;
@@ -3254,7 +3254,7 @@ impl IoBenchSuite {
         self.run_benchmark(&format!("Random Mixed ({:.0}% read)", read_ratio * 100.0), config)
     }
 
-    fn run_benchmark(&self, name: &str, config: IoBenchConfig) -> IoResult {
+    fn run_benchmark(&self, name: &str, config: IoBenchConfig) -> IoResult ~ Console {
         println!("Running I/O benchmark: {}", name);
 
         let mut histogram = HdrHistogram::new(1, 1_000_000_000, 3);
@@ -3320,7 +3320,7 @@ impl IoBenchSuite {
     }
 
     /// Run full I/O benchmark suite
-    pub fn run_all(&self) -> Vec<IoResult> {
+    pub fn run_all(&self) -> Vec<IoResult> ~ Console {
         println!("\n╔═══════════════════════════════════════════════════════════════╗");
         println!("║  I/O Benchmark Suite                                          ║");
         println!("╚═══════════════════════════════════════════════════════════════╝\n");
@@ -3408,7 +3408,7 @@ pub struct NetworkResult {
 }
 
 impl NetworkResult {
-    pub fn print(&self) {
+    pub fn print(&self) ~ Console {
         println!("\n╔═══════════════════════════════════════════════════════════════╗");
         println!("║  Network Benchmark: {}", self.name);
         println!("╚═══════════════════════════════════════════════════════════════╝");
@@ -3444,7 +3444,7 @@ impl NetworkBenchSuite {
     }
 
     /// Run ping benchmark (latency only)
-    pub fn bench_ping(&self) -> NetworkResult {
+    pub fn bench_ping(&self) -> NetworkResult ~ Console {
         self.run_benchmark("Ping", |_| {
             // Simulated ping
             std::thread::sleep(Duration::from_micros(100));
@@ -3453,7 +3453,7 @@ impl NetworkBenchSuite {
     }
 
     /// Run throughput benchmark
-    pub fn bench_throughput(&self) -> NetworkResult {
+    pub fn bench_throughput(&self) -> NetworkResult ~ Console {
         let mut config = self.config.clone();
         config.request_size = 65536;  // 64 KB
         config.response_size = 65536;
@@ -3466,7 +3466,7 @@ impl NetworkBenchSuite {
     }
 
     /// Run request/response benchmark
-    pub fn bench_request_response(&self) -> NetworkResult {
+    pub fn bench_request_response(&self) -> NetworkResult ~ Console {
         self.run_benchmark("Request/Response", |_| {
             // Simulated request/response
             std::thread::sleep(Duration::from_micros(200));
@@ -3475,7 +3475,7 @@ impl NetworkBenchSuite {
     }
 
     fn run_benchmark<F>(&self, name: &str, mut f: F) -> NetworkResult
-    where
+ ~ Console where
         F: FnMut(usize) -> Result<(), String>,
     {
         println!("Running network benchmark: {}", name);
@@ -3647,7 +3647,7 @@ impl CiBenchRunner {
 
     /// Run benchmarks multiple times for statistical significance
     pub fn run_benches<F>(&mut self, name: &str, mut f: F)
-    where
+ ~ Console where
         F: FnMut(&mut Bencher),
     {
         let mut run_results = Vec::new();
@@ -3766,7 +3766,7 @@ impl CiBenchRunner {
     }
 
     /// Send Slack notification
-    pub fn send_slack_notification(&self) -> Result<(), String> {
+    pub fn send_slack_notification(&self) -> Result<(), String> ~ Console {
         if let Some(ref webhook_url) = self.config.slack_webhook {
             let message = if self.regressions.is_empty() {
                 format!("✅ Benchmarks passed! {} improvements detected.", self.improvements.len())
@@ -3781,7 +3781,7 @@ impl CiBenchRunner {
     }
 
     /// Save current results as new baseline
-    pub fn save_baseline(&self, path: &str) -> Result<(), String> {
+    pub fn save_baseline(&self, path: &str) -> Result<(), String> ~ Console {
         let mut baseline = HashMap::new();
 
         for (name, runs) in &self.current_results {
@@ -4215,7 +4215,7 @@ pub struct AllocatorResult {
 }
 
 impl AllocatorResult {
-    pub fn print(&self) {
+    pub fn print(&self) ~ Console {
         println!("\n╔═══════════════════════════════════════════════════════════════╗");
         println!("║  Allocator Benchmark: {}", self.name);
         println!("╚═══════════════════════════════════════════════════════════════╝");
@@ -4416,17 +4416,17 @@ impl ProgressBar {
         }
     }
 
-    pub fn set(&mut self, current: u64) {
+    pub fn set(&mut self, current: u64) ~ Console {
         self.current = current.min(self.total);
         self.draw();
     }
 
-    pub fn inc(&mut self) {
+    pub fn inc(&mut self) ~ Console {
         self.current = (self.current + 1).min(self.total);
         self.draw();
     }
 
-    fn draw(&self) {
+    fn draw(&self) ~ Console {
         let progress = self.current as f64 / self.total as f64;
         let filled = (progress * self.width as f64) as usize;
         let empty = self.width - filled;
@@ -4445,7 +4445,7 @@ impl ProgressBar {
         std::io::Write::flush(&mut std::io::stdout()).ok();
     }
 
-    pub fn finish(&self) {
+    pub fn finish(&self) ~ Console {
         let elapsed = self.start_time.elapsed().as_secs_f64();
         println!("\r{} |{}| 100.0% Done in {:.1}s",
             self.label,
@@ -4496,7 +4496,7 @@ impl LiveDisplay {
         });
     }
 
-    pub fn update(&mut self, name: &str, status: BenchStatus, mean: f64, samples: u64, progress: f64) {
+    pub fn update(&mut self, name: &str, status: BenchStatus, mean: f64, samples: u64, progress: f64) ~ Console {
         if let Some(bench) = self.benchmarks.iter_mut().find(|b| b.name == name) {
             bench.status = status;
             bench.current_mean = mean;
@@ -4506,7 +4506,7 @@ impl LiveDisplay {
         self.draw();
     }
 
-    fn draw(&self) {
+    fn draw(&self) ~ Console {
         // Clear screen
         print!("\x1b[2J\x1b[H");
 
@@ -4699,7 +4699,7 @@ impl FuzzedBenchRunner {
 
     /// Run benchmark with fuzzed vector inputs
     pub fn fuzz_bench_vec<F>(&mut self, name: &str, mut f: F)
-    where
+ ~ Console where
         F: FnMut(&mut Iteration, &[u8]),
     {
         let mut fuzzer = BenchFuzzer::new(|seed| {
@@ -4726,7 +4726,7 @@ impl FuzzedBenchRunner {
     }
 
     /// Summary of fuzzed results
-    pub fn summary(&self) {
+    pub fn summary(&self) ~ Console {
         self.bencher.summary();
     }
 }
@@ -4930,7 +4930,7 @@ pub mod presets {
 // MAIN ENTRY POINT
 // ═══════════════════════════════════════════════════════════════════════════════
 
-pub fn main() {
+pub fn main() ~ Console {
     run_example_benchmarks();
 }
 
@@ -4938,7 +4938,7 @@ pub fn main() {
 // EXTENDED EXAMPLE BENCHMARKS
 // ═══════════════════════════════════════════════════════════════════════════════
 
-pub fn run_extended_examples() {
+pub fn run_extended_examples() ~ Console {
     println!("\n╔═══════════════════════════════════════════════════════════════╗");
     println!("║  BUILD-UNIVERSE Extended Benchmark Examples                  ║");
     println!("╚═══════════════════════════════════════════════════════════════╝\n");

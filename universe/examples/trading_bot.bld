@@ -76,7 +76,7 @@ impl QuantumTradingBot {
     }
 
     /// Start the trading bot
-    pub fn start(&mut self) {
+    pub fn start(&mut self) ~ Console {
         println!("╔═══════════════════════════════════════════════════════════════╗");
         println!("║  Quantum Trading Bot v2.0.0                                   ║");
         println!("║  Powered by BUILD-UNIVERSE                                   ║");
@@ -106,7 +106,7 @@ impl QuantumTradingBot {
         self.print_summary();
     }
 
-    fn initialize_market_data(&mut self) {
+    fn initialize_market_data(&mut self) ~ Console {
         println!("Loading market data...");
 
         // Simulate loading historical data
@@ -127,7 +127,7 @@ impl QuantumTradingBot {
         println!("  ✓ Market data loaded\n");
     }
 
-    fn train_models(&mut self) {
+    fn train_models(&mut self) ~ Console {
         println!("Training ML models...");
 
         for (i, model) in self.ml_models.iter_mut().enumerate() {
@@ -138,7 +138,7 @@ impl QuantumTradingBot {
         println!("  ✓ Models trained\n");
     }
 
-    fn evolve_strategies(&mut self) {
+    fn evolve_strategies(&mut self) ~ Console {
         println!("Evolving trading strategies with Axiom...");
 
         // Use Build Evolution Equation to optimize strategy parameters
@@ -152,7 +152,7 @@ impl QuantumTradingBot {
         println!("  ✓ Strategies evolved\n");
     }
 
-    fn trading_cycle(&mut self) {
+    fn trading_cycle(&mut self) ~ Console {
         println!("─────────────────────────────────────────────────────────────────");
         println!("Trading Cycle");
         println!("─────────────────────────────────────────────────────────────────\n");
@@ -179,7 +179,7 @@ impl QuantumTradingBot {
         self.update_portfolio();
     }
 
-    fn update_tensor(&mut self) {
+    fn update_tensor(&mut self) ~ Console {
         println!("  Updating 4D market tensor...");
 
         // Update tensor with latest market data
@@ -192,7 +192,7 @@ impl QuantumTradingBot {
         println!("    Optimal geodesic length: {:.4}", geodesic.length());
     }
 
-    fn generate_predictions(&self) -> HashMap<String, ForecastResult> {
+    fn generate_predictions(&self) -> HashMap<String, ForecastResult> ~ Console {
         println!("  Generating predictions with Oracle...");
 
         let mut predictions = HashMap::new();
@@ -211,7 +211,7 @@ impl QuantumTradingBot {
         predictions
     }
 
-    fn compute_signals(&self, predictions: &HashMap<String, ForecastResult>) -> Vec<Signal> {
+    fn compute_signals(&self, predictions: &HashMap<String, ForecastResult>) -> Vec<Signal> ~ Console {
         println!("  Computing trading signals...");
 
         let mut signals = Vec::new();
@@ -253,7 +253,7 @@ impl QuantumTradingBot {
         signals
     }
 
-    fn combine_signals(&self, signals: &[Signal]) -> HashMap<String, f64> {
+    fn combine_signals(&self, signals: &[Signal]) -> HashMap<String, f64> ~ Console {
         println!("  Combining signals with ML ensemble...");
 
         let mut combined = HashMap::new();
@@ -274,7 +274,7 @@ impl QuantumTradingBot {
         combined
     }
 
-    fn apply_risk_management(&self, signals: &HashMap<String, f64>) -> Vec<Order> {
+    fn apply_risk_management(&self, signals: &HashMap<String, f64>) -> Vec<Order> ~ Console {
         println!("  Applying risk management...");
 
         let mut orders = Vec::new();
@@ -313,7 +313,7 @@ impl QuantumTradingBot {
         orders
     }
 
-    fn execute_orders(&mut self, orders: &[Order]) {
+    fn execute_orders(&mut self, orders: &[Order]) ~ Console {
         println!("  Executing orders...");
 
         if self.config.paper_trading {
@@ -329,7 +329,7 @@ impl QuantumTradingBot {
         }
     }
 
-    fn update_portfolio(&mut self) {
+    fn update_portfolio(&mut self) ~ Console {
         println!("  Updating portfolio...\n");
 
         // In real implementation, sync with broker
@@ -338,7 +338,7 @@ impl QuantumTradingBot {
         println!("    Daily P&L: ${:.2}", self.portfolio.daily_pnl());
     }
 
-    fn print_summary(&self) {
+    fn print_summary(&self) ~ Console {
         println!();
         println!("╔═══════════════════════════════════════════════════════════════╗");
         println!("║  Trading Session Summary                                      ║");
@@ -357,7 +357,7 @@ impl QuantumTradingBot {
 // MAIN
 // ═══════════════════════════════════════════════════════════════════════════════
 
-fn main() {
+fn main() ~ Console {
     let config = TradingConfig::default();
     let mut bot = QuantumTradingBot::new(config);
     bot.start();
