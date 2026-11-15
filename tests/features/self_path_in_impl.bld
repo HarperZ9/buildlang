@@ -1,0 +1,24 @@
+struct P { a: i32, b: i32 }
+impl P {
+    const K: i32 = 5;
+    fn make() -> Self { P { a: 1, b: 2 } }
+    fn twice(x: i32) -> i32 { x * 2 }
+    fn sum(&self) -> i32 { self.a + self.b }
+    fn total(&self) -> i32 { Self::twice(self.sum()) }
+    fn with_a(a: i32) -> Self { P { a: a, ..Self::make() } }
+    fn built() -> i32 { let p = Self::make(); p.a + Self::make().b + Self::K }
+}
+struct Q { n: i32, m: i32 }
+impl Default for Q {
+    fn default() -> Self { Q { n: 10, m: 20 } }
+}
+impl Q {
+    fn with_n(n: i32) -> Self { Q { n: n, ..Self::default() } }
+}
+fn main() ~ Console {
+    let p = P::make();
+    let q = P::with_a(7);
+    let r = Q::with_n(3);
+    println!("{} {} {} {}", p.total(), q.a, q.b, P::built());
+    println!("{} {}", r.n, r.m);
+}

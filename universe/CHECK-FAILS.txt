@@ -4,10 +4,11 @@
 # fails when a line here stops being true or a file fails that is not listed, so a fix to the
 # compiler or to a module has to remove its line.
 #
-# State on 2026-11-15 with the compiler CI built from main (buildc 1.15.0, Linux): 72 of 267
-# files pass and 195 fail (1 lex, 21 parse, 173 types). buildc 1.14.0 passed 69. 1.15.0 accepts
-# programs/check.bld, find.bld, lint.bld and watch.bld, which 1.14.0 refused, and refuses
-# prism/pbr.bld, which 1.14.0 accepted: `Self::default()` has no C function behind it (BL0901).
+# State on 2026-11-15 with the compiler CI built from main (buildc 1.15.0, Linux): 73 of 267
+# files pass and 194 fail (1 lex, 21 parse, 172 types). buildc 1.14.0 passed 69. 1.15.0 accepts
+# programs/check.bld, find.bld, lint.bld and watch.bld, which 1.14.0 refused. 1.15.0 refused
+# prism/pbr.bld (`Self::default()` had no C function behind it); `Self::name` paths in an impl
+# block resolve to the type since then, and the file passes again.
 #
 # What the failures are, counted as files showing each diagnostic (buildc 1.14.0, 2026-11-15):
 # BL0314 undefined method 62, BL0301 type mismatch 52, BL0901 the C backend cannot compile the
@@ -157,7 +158,6 @@ prism/dof.bld types
 prism/effects.bld types
 prism/lib.bld types
 prism/motion_blur.bld types
-prism/pbr.bld types
 prism/raytracing.bld types
 prism/shadows.bld types
 prism/ssao.bld types

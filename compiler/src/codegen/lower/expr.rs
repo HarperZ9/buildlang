@@ -1170,6 +1170,26 @@ impl<'ctx> MirLowerer<'ctx> {
         Some(renamed)
     }
 
+    /// `Self::name` written inside an impl block, with `Self` replaced by the
+    /// type the block is for, so the path lowers the way `Type::name` does.
+    /// Before this a call such as `Self::default()` was lowered to a function
+    /// named `Self_default`, which no impl block defines; 1.14.0 emitted a call
+    /// to that missing function and 1.15.0 refused the program (BL0901).
+    fn self_path_resolved(&self, expr: &ast::Expr) -> Option<ast::Expr> {
+        let ExprKind::Path(path) = &expr.kind else {
+            return None;
+        };
+        if path.segments.len() < 2 || path.segments[0].ident.name.as_ref() != "Self" {
+            return None;
+        }
+        let impl_ty = self.current_impl_type.clone()?;
+        let mut resolved = expr.clone();
+        if let ExprKind::Path(p) = &mut resolved.kind {
+            p.segments[0].ident.name = impl_ty;
+        }
+        Some(resolved)
+    }
+
     pub(crate) fn lower_ident(&mut self, ident: &ast::Ident) -> CodegenResult<MirValue> {
         if let Some(&local) = self.var_map.get(&ident.name) {
             self.note_pending_vec_use(local);
@@ -1268,6 +1288,14 @@ impl<'ctx> MirLowerer<'ctx> {
     }
 
     fn lower_path(&mut self, path: &ast::Path) -> CodegenResult<MirValue> {
+        // `Self::NAME` inside an impl block is `Type::NAME`.
+        if path.segments.len() >= 2 && path.segments[0].ident.name.as_ref() == "Self" {
+            if let Some(impl_ty) = self.current_impl_type.clone() {
+                let mut resolved = path.clone();
+                resolved.segments[0].ident.name = impl_ty;
+                return self.lower_path(&resolved);
+            }
+        }
         if path.is_simple() {
             if let Some(ident) = path.last_ident() {
                 return self.lower_ident(ident);
@@ -3040,6 +3068,9 @@ impl<'ctx> MirLowerer<'ctx> {
         func: &ast::Expr,
         args: &[ast::Expr],
     ) -> CodegenResult<MirValue> {
+        if let Some(resolved) = self.self_path_resolved(func) {
+            return self.lower_call_with_closures(&resolved, args);
+        }
         let callee: Option<Arc<str>> = self.extract_call_name(func).map(Arc::from);
         let Some(callee) = callee else {
             return self.lower_call(func, args);
@@ -3183,6 +3214,9 @@ impl<'ctx> MirLowerer<'ctx> {
     }
 
     fn lower_call(&mut self, func: &ast::Expr, args: &[ast::Expr]) -> CodegenResult<MirValue> {
+        if let Some(resolved) = self.self_path_resolved(func) {
+            return self.lower_call(&resolved, args);
+        }
         // A call to a user function that shares a name with a C library or
         // runtime function goes to the user's function (see `shadow_fns`).
         if let Some(renamed) = self.shadowed_callee(func) {
@@ -4787,6 +4821,9 @@ impl<'ctx> MirLowerer<'ctx> {
     }
 
     fn resolve_call_return_type(&self, func: &ast::Expr) -> MirType {
+        if let Some(resolved) = self.self_path_resolved(func) {
+            return self.resolve_call_return_type(&resolved);
+        }
         let name = match &func.kind {
             ExprKind::Ident(ident) => {
                 // Inside an inline module, try the prefixed name first so

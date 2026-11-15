@@ -10,6 +10,10 @@ tracked in `STATUS.md`, `README.md`, and
 
 ## Unreleased
 
+### Compiler
+
+- `Self::name(...)` and `Self::NAME` inside an impl block now resolve to the type the block is for. A call such as `Self::default()` was lowered to a C function named `Self_default`, which nothing defines: 1.14.0 emitted the call and the C build failed, and 1.15.0 refused the program at the check (BL0901). The struct-update form `S { a, ..Self::default() }` builds as well. Feature program `tests/features/self_path_in_impl.bld`. `universe/prism/pbr.bld` passes the check again: 73 of 267 universe files pass, 194 fail.
+
 ### Editor support in `editors/`
 
 - The `HarperZ9/buildlang-tmLanguage` repository moved in as `editors/tmLanguage/` (its `main` at `d9c3de1`) and `HarperZ9/buildlang-vscode` as `editors/vscode-syntax/` (its `main` at `c7cc292`), each as one commit and each keeping its MIT licence file. `editors/vscode/` already held a larger extension with snippets and the language-server client, so the syntax-only extension sits beside it. The two old repositories stay in place and are not archived: the VS Code Marketplace listing `HarperZ9.quantalang` links to one of them.
