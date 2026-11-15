@@ -1,0 +1,1188 @@
+// BUILD-UNIVERSE: Refract - Weather System Integration
+// Dynamic weather-based effect parameter adjustment
+// Version: 1.0.0
+
+module refract::weather;
+
+use super::lib::*;
+use super::effects::*;
+
+// ============================================================================
+// WEATHER CLASSIFICATION
+// ============================================================================
+
+/// Detailed weather classification
+pub struct WeatherClassification {
+    pub primary_type: WeatherType,
+    pub intensity: f32,           // 0-1 weather intensity
+    pub cloud_coverage: f32,      // 0-1 cloud cover
+    pub precipitation: f32,       // 0-1 precipitation amount
+    pub fog_density: f32,         // 0-1 fog amount
+    pub wind_strength: f32,       // 0-1 wind intensity
+    pub lightning_chance: f32,    // 0-1 lightning probability
+    pub is_harsh: bool,           // Extreme weather
+}
+
+impl WeatherClassification {
+    pub fn from_weather_id(game: TargetGame, weather_id: u32) -> Self {
+        match game {
+            TargetGame::SkyrimSE | TargetGame::SkyrimAE => {
+                Self::classify_skyrim_weather(weather_id)
+            },
+            TargetGame::Fallout4 => {
+                Self::classify_fallout4_weather(weather_id)
+            },
+            _ => Self::default()
+        }
+    }
+
+    fn classify_skyrim_weather(weather_id: u32) -> Self {
+        // Skyrim weather form IDs
+        match weather_id {
+            // Clear weathers
+            0x10E1F2 | 0x10FE7E | 0x10FE82 => Self {
+                primary_type: WeatherType::Clear,
+                intensity: 0.0,
+                cloud_coverage: 0.1,
+                precipitation: 0.0,
+                fog_density: 0.0,
+                wind_strength: 0.2,
+                lightning_chance: 0.0,
+                is_harsh: false,
+            },
+            // Cloudy weathers
+            0x10E1F3 | 0x10FE7F | 0x10FE83 => Self {
+                primary_type: WeatherType::Cloudy,
+                intensity: 0.3,
+                cloud_coverage: 0.5,
+                precipitation: 0.0,
+                fog_density: 0.1,
+                wind_strength: 0.3,
+                lightning_chance: 0.0,
+                is_harsh: false,
+            },
+            // Overcast
+            0x10E1F4 | 0x10FE80 | 0x10FE84 => Self {
+                primary_type: WeatherType::Overcast,
+                intensity: 0.5,
+                cloud_coverage: 0.9,
+                precipitation: 0.0,
+                fog_density: 0.2,
+                wind_strength: 0.4,
+                lightning_chance: 0.0,
+                is_harsh: false,
+            },
+            // Fog
+            0x10E1F5 | 0x10FE81 | 0x10FE85 => Self {
+                primary_type: WeatherType::Fog,
+                intensity: 0.7,
+                cloud_coverage: 1.0,
+                precipitation: 0.0,
+                fog_density: 0.8,
+                wind_strength: 0.1,
+                lightning_chance: 0.0,
+                is_harsh: false,
+            },
+            // Rain
+            0x10E1F6 | 0x10FE7D => Self {
+                primary_type: WeatherType::Rain,
+                intensity: 0.6,
+                cloud_coverage: 0.9,
+                precipitation: 0.7,
+                fog_density: 0.3,
+                wind_strength: 0.5,
+                lightning_chance: 0.1,
+                is_harsh: false,
+            },
+            // Storm
+            0x10E1F7 | 0x10FE86 => Self {
+                primary_type: WeatherType::Storm,
+                intensity: 1.0,
+                cloud_coverage: 1.0,
+                precipitation: 1.0,
+                fog_density: 0.4,
+                wind_strength: 0.9,
+                lightning_chance: 0.5,
+                is_harsh: true,
+            },
+            // Snow
+            0x10E1F8 | 0x10FE87 => Self {
+                primary_type: WeatherType::Snow,
+                intensity: 0.6,
+                cloud_coverage: 0.8,
+                precipitation: 0.6,
+                fog_density: 0.2,
+                wind_strength: 0.3,
+                lightning_chance: 0.0,
+                is_harsh: false,
+            },
+            // Blizzard
+            0x10E1F9 => Self {
+                primary_type: WeatherType::Blizzard,
+                intensity: 1.0,
+                cloud_coverage: 1.0,
+                precipitation: 1.0,
+                fog_density: 0.7,
+                wind_strength: 1.0,
+                lightning_chance: 0.0,
+                is_harsh: true,
+            },
+            _ => Self::default()
+        }
+    }
+
+    fn classify_fallout4_weather(weather_id: u32) -> Self {
+        // Fallout 4 weather form IDs
+        match weather_id {
+            // Clear
+            0x0001ED8C => Self {
+                primary_type: WeatherType::Clear,
+                intensity: 0.0,
+                cloud_coverage: 0.1,
+                precipitation: 0.0,
+                fog_density: 0.05,
+                wind_strength: 0.2,
+                lightning_chance: 0.0,
+                is_harsh: false,
+            },
+            // Radstorm
+            0x001C858B => Self {
+                primary_type: WeatherType::Custom("Radstorm".to_string()),
+                intensity: 1.0,
+                cloud_coverage: 1.0,
+                precipitation: 0.3,
+                fog_density: 0.8,
+                wind_strength: 0.8,
+                lightning_chance: 0.8,
+                is_harsh: true,
+            },
+            _ => Self::default()
+        }
+    }
+}
+
+impl Default for WeatherClassification {
+    fn default() -> Self {
+        Self {
+            primary_type: WeatherType::Clear,
+            intensity: 0.0,
+            cloud_coverage: 0.2,
+            precipitation: 0.0,
+            fog_density: 0.0,
+            wind_strength: 0.2,
+            lightning_chance: 0.0,
+            is_harsh: false,
+        }
+    }
+}
+
+// ============================================================================
+// WEATHER PARAMETER PROFILES
+// ============================================================================
+
+/// Weather-specific effect parameters
+pub struct WeatherEffectProfile {
+    pub name: String,
+    pub weather_types: Vec<WeatherType>,
+
+    // SSAO adjustments
+    pub ssao_intensity_mult: f32,
+    pub ssao_radius_mult: f32,
+
+    // SSR adjustments
+    pub ssr_intensity_mult: f32,
+    pub ssr_roughness_offset: f32,
+
+    // Bloom adjustments
+    pub bloom_intensity_mult: f32,
+    pub bloom_threshold_mult: f32,
+
+    // DOF adjustments
+    pub dof_blur_mult: f32,
+    pub dof_focus_shift: f32,
+
+    // Tonemap adjustments
+    pub exposure_mult: f32,
+    pub contrast_mult: f32,
+    pub saturation_mult: f32,
+
+    // Color grading
+    pub color_tint: Vec3,
+    pub color_tint_intensity: f32,
+    pub shadow_tint: Vec3,
+    pub highlight_tint: Vec3,
+
+    // Fog
+    pub fog_color: Vec3,
+    pub fog_density_mult: f32,
+    pub fog_start_mult: f32,
+    pub fog_end_mult: f32,
+
+    // Volumetric adjustments
+    pub volumetric_intensity_mult: f32,
+    pub volumetric_scatter_mult: f32,
+    pub god_ray_intensity_mult: f32,
+
+    // Ambient adjustments
+    pub ambient_intensity_mult: f32,
+    pub ambient_tint: Vec3,
+
+    // Sun/Sky
+    pub sun_intensity_mult: f32,
+    pub sun_color_mult: Vec3,
+    pub sky_intensity_mult: f32,
+}
+
+impl WeatherEffectProfile {
+    /// Create a profile for clear weather
+    pub fn clear() -> Self {
+        Self {
+            name: "Clear".to_string(),
+            weather_types: vec![WeatherType::Clear],
+
+            ssao_intensity_mult: 1.0,
+            ssao_radius_mult: 1.0,
+
+            ssr_intensity_mult: 1.0,
+            ssr_roughness_offset: 0.0,
+
+            bloom_intensity_mult: 1.0,
+            bloom_threshold_mult: 1.0,
+
+            dof_blur_mult: 1.0,
+            dof_focus_shift: 0.0,
+
+            exposure_mult: 1.0,
+            contrast_mult: 1.0,
+            saturation_mult: 1.0,
+
+            color_tint: Vec3::new(1.0, 1.0, 1.0),
+            color_tint_intensity: 0.0,
+            shadow_tint: Vec3::new(0.9, 0.9, 1.0),
+            highlight_tint: Vec3::new(1.0, 0.98, 0.95),
+
+            fog_color: Vec3::new(0.7, 0.8, 1.0),
+            fog_density_mult: 1.0,
+            fog_start_mult: 1.0,
+            fog_end_mult: 1.0,
+
+            volumetric_intensity_mult: 1.0,
+            volumetric_scatter_mult: 1.0,
+            god_ray_intensity_mult: 1.0,
+
+            ambient_intensity_mult: 1.0,
+            ambient_tint: Vec3::new(1.0, 1.0, 1.0),
+
+            sun_intensity_mult: 1.0,
+            sun_color_mult: Vec3::new(1.0, 1.0, 1.0),
+            sky_intensity_mult: 1.0,
+        }
+    }
+
+    /// Create a profile for cloudy weather
+    pub fn cloudy() -> Self {
+        Self {
+            name: "Cloudy".to_string(),
+            weather_types: vec![WeatherType::Cloudy],
+
+            ssao_intensity_mult: 1.1,
+            ssao_radius_mult: 1.0,
+
+            ssr_intensity_mult: 0.9,
+            ssr_roughness_offset: 0.05,
+
+            bloom_intensity_mult: 0.8,
+            bloom_threshold_mult: 1.1,
+
+            dof_blur_mult: 1.0,
+            dof_focus_shift: 0.0,
+
+            exposure_mult: 1.1,
+            contrast_mult: 0.95,
+            saturation_mult: 0.9,
+
+            color_tint: Vec3::new(0.95, 0.95, 1.0),
+            color_tint_intensity: 0.1,
+            shadow_tint: Vec3::new(0.85, 0.88, 0.95),
+            highlight_tint: Vec3::new(0.98, 0.98, 1.0),
+
+            fog_color: Vec3::new(0.75, 0.78, 0.85),
+            fog_density_mult: 1.2,
+            fog_start_mult: 0.9,
+            fog_end_mult: 0.95,
+
+            volumetric_intensity_mult: 1.2,
+            volumetric_scatter_mult: 1.1,
+            god_ray_intensity_mult: 0.3,
+
+            ambient_intensity_mult: 1.2,
+            ambient_tint: Vec3::new(0.9, 0.92, 1.0),
+
+            sun_intensity_mult: 0.6,
+            sun_color_mult: Vec3::new(1.0, 0.98, 0.95),
+            sky_intensity_mult: 0.8,
+        }
+    }
+
+    /// Create a profile for rainy weather
+    pub fn rain() -> Self {
+        Self {
+            name: "Rain".to_string(),
+            weather_types: vec![WeatherType::Rain],
+
+            ssao_intensity_mult: 1.2,
+            ssao_radius_mult: 1.1,
+
+            ssr_intensity_mult: 1.5,  // Wet surfaces are more reflective
+            ssr_roughness_offset: -0.15,  // Smoother wet surfaces
+
+            bloom_intensity_mult: 0.6,
+            bloom_threshold_mult: 1.3,
+
+            dof_blur_mult: 1.1,
+            dof_focus_shift: -0.1,
+
+            exposure_mult: 1.2,
+            contrast_mult: 0.9,
+            saturation_mult: 0.85,
+
+            color_tint: Vec3::new(0.9, 0.92, 1.0),
+            color_tint_intensity: 0.15,
+            shadow_tint: Vec3::new(0.75, 0.8, 0.9),
+            highlight_tint: Vec3::new(0.95, 0.95, 1.0),
+
+            fog_color: Vec3::new(0.7, 0.72, 0.8),
+            fog_density_mult: 2.0,
+            fog_start_mult: 0.7,
+            fog_end_mult: 0.6,
+
+            volumetric_intensity_mult: 1.5,
+            volumetric_scatter_mult: 1.3,
+            god_ray_intensity_mult: 0.1,
+
+            ambient_intensity_mult: 1.4,
+            ambient_tint: Vec3::new(0.85, 0.88, 0.95),
+
+            sun_intensity_mult: 0.3,
+            sun_color_mult: Vec3::new(0.9, 0.9, 0.95),
+            sky_intensity_mult: 0.4,
+        }
+    }
+
+    /// Create a profile for stormy weather
+    pub fn storm() -> Self {
+        Self {
+            name: "Storm".to_string(),
+            weather_types: vec![WeatherType::Storm],
+
+            ssao_intensity_mult: 1.3,
+            ssao_radius_mult: 1.2,
+
+            ssr_intensity_mult: 1.8,
+            ssr_roughness_offset: -0.2,
+
+            bloom_intensity_mult: 0.4,
+            bloom_threshold_mult: 1.5,
+
+            dof_blur_mult: 1.2,
+            dof_focus_shift: -0.15,
+
+            exposure_mult: 1.3,
+            contrast_mult: 1.1,
+            saturation_mult: 0.8,
+
+            color_tint: Vec3::new(0.85, 0.87, 0.95),
+            color_tint_intensity: 0.25,
+            shadow_tint: Vec3::new(0.6, 0.65, 0.8),
+            highlight_tint: Vec3::new(0.9, 0.9, 1.0),
+
+            fog_color: Vec3::new(0.6, 0.62, 0.7),
+            fog_density_mult: 3.0,
+            fog_start_mult: 0.5,
+            fog_end_mult: 0.4,
+
+            volumetric_intensity_mult: 2.0,
+            volumetric_scatter_mult: 1.5,
+            god_ray_intensity_mult: 0.0,
+
+            ambient_intensity_mult: 1.8,
+            ambient_tint: Vec3::new(0.8, 0.82, 0.9),
+
+            sun_intensity_mult: 0.15,
+            sun_color_mult: Vec3::new(0.85, 0.85, 0.9),
+            sky_intensity_mult: 0.25,
+        }
+    }
+
+    /// Create a profile for foggy weather
+    pub fn fog() -> Self {
+        Self {
+            name: "Fog".to_string(),
+            weather_types: vec![WeatherType::Fog],
+
+            ssao_intensity_mult: 0.8,
+            ssao_radius_mult: 0.9,
+
+            ssr_intensity_mult: 0.5,
+            ssr_roughness_offset: 0.1,
+
+            bloom_intensity_mult: 1.2,
+            bloom_threshold_mult: 0.8,
+
+            dof_blur_mult: 0.9,
+            dof_focus_shift: 0.0,
+
+            exposure_mult: 1.15,
+            contrast_mult: 0.85,
+            saturation_mult: 0.75,
+
+            color_tint: Vec3::new(0.95, 0.95, 1.0),
+            color_tint_intensity: 0.2,
+            shadow_tint: Vec3::new(0.85, 0.88, 0.95),
+            highlight_tint: Vec3::new(1.0, 1.0, 1.02),
+
+            fog_color: Vec3::new(0.9, 0.92, 0.98),
+            fog_density_mult: 5.0,
+            fog_start_mult: 0.3,
+            fog_end_mult: 0.25,
+
+            volumetric_intensity_mult: 0.5,
+            volumetric_scatter_mult: 0.8,
+            god_ray_intensity_mult: 0.5,
+
+            ambient_intensity_mult: 1.5,
+            ambient_tint: Vec3::new(0.95, 0.95, 1.0),
+
+            sun_intensity_mult: 0.4,
+            sun_color_mult: Vec3::new(1.0, 0.98, 0.95),
+            sky_intensity_mult: 0.5,
+        }
+    }
+
+    /// Create a profile for snowy weather
+    pub fn snow() -> Self {
+        Self {
+            name: "Snow".to_string(),
+            weather_types: vec![WeatherType::Snow],
+
+            ssao_intensity_mult: 0.9,
+            ssao_radius_mult: 1.0,
+
+            ssr_intensity_mult: 1.2,
+            ssr_roughness_offset: 0.0,
+
+            bloom_intensity_mult: 1.3,
+            bloom_threshold_mult: 0.7,
+
+            dof_blur_mult: 1.1,
+            dof_focus_shift: 0.0,
+
+            exposure_mult: 0.9,  // Compensate for bright snow
+            contrast_mult: 1.05,
+            saturation_mult: 0.8,
+
+            color_tint: Vec3::new(0.95, 0.98, 1.05),
+            color_tint_intensity: 0.15,
+            shadow_tint: Vec3::new(0.8, 0.85, 1.0),
+            highlight_tint: Vec3::new(1.0, 1.0, 1.05),
+
+            fog_color: Vec3::new(0.95, 0.97, 1.0),
+            fog_density_mult: 1.5,
+            fog_start_mult: 0.8,
+            fog_end_mult: 0.75,
+
+            volumetric_intensity_mult: 1.3,
+            volumetric_scatter_mult: 1.2,
+            god_ray_intensity_mult: 0.4,
+
+            ambient_intensity_mult: 1.3,
+            ambient_tint: Vec3::new(0.92, 0.95, 1.05),
+
+            sun_intensity_mult: 0.7,
+            sun_color_mult: Vec3::new(1.0, 0.98, 0.96),
+            sky_intensity_mult: 0.6,
+        }
+    }
+
+    /// Create a profile for blizzard weather
+    pub fn blizzard() -> Self {
+        Self {
+            name: "Blizzard".to_string(),
+            weather_types: vec![WeatherType::Blizzard],
+
+            ssao_intensity_mult: 0.5,
+            ssao_radius_mult: 0.8,
+
+            ssr_intensity_mult: 0.3,
+            ssr_roughness_offset: 0.2,
+
+            bloom_intensity_mult: 1.5,
+            bloom_threshold_mult: 0.6,
+
+            dof_blur_mult: 1.3,
+            dof_focus_shift: -0.2,
+
+            exposure_mult: 0.85,
+            contrast_mult: 0.9,
+            saturation_mult: 0.6,
+
+            color_tint: Vec3::new(0.9, 0.95, 1.1),
+            color_tint_intensity: 0.3,
+            shadow_tint: Vec3::new(0.7, 0.8, 1.0),
+            highlight_tint: Vec3::new(1.0, 1.0, 1.1),
+
+            fog_color: Vec3::new(0.95, 0.97, 1.02),
+            fog_density_mult: 8.0,
+            fog_start_mult: 0.2,
+            fog_end_mult: 0.15,
+
+            volumetric_intensity_mult: 0.3,
+            volumetric_scatter_mult: 0.5,
+            god_ray_intensity_mult: 0.0,
+
+            ambient_intensity_mult: 1.8,
+            ambient_tint: Vec3::new(0.9, 0.93, 1.05),
+
+            sun_intensity_mult: 0.1,
+            sun_color_mult: Vec3::new(1.0, 1.0, 1.05),
+            sky_intensity_mult: 0.15,
+        }
+    }
+
+    /// Interpolate between two profiles
+    pub fn lerp(a: &Self, b: &Self, t: f32) -> Self {
+        let lerp_f32 = |x: f32, y: f32| -> f32 { x + (y - x) * t };
+        let lerp_vec3 = |x: Vec3, y: Vec3| -> Vec3 {
+            Vec3::new(
+                lerp_f32(x.x, y.x),
+                lerp_f32(x.y, y.y),
+                lerp_f32(x.z, y.z)
+            )
+        };
+
+        Self {
+            name: if t < 0.5 { a.name.clone() } else { b.name.clone() },
+            weather_types: b.weather_types.clone(),
+
+            ssao_intensity_mult: lerp_f32(a.ssao_intensity_mult, b.ssao_intensity_mult),
+            ssao_radius_mult: lerp_f32(a.ssao_radius_mult, b.ssao_radius_mult),
+
+            ssr_intensity_mult: lerp_f32(a.ssr_intensity_mult, b.ssr_intensity_mult),
+            ssr_roughness_offset: lerp_f32(a.ssr_roughness_offset, b.ssr_roughness_offset),
+
+            bloom_intensity_mult: lerp_f32(a.bloom_intensity_mult, b.bloom_intensity_mult),
+            bloom_threshold_mult: lerp_f32(a.bloom_threshold_mult, b.bloom_threshold_mult),
+
+            dof_blur_mult: lerp_f32(a.dof_blur_mult, b.dof_blur_mult),
+            dof_focus_shift: lerp_f32(a.dof_focus_shift, b.dof_focus_shift),
+
+            exposure_mult: lerp_f32(a.exposure_mult, b.exposure_mult),
+            contrast_mult: lerp_f32(a.contrast_mult, b.contrast_mult),
+            saturation_mult: lerp_f32(a.saturation_mult, b.saturation_mult),
+
+            color_tint: lerp_vec3(a.color_tint, b.color_tint),
+            color_tint_intensity: lerp_f32(a.color_tint_intensity, b.color_tint_intensity),
+            shadow_tint: lerp_vec3(a.shadow_tint, b.shadow_tint),
+            highlight_tint: lerp_vec3(a.highlight_tint, b.highlight_tint),
+
+            fog_color: lerp_vec3(a.fog_color, b.fog_color),
+            fog_density_mult: lerp_f32(a.fog_density_mult, b.fog_density_mult),
+            fog_start_mult: lerp_f32(a.fog_start_mult, b.fog_start_mult),
+            fog_end_mult: lerp_f32(a.fog_end_mult, b.fog_end_mult),
+
+            volumetric_intensity_mult: lerp_f32(a.volumetric_intensity_mult, b.volumetric_intensity_mult),
+            volumetric_scatter_mult: lerp_f32(a.volumetric_scatter_mult, b.volumetric_scatter_mult),
+            god_ray_intensity_mult: lerp_f32(a.god_ray_intensity_mult, b.god_ray_intensity_mult),
+
+            ambient_intensity_mult: lerp_f32(a.ambient_intensity_mult, b.ambient_intensity_mult),
+            ambient_tint: lerp_vec3(a.ambient_tint, b.ambient_tint),
+
+            sun_intensity_mult: lerp_f32(a.sun_intensity_mult, b.sun_intensity_mult),
+            sun_color_mult: lerp_vec3(a.sun_color_mult, b.sun_color_mult),
+            sky_intensity_mult: lerp_f32(a.sky_intensity_mult, b.sky_intensity_mult),
+        }
+    }
+}
+
+// ============================================================================
+// TIME OF DAY PROFILES
+// ============================================================================
+
+/// Time-of-day specific parameters
+pub struct TimeOfDayProfile {
+    pub name: String,
+    pub hour_start: f32,
+    pub hour_end: f32,
+
+    // Lighting
+    pub sun_intensity: f32,
+    pub sun_color: Vec3,
+    pub sun_angle: f32,
+
+    // Ambient
+    pub ambient_intensity: f32,
+    pub ambient_color: Vec3,
+    pub sky_intensity: f32,
+    pub sky_color: Vec3,
+
+    // Effects
+    pub exposure_bias: f32,
+    pub bloom_intensity: f32,
+    pub god_ray_intensity: f32,
+
+    // Color grading
+    pub color_temperature: f32,  // Kelvin
+    pub tint: Vec3,
+    pub saturation: f32,
+    pub contrast: f32,
+
+    // Shadows
+    pub shadow_intensity: f32,
+    pub shadow_color: Vec3,
+}
+
+impl TimeOfDayProfile {
+    /// Dawn profile (5:00 - 7:00)
+    pub fn dawn() -> Self {
+        Self {
+            name: "Dawn".to_string(),
+            hour_start: 5.0,
+            hour_end: 7.0,
+
+            sun_intensity: 0.3,
+            sun_color: Vec3::new(1.0, 0.6, 0.4),
+            sun_angle: 5.0,
+
+            ambient_intensity: 0.4,
+            ambient_color: Vec3::new(0.7, 0.75, 1.0),
+            sky_intensity: 0.5,
+            sky_color: Vec3::new(0.8, 0.7, 0.9),
+
+            exposure_bias: 0.3,
+            bloom_intensity: 1.3,
+            god_ray_intensity: 1.5,
+
+            color_temperature: 3500.0,
+            tint: Vec3::new(1.05, 0.95, 0.9),
+            saturation: 1.1,
+            contrast: 0.95,
+
+            shadow_intensity: 0.4,
+            shadow_color: Vec3::new(0.6, 0.7, 0.9),
+        }
+    }
+
+    /// Morning profile (7:00 - 10:00)
+    pub fn morning() -> Self {
+        Self {
+            name: "Morning".to_string(),
+            hour_start: 7.0,
+            hour_end: 10.0,
+
+            sun_intensity: 0.7,
+            sun_color: Vec3::new(1.0, 0.9, 0.8),
+            sun_angle: 25.0,
+
+            ambient_intensity: 0.6,
+            ambient_color: Vec3::new(0.85, 0.9, 1.0),
+            sky_intensity: 0.8,
+            sky_color: Vec3::new(0.6, 0.75, 1.0),
+
+            exposure_bias: 0.0,
+            bloom_intensity: 1.0,
+            god_ray_intensity: 1.2,
+
+            color_temperature: 5500.0,
+            tint: Vec3::new(1.0, 1.0, 1.0),
+            saturation: 1.05,
+            contrast: 1.0,
+
+            shadow_intensity: 0.5,
+            shadow_color: Vec3::new(0.7, 0.75, 0.85),
+        }
+    }
+
+    /// Midday profile (10:00 - 15:00)
+    pub fn midday() -> Self {
+        Self {
+            name: "Midday".to_string(),
+            hour_start: 10.0,
+            hour_end: 15.0,
+
+            sun_intensity: 1.0,
+            sun_color: Vec3::new(1.0, 0.98, 0.95),
+            sun_angle: 60.0,
+
+            ambient_intensity: 0.8,
+            ambient_color: Vec3::new(0.9, 0.95, 1.0),
+            sky_intensity: 1.0,
+            sky_color: Vec3::new(0.5, 0.7, 1.0),
+
+            exposure_bias: -0.2,
+            bloom_intensity: 0.8,
+            god_ray_intensity: 0.8,
+
+            color_temperature: 6500.0,
+            tint: Vec3::new(1.0, 1.0, 1.0),
+            saturation: 1.0,
+            contrast: 1.05,
+
+            shadow_intensity: 0.6,
+            shadow_color: Vec3::new(0.75, 0.8, 0.9),
+        }
+    }
+
+    /// Afternoon profile (15:00 - 18:00)
+    pub fn afternoon() -> Self {
+        Self {
+            name: "Afternoon".to_string(),
+            hour_start: 15.0,
+            hour_end: 18.0,
+
+            sun_intensity: 0.8,
+            sun_color: Vec3::new(1.0, 0.92, 0.85),
+            sun_angle: 35.0,
+
+            ambient_intensity: 0.7,
+            ambient_color: Vec3::new(0.88, 0.9, 0.98),
+            sky_intensity: 0.9,
+            sky_color: Vec3::new(0.55, 0.72, 0.98),
+
+            exposure_bias: 0.1,
+            bloom_intensity: 1.0,
+            god_ray_intensity: 1.0,
+
+            color_temperature: 5800.0,
+            tint: Vec3::new(1.02, 1.0, 0.98),
+            saturation: 1.02,
+            contrast: 1.0,
+
+            shadow_intensity: 0.55,
+            shadow_color: Vec3::new(0.72, 0.78, 0.88),
+        }
+    }
+
+    /// Dusk profile (18:00 - 20:00)
+    pub fn dusk() -> Self {
+        Self {
+            name: "Dusk".to_string(),
+            hour_start: 18.0,
+            hour_end: 20.0,
+
+            sun_intensity: 0.4,
+            sun_color: Vec3::new(1.0, 0.5, 0.3),
+            sun_angle: 10.0,
+
+            ambient_intensity: 0.5,
+            ambient_color: Vec3::new(0.75, 0.65, 0.85),
+            sky_intensity: 0.6,
+            sky_color: Vec3::new(0.9, 0.6, 0.7),
+
+            exposure_bias: 0.4,
+            bloom_intensity: 1.4,
+            god_ray_intensity: 1.8,
+
+            color_temperature: 3000.0,
+            tint: Vec3::new(1.1, 0.9, 0.85),
+            saturation: 1.15,
+            contrast: 0.95,
+
+            shadow_intensity: 0.45,
+            shadow_color: Vec3::new(0.5, 0.55, 0.75),
+        }
+    }
+
+    /// Night profile (20:00 - 5:00)
+    pub fn night() -> Self {
+        Self {
+            name: "Night".to_string(),
+            hour_start: 20.0,
+            hour_end: 5.0,
+
+            sun_intensity: 0.0,
+            sun_color: Vec3::new(0.0, 0.0, 0.0),
+            sun_angle: -30.0,
+
+            ambient_intensity: 0.15,
+            ambient_color: Vec3::new(0.6, 0.7, 1.0),
+            sky_intensity: 0.1,
+            sky_color: Vec3::new(0.1, 0.15, 0.3),
+
+            exposure_bias: 1.0,
+            bloom_intensity: 1.5,
+            god_ray_intensity: 0.5,
+
+            color_temperature: 8000.0,
+            tint: Vec3::new(0.9, 0.95, 1.1),
+            saturation: 0.7,
+            contrast: 1.1,
+
+            shadow_intensity: 0.2,
+            shadow_color: Vec3::new(0.3, 0.35, 0.5),
+        }
+    }
+
+    /// Interpolate between two time profiles
+    pub fn lerp(a: &Self, b: &Self, t: f32) -> Self {
+        let lerp_f32 = |x: f32, y: f32| -> f32 { x + (y - x) * t };
+        let lerp_vec3 = |x: Vec3, y: Vec3| -> Vec3 {
+            Vec3::new(
+                lerp_f32(x.x, y.x),
+                lerp_f32(x.y, y.y),
+                lerp_f32(x.z, y.z)
+            )
+        };
+
+        Self {
+            name: if t < 0.5 { a.name.clone() } else { b.name.clone() },
+            hour_start: lerp_f32(a.hour_start, b.hour_start),
+            hour_end: lerp_f32(a.hour_end, b.hour_end),
+
+            sun_intensity: lerp_f32(a.sun_intensity, b.sun_intensity),
+            sun_color: lerp_vec3(a.sun_color, b.sun_color),
+            sun_angle: lerp_f32(a.sun_angle, b.sun_angle),
+
+            ambient_intensity: lerp_f32(a.ambient_intensity, b.ambient_intensity),
+            ambient_color: lerp_vec3(a.ambient_color, b.ambient_color),
+            sky_intensity: lerp_f32(a.sky_intensity, b.sky_intensity),
+            sky_color: lerp_vec3(a.sky_color, b.sky_color),
+
+            exposure_bias: lerp_f32(a.exposure_bias, b.exposure_bias),
+            bloom_intensity: lerp_f32(a.bloom_intensity, b.bloom_intensity),
+            god_ray_intensity: lerp_f32(a.god_ray_intensity, b.god_ray_intensity),
+
+            color_temperature: lerp_f32(a.color_temperature, b.color_temperature),
+            tint: lerp_vec3(a.tint, b.tint),
+            saturation: lerp_f32(a.saturation, b.saturation),
+            contrast: lerp_f32(a.contrast, b.contrast),
+
+            shadow_intensity: lerp_f32(a.shadow_intensity, b.shadow_intensity),
+            shadow_color: lerp_vec3(a.shadow_color, b.shadow_color),
+        }
+    }
+}
+
+// ============================================================================
+// WEATHER SYSTEM
+// ============================================================================
+
+/// Weather system manager
+pub struct WeatherSystem {
+    // Current state
+    current_weather: WeatherClassification,
+    target_weather: WeatherClassification,
+    weather_transition: f32,
+    transition_speed: f32,
+
+    // Profiles
+    weather_profiles: HashMap<WeatherType, WeatherEffectProfile>,
+    current_profile: WeatherEffectProfile,
+
+    // Time of day
+    time_profiles: Vec<TimeOfDayProfile>,
+    current_time_profile: TimeOfDayProfile,
+    current_hour: f32,
+
+    // Interior detection
+    is_interior: bool,
+    interior_transition: f32,
+    interior_profile: WeatherEffectProfile,
+
+    // Game interface
+    target_game: TargetGame,
+}
+
+impl WeatherSystem {
+    pub fn new(game: TargetGame) -> Self {
+        let mut weather_profiles = HashMap::new();
+        weather_profiles.insert(WeatherType::Clear, WeatherEffectProfile::clear());
+        weather_profiles.insert(WeatherType::Cloudy, WeatherEffectProfile::cloudy());
+        weather_profiles.insert(WeatherType::Rain, WeatherEffectProfile::rain());
+        weather_profiles.insert(WeatherType::Storm, WeatherEffectProfile::storm());
+        weather_profiles.insert(WeatherType::Fog, WeatherEffectProfile::fog());
+        weather_profiles.insert(WeatherType::Snow, WeatherEffectProfile::snow());
+        weather_profiles.insert(WeatherType::Blizzard, WeatherEffectProfile::blizzard());
+
+        let time_profiles = vec![
+            TimeOfDayProfile::dawn(),
+            TimeOfDayProfile::morning(),
+            TimeOfDayProfile::midday(),
+            TimeOfDayProfile::afternoon(),
+            TimeOfDayProfile::dusk(),
+            TimeOfDayProfile::night(),
+        ];
+
+        Self {
+            current_weather: WeatherClassification::default(),
+            target_weather: WeatherClassification::default(),
+            weather_transition: 1.0,
+            transition_speed: 0.5,
+
+            weather_profiles,
+            current_profile: WeatherEffectProfile::clear(),
+
+            time_profiles,
+            current_time_profile: TimeOfDayProfile::midday(),
+            current_hour: 12.0,
+
+            is_interior: false,
+            interior_transition: 0.0,
+            interior_profile: Self::create_interior_profile(),
+
+            target_game: game,
+        }
+    }
+
+    fn create_interior_profile() -> WeatherEffectProfile {
+        WeatherEffectProfile {
+            name: "Interior".to_string(),
+            weather_types: vec![],
+
+            ssao_intensity_mult: 1.3,
+            ssao_radius_mult: 0.8,
+
+            ssr_intensity_mult: 0.8,
+            ssr_roughness_offset: 0.1,
+
+            bloom_intensity_mult: 0.7,
+            bloom_threshold_mult: 1.2,
+
+            dof_blur_mult: 0.9,
+            dof_focus_shift: 0.0,
+
+            exposure_mult: 1.2,
+            contrast_mult: 1.1,
+            saturation_mult: 0.95,
+
+            color_tint: Vec3::new(1.0, 0.98, 0.95),
+            color_tint_intensity: 0.1,
+            shadow_tint: Vec3::new(0.8, 0.75, 0.7),
+            highlight_tint: Vec3::new(1.0, 0.98, 0.95),
+
+            fog_color: Vec3::new(0.5, 0.48, 0.45),
+            fog_density_mult: 0.3,
+            fog_start_mult: 2.0,
+            fog_end_mult: 3.0,
+
+            volumetric_intensity_mult: 0.5,
+            volumetric_scatter_mult: 0.6,
+            god_ray_intensity_mult: 0.2,
+
+            ambient_intensity_mult: 1.5,
+            ambient_tint: Vec3::new(1.0, 0.95, 0.9),
+
+            sun_intensity_mult: 0.3,
+            sun_color_mult: Vec3::new(1.0, 0.95, 0.9),
+            sky_intensity_mult: 0.2,
+        }
+    }
+
+    /// Update weather from game state
+    pub fn update(&mut self, weather_id: u32, hour: f32, interior: bool, delta_time: f32) {
+        // Update time
+        self.current_hour = hour;
+        self.update_time_profile();
+
+        // Update interior state
+        if interior != self.is_interior {
+            self.is_interior = interior;
+        }
+
+        // Smooth interior transition
+        let target_interior = if self.is_interior { 1.0 } else { 0.0 };
+        self.interior_transition += (target_interior - self.interior_transition) * delta_time * 2.0;
+
+        // Update weather
+        let new_weather = WeatherClassification::from_weather_id(self.target_game, weather_id);
+
+        if !self.weather_matches(&new_weather) {
+            self.target_weather = new_weather;
+            self.weather_transition = 0.0;
+        }
+
+        // Smooth weather transition
+        if self.weather_transition < 1.0 {
+            self.weather_transition += delta_time * self.transition_speed;
+            self.weather_transition = self.weather_transition.min(1.0);
+
+            // Interpolate profiles
+            if let Some(current) = self.weather_profiles.get(&self.current_weather.primary_type) {
+                if let Some(target) = self.weather_profiles.get(&self.target_weather.primary_type) {
+                    self.current_profile = WeatherEffectProfile::lerp(
+                        current,
+                        target,
+                        self.weather_transition
+                    );
+                }
+            }
+
+            if self.weather_transition >= 1.0 {
+                self.current_weather = self.target_weather.clone();
+            }
+        }
+
+        // Apply interior blending
+        if self.interior_transition > 0.0 {
+            self.current_profile = WeatherEffectProfile::lerp(
+                &self.current_profile,
+                &self.interior_profile,
+                self.interior_transition
+            );
+        }
+    }
+
+    fn weather_matches(&self, other: &WeatherClassification) -> bool {
+        std::mem::discriminant(&self.target_weather.primary_type) ==
+            std::mem::discriminant(&other.primary_type)
+    }
+
+    fn update_time_profile(&mut self) {
+        let hour = self.current_hour;
+
+        // Find current and next time profile
+        for i in 0..self.time_profiles.len() {
+            let profile = &self.time_profiles[i];
+            let next_profile = &self.time_profiles[(i + 1) % self.time_profiles.len()];
+
+            let in_range = if profile.hour_start < profile.hour_end {
+                hour >= profile.hour_start && hour < profile.hour_end
+            } else {
+                // Wraps around midnight
+                hour >= profile.hour_start || hour < profile.hour_end
+            };
+
+            if in_range {
+                // Calculate blend factor
+                let range = if profile.hour_start < profile.hour_end {
+                    profile.hour_end - profile.hour_start
+                } else {
+                    24.0 - profile.hour_start + profile.hour_end
+                };
+
+                let progress = if hour >= profile.hour_start {
+                    hour - profile.hour_start
+                } else {
+                    24.0 - profile.hour_start + hour
+                };
+
+                // Blend near edges
+                let edge_blend = 0.5; // 30 minutes blend zone
+                let t = if progress < edge_blend {
+                    0.0
+                } else if progress > range - edge_blend {
+                    (progress - (range - edge_blend)) / edge_blend
+                } else {
+                    0.0
+                };
+
+                self.current_time_profile = TimeOfDayProfile::lerp(profile, next_profile, t);
+                break;
+            }
+        }
+    }
+
+    /// Get current effect profile
+    pub fn get_effect_profile(&self) -> &WeatherEffectProfile {
+        &self.current_profile
+    }
+
+    /// Get current time profile
+    pub fn get_time_profile(&self) -> &TimeOfDayProfile {
+        &self.current_time_profile
+    }
+
+    /// Apply weather settings to effects
+    pub fn apply_to_effects(&self, effects: &mut ENBEffectSystem) {
+        let profile = &self.current_profile;
+        let time = &self.current_time_profile;
+
+        // Apply multipliers to effect system
+        // This would modify the effect parameters based on weather and time
+    }
+}
+
+// ============================================================================
+// INTERIOR DETECTION
+// ============================================================================
+
+/// Interior detection system
+pub struct InteriorDetector {
+    target_game: TargetGame,
+    is_interior: bool,
+    cell_name: String,
+    worldspace_name: String,
+
+    // Memory addresses for game-specific detection
+    interior_flag_address: usize,
+    cell_name_address: usize,
+    worldspace_address: usize,
+}
+
+impl InteriorDetector {
+    pub fn new(game: TargetGame) -> Self {
+        let (interior_addr, cell_addr, worldspace_addr) = match game {
+            TargetGame::SkyrimSE | TargetGame::SkyrimAE => {
+                (0x142F26900, 0x142F26910, 0x142F26920)
+            },
+            TargetGame::Fallout4 => {
+                (0x145DA4000, 0x145DA4010, 0x145DA4020)
+            },
+            _ => (0, 0, 0),
+        };
+
+        Self {
+            target_game: game,
+            is_interior: false,
+            cell_name: String::new(),
+            worldspace_name: String::new(),
+            interior_flag_address: interior_addr,
+            cell_name_address: cell_addr,
+            worldspace_address: worldspace_addr,
+        }
+    }
+
+    /// Update interior detection
+    pub fn update(&mut self) {
+        if self.interior_flag_address == 0 {
+            return;
+        }
+
+        unsafe {
+            // Read interior flag from game memory
+            let flag_ptr = self.interior_flag_address as *const u8;
+            self.is_interior = *flag_ptr != 0;
+
+            // Read cell name
+            if self.cell_name_address != 0 {
+                let name_ptr = self.cell_name_address as *const *const i8;
+                if !(*name_ptr).is_null() {
+                    // Read null-terminated string
+                    let cstr = std::ffi::CStr::from_ptr(*name_ptr);
+                    self.cell_name = cstr.to_string_lossy().into_owned();
+                }
+            }
+        }
+    }
+
+    /// Check if currently in interior
+    pub fn is_interior(&self) -> bool {
+        self.is_interior
+    }
+
+    /// Get current cell name
+    pub fn get_cell_name(&self) -> &str {
+        &self.cell_name
+    }
+}
+
+// ============================================================================
+// MODULE EXPORTS
+// ============================================================================
+
+pub use self::{
+    WeatherClassification,
+    WeatherEffectProfile,
+    TimeOfDayProfile,
+    WeatherSystem,
+    InteriorDetector,
+};

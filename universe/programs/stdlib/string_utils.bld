@@ -1,0 +1,22 @@
+// String utility functions that depend on chars.bld
+// Include via: include!("stdlib/string_utils.bld");
+
+include!("chars.bld");
+
+fn trim_left(s: String) -> String {
+    let i = 0;
+    let len = s.len();
+    while i < len {
+        let c = s.char_at(i);
+        if !is_whitespace(c) {
+            return s.substring(i, len);
+        }
+        i = i + 1;
+    }
+    return "";
+}
+
+fn starts_with_alpha(s: String) -> bool {
+    if s.len() == 0 { return false; }
+    return is_alpha(s.char_at(0));
+}

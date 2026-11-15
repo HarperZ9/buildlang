@@ -1,0 +1,1199 @@
+// ============================================================================
+// NEXUS - Hook System
+// ============================================================================
+// Comprehensive hook system for intercepting and modifying game behavior
+// Supports pre/post hooks, detours, trampolines, and virtual table hooking
+// ============================================================================
+
+module nexus::hooks;
+
+use core::mem;
+use core::sync::{Mutex, RwLock, Arc};
+use core::collections::{HashMap, Vec, BTreeMap};
+
+// ============================================================================
+// Hook Types and Priorities
+// ============================================================================
+
+/// Hook execution priority
+@derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum HookPriority {
+    Critical = 0,    // Always runs first, cannot be overridden
+    Highest = 100,
+    High = 200,
+    Normal = 500,
+    Low = 800,
+    Lowest = 900,
+    Monitor = 1000   // Runs last, only observes
+}
+
+impl HookPriority {
+    pub fn value(&self) -> i32 {
+        match self {
+            Self::Critical => 0,
+            Self::Highest => 100,
+            Self::High => 200,
+            Self::Normal => 500,
+            Self::Low => 800,
+            Self::Lowest => 900,
+            Self::Monitor => 1000
+        }
+    }
+}
+
+/// Result of hook execution
+@derive(Clone)]
+pub enum HookResult {
+    Continue,                    // Continue to next hook
+    Skip,                        // Skip remaining hooks, proceed to original
+    Cancel,                      // Cancel the hooked operation entirely
+    Replace(Box<dyn Any>),       // Replace the result
+    Error(String)                // Hook encountered an error
+}
+
+impl HookResult {
+    pub fn should_continue(&self) -> bool {
+        matches!(self, HookResult::Continue)
+    }
+
+    pub fn should_cancel(&self) -> bool {
+        matches!(self, HookResult::Cancel)
+    }
+
+    pub fn is_replacement(&self) -> bool {
+        matches!(self, HookResult::Replace(_))
+    }
+}
+
+/// Hook type classification
+@derive(Clone, Copy, PartialEq, Eq)]
+pub enum HookType {
+    Pre,           // Called before the hooked function
+    Post,          // Called after the hooked function
+    Replace,       // Replaces the hooked function entirely
+    Wrap,          // Wraps around the hooked function
+    Monitor        // Observes without modifying
+}
+
+/// Hook state
+@derive(Clone, Copy, PartialEq, Eq)]
+pub enum HookState {
+    Inactive,
+    Pending,
+    Installing,
+    Active,
+    Suspended,
+    Removing,
+    Error
+}
+
+// ============================================================================
+// Hook Context
+// ============================================================================
+
+/// Context passed to hook handlers
+pub struct HookContext {
+    hook_id: String,
+    target_name: String,
+    hook_type: HookType,
+    arguments: Vec<HookArgument>,
+    return_value: Option<Box<dyn Any>>,
+    user_data: HashMap<String, Box<dyn Any>>,
+    cancelled: bool,
+    call_original: bool,
+    modified: bool,
+    timestamp: u64
+}
+
+impl HookContext {
+    pub fn new(hook_id: &str, target_name: &str, hook_type: HookType) -> Self {
+        Self {
+            hook_id: hook_id.to_string(),
+            target_name: target_name.to_string(),
+            hook_type,
+            arguments: Vec::new(),
+            return_value: None,
+            user_data: HashMap::new(),
+            cancelled: false,
+            call_original: true,
+            modified: false,
+            timestamp: 0
+        }
+    }
+
+    pub fn hook_id(&self) -> &str { &self.hook_id }
+    pub fn target_name(&self) -> &str { &self.target_name }
+    pub fn hook_type(&self) -> HookType { self.hook_type }
+
+    pub fn get_argument<T: 'static>(&self, index: usize) -> Option<&T> {
+        self.arguments.get(index).and_then(|arg| arg.as_ref())
+    }
+
+    pub fn set_argument<T: 'static>(&mut self, index: usize, value: T) {
+        if index < self.arguments.len() {
+            self.arguments[index] = HookArgument::new(value);
+            self.modified = true;
+        }
+    }
+
+    pub fn get_return_value<T: 'static>(&self) -> Option<&T> {
+        self.return_value.as_ref().and_then(|v| v.downcast_ref())
+    }
+
+    pub fn set_return_value<T: 'static>(&mut self, value: T) {
+        self.return_value = Some(Box::new(value));
+        self.modified = true;
+    }
+
+    pub fn get_user_data<T: 'static>(&self, key: &str) -> Option<&T> {
+        self.user_data.get(key).and_then(|v| v.downcast_ref())
+    }
+
+    pub fn set_user_data<T: 'static>(&mut self, key: &str, value: T) {
+        self.user_data.insert(key.to_string(), Box::new(value));
+    }
+
+    pub fn cancel(&mut self) {
+        self.cancelled = true;
+        self.call_original = false;
+    }
+
+    pub fn is_cancelled(&self) -> bool { self.cancelled }
+
+    pub fn skip_original(&mut self) {
+        self.call_original = false;
+    }
+
+    pub fn should_call_original(&self) -> bool { self.call_original }
+
+    pub fn is_modified(&self) -> bool { self.modified }
+
+    pub fn add_argument(&mut self, arg: HookArgument) {
+        self.arguments.push(arg);
+    }
+
+    pub fn argument_count(&self) -> usize {
+        self.arguments.len()
+    }
+}
+
+/// Wrapper for hook arguments
+pub struct HookArgument {
+    value: Box<dyn Any>,
+    type_name: String
+}
+
+impl HookArgument {
+    pub fn new<T: 'static>(value: T) -> Self {
+        Self {
+            value: Box::new(value),
+            type_name: std::any::type_name::<T>().to_string()
+        }
+    }
+
+    pub fn as_ref<T: 'static>(&self) -> Option<&T> {
+        self.value.downcast_ref()
+    }
+
+    pub fn type_name(&self) -> &str { &self.type_name }
+}
+
+// ============================================================================
+// Hook Definitions
+// ============================================================================
+
+/// Hook handler function type
+pub type HookHandler = Box<dyn Fn(&mut HookContext) -> HookResult + Send + Sync>;
+
+/// Hook definition
+pub struct Hook {
+    id: String,
+    name: String,
+    description: String,
+    target: HookTarget,
+    hook_type: HookType,
+    priority: HookPriority,
+    state: HookState,
+    handler: HookHandler,
+    owner_mod: String,
+    enabled: bool,
+    call_count: u64,
+    error_count: u64,
+    last_error: Option<String>,
+    created_at: u64
+}
+
+impl Hook {
+    pub fn new(id: &str, target: HookTarget, handler: HookHandler) -> Self {
+        Self {
+            id: id.to_string(),
+            name: id.to_string(),
+            description: String::new(),
+            target,
+            hook_type: HookType::Pre,
+            priority: HookPriority::Normal,
+            state: HookState::Inactive,
+            handler,
+            owner_mod: String::new(),
+            enabled: true,
+            call_count: 0,
+            error_count: 0,
+            last_error: None,
+            created_at: 0
+        }
+    }
+
+    pub fn with_name(mut self, name: &str) -> Self {
+        self.name = name.to_string();
+        self
+    }
+
+    pub fn with_description(mut self, desc: &str) -> Self {
+        self.description = desc.to_string();
+        self
+    }
+
+    pub fn with_type(mut self, hook_type: HookType) -> Self {
+        self.hook_type = hook_type;
+        self
+    }
+
+    pub fn with_priority(mut self, priority: HookPriority) -> Self {
+        self.priority = priority;
+        self
+    }
+
+    pub fn with_owner(mut self, mod_id: &str) -> Self {
+        self.owner_mod = mod_id.to_string();
+        self
+    }
+
+    pub fn id(&self) -> &str { &self.id }
+    pub fn name(&self) -> &str { &self.name }
+    pub fn target(&self) -> &HookTarget { &self.target }
+    pub fn hook_type(&self) -> HookType { self.hook_type }
+    pub fn priority(&self) -> HookPriority { self.priority }
+    pub fn state(&self) -> HookState { self.state }
+    pub fn owner_mod(&self) -> &str { &self.owner_mod }
+    pub fn is_enabled(&self) -> bool { self.enabled }
+    pub fn call_count(&self) -> u64 { self.call_count }
+
+    pub fn invoke(&mut self, context: &mut HookContext) -> HookResult {
+        if !self.enabled {
+            return HookResult::Continue;
+        }
+
+        self.call_count += 1;
+
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            (self.handler)(context)
+        })) {
+            Ok(result) => result,
+            Err(e) => {
+                self.error_count += 1;
+                self.last_error = Some(format!("Hook panic: {:?}", e));
+                HookResult::Error(self.last_error.clone().unwrap())
+            }
+        }
+    }
+
+    pub fn enable(&mut self) { self.enabled = true; }
+    pub fn disable(&mut self) { self.enabled = false; }
+}
+
+/// Hook target specification
+@derive(Clone)]
+pub enum HookTarget {
+    Function {
+        module: String,
+        name: String,
+        signature: Option<FunctionSignature>
+    },
+    Address {
+        address: usize,
+        size: usize
+    },
+    VirtualTable {
+        class_name: String,
+        vtable_offset: usize,
+        method_index: usize
+    },
+    Import {
+        module: String,
+        import_name: String
+    },
+    Export {
+        module: String,
+        export_name: String
+    },
+    Pattern {
+        pattern: String,
+        mask: Option<String>,
+        offset: i32
+    },
+    Event(String),
+    Custom(String)
+}
+
+impl HookTarget {
+    pub fn function(module: &str, name: &str) -> Self {
+        Self::Function {
+            module: module.to_string(),
+            name: name.to_string(),
+            signature: None
+        }
+    }
+
+    pub fn address(addr: usize) -> Self {
+        Self::Address {
+            address: addr,
+            size: 0
+        }
+    }
+
+    pub fn vtable(class_name: &str, vtable_offset: usize, method_index: usize) -> Self {
+        Self::VirtualTable {
+            class_name: class_name.to_string(),
+            vtable_offset,
+            method_index
+        }
+    }
+
+    pub fn pattern(pattern: &str) -> Self {
+        Self::Pattern {
+            pattern: pattern.to_string(),
+            mask: None,
+            offset: 0
+        }
+    }
+
+    pub fn event(event_name: &str) -> Self {
+        Self::Event(event_name.to_string())
+    }
+}
+
+/// Function signature for type checking
+@derive(Clone)]
+pub struct FunctionSignature {
+    return_type: TypeDescriptor,
+    parameters: Vec<TypeDescriptor>,
+    calling_convention: CallingConvention
+}
+
+impl FunctionSignature {
+    pub fn new(return_type: TypeDescriptor) -> Self {
+        Self {
+            return_type,
+            parameters: Vec::new(),
+            calling_convention: CallingConvention::Cdecl
+        }
+    }
+
+    pub fn with_param(mut self, param: TypeDescriptor) -> Self {
+        self.parameters.push(param);
+        self
+    }
+
+    pub fn with_convention(mut self, convention: CallingConvention) -> Self {
+        self.calling_convention = convention;
+        self
+    }
+}
+
+/// Type descriptor for function parameters
+@derive(Clone)]
+pub enum TypeDescriptor {
+    Void,
+    Bool,
+    I8, I16, I32, I64,
+    U8, U16, U32, U64,
+    F32, F64,
+    Pointer(Box<TypeDescriptor>),
+    Array(Box<TypeDescriptor>, usize),
+    Struct(String),
+    Custom(String)
+}
+
+/// Calling conventions
+@derive(Clone, Copy, PartialEq, Eq)]
+pub enum CallingConvention {
+    Cdecl,
+    Stdcall,
+    Fastcall,
+    Thiscall,
+    Vectorcall,
+    Win64,
+    SysV64
+}
+
+// ============================================================================
+// Pre/Post Hooks
+// ============================================================================
+
+/// Pre-hook that runs before the target
+pub struct PreHook {
+    base: Hook,
+    can_cancel: bool,
+    can_modify_args: bool
+}
+
+impl PreHook {
+    pub fn new(id: &str, target: HookTarget, handler: HookHandler) -> Self {
+        Self {
+            base: Hook::new(id, target, handler).with_type(HookType::Pre),
+            can_cancel: true,
+            can_modify_args: true
+        }
+    }
+
+    pub fn with_cancel(mut self, can_cancel: bool) -> Self {
+        self.can_cancel = can_cancel;
+        self
+    }
+
+    pub fn with_arg_modification(mut self, can_modify: bool) -> Self {
+        self.can_modify_args = can_modify;
+        self
+    }
+
+    pub fn invoke(&mut self, context: &mut HookContext) -> HookResult {
+        let result = self.base.invoke(context);
+
+        // Enforce restrictions
+        if !self.can_cancel && context.is_cancelled() {
+            context.cancelled = false;
+            context.call_original = true;
+        }
+
+        result
+    }
+}
+
+/// Post-hook that runs after the target
+pub struct PostHook {
+    base: Hook,
+    can_modify_return: bool,
+    always_run: bool
+}
+
+impl PostHook {
+    pub fn new(id: &str, target: HookTarget, handler: HookHandler) -> Self {
+        Self {
+            base: Hook::new(id, target, handler).with_type(HookType::Post),
+            can_modify_return: true,
+            always_run: false
+        }
+    }
+
+    pub fn with_return_modification(mut self, can_modify: bool) -> Self {
+        self.can_modify_return = can_modify;
+        self
+    }
+
+    pub fn with_always_run(mut self, always: bool) -> Self {
+        self.always_run = always;
+        self
+    }
+
+    pub fn invoke(&mut self, context: &mut HookContext) -> HookResult {
+        self.base.invoke(context)
+    }
+
+    pub fn should_run(&self, was_cancelled: bool) -> bool {
+        self.always_run || !was_cancelled
+    }
+}
+
+/// Replace hook that replaces the target entirely
+pub struct ReplaceHook {
+    base: Hook,
+    original_trampoline: Option<usize>,
+    call_original_handler: Option<HookHandler>
+}
+
+impl ReplaceHook {
+    pub fn new(id: &str, target: HookTarget, handler: HookHandler) -> Self {
+        Self {
+            base: Hook::new(id, target, handler).with_type(HookType::Replace),
+            original_trampoline: None,
+            call_original_handler: None
+        }
+    }
+
+    pub fn set_trampoline(&mut self, addr: usize) {
+        self.original_trampoline = Some(addr);
+    }
+
+    pub fn trampoline(&self) -> Option<usize> {
+        self.original_trampoline
+    }
+
+    pub fn invoke(&mut self, context: &mut HookContext) -> HookResult {
+        self.base.invoke(context)
+    }
+}
+
+// ============================================================================
+// Hook Chain
+// ============================================================================
+
+/// Chain of hooks for a single target
+pub struct HookChain {
+    target: HookTarget,
+    target_name: String,
+    pre_hooks: Vec<Hook>,
+    post_hooks: Vec<Hook>,
+    replace_hook: Option<ReplaceHook>,
+    original_address: Option<usize>,
+    trampoline_address: Option<usize>,
+    installed: bool,
+    enabled: bool
+}
+
+impl HookChain {
+    pub fn new(target: HookTarget, name: &str) -> Self {
+        Self {
+            target,
+            target_name: name.to_string(),
+            pre_hooks: Vec::new(),
+            post_hooks: Vec::new(),
+            replace_hook: None,
+            original_address: None,
+            trampoline_address: None,
+            installed: false,
+            enabled: true
+        }
+    }
+
+    pub fn add_pre_hook(&mut self, hook: Hook) {
+        self.pre_hooks.push(hook);
+        self.sort_hooks();
+    }
+
+    pub fn add_post_hook(&mut self, hook: Hook) {
+        self.post_hooks.push(hook);
+        self.sort_hooks();
+    }
+
+    pub fn set_replace_hook(&mut self, hook: ReplaceHook) {
+        self.replace_hook = Some(hook);
+    }
+
+    pub fn remove_hook(&mut self, hook_id: &str) -> bool {
+        let pre_len = self.pre_hooks.len();
+        self.pre_hooks.retain(|h| h.id() != hook_id);
+        if self.pre_hooks.len() != pre_len {
+            return true;
+        }
+
+        let post_len = self.post_hooks.len();
+        self.post_hooks.retain(|h| h.id() != hook_id);
+        if self.post_hooks.len() != post_len {
+            return true;
+        }
+
+        if let Some(ref replace) = self.replace_hook {
+            if replace.base.id() == hook_id {
+                self.replace_hook = None;
+                return true;
+            }
+        }
+
+        false
+    }
+
+    fn sort_hooks(&mut self) {
+        self.pre_hooks.sort_by(|a, b| a.priority().cmp(&b.priority()));
+        self.post_hooks.sort_by(|a, b| a.priority().cmp(&b.priority()));
+    }
+
+    pub fn invoke(&mut self) -> HookResult {
+        if !self.enabled {
+            return HookResult::Continue;
+        }
+
+        let mut context = HookContext::new("", &self.target_name, HookType::Pre);
+
+        // Run pre-hooks
+        for hook in &mut self.pre_hooks {
+            match hook.invoke(&mut context) {
+                HookResult::Cancel => {
+                    context.cancel();
+                    break;
+                }
+                HookResult::Skip => break,
+                HookResult::Error(e) => {
+                    return HookResult::Error(e);
+                }
+                _ => {}
+            }
+        }
+
+        // Run replace hook or original
+        if !context.is_cancelled() {
+            if let Some(ref mut replace) = self.replace_hook {
+                context.hook_type = HookType::Replace;
+                replace.invoke(&mut context);
+            }
+        }
+
+        // Run post-hooks
+        context.hook_type = HookType::Post;
+        for hook in &mut self.post_hooks {
+            match hook.invoke(&mut context) {
+                HookResult::Error(e) => {
+                    return HookResult::Error(e);
+                }
+                _ => {}
+            }
+        }
+
+        if context.is_cancelled() {
+            HookResult::Cancel
+        } else if let Some(ret) = context.return_value {
+            HookResult::Replace(ret)
+        } else {
+            HookResult::Continue
+        }
+    }
+
+    pub fn is_installed(&self) -> bool { self.installed }
+    pub fn set_installed(&mut self, installed: bool) { self.installed = installed; }
+    pub fn is_enabled(&self) -> bool { self.enabled }
+    pub fn enable(&mut self) { self.enabled = true; }
+    pub fn disable(&mut self) { self.enabled = false; }
+
+    pub fn hook_count(&self) -> usize {
+        self.pre_hooks.len() + self.post_hooks.len() +
+        if self.replace_hook.is_some() { 1 } else { 0 }
+    }
+}
+
+// ============================================================================
+// Hook Manager
+// ============================================================================
+
+/// Central hook manager
+pub struct HookManager {
+    chains: HashMap<String, HookChain>,
+    hooks_by_mod: HashMap<String, Vec<String>>,
+    pattern_cache: HashMap<String, usize>,
+    trampoline_allocator: TrampolineAllocator,
+    installed: bool,
+    enabled: bool,
+    stats: HookStats
+}
+
+impl HookManager {
+    pub fn new() -> Self {
+        Self {
+            chains: HashMap::new(),
+            hooks_by_mod: HashMap::new(),
+            pattern_cache: HashMap::new(),
+            trampoline_allocator: TrampolineAllocator::new(),
+            installed: false,
+            enabled: true,
+            stats: HookStats::new()
+        }
+    }
+
+    /// Register a hook
+    pub fn register(&mut self, hook: Hook) -> Result<(), HookError> {
+        let target_key = self.get_target_key(&hook.target);
+
+        // Get or create chain
+        let chain = self.chains
+            .entry(target_key.clone())
+            .or_insert_with(|| HookChain::new(hook.target.clone(), &target_key));
+
+        // Record mod ownership
+        if !hook.owner_mod.is_empty() {
+            self.hooks_by_mod
+                .entry(hook.owner_mod.clone())
+                .or_insert_with(Vec::new)
+                .push(hook.id.clone());
+        }
+
+        // Add to appropriate list
+        match hook.hook_type {
+            HookType::Pre | HookType::Monitor => {
+                chain.add_pre_hook(hook);
+            }
+            HookType::Post => {
+                chain.add_post_hook(hook);
+            }
+            HookType::Replace => {
+                chain.set_replace_hook(ReplaceHook {
+                    base: hook,
+                    original_trampoline: None,
+                    call_original_handler: None
+                });
+            }
+            HookType::Wrap => {
+                chain.add_pre_hook(hook);
+            }
+        }
+
+        self.stats.hooks_registered += 1;
+        Ok(())
+    }
+
+    /// Unregister a hook by ID
+    pub fn unregister(&mut self, hook_id: &str) -> bool {
+        for chain in self.chains.values_mut() {
+            if chain.remove_hook(hook_id) {
+                self.stats.hooks_unregistered += 1;
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Unregister all hooks for a mod
+    pub fn unregister_mod_hooks(&mut self, mod_id: &str) {
+        if let Some(hook_ids) = self.hooks_by_mod.remove(mod_id) {
+            for hook_id in hook_ids {
+                self.unregister(&hook_id);
+            }
+        }
+    }
+
+    /// Install all registered hooks
+    pub fn install_all(&mut self) -> Result<(), HookError> {
+        if self.installed {
+            return Ok(());
+        }
+
+        for chain in self.chains.values_mut() {
+            self.install_chain(chain)?;
+        }
+
+        self.installed = true;
+        self.stats.install_count += 1;
+        Ok(())
+    }
+
+    /// Uninstall all hooks
+    pub fn uninstall_all(&mut self) {
+        for chain in self.chains.values_mut() {
+            self.uninstall_chain(chain);
+        }
+        self.installed = false;
+    }
+
+    fn install_chain(&mut self, chain: &mut HookChain) -> Result<(), HookError> {
+        if chain.is_installed() {
+            return Ok(());
+        }
+
+        // Resolve target address
+        let target_addr = self.resolve_target(&chain.target)?;
+        chain.original_address = Some(target_addr);
+
+        // Allocate trampoline
+        let trampoline = self.trampoline_allocator.allocate(64)?;
+        chain.trampoline_address = Some(trampoline);
+
+        // Install the actual hook (platform-specific)
+        self.install_detour(target_addr, trampoline)?;
+
+        chain.set_installed(true);
+        Ok(())
+    }
+
+    fn uninstall_chain(&mut self, chain: &mut HookChain) {
+        if !chain.is_installed() {
+            return;
+        }
+
+        // Restore original code
+        if let (Some(original), Some(trampoline)) = (chain.original_address, chain.trampoline_address) {
+            self.remove_detour(original, trampoline);
+            self.trampoline_allocator.free(trampoline);
+        }
+
+        chain.set_installed(false);
+    }
+
+    fn resolve_target(&self, target: &HookTarget) -> Result<usize, HookError> {
+        match target {
+            HookTarget::Address { address, .. } => Ok(*address),
+            HookTarget::Function { module, name, .. } => {
+                self.resolve_function(module, name)
+            }
+            HookTarget::Pattern { pattern, mask, offset } => {
+                self.resolve_pattern(pattern, mask.as_deref(), *offset)
+            }
+            HookTarget::Import { module, import_name } => {
+                self.resolve_import(module, import_name)
+            }
+            HookTarget::Export { module, export_name } => {
+                self.resolve_export(module, export_name)
+            }
+            HookTarget::VirtualTable { class_name, vtable_offset, method_index } => {
+                self.resolve_vtable(class_name, *vtable_offset, *method_index)
+            }
+            _ => Err(HookError::UnsupportedTarget)
+        }
+    }
+
+    fn resolve_function(&self, module: &str, name: &str) -> Result<usize, HookError> {
+        // Platform-specific function resolution
+        #[cfg(windows)]
+        {
+            // GetModuleHandle + GetProcAddress
+            Err(HookError::FunctionNotFound(format!("{}::{}", module, name)))
+        }
+        #[cfg(unix)]
+        {
+            // dlopen + dlsym
+            Err(HookError::FunctionNotFound(format!("{}::{}", module, name)))
+        }
+    }
+
+    fn resolve_pattern(&self, pattern: &str, mask: Option<&str>, offset: i32) -> Result<usize, HookError> {
+        // Check cache first
+        if let Some(&addr) = self.pattern_cache.get(pattern) {
+            return Ok((addr as i64 + offset as i64) as usize);
+        }
+
+        // Parse pattern
+        let bytes = self.parse_pattern(pattern)?;
+        let mask_bytes = mask.map(|m| m.as_bytes().to_vec());
+
+        // Scan memory for pattern
+        let addr = self.scan_for_pattern(&bytes, mask_bytes.as_deref())?;
+
+        Ok((addr as i64 + offset as i64) as usize)
+    }
+
+    fn parse_pattern(&self, pattern: &str) -> Result<Vec<u8>, HookError> {
+        let mut bytes = Vec::new();
+        for part in pattern.split_whitespace() {
+            if part == "?" || part == "??" {
+                bytes.push(0x00); // Wildcard
+            } else {
+                let byte = u8::from_str_radix(part, 16)
+                    .map_err(|_| HookError::InvalidPattern(pattern.to_string()))?;
+                bytes.push(byte);
+            }
+        }
+        Ok(bytes)
+    }
+
+    fn scan_for_pattern(&self, pattern: &[u8], mask: Option<&[u8]>) -> Result<usize, HookError> {
+        // Would scan process memory for the pattern
+        Err(HookError::PatternNotFound)
+    }
+
+    fn resolve_import(&self, module: &str, import: &str) -> Result<usize, HookError> {
+        Err(HookError::ImportNotFound(format!("{}::{}", module, import)))
+    }
+
+    fn resolve_export(&self, module: &str, export: &str) -> Result<usize, HookError> {
+        Err(HookError::ExportNotFound(format!("{}::{}", module, export)))
+    }
+
+    fn resolve_vtable(&self, class_name: &str, vtable_offset: usize, method_index: usize) -> Result<usize, HookError> {
+        Err(HookError::VTableNotFound(class_name.to_string()))
+    }
+
+    fn install_detour(&mut self, target: usize, trampoline: usize) -> Result<(), HookError> {
+        // Platform-specific detour installation
+        Ok(())
+    }
+
+    fn remove_detour(&mut self, target: usize, trampoline: usize) {
+        // Platform-specific detour removal
+    }
+
+    fn get_target_key(&self, target: &HookTarget) -> String {
+        match target {
+            HookTarget::Function { module, name, .. } => format!("{}::{}", module, name),
+            HookTarget::Address { address, .. } => format!("addr:0x{:X}", address),
+            HookTarget::Pattern { pattern, .. } => format!("pattern:{}", pattern),
+            HookTarget::Import { module, import_name } => format!("import:{}::{}", module, import_name),
+            HookTarget::Export { module, export_name } => format!("export:{}::{}", module, export_name),
+            HookTarget::VirtualTable { class_name, method_index, .. } => {
+                format!("vtable::{}::{}", class_name, method_index)
+            }
+            HookTarget::Event(name) => format!("event:{}", name),
+            HookTarget::Custom(name) => format!("custom:{}", name)
+        }
+    }
+
+    pub fn is_enabled(&self) -> bool { self.enabled }
+    pub fn enable(&mut self) { self.enabled = true; }
+    pub fn disable(&mut self) { self.enabled = false; }
+    pub fn stats(&self) -> &HookStats { &self.stats }
+
+    pub fn get_chain(&self, target_key: &str) -> Option<&HookChain> {
+        self.chains.get(target_key)
+    }
+
+    pub fn get_chain_mut(&mut self, target_key: &str) -> Option<&mut HookChain> {
+        self.chains.get_mut(target_key)
+    }
+}
+
+/// Hook statistics
+pub struct HookStats {
+    pub hooks_registered: u64,
+    pub hooks_unregistered: u64,
+    pub install_count: u64,
+    pub total_invocations: u64,
+    pub total_errors: u64
+}
+
+impl HookStats {
+    pub fn new() -> Self {
+        Self {
+            hooks_registered: 0,
+            hooks_unregistered: 0,
+            install_count: 0,
+            total_invocations: 0,
+            total_errors: 0
+        }
+    }
+}
+
+// ============================================================================
+// Trampoline Allocator
+// ============================================================================
+
+/// Allocates executable memory for trampolines
+pub struct TrampolineAllocator {
+    pages: Vec<TrampolinePage>,
+    page_size: usize,
+    allocation_count: usize
+}
+
+struct TrampolinePage {
+    base: usize,
+    size: usize,
+    used: usize,
+    allocations: Vec<(usize, usize)> // (offset, size)
+}
+
+impl TrampolineAllocator {
+    pub fn new() -> Self {
+        Self {
+            pages: Vec::new(),
+            page_size: 4096,
+            allocation_count: 0
+        }
+    }
+
+    pub fn allocate(&mut self, size: usize) -> Result<usize, HookError> {
+        // Find page with enough space
+        for page in &mut self.pages {
+            if page.size - page.used >= size {
+                let addr = page.base + page.used;
+                page.allocations.push((page.used, size));
+                page.used += size;
+                self.allocation_count += 1;
+                return Ok(addr);
+            }
+        }
+
+        // Allocate new page
+        let new_page = self.allocate_page()?;
+        let addr = new_page.base;
+        self.pages.push(TrampolinePage {
+            base: new_page.base,
+            size: new_page.size,
+            used: size,
+            allocations: vec![(0, size)]
+        });
+        self.allocation_count += 1;
+
+        Ok(addr)
+    }
+
+    pub fn free(&mut self, addr: usize) {
+        for page in &mut self.pages {
+            if addr >= page.base && addr < page.base + page.size {
+                let offset = addr - page.base;
+                page.allocations.retain(|(off, _)| *off != offset);
+                // Note: This is a simple allocator - doesn't reclaim space
+                return;
+            }
+        }
+    }
+
+    fn allocate_page(&self) -> Result<TrampolinePage, HookError> {
+        // Platform-specific executable memory allocation
+        // VirtualAlloc on Windows, mmap on Unix
+        Err(HookError::AllocationFailed)
+    }
+}
+
+// ============================================================================
+// Error Types
+// ============================================================================
+
+@derive(Clone)]
+pub enum HookError {
+    UnsupportedTarget,
+    FunctionNotFound(String),
+    ImportNotFound(String),
+    ExportNotFound(String),
+    VTableNotFound(String),
+    PatternNotFound,
+    InvalidPattern(String),
+    AllocationFailed,
+    InstallFailed(String),
+    AlreadyHooked(String),
+    NotHooked(String),
+    PermissionDenied,
+    MemoryProtectionFailed
+}
+
+impl HookError {
+    pub fn message(&self) -> String {
+        match self {
+            Self::UnsupportedTarget => "Unsupported hook target type".to_string(),
+            Self::FunctionNotFound(name) => format!("Function not found: {}", name),
+            Self::ImportNotFound(name) => format!("Import not found: {}", name),
+            Self::ExportNotFound(name) => format!("Export not found: {}", name),
+            Self::VTableNotFound(name) => format!("VTable not found: {}", name),
+            Self::PatternNotFound => "Pattern not found in memory".to_string(),
+            Self::InvalidPattern(p) => format!("Invalid pattern: {}", p),
+            Self::AllocationFailed => "Failed to allocate trampoline memory".to_string(),
+            Self::InstallFailed(reason) => format!("Hook installation failed: {}", reason),
+            Self::AlreadyHooked(target) => format!("Target already hooked: {}", target),
+            Self::NotHooked(target) => format!("Target not hooked: {}", target),
+            Self::PermissionDenied => "Permission denied for hook operation".to_string(),
+            Self::MemoryProtectionFailed => "Failed to change memory protection".to_string()
+        }
+    }
+}
+
+// ============================================================================
+// Convenience Macros
+// ============================================================================
+
+/// Create a pre-hook with a closure
+macro_rules! pre_hook {
+    ($id:expr, $target:expr, $handler:expr) => {
+        Hook::new($id, $target, Box::new($handler)).with_type(HookType::Pre)
+    };
+}
+
+/// Create a post-hook with a closure
+macro_rules! post_hook {
+    ($id:expr, $target:expr, $handler:expr) => {
+        Hook::new($id, $target, Box::new($handler)).with_type(HookType::Post)
+    };
+}
+
+/// Create a replace-hook with a closure
+macro_rules! replace_hook {
+    ($id:expr, $target:expr, $handler:expr) => {
+        Hook::new($id, $target, Box::new($handler)).with_type(HookType::Replace)
+    };
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_hook_priority_ordering() {
+        assert!(HookPriority::Critical < HookPriority::Highest);
+        assert!(HookPriority::High < HookPriority::Normal);
+        assert!(HookPriority::Normal < HookPriority::Low);
+        assert!(HookPriority::Low < HookPriority::Lowest);
+        assert!(HookPriority::Lowest < HookPriority::Monitor);
+    }
+
+    #[test]
+    fn test_hook_result() {
+        let continue_result = HookResult::Continue;
+        assert!(continue_result.should_continue());
+        assert!(!continue_result.should_cancel());
+
+        let cancel_result = HookResult::Cancel;
+        assert!(cancel_result.should_cancel());
+        assert!(!cancel_result.should_continue());
+    }
+
+    #[test]
+    fn test_hook_context() {
+        let mut context = HookContext::new("test_hook", "test_func", HookType::Pre);
+
+        context.set_user_data("key1", 42i32);
+        assert_eq!(context.get_user_data::<i32>("key1"), Some(&42));
+
+        assert!(!context.is_cancelled());
+        context.cancel();
+        assert!(context.is_cancelled());
+        assert!(!context.should_call_original());
+    }
+
+    #[test]
+    fn test_hook_target() {
+        let func_target = HookTarget::function("kernel32.dll", "LoadLibraryA");
+        if let HookTarget::Function { module, name, .. } = func_target {
+            assert_eq!(module, "kernel32.dll");
+            assert_eq!(name, "LoadLibraryA");
+        } else {
+            panic!("Expected Function target");
+        }
+
+        let addr_target = HookTarget::address(0x12345678);
+        if let HookTarget::Address { address, .. } = addr_target {
+            assert_eq!(address, 0x12345678);
+        } else {
+            panic!("Expected Address target");
+        }
+    }
+
+    #[test]
+    fn test_hook_chain() {
+        let target = HookTarget::function("test.dll", "TestFunc");
+        let mut chain = HookChain::new(target, "test.dll::TestFunc");
+
+        let hook1 = Hook::new("hook1", HookTarget::event("test"), Box::new(|_| HookResult::Continue))
+            .with_priority(HookPriority::High);
+        let hook2 = Hook::new("hook2", HookTarget::event("test"), Box::new(|_| HookResult::Continue))
+            .with_priority(HookPriority::Low);
+
+        chain.add_pre_hook(hook1);
+        chain.add_pre_hook(hook2);
+
+        assert_eq!(chain.hook_count(), 2);
+
+        chain.remove_hook("hook1");
+        assert_eq!(chain.hook_count(), 1);
+    }
+
+    #[test]
+    fn test_hook_manager() {
+        let mut manager = HookManager::new();
+
+        let hook = Hook::new("test_hook", HookTarget::event("game_start"), Box::new(|_| HookResult::Continue))
+            .with_owner("test_mod");
+
+        assert!(manager.register(hook).is_ok());
+        assert_eq!(manager.stats().hooks_registered, 1);
+
+        manager.unregister("test_hook");
+        assert_eq!(manager.stats().hooks_unregistered, 1);
+    }
+
+    #[test]
+    fn test_function_signature() {
+        let sig = FunctionSignature::new(TypeDescriptor::Void)
+            .with_param(TypeDescriptor::Pointer(Box::new(TypeDescriptor::U8)))
+            .with_param(TypeDescriptor::I32)
+            .with_convention(CallingConvention::Stdcall);
+
+        assert_eq!(sig.parameters.len(), 2);
+        assert_eq!(sig.calling_convention, CallingConvention::Stdcall);
+    }
+}

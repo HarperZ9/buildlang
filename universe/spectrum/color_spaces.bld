@@ -1,0 +1,1670 @@
+// ============================================================================
+// SPECTRUM COLOR SPACES - COMPLETE COLOR SPACE LIBRARY
+// ============================================================================
+// Comprehensive color space definitions, conversions, and transformations
+// supporting all major industry standards and proprietary Build spaces.
+// ============================================================================
+// Copyright © 2024-2025 Zain Dana Harper. All Rights Reserved.
+// ============================================================================
+
+module spectrum::color_spaces
+
+use std::math::{sin, cos, tan, atan2, sqrt, pow, exp, log, abs, min, max, clamp, floor, ceil}
+
+// ============================================================================
+// FUNDAMENTAL COLOR TYPES
+// ============================================================================
+
+/// CIE 1931 XYZ tristimulus values
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct XYZ {
+    pub x: f64,
+    pub y: f64,
+    pub z: f64,
+}
+
+impl XYZ {
+    pub const fn new(x: f64, y: f64, z: f64) -> Self {
+        XYZ { x, y, z }
+    }
+
+    pub const fn zero() -> Self {
+        XYZ { x: 0.0, y: 0.0, z: 0.0 }
+    }
+
+    /// D65 standard illuminant (daylight)
+    pub const D65: XYZ = XYZ { x: 0.95047, y: 1.0, z: 1.08883 };
+
+    /// D50 standard illuminant (horizon light)
+    pub const D50: XYZ = XYZ { x: 0.96422, y: 1.0, z: 0.82521 };
+
+    /// D55 standard illuminant
+    pub const D55: XYZ = XYZ { x: 0.95682, y: 1.0, z: 0.92149 };
+
+    /// D75 standard illuminant
+    pub const D75: XYZ = XYZ { x: 0.94972, y: 1.0, z: 1.22638 };
+
+    /// Illuminant A (incandescent)
+    pub const A: XYZ = XYZ { x: 1.09850, y: 1.0, z: 0.35585 };
+
+    /// Illuminant E (equal energy)
+    pub const E: XYZ = XYZ { x: 1.0, y: 1.0, z: 1.0 };
+
+    /// CIE Illuminant C
+    pub const C: XYZ = XYZ { x: 0.98074, y: 1.0, z: 1.18232 };
+
+    /// DCI-P3 white point (theater)
+    pub const DCI: XYZ = XYZ { x: 0.89459, y: 1.0, z: 0.95441 };
+
+    /// Convert to xyY chromaticity
+    pub fn to_xyY(&self) -> xyY {
+        let sum = self.x + self.y + self.z;
+        if sum == 0.0 {
+            return xyY::new(0.0, 0.0, 0.0);
+        }
+        xyY::new(self.x / sum, self.y / sum, self.y)
+    }
+
+    /// Luminance (Y component)
+    pub fn luminance(&self) -> f64 {
+        self.y
+    }
+
+    /// Scale by factor
+    pub fn scale(&self, factor: f64) -> Self {
+        XYZ::new(self.x * factor, self.y * factor, self.z * factor)
+    }
+
+    /// Add two XYZ colors
+    pub fn add(&self, other: &XYZ) -> Self {
+        XYZ::new(self.x + other.x, self.y + other.y, self.z + other.z)
+    }
+
+    /// Interpolate between two XYZ colors
+    pub fn lerp(&self, other: &XYZ, t: f64) -> Self {
+        XYZ::new(
+            self.x + (other.x - self.x) * t,
+            self.y + (other.y - self.y) * t,
+            self.z + (other.z - self.z) * t,
+        )
+    }
+}
+
+/// CIE xyY chromaticity coordinates
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct xyY {
+    pub x: f64,  // x chromaticity [0, 1]
+    pub y: f64,  // y chromaticity [0, 1]
+    pub Y: f64,  // Luminance
+}
+
+impl xyY {
+    pub const fn new(x: f64, y: f64, Y: f64) -> Self {
+        xyY { x, y, Y }
+    }
+
+    /// Convert to XYZ
+    pub fn to_xyz(&self) -> XYZ {
+        if self.y == 0.0 {
+            return XYZ::zero();
+        }
+        let X = self.x * self.Y / self.y;
+        let Z = (1.0 - self.x - self.y) * self.Y / self.y;
+        XYZ::new(X, self.Y, Z)
+    }
+
+    /// Get chromaticity as (x, y) pair
+    pub fn chromaticity(&self) -> (f64, f64) {
+        (self.x, self.y)
+    }
+}
+
+/// Linear RGB with arbitrary primaries
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LinearRGB {
+    pub r: f64,
+    pub g: f64,
+    pub b: f64,
+}
+
+impl LinearRGB {
+    pub const fn new(r: f64, g: f64, b: f64) -> Self {
+        LinearRGB { r, g, b }
+    }
+
+    pub const fn black() -> Self {
+        LinearRGB { r: 0.0, g: 0.0, b: 0.0 }
+    }
+
+    pub const fn white() -> Self {
+        LinearRGB { r: 1.0, g: 1.0, b: 1.0 }
+    }
+
+    /// Clamp to [0, 1] range
+    pub fn saturate(&self) -> Self {
+        LinearRGB::new(
+            self.r.clamp(0.0, 1.0),
+            self.g.clamp(0.0, 1.0),
+            self.b.clamp(0.0, 1.0),
+        )
+    }
+
+    /// Check if within gamut
+    pub fn is_in_gamut(&self) -> bool {
+        self.r >= 0.0 && self.r <= 1.0 &&
+        self.g >= 0.0 && self.g <= 1.0 &&
+        self.b >= 0.0 && self.b <= 1.0
+    }
+
+    /// Scale by factor
+    pub fn scale(&self, factor: f64) -> Self {
+        LinearRGB::new(self.r * factor, self.g * factor, self.b * factor)
+    }
+
+    /// Component-wise multiply
+    pub fn multiply(&self, other: &LinearRGB) -> Self {
+        LinearRGB::new(self.r * other.r, self.g * other.g, self.b * other.b)
+    }
+
+    /// Add two colors
+    pub fn add(&self, other: &LinearRGB) -> Self {
+        LinearRGB::new(self.r + other.r, self.g + other.g, self.b + other.b)
+    }
+
+    /// Lerp between colors
+    pub fn lerp(&self, other: &LinearRGB, t: f64) -> Self {
+        LinearRGB::new(
+            self.r + (other.r - self.r) * t,
+            self.g + (other.g - self.g) * t,
+            self.b + (other.b - self.b) * t,
+        )
+    }
+
+    /// Maximum component
+    pub fn max_component(&self) -> f64 {
+        self.r.max(self.g).max(self.b)
+    }
+
+    /// Minimum component
+    pub fn min_component(&self) -> f64 {
+        self.r.min(self.g).min(self.b)
+    }
+}
+
+/// Encoded sRGB (gamma-compressed)
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct sRGB {
+    pub r: f64,
+    pub g: f64,
+    pub b: f64,
+}
+
+impl sRGB {
+    pub const fn new(r: f64, g: f64, b: f64) -> Self {
+        sRGB { r, g, b }
+    }
+
+    /// From 8-bit values
+    pub fn from_u8(r: u8, g: u8, b: u8) -> Self {
+        sRGB::new(r as f64 / 255.0, g as f64 / 255.0, b as f64 / 255.0)
+    }
+
+    /// To 8-bit values
+    pub fn to_u8(&self) -> (u8, u8, u8) {
+        (
+            (self.r.clamp(0.0, 1.0) * 255.0 + 0.5) as u8,
+            (self.g.clamp(0.0, 1.0) * 255.0 + 0.5) as u8,
+            (self.b.clamp(0.0, 1.0) * 255.0 + 0.5) as u8,
+        )
+    }
+
+    /// From hex string (#RRGGBB or RRGGBB)
+    pub fn from_hex(hex: &str) -> Option<Self> {
+        let hex = hex.trim_start_matches('#');
+        if hex.len() != 6 {
+            return None;
+        }
+        let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+        let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+        let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+        Some(sRGB::from_u8(r, g, b))
+    }
+
+    /// To hex string
+    pub fn to_hex(&self) -> String {
+        let (r, g, b) = self.to_u8();
+        format!("#{:02X}{:02X}{:02X}", r, g, b)
+    }
+
+    /// Convert to linear RGB
+    pub fn to_linear(&self) -> LinearRGB {
+        LinearRGB::new(
+            srgb_eotf(self.r),
+            srgb_eotf(self.g),
+            srgb_eotf(self.b),
+        )
+    }
+
+    /// Convert from linear RGB
+    pub fn from_linear(linear: &LinearRGB) -> Self {
+        sRGB::new(
+            srgb_oetf(linear.r),
+            srgb_oetf(linear.g),
+            srgb_oetf(linear.b),
+        )
+    }
+}
+
+// ============================================================================
+// CIE LAB AND RELATED SPACES
+// ============================================================================
+
+/// CIE L*a*b* (CIELAB) perceptually uniform color space
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Lab {
+    pub L: f64,  // Lightness [0, 100]
+    pub a: f64,  // Green-Red axis [-128, 127]
+    pub b: f64,  // Blue-Yellow axis [-128, 127]
+}
+
+impl Lab {
+    pub const fn new(L: f64, a: f64, b: f64) -> Self {
+        Lab { L, a, b }
+    }
+
+    /// Chroma (colorfulness)
+    pub fn chroma(&self) -> f64 {
+        (self.a * self.a + self.b * self.b).sqrt()
+    }
+
+    /// Hue angle in radians
+    pub fn hue_radians(&self) -> f64 {
+        self.b.atan2(self.a)
+    }
+
+    /// Hue angle in degrees [0, 360)
+    pub fn hue_degrees(&self) -> f64 {
+        let h = self.b.atan2(self.a).to_degrees();
+        if h < 0.0 { h + 360.0 } else { h }
+    }
+
+    /// Convert to LCH
+    pub fn to_lch(&self) -> LCH {
+        LCH::new(self.L, self.chroma(), self.hue_degrees())
+    }
+
+    /// Convert from XYZ with white point
+    pub fn from_xyz(xyz: &XYZ, white: &XYZ) -> Self {
+        let fx = lab_f(xyz.x / white.x);
+        let fy = lab_f(xyz.y / white.y);
+        let fz = lab_f(xyz.z / white.z);
+
+        Lab::new(
+            116.0 * fy - 16.0,
+            500.0 * (fx - fy),
+            200.0 * (fy - fz),
+        )
+    }
+
+    /// Convert to XYZ with white point
+    pub fn to_xyz(&self, white: &XYZ) -> XYZ {
+        let fy = (self.L + 16.0) / 116.0;
+        let fx = self.a / 500.0 + fy;
+        let fz = fy - self.b / 200.0;
+
+        XYZ::new(
+            white.x * lab_f_inv(fx),
+            white.y * lab_f_inv(fy),
+            white.z * lab_f_inv(fz),
+        )
+    }
+}
+
+/// CIE L*C*h (cylindrical Lab)
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LCH {
+    pub L: f64,  // Lightness [0, 100]
+    pub C: f64,  // Chroma [0, ~230]
+    pub h: f64,  // Hue [0, 360)
+}
+
+impl LCH {
+    pub const fn new(L: f64, C: f64, h: f64) -> Self {
+        LCH { L, C, h }
+    }
+
+    /// Convert to Lab
+    pub fn to_lab(&self) -> Lab {
+        let h_rad = self.h.to_radians();
+        Lab::new(
+            self.L,
+            self.C * h_rad.cos(),
+            self.C * h_rad.sin(),
+        )
+    }
+
+    /// Interpolate hue (shortest path)
+    pub fn lerp_hue(h1: f64, h2: f64, t: f64) -> f64 {
+        let diff = h2 - h1;
+        let diff = if diff > 180.0 {
+            diff - 360.0
+        } else if diff < -180.0 {
+            diff + 360.0
+        } else {
+            diff
+        };
+        let h = h1 + diff * t;
+        if h < 0.0 { h + 360.0 } else if h >= 360.0 { h - 360.0 } else { h }
+    }
+}
+
+/// CIE L*u*v* color space
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Luv {
+    pub L: f64,  // Lightness [0, 100]
+    pub u: f64,  // u* coordinate
+    pub v: f64,  // v* coordinate
+}
+
+impl Luv {
+    pub const fn new(L: f64, u: f64, v: f64) -> Self {
+        Luv { L, u, v }
+    }
+
+    /// Convert from XYZ with white point
+    pub fn from_xyz(xyz: &XYZ, white: &XYZ) -> Self {
+        let yr = xyz.y / white.y;
+        let L = if yr > CIE_EPSILON {
+            116.0 * yr.cbrt() - 16.0
+        } else {
+            CIE_KAPPA * yr
+        };
+
+        let (u_prime, v_prime) = Self::uv_prime(xyz);
+        let (un_prime, vn_prime) = Self::uv_prime(white);
+
+        Luv::new(
+            L,
+            13.0 * L * (u_prime - un_prime),
+            13.0 * L * (v_prime - vn_prime),
+        )
+    }
+
+    /// Convert to XYZ with white point
+    pub fn to_xyz(&self, white: &XYZ) -> XYZ {
+        if self.L == 0.0 {
+            return XYZ::zero();
+        }
+
+        let (un_prime, vn_prime) = Self::uv_prime(white);
+        let u_prime = self.u / (13.0 * self.L) + un_prime;
+        let v_prime = self.v / (13.0 * self.L) + vn_prime;
+
+        let Y = if self.L > CIE_KAPPA * CIE_EPSILON {
+            ((self.L + 16.0) / 116.0).powi(3)
+        } else {
+            self.L / CIE_KAPPA
+        } * white.y;
+
+        let X = Y * 9.0 * u_prime / (4.0 * v_prime);
+        let Z = Y * (12.0 - 3.0 * u_prime - 20.0 * v_prime) / (4.0 * v_prime);
+
+        XYZ::new(X, Y, Z)
+    }
+
+    fn uv_prime(xyz: &XYZ) -> (f64, f64) {
+        let denom = xyz.x + 15.0 * xyz.y + 3.0 * xyz.z;
+        if denom == 0.0 {
+            (0.0, 0.0)
+        } else {
+            (4.0 * xyz.x / denom, 9.0 * xyz.y / denom)
+        }
+    }
+
+    /// Chroma
+    pub fn chroma(&self) -> f64 {
+        (self.u * self.u + self.v * self.v).sqrt()
+    }
+
+    /// Saturation
+    pub fn saturation(&self) -> f64 {
+        if self.L == 0.0 { 0.0 } else { self.chroma() / self.L }
+    }
+}
+
+// ============================================================================
+// OKLAB - PERCEPTUALLY UNIFORM COLOR SPACE
+// ============================================================================
+
+/// Oklab perceptually uniform color space (Björn Ottosson)
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Oklab {
+    pub L: f64,  // Lightness [0, 1]
+    pub a: f64,  // Green-Red
+    pub b: f64,  // Blue-Yellow
+}
+
+impl Oklab {
+    pub const fn new(L: f64, a: f64, b: f64) -> Self {
+        Oklab { L, a, b }
+    }
+
+    /// Chroma
+    pub fn chroma(&self) -> f64 {
+        (self.a * self.a + self.b * self.b).sqrt()
+    }
+
+    /// Hue in degrees
+    pub fn hue(&self) -> f64 {
+        let h = self.b.atan2(self.a).to_degrees();
+        if h < 0.0 { h + 360.0 } else { h }
+    }
+
+    /// Convert from linear sRGB
+    pub fn from_linear_srgb(rgb: &LinearRGB) -> Self {
+        let l = 0.4122214708 * rgb.r + 0.5363325363 * rgb.g + 0.0514459929 * rgb.b;
+        let m = 0.2119034982 * rgb.r + 0.6806995451 * rgb.g + 0.1073969566 * rgb.b;
+        let s = 0.0883024619 * rgb.r + 0.2817188376 * rgb.g + 0.6299787005 * rgb.b;
+
+        let l_ = l.cbrt();
+        let m_ = m.cbrt();
+        let s_ = s.cbrt();
+
+        Oklab::new(
+            0.2104542553 * l_ + 0.7936177850 * m_ - 0.0040720468 * s_,
+            1.9779984951 * l_ - 2.4285922050 * m_ + 0.4505937099 * s_,
+            0.0259040371 * l_ + 0.7827717662 * m_ - 0.8086757660 * s_,
+        )
+    }
+
+    /// Convert to linear sRGB
+    pub fn to_linear_srgb(&self) -> LinearRGB {
+        let l_ = self.L + 0.3963377774 * self.a + 0.2158037573 * self.b;
+        let m_ = self.L - 0.1055613458 * self.a - 0.0638541728 * self.b;
+        let s_ = self.L - 0.0894841775 * self.a - 1.2914855480 * self.b;
+
+        let l = l_ * l_ * l_;
+        let m = m_ * m_ * m_;
+        let s = s_ * s_ * s_;
+
+        LinearRGB::new(
+             4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s,
+            -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
+            -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s,
+        )
+    }
+
+    /// Convert to Oklch
+    pub fn to_oklch(&self) -> Oklch {
+        Oklch::new(self.L, self.chroma(), self.hue())
+    }
+}
+
+/// Oklch cylindrical representation of Oklab
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Oklch {
+    pub L: f64,  // Lightness [0, 1]
+    pub C: f64,  // Chroma
+    pub h: f64,  // Hue [0, 360)
+}
+
+impl Oklch {
+    pub const fn new(L: f64, C: f64, h: f64) -> Self {
+        Oklch { L, C, h }
+    }
+
+    /// Convert to Oklab
+    pub fn to_oklab(&self) -> Oklab {
+        let h_rad = self.h.to_radians();
+        Oklab::new(
+            self.L,
+            self.C * h_rad.cos(),
+            self.C * h_rad.sin(),
+        )
+    }
+
+    /// Interpolate in Oklch (preserves hue better)
+    pub fn lerp(&self, other: &Oklch, t: f64) -> Oklch {
+        Oklch::new(
+            self.L + (other.L - self.L) * t,
+            self.C + (other.C - self.C) * t,
+            LCH::lerp_hue(self.h, other.h, t),
+        )
+    }
+}
+
+// ============================================================================
+// JZAZBZ - HIGH DYNAMIC RANGE PERCEPTUAL SPACE
+// ============================================================================
+
+/// JzAzBz perceptually uniform HDR color space
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct JzAzBz {
+    pub Jz: f64,  // Lightness
+    pub az: f64,  // Red-Green
+    pub bz: f64,  // Yellow-Blue
+}
+
+impl JzAzBz {
+    pub const fn new(Jz: f64, az: f64, bz: f64) -> Self {
+        JzAzBz { Jz, az, bz }
+    }
+
+    // JzAzBz constants
+    const B: f64 = 1.15;
+    const G: f64 = 0.66;
+    const C1: f64 = 0.8359375;        // 3424 / 4096
+    const C2: f64 = 18.8515625;       // 2413 / 128
+    const C3: f64 = 18.6875;          // 2392 / 128
+    const N: f64 = 0.15930175781;     // 2610 / 16384
+    const P: f64 = 134.034375;        // 1.7 * 2523 / 32
+    const D: f64 = -0.56;
+    const D0: f64 = 1.6295499532821566e-11;
+
+    /// Convert from XYZ (absolute, in cd/m²)
+    pub fn from_xyz_abs(xyz: &XYZ) -> Self {
+        let xp = Self::B * xyz.x - (Self::B - 1.0) * xyz.z;
+        let yp = Self::G * xyz.y - (Self::G - 1.0) * xyz.x;
+
+        let lp = 0.41478972 * xp + 0.579999 * yp + 0.0146480 * xyz.z;
+        let mp = -0.2015100 * xp + 1.120649 * yp + 0.0531008 * xyz.z;
+        let sp = -0.0166008 * xp + 0.264800 * yp + 0.6684799 * xyz.z;
+
+        let l = Self::pq_encode(lp);
+        let m = Self::pq_encode(mp);
+        let s = Self::pq_encode(sp);
+
+        let iz = 0.5 * (l + m);
+        let az = 3.524000 * l - 4.066708 * m + 0.542708 * s;
+        let bz = 0.199076 * l + 1.096799 * m - 1.295875 * s;
+
+        let jz = ((1.0 + Self::D) * iz) / (1.0 + Self::D * iz) - Self::D0;
+
+        JzAzBz::new(jz, az, bz)
+    }
+
+    /// Convert to XYZ (absolute, in cd/m²)
+    pub fn to_xyz_abs(&self) -> XYZ {
+        let jz = self.Jz + Self::D0;
+        let iz = jz / (1.0 + Self::D - Self::D * jz);
+
+        let l = iz + 0.1386050432715393 * self.az + 0.05804731615611886 * self.bz;
+        let m = iz - 0.1386050432715393 * self.az - 0.05804731615611886 * self.bz;
+        let s = iz - 0.09601924202631895 * self.az - 0.8118918960560388 * self.bz;
+
+        let lp = Self::pq_decode(l);
+        let mp = Self::pq_decode(m);
+        let sp = Self::pq_decode(s);
+
+        let xp =  1.9242264357876067 * lp - 1.0047923125953657 * mp + 0.037651404030618 * sp;
+        let yp =  0.35031676209499907 * lp + 0.7264811939316552 * mp - 0.06538442294808501 * sp;
+        let z  = -0.09098281098284752 * lp - 0.3127282905230739 * mp + 1.5227665613052603 * sp;
+
+        let x = (xp + (Self::B - 1.0) * z) / Self::B;
+        let y = (yp + (Self::G - 1.0) * x) / Self::G;
+
+        XYZ::new(x, y, z)
+    }
+
+    fn pq_encode(x: f64) -> f64 {
+        let xp = (x / 10000.0).max(0.0);
+        let num = Self::C1 + Self::C2 * xp.powf(Self::N);
+        let den = 1.0 + Self::C3 * xp.powf(Self::N);
+        (num / den).powf(Self::P)
+    }
+
+    fn pq_decode(x: f64) -> f64 {
+        let xp = x.powf(1.0 / Self::P);
+        let num = (Self::C1 - xp).max(0.0);
+        let den = Self::C3 * xp - Self::C2;
+        10000.0 * (num / den).powf(1.0 / Self::N)
+    }
+
+    /// Chroma
+    pub fn chroma(&self) -> f64 {
+        (self.az * self.az + self.bz * self.bz).sqrt()
+    }
+
+    /// Hue in degrees
+    pub fn hue(&self) -> f64 {
+        let h = self.bz.atan2(self.az).to_degrees();
+        if h < 0.0 { h + 360.0 } else { h }
+    }
+}
+
+/// JzCzhz cylindrical representation
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct JzCzhz {
+    pub Jz: f64,
+    pub Cz: f64,
+    pub hz: f64,
+}
+
+impl JzCzhz {
+    pub const fn new(Jz: f64, Cz: f64, hz: f64) -> Self {
+        JzCzhz { Jz, Cz, hz }
+    }
+
+    pub fn from_jzazbz(jzazbz: &JzAzBz) -> Self {
+        JzCzhz::new(jzazbz.Jz, jzazbz.chroma(), jzazbz.hue())
+    }
+
+    pub fn to_jzazbz(&self) -> JzAzBz {
+        let h_rad = self.hz.to_radians();
+        JzAzBz::new(self.Jz, self.Cz * h_rad.cos(), self.Cz * h_rad.sin())
+    }
+}
+
+// ============================================================================
+// ICTCP - DOLBY HDR COLOR SPACE
+// ============================================================================
+
+/// ICtCp color space (Dolby HDR)
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ICtCp {
+    pub I: f64,   // Intensity
+    pub Ct: f64,  // Tritan (blue-yellow)
+    pub Cp: f64,  // Protan (red-green)
+}
+
+impl ICtCp {
+    pub const fn new(I: f64, Ct: f64, Cp: f64) -> Self {
+        ICtCp { I, Ct, Cp }
+    }
+
+    /// Convert from XYZ (absolute, cd/m²)
+    pub fn from_xyz_abs(xyz: &XYZ) -> Self {
+        // XYZ to LMS
+        let L =  0.3592 * xyz.x + 0.6976 * xyz.y - 0.0358 * xyz.z;
+        let M = -0.1922 * xyz.x + 1.1004 * xyz.y + 0.0755 * xyz.z;
+        let S =  0.0070 * xyz.x + 0.0749 * xyz.y + 0.8434 * xyz.z;
+
+        // PQ encode
+        let Lp = pq_oetf(L / 10000.0);
+        let Mp = pq_oetf(M / 10000.0);
+        let Sp = pq_oetf(S / 10000.0);
+
+        // LMS' to ICtCp
+        ICtCp::new(
+            0.5 * Lp + 0.5 * Mp,
+            1.613769531 * Lp - 3.323486328 * Mp + 1.709716797 * Sp,
+            4.378173828 * Lp - 4.245605469 * Mp - 0.132568359 * Sp,
+        )
+    }
+
+    /// Convert to XYZ (absolute, cd/m²)
+    pub fn to_xyz_abs(&self) -> XYZ {
+        // ICtCp to LMS'
+        let Lp = self.I + 0.00860904 * self.Ct + 0.11103 * self.Cp;
+        let Mp = self.I - 0.00860904 * self.Ct - 0.11103 * self.Cp;
+        let Sp = self.I + 0.56003 * self.Ct - 0.32068 * self.Cp;
+
+        // PQ decode
+        let L = pq_eotf(Lp) * 10000.0;
+        let M = pq_eotf(Mp) * 10000.0;
+        let S = pq_eotf(Sp) * 10000.0;
+
+        // LMS to XYZ
+        XYZ::new(
+             2.0702 * L - 1.3265 * M + 0.2067 * S,
+             0.3650 * L + 0.6806 * M - 0.0453 * S,
+            -0.0496 * L - 0.0494 * M + 1.1880 * S,
+        )
+    }
+}
+
+// ============================================================================
+// ACES COLOR SPACES
+// ============================================================================
+
+/// ACES 2065-1 (AP0 primaries)
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ACES2065_1 {
+    pub r: f64,
+    pub g: f64,
+    pub b: f64,
+}
+
+impl ACES2065_1 {
+    pub const fn new(r: f64, g: f64, b: f64) -> Self {
+        ACES2065_1 { r, g, b }
+    }
+
+    /// Convert from XYZ
+    pub fn from_xyz(xyz: &XYZ) -> Self {
+        ACES2065_1::new(
+             1.0498110175 * xyz.x + 0.0000000000 * xyz.y - 0.0000974845 * xyz.z,
+            -0.4959030231 * xyz.x + 1.3733130458 * xyz.y + 0.0982400361 * xyz.z,
+             0.0000000000 * xyz.x + 0.0000000000 * xyz.y + 0.9912520182 * xyz.z,
+        )
+    }
+
+    /// Convert to XYZ
+    pub fn to_xyz(&self) -> XYZ {
+        XYZ::new(
+            0.9525523959 * self.r + 0.0000000000 * self.g + 0.0000936786 * self.b,
+            0.3439664498 * self.r + 0.7281660966 * self.g - 0.0721325464 * self.b,
+            0.0000000000 * self.r + 0.0000000000 * self.g + 1.0088251844 * self.b,
+        )
+    }
+
+    /// Convert to ACEScg
+    pub fn to_acescg(&self) -> ACEScg {
+        ACEScg::new(
+             1.4514393161 * self.r - 0.2365107469 * self.g - 0.2149285693 * self.b,
+            -0.0765537734 * self.r + 1.1762296998 * self.g - 0.0996759264 * self.b,
+             0.0083161484 * self.r - 0.0060324498 * self.g + 0.9977163014 * self.b,
+        )
+    }
+}
+
+/// ACEScg (AP1 primaries) - working space
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ACEScg {
+    pub r: f64,
+    pub g: f64,
+    pub b: f64,
+}
+
+impl ACEScg {
+    pub const fn new(r: f64, g: f64, b: f64) -> Self {
+        ACEScg { r, g, b }
+    }
+
+    /// Convert from XYZ
+    pub fn from_xyz(xyz: &XYZ) -> Self {
+        ACEScg::new(
+             1.6410233797 * xyz.x - 0.3248032942 * xyz.y - 0.2364246952 * xyz.z,
+            -0.6636628587 * xyz.x + 1.6153315917 * xyz.y + 0.0167563477 * xyz.z,
+             0.0117218943 * xyz.x - 0.0082844420 * xyz.y + 0.9883948585 * xyz.z,
+        )
+    }
+
+    /// Convert to XYZ
+    pub fn to_xyz(&self) -> XYZ {
+        XYZ::new(
+            0.6624541811 * self.r + 0.1340042065 * self.g + 0.1561876870 * self.b,
+            0.2722287168 * self.r + 0.6740817658 * self.g + 0.0536895174 * self.b,
+           -0.0055746495 * self.r + 0.0040607335 * self.g + 1.0103391003 * self.b,
+        )
+    }
+
+    /// Convert to ACES2065-1
+    pub fn to_aces2065_1(&self) -> ACES2065_1 {
+        ACES2065_1::new(
+            0.6954522414 * self.r + 0.1406786965 * self.g + 0.1638690622 * self.b,
+            0.0447945634 * self.r + 0.8596711185 * self.g + 0.0955343182 * self.b,
+           -0.0055258826 * self.r + 0.0040252103 * self.g + 1.0015006723 * self.b,
+        )
+    }
+
+    /// Convert to linear sRGB
+    pub fn to_linear_srgb(&self) -> LinearRGB {
+        LinearRGB::new(
+             1.7050509879 * self.r - 0.6217921206 * self.g - 0.0832588234 * self.b,
+            -0.1302564175 * self.r + 1.1408047365 * self.g - 0.0105482626 * self.b,
+            -0.0240033568 * self.r - 0.1289689761 * self.g + 1.1529723252 * self.b,
+        )
+    }
+
+    /// Convert from linear sRGB
+    pub fn from_linear_srgb(rgb: &LinearRGB) -> Self {
+        ACEScg::new(
+            0.6131178520 * rgb.r + 0.3395231462 * rgb.g + 0.0473590018 * rgb.b,
+            0.0701918649 * rgb.r + 0.9163553837 * rgb.g + 0.0134527514 * rgb.b,
+            0.0205798908 * rgb.r + 0.1096578085 * rgb.g + 0.8697623008 * rgb.b,
+        )
+    }
+}
+
+/// ACEScc (logarithmic encoding)
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ACEScc {
+    pub r: f64,
+    pub g: f64,
+    pub b: f64,
+}
+
+impl ACEScc {
+    pub const fn new(r: f64, g: f64, b: f64) -> Self {
+        ACEScc { r, g, b }
+    }
+
+    /// Convert from ACEScg
+    pub fn from_acescg(acescg: &ACEScg) -> Self {
+        ACEScc::new(
+            Self::lin_to_log(acescg.r),
+            Self::lin_to_log(acescg.g),
+            Self::lin_to_log(acescg.b),
+        )
+    }
+
+    /// Convert to ACEScg
+    pub fn to_acescg(&self) -> ACEScg {
+        ACEScg::new(
+            Self::log_to_lin(self.r),
+            Self::log_to_lin(self.g),
+            Self::log_to_lin(self.b),
+        )
+    }
+
+    fn lin_to_log(x: f64) -> f64 {
+        if x <= 0.0 {
+            -0.3584474886 // (log2(2^-16) + 9.72) / 17.52
+        } else if x < 2.0_f64.powf(-15.0) {
+            (2.0_f64.ln().recip() * (2.0_f64.powf(-16.0) + x * 0.5).ln() + 9.72) / 17.52
+        } else {
+            (2.0_f64.ln().recip() * x.ln() + 9.72) / 17.52
+        }
+    }
+
+    fn log_to_lin(x: f64) -> f64 {
+        if x < -0.3013698630 { // (9.72 - 15) / 17.52
+            (2.0_f64.powf(x * 17.52 - 9.72) - 2.0_f64.powf(-16.0)) * 2.0
+        } else if x < 1.4679964372 { // (log2(65504) + 9.72) / 17.52
+            2.0_f64.powf(x * 17.52 - 9.72)
+        } else {
+            65504.0
+        }
+    }
+}
+
+/// ACEScct (modified ACEScc with toe)
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ACEScct {
+    pub r: f64,
+    pub g: f64,
+    pub b: f64,
+}
+
+impl ACEScct {
+    pub const fn new(r: f64, g: f64, b: f64) -> Self {
+        ACEScct { r, g, b }
+    }
+
+    const CUT: f64 = 0.0078125; // 2^-7
+
+    /// Convert from ACEScg
+    pub fn from_acescg(acescg: &ACEScg) -> Self {
+        ACEScct::new(
+            Self::lin_to_log(acescg.r),
+            Self::lin_to_log(acescg.g),
+            Self::lin_to_log(acescg.b),
+        )
+    }
+
+    /// Convert to ACEScg
+    pub fn to_acescg(&self) -> ACEScg {
+        ACEScg::new(
+            Self::log_to_lin(self.r),
+            Self::log_to_lin(self.g),
+            Self::log_to_lin(self.b),
+        )
+    }
+
+    fn lin_to_log(x: f64) -> f64 {
+        if x <= Self::CUT {
+            10.5402377416545 * x + 0.0729055341958355
+        } else {
+            (2.0_f64.ln().recip() * x.ln() + 9.72) / 17.52
+        }
+    }
+
+    fn log_to_lin(x: f64) -> f64 {
+        if x <= 0.155251141552511 {
+            (x - 0.0729055341958355) / 10.5402377416545
+        } else {
+            2.0_f64.powf(x * 17.52 - 9.72)
+        }
+    }
+}
+
+// ============================================================================
+// DISPLAY P3 AND REC.2020
+// ============================================================================
+
+/// Display P3 (Apple's wide gamut)
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DisplayP3 {
+    pub r: f64,
+    pub g: f64,
+    pub b: f64,
+}
+
+impl DisplayP3 {
+    pub const fn new(r: f64, g: f64, b: f64) -> Self {
+        DisplayP3 { r, g, b }
+    }
+
+    /// Convert from XYZ (D65)
+    pub fn from_xyz(xyz: &XYZ) -> Self {
+        let linear = LinearRGB::new(
+             2.4934969119 * xyz.x - 0.9313836179 * xyz.y - 0.4027107845 * xyz.z,
+            -0.8294889696 * xyz.x + 1.7626640603 * xyz.y + 0.0236246858 * xyz.z,
+             0.0358458302 * xyz.x - 0.0761723893 * xyz.y + 0.9568845240 * xyz.z,
+        );
+        DisplayP3::new(
+            srgb_oetf(linear.r),
+            srgb_oetf(linear.g),
+            srgb_oetf(linear.b),
+        )
+    }
+
+    /// Convert to XYZ (D65)
+    pub fn to_xyz(&self) -> XYZ {
+        let linear = LinearRGB::new(
+            srgb_eotf(self.r),
+            srgb_eotf(self.g),
+            srgb_eotf(self.b),
+        );
+        XYZ::new(
+            0.4865709486 * linear.r + 0.2656676932 * linear.g + 0.1982172852 * linear.b,
+            0.2289745641 * linear.r + 0.6917385218 * linear.g + 0.0792869141 * linear.b,
+            0.0000000000 * linear.r + 0.0451133819 * linear.g + 1.0439443689 * linear.b,
+        )
+    }
+
+    /// Convert to sRGB (may clip)
+    pub fn to_srgb(&self) -> sRGB {
+        let xyz = self.to_xyz();
+        let linear = LinearRGB::new(
+             3.2404541621 * xyz.x - 1.5371385940 * xyz.y - 0.4985314095 * xyz.z,
+            -0.9692660305 * xyz.x + 1.8760108454 * xyz.y + 0.0415560175 * xyz.z,
+             0.0556434309 * xyz.x - 0.2040259135 * xyz.y + 1.0572251882 * xyz.z,
+        );
+        sRGB::from_linear(&linear.saturate())
+    }
+}
+
+/// Rec. 2020 (UHDTV wide gamut)
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Rec2020 {
+    pub r: f64,
+    pub g: f64,
+    pub b: f64,
+}
+
+impl Rec2020 {
+    pub const fn new(r: f64, g: f64, b: f64) -> Self {
+        Rec2020 { r, g, b }
+    }
+
+    const ALPHA: f64 = 1.09929682680944;
+    const BETA: f64 = 0.018053968510807;
+
+    /// Convert from XYZ (D65)
+    pub fn from_xyz(xyz: &XYZ) -> Self {
+        let linear = LinearRGB::new(
+             1.7166511880 * xyz.x - 0.3556707838 * xyz.y - 0.2533662814 * xyz.z,
+            -0.6666843518 * xyz.x + 1.6164812366 * xyz.y + 0.0157685458 * xyz.z,
+             0.0176398574 * xyz.x - 0.0427706133 * xyz.y + 0.9421031212 * xyz.z,
+        );
+        Rec2020::new(
+            Self::oetf(linear.r),
+            Self::oetf(linear.g),
+            Self::oetf(linear.b),
+        )
+    }
+
+    /// Convert to XYZ (D65)
+    pub fn to_xyz(&self) -> XYZ {
+        let linear = LinearRGB::new(
+            Self::eotf(self.r),
+            Self::eotf(self.g),
+            Self::eotf(self.b),
+        );
+        XYZ::new(
+            0.6369580483 * linear.r + 0.1446169036 * linear.g + 0.1688809752 * linear.b,
+            0.2627002120 * linear.r + 0.6779980715 * linear.g + 0.0593017165 * linear.b,
+            0.0000000000 * linear.r + 0.0280726930 * linear.g + 1.0609850577 * linear.b,
+        )
+    }
+
+    fn oetf(L: f64) -> f64 {
+        if L < Self::BETA {
+            4.5 * L
+        } else {
+            Self::ALPHA * L.powf(0.45) - (Self::ALPHA - 1.0)
+        }
+    }
+
+    fn eotf(V: f64) -> f64 {
+        if V < 4.5 * Self::BETA {
+            V / 4.5
+        } else {
+            ((V + Self::ALPHA - 1.0) / Self::ALPHA).powf(1.0 / 0.45)
+        }
+    }
+}
+
+// ============================================================================
+// HSL/HSV/HWB
+// ============================================================================
+
+/// HSL (Hue, Saturation, Lightness)
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HSL {
+    pub h: f64,  // Hue [0, 360)
+    pub s: f64,  // Saturation [0, 1]
+    pub l: f64,  // Lightness [0, 1]
+}
+
+impl HSL {
+    pub const fn new(h: f64, s: f64, l: f64) -> Self {
+        HSL { h, s, l }
+    }
+
+    /// Convert from sRGB
+    pub fn from_srgb(rgb: &sRGB) -> Self {
+        let max = rgb.r.max(rgb.g).max(rgb.b);
+        let min = rgb.r.min(rgb.g).min(rgb.b);
+        let l = (max + min) / 2.0;
+
+        if max == min {
+            return HSL::new(0.0, 0.0, l);
+        }
+
+        let d = max - min;
+        let s = if l > 0.5 {
+            d / (2.0 - max - min)
+        } else {
+            d / (max + min)
+        };
+
+        let h = if max == rgb.r {
+            ((rgb.g - rgb.b) / d + (if rgb.g < rgb.b { 6.0 } else { 0.0 })) * 60.0
+        } else if max == rgb.g {
+            ((rgb.b - rgb.r) / d + 2.0) * 60.0
+        } else {
+            ((rgb.r - rgb.g) / d + 4.0) * 60.0
+        };
+
+        HSL::new(h, s, l)
+    }
+
+    /// Convert to sRGB
+    pub fn to_srgb(&self) -> sRGB {
+        if self.s == 0.0 {
+            return sRGB::new(self.l, self.l, self.l);
+        }
+
+        let q = if self.l < 0.5 {
+            self.l * (1.0 + self.s)
+        } else {
+            self.l + self.s - self.l * self.s
+        };
+        let p = 2.0 * self.l - q;
+
+        fn hue_to_rgb(p: f64, q: f64, t: f64) -> f64 {
+            let t = if t < 0.0 { t + 1.0 } else if t > 1.0 { t - 1.0 } else { t };
+            if t < 1.0 / 6.0 {
+                p + (q - p) * 6.0 * t
+            } else if t < 0.5 {
+                q
+            } else if t < 2.0 / 3.0 {
+                p + (q - p) * (2.0 / 3.0 - t) * 6.0
+            } else {
+                p
+            }
+        }
+
+        sRGB::new(
+            hue_to_rgb(p, q, self.h / 360.0 + 1.0 / 3.0),
+            hue_to_rgb(p, q, self.h / 360.0),
+            hue_to_rgb(p, q, self.h / 360.0 - 1.0 / 3.0),
+        )
+    }
+}
+
+/// HSV (Hue, Saturation, Value)
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HSV {
+    pub h: f64,  // Hue [0, 360)
+    pub s: f64,  // Saturation [0, 1]
+    pub v: f64,  // Value [0, 1]
+}
+
+impl HSV {
+    pub const fn new(h: f64, s: f64, v: f64) -> Self {
+        HSV { h, s, v }
+    }
+
+    /// Convert from sRGB
+    pub fn from_srgb(rgb: &sRGB) -> Self {
+        let max = rgb.r.max(rgb.g).max(rgb.b);
+        let min = rgb.r.min(rgb.g).min(rgb.b);
+        let d = max - min;
+
+        let v = max;
+        let s = if max == 0.0 { 0.0 } else { d / max };
+
+        if max == min {
+            return HSV::new(0.0, s, v);
+        }
+
+        let h = if max == rgb.r {
+            ((rgb.g - rgb.b) / d + (if rgb.g < rgb.b { 6.0 } else { 0.0 })) * 60.0
+        } else if max == rgb.g {
+            ((rgb.b - rgb.r) / d + 2.0) * 60.0
+        } else {
+            ((rgb.r - rgb.g) / d + 4.0) * 60.0
+        };
+
+        HSV::new(h, s, v)
+    }
+
+    /// Convert to sRGB
+    pub fn to_srgb(&self) -> sRGB {
+        if self.s == 0.0 {
+            return sRGB::new(self.v, self.v, self.v);
+        }
+
+        let h = self.h / 60.0;
+        let i = h.floor() as i32;
+        let f = h - i as f64;
+        let p = self.v * (1.0 - self.s);
+        let q = self.v * (1.0 - self.s * f);
+        let t = self.v * (1.0 - self.s * (1.0 - f));
+
+        match i % 6 {
+            0 => sRGB::new(self.v, t, p),
+            1 => sRGB::new(q, self.v, p),
+            2 => sRGB::new(p, self.v, t),
+            3 => sRGB::new(p, q, self.v),
+            4 => sRGB::new(t, p, self.v),
+            _ => sRGB::new(self.v, p, q),
+        }
+    }
+}
+
+/// HWB (Hue, Whiteness, Blackness)
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HWB {
+    pub h: f64,  // Hue [0, 360)
+    pub w: f64,  // Whiteness [0, 1]
+    pub b: f64,  // Blackness [0, 1]
+}
+
+impl HWB {
+    pub const fn new(h: f64, w: f64, b: f64) -> Self {
+        HWB { h, w, b }
+    }
+
+    /// Convert from sRGB
+    pub fn from_srgb(rgb: &sRGB) -> Self {
+        let hsv = HSV::from_srgb(rgb);
+        let w = (1.0 - hsv.s) * hsv.v;
+        let b = 1.0 - hsv.v;
+        HWB::new(hsv.h, w, b)
+    }
+
+    /// Convert to sRGB
+    pub fn to_srgb(&self) -> sRGB {
+        let mut w = self.w;
+        let mut b = self.b;
+
+        // Normalize if w + b > 1
+        if w + b > 1.0 {
+            let sum = w + b;
+            w /= sum;
+            b /= sum;
+        }
+
+        let v = 1.0 - b;
+        let s = if v == 0.0 { 0.0 } else { 1.0 - w / v };
+
+        HSV::new(self.h, s, v).to_srgb()
+    }
+}
+
+// ============================================================================
+// HELPER FUNCTIONS AND CONSTANTS
+// ============================================================================
+
+/// CIE constants
+const CIE_EPSILON: f64 = 216.0 / 24389.0;  // (6/29)^3
+const CIE_KAPPA: f64 = 24389.0 / 27.0;     // (29/3)^3
+
+/// Lab f function
+fn lab_f(t: f64) -> f64 {
+    if t > CIE_EPSILON {
+        t.cbrt()
+    } else {
+        (CIE_KAPPA * t + 16.0) / 116.0
+    }
+}
+
+/// Lab f inverse
+fn lab_f_inv(t: f64) -> f64 {
+    let t3 = t * t * t;
+    if t3 > CIE_EPSILON {
+        t3
+    } else {
+        (116.0 * t - 16.0) / CIE_KAPPA
+    }
+}
+
+/// sRGB EOTF (electro-optical transfer function / gamma decode)
+pub fn srgb_eotf(v: f64) -> f64 {
+    if v <= 0.04045 {
+        v / 12.92
+    } else {
+        ((v + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+/// sRGB OETF (opto-electronic transfer function / gamma encode)
+pub fn srgb_oetf(v: f64) -> f64 {
+    if v <= 0.0031308 {
+        v * 12.92
+    } else {
+        1.055 * v.powf(1.0 / 2.4) - 0.055
+    }
+}
+
+/// PQ (Perceptual Quantizer) EOTF - ST 2084
+pub fn pq_eotf(v: f64) -> f64 {
+    let m1 = 0.1593017578125;
+    let m2 = 78.84375;
+    let c1 = 0.8359375;
+    let c2 = 18.8515625;
+    let c3 = 18.6875;
+
+    let vp = v.powf(1.0 / m2);
+    let num = (vp - c1).max(0.0);
+    let den = c2 - c3 * vp;
+
+    (num / den).powf(1.0 / m1)
+}
+
+/// PQ OETF
+pub fn pq_oetf(v: f64) -> f64 {
+    let m1 = 0.1593017578125;
+    let m2 = 78.84375;
+    let c1 = 0.8359375;
+    let c2 = 18.8515625;
+    let c3 = 18.6875;
+
+    let yp = v.powf(m1);
+    let num = c1 + c2 * yp;
+    let den = 1.0 + c3 * yp;
+
+    (num / den).powf(m2)
+}
+
+/// HLG EOTF (Hybrid Log-Gamma)
+pub fn hlg_eotf(v: f64) -> f64 {
+    let a = 0.17883277;
+    let b = 0.28466892;
+    let c = 0.55991073;
+
+    if v <= 0.5 {
+        v * v / 3.0
+    } else {
+        ((v - c).exp() / a + b) / 12.0
+    }
+}
+
+/// HLG OETF
+pub fn hlg_oetf(v: f64) -> f64 {
+    let a = 0.17883277;
+    let b = 0.28466892;
+    let c = 0.55991073;
+
+    if v <= 1.0 / 12.0 {
+        (3.0 * v).sqrt()
+    } else {
+        a * (12.0 * v - b).ln() + c
+    }
+}
+
+// ============================================================================
+// COLOR SPACE CONVERSION MATRICES
+// ============================================================================
+
+/// 3x3 color transformation matrix
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct ColorMatrix3x3 {
+    pub m: [[f64; 3]; 3],
+}
+
+impl ColorMatrix3x3 {
+    pub const fn new(m: [[f64; 3]; 3]) -> Self {
+        ColorMatrix3x3 { m }
+    }
+
+    pub const fn identity() -> Self {
+        ColorMatrix3x3 {
+            m: [
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+            ],
+        }
+    }
+
+    /// Apply to XYZ
+    pub fn apply_xyz(&self, xyz: &XYZ) -> XYZ {
+        XYZ::new(
+            self.m[0][0] * xyz.x + self.m[0][1] * xyz.y + self.m[0][2] * xyz.z,
+            self.m[1][0] * xyz.x + self.m[1][1] * xyz.y + self.m[1][2] * xyz.z,
+            self.m[2][0] * xyz.x + self.m[2][1] * xyz.y + self.m[2][2] * xyz.z,
+        )
+    }
+
+    /// Apply to LinearRGB
+    pub fn apply_rgb(&self, rgb: &LinearRGB) -> LinearRGB {
+        LinearRGB::new(
+            self.m[0][0] * rgb.r + self.m[0][1] * rgb.g + self.m[0][2] * rgb.b,
+            self.m[1][0] * rgb.r + self.m[1][1] * rgb.g + self.m[1][2] * rgb.b,
+            self.m[2][0] * rgb.r + self.m[2][1] * rgb.g + self.m[2][2] * rgb.b,
+        )
+    }
+
+    /// Matrix multiplication
+    pub fn multiply(&self, other: &ColorMatrix3x3) -> ColorMatrix3x3 {
+        let mut result = [[0.0; 3]; 3];
+        for i in 0..3 {
+            for j in 0..3 {
+                for k in 0..3 {
+                    result[i][j] += self.m[i][k] * other.m[k][j];
+                }
+            }
+        }
+        ColorMatrix3x3::new(result)
+    }
+
+    /// Matrix inverse (using cofactors)
+    pub fn inverse(&self) -> Option<ColorMatrix3x3> {
+        let det = self.determinant();
+        if det.abs() < 1e-10 {
+            return None;
+        }
+
+        let inv_det = 1.0 / det;
+        let mut result = [[0.0; 3]; 3];
+
+        result[0][0] = (self.m[1][1] * self.m[2][2] - self.m[1][2] * self.m[2][1]) * inv_det;
+        result[0][1] = (self.m[0][2] * self.m[2][1] - self.m[0][1] * self.m[2][2]) * inv_det;
+        result[0][2] = (self.m[0][1] * self.m[1][2] - self.m[0][2] * self.m[1][1]) * inv_det;
+        result[1][0] = (self.m[1][2] * self.m[2][0] - self.m[1][0] * self.m[2][2]) * inv_det;
+        result[1][1] = (self.m[0][0] * self.m[2][2] - self.m[0][2] * self.m[2][0]) * inv_det;
+        result[1][2] = (self.m[0][2] * self.m[1][0] - self.m[0][0] * self.m[1][2]) * inv_det;
+        result[2][0] = (self.m[1][0] * self.m[2][1] - self.m[1][1] * self.m[2][0]) * inv_det;
+        result[2][1] = (self.m[0][1] * self.m[2][0] - self.m[0][0] * self.m[2][1]) * inv_det;
+        result[2][2] = (self.m[0][0] * self.m[1][1] - self.m[0][1] * self.m[1][0]) * inv_det;
+
+        Some(ColorMatrix3x3::new(result))
+    }
+
+    /// Matrix determinant
+    pub fn determinant(&self) -> f64 {
+        self.m[0][0] * (self.m[1][1] * self.m[2][2] - self.m[1][2] * self.m[2][1])
+      - self.m[0][1] * (self.m[1][0] * self.m[2][2] - self.m[1][2] * self.m[2][0])
+      + self.m[0][2] * (self.m[1][0] * self.m[2][1] - self.m[1][1] * self.m[2][0])
+    }
+}
+
+/// Standard color matrices
+pub mod matrices {
+    use super::ColorMatrix3x3;
+
+    /// sRGB to XYZ (D65)
+    pub const SRGB_TO_XYZ: ColorMatrix3x3 = ColorMatrix3x3 {
+        m: [
+            [0.4124564, 0.3575761, 0.1804375],
+            [0.2126729, 0.7151522, 0.0721750],
+            [0.0193339, 0.1191920, 0.9503041],
+        ],
+    };
+
+    /// XYZ to sRGB (D65)
+    pub const XYZ_TO_SRGB: ColorMatrix3x3 = ColorMatrix3x3 {
+        m: [
+            [ 3.2404542, -1.5371385, -0.4985314],
+            [-0.9692660,  1.8760108,  0.0415560],
+            [ 0.0556434, -0.2040259,  1.0572252],
+        ],
+    };
+
+    /// Display P3 to XYZ (D65)
+    pub const P3_TO_XYZ: ColorMatrix3x3 = ColorMatrix3x3 {
+        m: [
+            [0.4865709, 0.2656677, 0.1982173],
+            [0.2289746, 0.6917385, 0.0792869],
+            [0.0000000, 0.0451134, 1.0439444],
+        ],
+    };
+
+    /// XYZ to Display P3 (D65)
+    pub const XYZ_TO_P3: ColorMatrix3x3 = ColorMatrix3x3 {
+        m: [
+            [ 2.4934969, -0.9313836, -0.4027108],
+            [-0.8294890,  1.7626641,  0.0236247],
+            [ 0.0358458, -0.0761724,  0.9568845],
+        ],
+    };
+
+    /// Rec.2020 to XYZ (D65)
+    pub const REC2020_TO_XYZ: ColorMatrix3x3 = ColorMatrix3x3 {
+        m: [
+            [0.6369580, 0.1446169, 0.1688810],
+            [0.2627002, 0.6779981, 0.0593017],
+            [0.0000000, 0.0280727, 1.0609851],
+        ],
+    };
+
+    /// XYZ to Rec.2020 (D65)
+    pub const XYZ_TO_REC2020: ColorMatrix3x3 = ColorMatrix3x3 {
+        m: [
+            [ 1.7166512, -0.3556708, -0.2533663],
+            [-0.6666844,  1.6164812,  0.0157685],
+            [ 0.0176399, -0.0427706,  0.9421031],
+        ],
+    };
+
+    /// Adobe RGB to XYZ (D65)
+    pub const ADOBE_RGB_TO_XYZ: ColorMatrix3x3 = ColorMatrix3x3 {
+        m: [
+            [0.5767309, 0.1855540, 0.1881852],
+            [0.2973769, 0.6273491, 0.0752741],
+            [0.0270343, 0.0706872, 0.9911085],
+        ],
+    };
+
+    /// XYZ to Adobe RGB (D65)
+    pub const XYZ_TO_ADOBE_RGB: ColorMatrix3x3 = ColorMatrix3x3 {
+        m: [
+            [ 2.0413690, -0.5649464, -0.3446944],
+            [-0.9692660,  1.8760108,  0.0415560],
+            [ 0.0134474, -0.1183897,  1.0154096],
+        ],
+    };
+
+    /// ProPhoto RGB to XYZ (D50)
+    pub const PROPHOTO_TO_XYZ: ColorMatrix3x3 = ColorMatrix3x3 {
+        m: [
+            [0.7976749, 0.1351917, 0.0313534],
+            [0.2880402, 0.7118741, 0.0000857],
+            [0.0000000, 0.0000000, 0.8252100],
+        ],
+    };
+
+    /// XYZ to ProPhoto RGB (D50)
+    pub const XYZ_TO_PROPHOTO: ColorMatrix3x3 = ColorMatrix3x3 {
+        m: [
+            [ 1.3459433, -0.2556075, -0.0511118],
+            [-0.5445989,  1.5081673,  0.0205351],
+            [ 0.0000000,  0.0000000,  1.2118128],
+        ],
+    };
+}
+
+// ============================================================================
+// UNIT TESTS
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const EPSILON: f64 = 1e-5;
+
+    fn approx_eq(a: f64, b: f64) -> bool {
+        (a - b).abs() < EPSILON
+    }
+
+    #[test]
+    fn test_xyz_to_xyY_roundtrip() {
+        let xyz = XYZ::new(0.5, 0.6, 0.7);
+        let xyY = xyz.to_xyY();
+        let back = xyY.to_xyz();
+        assert!(approx_eq(xyz.x, back.x));
+        assert!(approx_eq(xyz.y, back.y));
+        assert!(approx_eq(xyz.z, back.z));
+    }
+
+    #[test]
+    fn test_srgb_linear_roundtrip() {
+        let srgb = sRGB::new(0.5, 0.3, 0.8);
+        let linear = srgb.to_linear();
+        let back = sRGB::from_linear(&linear);
+        assert!(approx_eq(srgb.r, back.r));
+        assert!(approx_eq(srgb.g, back.g));
+        assert!(approx_eq(srgb.b, back.b));
+    }
+
+    #[test]
+    fn test_lab_xyz_roundtrip() {
+        let xyz = XYZ::new(0.4, 0.5, 0.6);
+        let lab = Lab::from_xyz(&xyz, &XYZ::D65);
+        let back = lab.to_xyz(&XYZ::D65);
+        assert!(approx_eq(xyz.x, back.x));
+        assert!(approx_eq(xyz.y, back.y));
+        assert!(approx_eq(xyz.z, back.z));
+    }
+
+    #[test]
+    fn test_lab_lch_roundtrip() {
+        let lab = Lab::new(50.0, 30.0, -20.0);
+        let lch = lab.to_lch();
+        let back = lch.to_lab();
+        assert!(approx_eq(lab.L, back.L));
+        assert!(approx_eq(lab.a, back.a));
+        assert!(approx_eq(lab.b, back.b));
+    }
+
+    #[test]
+    fn test_oklab_srgb_roundtrip() {
+        let linear = LinearRGB::new(0.5, 0.3, 0.2);
+        let oklab = Oklab::from_linear_srgb(&linear);
+        let back = oklab.to_linear_srgb();
+        assert!(approx_eq(linear.r, back.r));
+        assert!(approx_eq(linear.g, back.g));
+        assert!(approx_eq(linear.b, back.b));
+    }
+
+    #[test]
+    fn test_hsl_roundtrip() {
+        let srgb = sRGB::new(0.8, 0.4, 0.2);
+        let hsl = HSL::from_srgb(&srgb);
+        let back = hsl.to_srgb();
+        assert!(approx_eq(srgb.r, back.r));
+        assert!(approx_eq(srgb.g, back.g));
+        assert!(approx_eq(srgb.b, back.b));
+    }
+
+    #[test]
+    fn test_hsv_roundtrip() {
+        let srgb = sRGB::new(0.6, 0.2, 0.9);
+        let hsv = HSV::from_srgb(&srgb);
+        let back = hsv.to_srgb();
+        assert!(approx_eq(srgb.r, back.r));
+        assert!(approx_eq(srgb.g, back.g));
+        assert!(approx_eq(srgb.b, back.b));
+    }
+
+    #[test]
+    fn test_acescg_xyz_roundtrip() {
+        let acescg = ACEScg::new(0.5, 0.4, 0.3);
+        let xyz = acescg.to_xyz();
+        let back = ACEScg::from_xyz(&xyz);
+        assert!(approx_eq(acescg.r, back.r));
+        assert!(approx_eq(acescg.g, back.g));
+        assert!(approx_eq(acescg.b, back.b));
+    }
+
+    #[test]
+    fn test_srgb_hex() {
+        let srgb = sRGB::from_hex("#FF8040").unwrap();
+        assert_eq!(srgb.to_hex(), "#FF8040");
+    }
+
+    #[test]
+    fn test_white_points() {
+        assert!(approx_eq(XYZ::D65.y, 1.0));
+        assert!(approx_eq(XYZ::D50.y, 1.0));
+    }
+
+    #[test]
+    fn test_matrix_inverse() {
+        let m = matrices::SRGB_TO_XYZ;
+        let inv = m.inverse().unwrap();
+        let identity = m.multiply(&inv);
+
+        for i in 0..3 {
+            for j in 0..3 {
+                let expected = if i == j { 1.0 } else { 0.0 };
+                assert!((identity.m[i][j] - expected).abs() < 1e-10);
+            }
+        }
+    }
+
+    #[test]
+    fn test_luv_xyz_roundtrip() {
+        let xyz = XYZ::new(0.3, 0.4, 0.5);
+        let luv = Luv::from_xyz(&xyz, &XYZ::D65);
+        let back = luv.to_xyz(&XYZ::D65);
+        assert!(approx_eq(xyz.x, back.x));
+        assert!(approx_eq(xyz.y, back.y));
+        assert!(approx_eq(xyz.z, back.z));
+    }
+
+    #[test]
+    fn test_pq_roundtrip() {
+        let v = 0.5;
+        let encoded = pq_oetf(v);
+        let decoded = pq_eotf(encoded);
+        assert!(approx_eq(v, decoded));
+    }
+
+    #[test]
+    fn test_hlg_roundtrip() {
+        let v = 0.5;
+        let encoded = hlg_oetf(v);
+        let decoded = hlg_eotf(encoded);
+        assert!(approx_eq(v, decoded));
+    }
+}

@@ -1,0 +1,167 @@
+// =============================================================================
+// qsum — BSD-style checksum written in BuildLang
+// =============================================================================
+// Computes a 16-bit checksum using the BSD rotate-and-add algorithm.
+//
+// Usage:
+//   qsum file.txt                 print checksum + block count
+//   qsum file1.txt file2.txt      checksums for multiple files
+//   cat data | qsum               from stdin
+//   qsum --help                   usage
+//
+// Output:
+//   51243 12 file.txt
+//   (checksum  block_count  filename)
+//
+// Algorithm (BSD sum):
+//   For each byte: rotate checksum right by 1, then add the byte value.
+//   Keep checksum in 16-bit range (0-65535) using & 0xFFFF.
+//
+// Design: Uses the ASCII lookup table pattern (same as qhex/qbase64) for
+// character-to-byte-value conversion.
+// =============================================================================
+
+struct Tables {
+    ascii: String,
+}
+
+fn tables_new() -> Tables {
+    Tables {
+        ascii: " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~",
+    }
+}
+
+// --- Byte value from character ---
+fn char_code(t: &Tables, c: String) -> i64 {
+    let idx = t.ascii.index_of(c);
+    if idx < 0 {
+        if c == "\n" { return 10; }
+        if c == "\r" { return 13; }
+        if c == "\t" { return 9; }
+        return 0;
+    }
+    idx + 32
+}
+
+// --- BSD checksum algorithm ---
+// For each byte: checksum = rotate_right(checksum, 1) + byte
+// Kept in 16-bit range with & 0xFFFF
+fn compute_checksum(t: &Tables, data: String) -> i64 {
+    let len = data.len();
+    let mut cksum: i64 = 0;
+    let mut i: i64 = 0;
+
+    while i < len {
+        let c = data.char_at(i);
+        let byte_val = char_code(t, c);
+
+        // Rotate right by 1: extract low bit, shift right, put low bit at bit 15
+        let low_bit = cksum & 1;
+        cksum = (cksum >> 1) + (low_bit << 15);
+
+        // Add byte value
+        cksum = cksum + byte_val;
+
+        // Keep in 16-bit range
+        cksum = cksum & 65535;
+
+        i = i + 1;
+    }
+
+    cksum
+}
+
+// --- Help ---
+fn print_help() ~ Console {
+    println!("qsum — BSD-style file checksum");
+    println!("");
+    println!("Usage:");
+    println!("  qsum [FILE]...");
+    println!("  cat data | qsum");
+    println!("  qsum --help");
+    println!("");
+    println!("Output:");
+    println!("  CHECKSUM  BLOCKS  FILENAME");
+    println!("");
+    println!("CHECKSUM is a 16-bit BSD rotate-and-add checksum.");
+    println!("BLOCKS is the file size in 1024-byte blocks (rounded up).");
+}
+
+// --- Print checksum result ---
+fn print_result(cksum: i64, byte_count: i64, name: String) ~ Console {
+    // Block count: ceil(bytes / 1024)
+    let blocks = if byte_count == 0 {
+        0
+    } else {
+        (byte_count + 1023) / 1024
+    };
+
+    if name == "" {
+        println!("{} {}", cksum, blocks);
+    } else {
+        println!("{} {} {}", cksum, blocks, name);
+    }
+}
+
+// --- Main ---
+fn main() ~ Console + Environment + FileSystem + Process {
+    let t = tables_new();
+    let nargs = args_count();
+
+    if nargs < 2 {
+        // No args: try reading from stdin
+        let piped = stdin_is_pipe();
+        if piped {
+            let data = read_all();
+            let cksum = compute_checksum(&t, data);
+            let byte_count = data.len();
+            print_result(cksum, byte_count, "");
+            process_exit(0);
+        }
+        print_help();
+        process_exit(0);
+    }
+
+    // Parse arguments
+    let mut file_count: i64 = 0;
+
+    let mut i: i64 = 1;
+    while i < nargs {
+        let arg = args_get(i);
+
+        if arg == "--help" || arg == "-h" {
+            print_help();
+            process_exit(0);
+        } else if arg.starts_with("-") {
+            println!("qsum: unknown option '{}'", arg);
+            println!("Try 'qsum --help' for usage.");
+            process_exit(2);
+        } else {
+            file_count = file_count + 1;
+        }
+
+        i = i + 1;
+    }
+
+    // Process each file
+    let mut j: i64 = 1;
+    while j < nargs {
+        let arg = args_get(j);
+
+        if arg.starts_with("-") {
+            j = j + 1;
+        } else {
+            if !file_exists(arg) {
+                println!("qsum: {}: No such file or directory", arg);
+                process_exit(2);
+            }
+
+            let data = read_file(arg);
+            let cksum = compute_checksum(&t, data);
+            let byte_count = data.len();
+            print_result(cksum, byte_count, arg);
+
+            j = j + 1;
+        }
+    }
+}

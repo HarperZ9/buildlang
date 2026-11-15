@@ -1,0 +1,344 @@
+include!("stdlib/lines.bld");
+
+// =============================================================================
+// qpaste — Merge lines of files (GNU paste clone) written in BuildLang
+// =============================================================================
+// Usage:
+//   qpaste file1.txt file2.txt              merge side by side (tab delimiter)
+//   qpaste -d',' file1.txt file2.txt        merge with comma delimiter
+//   qpaste -s file1.txt                     serial: all lines joined into one
+//   echo -e "a\nb\nc" | qpaste -s           serial from stdin
+//   qpaste --help                           usage
+//
+// Design: Read all files into parallel line arrays stored in a flat struct.
+// For normal mode, iterate max(lines) times outputting corresponding line
+// from each file (empty if file is shorter). For serial mode, join all lines
+// from each file into a single output line.
+// =============================================================================
+
+// --- State struct: holds lines from all files ---
+// String pool fields (sp_buf/sp_starts/sp_lens/sp_n) match stdlib/string_pool.bld pattern.
+// Kept inline to avoid nested-struct &mut and sp_add/sp_get name collisions.
+struct Paste {
+    // String pool (matches stdlib/string_pool.bld pattern)
+    sp_buf: String,
+    sp_n: i32,
+    sp_starts: Vec<i32>,
+    sp_lens: Vec<i32>,
+    // Per-file line storage: flat array of string-pool IDs
+    // file_starts[f] = index into line_ids where file f begins
+    // file_counts[f] = number of lines in file f
+    line_ids: Vec<i32>,
+    file_starts: Vec<i32>,
+    file_counts: Vec<i32>,
+    file_n: i32,
+}
+
+fn paste_new() -> Paste {
+    Paste {
+        sp_buf: "", sp_n: 0, sp_starts: vec![], sp_lens: vec![],
+        line_ids: vec![], file_starts: vec![], file_counts: vec![],
+        file_n: 0,
+    }
+}
+
+// --- String pool ops ---
+fn sp_add(s: &mut Paste, text: String) -> i32 {
+    let id = s.sp_n;
+    let st = s.sp_buf.len();
+    s.sp_buf = s.sp_buf + text;
+    let en = s.sp_buf.len();
+    vec_push(s.sp_starts, st);
+    vec_push(s.sp_lens, en - st);
+    s.sp_n = s.sp_n + 1;
+    id
+}
+
+fn sp_get(s: &Paste, id: i32) -> String {
+    let st = vec_get(s.sp_starts, id);
+    let ln = vec_get(s.sp_lens, id);
+    if ln == 0 { return ""; }
+    s.sp_buf.substring(st, ln)
+}
+
+// --- Parse content into lines, adding to the struct for one file ---
+fn add_file_lines(s: &mut Paste, content: String) {
+    let start_idx = vec_len(s.line_ids);
+    vec_push(s.file_starts, start_idx);
+    let mut count: i32 = 0;
+
+    let lr = lr_new(content);
+    let mut i: i32 = 0;
+    while i < lr.count {
+        let raw_line = lr_get(&lr, i);
+        // Strip trailing \r
+        let tlen = raw_line.len();
+        let clean = if tlen > 0 {
+            let last = raw_line.char_at(tlen - 1);
+            if last == "\r" {
+                if tlen == 1 { "" } else { raw_line.substring(0, tlen - 1) }
+            } else {
+                raw_line
+            }
+        } else {
+            raw_line
+        };
+        let id = sp_add(s, clean);
+        vec_push(s.line_ids, id);
+        count = count + 1;
+        i = i + 1;
+    }
+
+    vec_push(s.file_counts, count);
+    s.file_n = s.file_n + 1;
+}
+
+// --- Get a line from file f at line index li ---
+fn get_line(s: &Paste, f: i32, li: i32) -> String {
+    let fs = vec_get(s.file_starts, f);
+    let fc = vec_get(s.file_counts, f);
+    if li >= fc {
+        return "";
+    }
+    let id = vec_get(s.line_ids, fs + li);
+    sp_get(s, id)
+}
+
+// --- Normal mode: merge files line by line ---
+fn output_normal(s: &Paste, delim: String) ~ Console {
+    // Find max line count across all files
+    let mut max_lines: i32 = 0;
+    let mut fi: i32 = 0;
+    while fi < s.file_n {
+        let fc = vec_get(s.file_counts, fi);
+        if fc > max_lines {
+            max_lines = fc;
+        }
+        fi = fi + 1;
+    }
+
+    // Output each line
+    let mut li: i32 = 0;
+    while li < max_lines {
+        let mut out = "";
+        let mut fi2: i32 = 0;
+        while fi2 < s.file_n {
+            if fi2 > 0 {
+                out = out + delim;
+            }
+            let line = get_line(s, fi2, li);
+            out = out + line;
+            fi2 = fi2 + 1;
+        }
+        println!("{}", out);
+        li = li + 1;
+    }
+}
+
+// --- Serial mode: join all lines from each file into one line ---
+fn output_serial(s: &Paste, delim: String) ~ Console {
+    let mut fi: i32 = 0;
+    while fi < s.file_n {
+        let fc = vec_get(s.file_counts, fi);
+        let mut out = "";
+        let mut li: i32 = 0;
+        while li < fc {
+            if li > 0 {
+                out = out + delim;
+            }
+            let line = get_line(s, fi, li);
+            out = out + line;
+            li = li + 1;
+        }
+        println!("{}", out);
+        fi = fi + 1;
+    }
+}
+
+// --- Extract option value: handles -dX, -d'X' forms ---
+fn extract_opt_val(arg: String, prefix_len: i32) -> String {
+    let alen = arg.len();
+    if alen <= prefix_len {
+        return "";
+    }
+    let rest = arg.substring(prefix_len, alen - prefix_len);
+    // Strip surrounding single quotes if present
+    let rlen = rest.len();
+    if rlen >= 2 {
+        let first = rest.char_at(0);
+        let last = rest.char_at(rlen - 1);
+        if first == "'" && last == "'" {
+            if rlen == 2 { return ""; }
+            return rest.substring(1, rlen - 2);
+        }
+    }
+    rest
+}
+
+// --- Help ---
+fn print_help() ~ Console {
+    println!("qpaste — merge lines of files");
+    println!("");
+    println!("Usage:");
+    println!("  qpaste [OPTION]... [FILE]...");
+    println!("");
+    println!("Options:");
+    println!("  -d DELIM   use DELIM instead of TAB for output delimiter");
+    println!("  -s         serial mode: join all lines of each file into one line");
+    println!("  --help     display this help and exit");
+    println!("");
+    println!("With no FILE, or when FILE is -, read standard input.");
+    println!("");
+    println!("Examples:");
+    println!("  qpaste file1.txt file2.txt");
+    println!("  qpaste -d',' file1.txt file2.txt");
+    println!("  echo -e \"a\\nb\\nc\" | qpaste -s");
+}
+
+// --- Filename pool: stored in a struct so substring works ---
+struct FnPool {
+    buf: String,
+    starts: Vec<i32>,
+    lens: Vec<i32>,
+    n: i32,
+}
+
+fn fnpool_new() -> FnPool {
+    FnPool { buf: "", starts: vec![], lens: vec![], n: 0 }
+}
+
+fn fnpool_add(fp: &mut FnPool, name: String) {
+    let st = fp.buf.len();
+    fp.buf = fp.buf + name;
+    let en = fp.buf.len();
+    vec_push(fp.starts, st);
+    vec_push(fp.lens, en - st);
+    fp.n = fp.n + 1;
+}
+
+fn fnpool_get(fp: &FnPool, idx: i32) -> String {
+    let st = vec_get(fp.starts, idx);
+    let ln = vec_get(fp.lens, idx);
+    if ln == 0 { return ""; }
+    fp.buf.substring(st, ln)
+}
+
+// --- Main ---
+fn main() ~ Console + Environment + FileSystem + Process {
+    let nargs = args_count();
+
+    if nargs < 2 {
+        print_help();
+        process_exit(0);
+    }
+
+    let mut delim = "\t";
+    let mut serial = false;
+    let mut has_delim = false;
+
+    // Collect filenames in a pool
+    let mut fp = fnpool_new();
+
+    // Parse arguments
+    let mut i: i32 = 1;
+    while i < nargs {
+        let arg = args_get(i);
+
+        if arg == "--help" || arg == "-h" {
+            print_help();
+            process_exit(0);
+        } else if arg == "-s" {
+            serial = true;
+        } else if arg == "-d" {
+            // Next arg is delimiter
+            i = i + 1;
+            if i < nargs {
+                let val = args_get(i);
+                let vlen = val.len();
+                if vlen >= 2 {
+                    let first = val.char_at(0);
+                    let last = val.char_at(vlen - 1);
+                    if first == "'" && last == "'" {
+                        delim = if vlen == 2 { "" } else { val.substring(1, vlen - 2) };
+                    } else {
+                        delim = val;
+                    }
+                } else {
+                    delim = val;
+                }
+                has_delim = true;
+            }
+        } else if arg.starts_with("-d") {
+            // -d',' or -d,
+            let val = extract_opt_val(arg, 2);
+            if val.len() > 0 {
+                delim = val;
+                has_delim = true;
+            }
+        } else if arg.starts_with("-") {
+            // Check for combined flags like -sd or -ds
+            if arg.contains("s") {
+                serial = true;
+            }
+        } else {
+            // It's a filename
+            fnpool_add(&mut fp, arg);
+        }
+
+        i = i + 1;
+    }
+
+    // Build the paste state
+    let mut s = paste_new();
+
+    if fp.n == 0 {
+        // No files: read from stdin
+        let piped = stdin_is_pipe();
+        if !piped {
+            print_help();
+            process_exit(0);
+        }
+        let content = read_all();
+        if content.len() == 0 {
+            process_exit(0);
+        }
+        add_file_lines(&mut s, content);
+    } else {
+        // Read each file
+        let mut fi: i32 = 0;
+        while fi < fp.n {
+            let fname = fnpool_get(&fp, fi);
+
+            if fname == "-" {
+                // Read from stdin
+                let piped = stdin_is_pipe();
+                if piped {
+                    let content = read_all();
+                    add_file_lines(&mut s, content);
+                } else {
+                    add_file_lines(&mut s, "");
+                }
+            } else {
+                let exists = file_exists(fname);
+                if !exists {
+                    println!("qpaste: {}: No such file or directory", fname);
+                    process_exit(2);
+                }
+                let content = read_file(fname);
+                add_file_lines(&mut s, content);
+            }
+            fi = fi + 1;
+        }
+    }
+
+    if s.file_n == 0 {
+        process_exit(0);
+    }
+
+    // Output
+    if serial {
+        output_serial(&s, delim);
+    } else {
+        output_normal(&s, delim);
+    }
+}

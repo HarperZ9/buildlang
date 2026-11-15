@@ -1,0 +1,1303 @@
+// ============================================================================
+// NEXUS - Registry System
+// ============================================================================
+// Component and service registration for mod extensibility
+// Provides extension points, plugin slots, and service discovery
+// ============================================================================
+
+module nexus::registry;
+
+use core::sync::{Mutex, RwLock, Arc};
+use core::collections::{HashMap, HashSet, Vec, BTreeMap};
+use core::any::Any;
+
+// ============================================================================
+// Registry Types
+// ============================================================================
+
+/// Component registration entry
+pub struct ComponentEntry {
+    id: String,
+    name: String,
+    component_type: String,
+    provider_mod: String,
+    version: String,
+    priority: i32,
+    factory: Box<dyn Fn() -> Box<dyn Any + Send + Sync> + Send + Sync>,
+    metadata: HashMap<String, String>,
+    dependencies: Vec<String>,
+    enabled: bool,
+    created_at: u64
+}
+
+impl ComponentEntry {
+    pub fn new<F>(id: &str, component_type: &str, factory: F) -> Self
+    where
+        F: Fn() -> Box<dyn Any + Send + Sync> + Send + Sync + 'static
+    {
+        Self {
+            id: id.to_string(),
+            name: id.to_string(),
+            component_type: component_type.to_string(),
+            provider_mod: String::new(),
+            version: "1.0.0".to_string(),
+            priority: 0,
+            factory: Box::new(factory),
+            metadata: HashMap::new(),
+            dependencies: Vec::new(),
+            enabled: true,
+            created_at: 0
+        }
+    }
+
+    pub fn with_name(mut self, name: &str) -> Self {
+        self.name = name.to_string();
+        self
+    }
+
+    pub fn with_provider(mut self, mod_id: &str) -> Self {
+        self.provider_mod = mod_id.to_string();
+        self
+    }
+
+    pub fn with_version(mut self, version: &str) -> Self {
+        self.version = version.to_string();
+        self
+    }
+
+    pub fn with_priority(mut self, priority: i32) -> Self {
+        self.priority = priority;
+        self
+    }
+
+    pub fn with_metadata(mut self, key: &str, value: &str) -> Self {
+        self.metadata.insert(key.to_string(), value.to_string());
+        self
+    }
+
+    pub fn with_dependency(mut self, dep: &str) -> Self {
+        self.dependencies.push(dep.to_string());
+        self
+    }
+
+    pub fn id(&self) -> &str { &self.id }
+    pub fn name(&self) -> &str { &self.name }
+    pub fn component_type(&self) -> &str { &self.component_type }
+    pub fn provider_mod(&self) -> &str { &self.provider_mod }
+    pub fn version(&self) -> &str { &self.version }
+    pub fn priority(&self) -> i32 { self.priority }
+    pub fn is_enabled(&self) -> bool { self.enabled }
+
+    pub fn create(&self) -> Box<dyn Any + Send + Sync> {
+        (self.factory)()
+    }
+
+    pub fn enable(&mut self) { self.enabled = true; }
+    pub fn disable(&mut self) { self.enabled = false; }
+}
+
+/// Service entry for service registry
+pub struct ServiceEntry {
+    id: String,
+    name: String,
+    interface_type: String,
+    provider_mod: String,
+    instance: Option<Box<dyn Any + Send + Sync>>,
+    factory: Option<Box<dyn Fn() -> Box<dyn Any + Send + Sync> + Send + Sync>>,
+    singleton: bool,
+    lazy: bool,
+    priority: i32,
+    dependencies: Vec<String>,
+    enabled: bool
+}
+
+impl ServiceEntry {
+    pub fn new(id: &str, interface_type: &str) -> Self {
+        Self {
+            id: id.to_string(),
+            name: id.to_string(),
+            interface_type: interface_type.to_string(),
+            provider_mod: String::new(),
+            instance: None,
+            factory: None,
+            singleton: true,
+            lazy: true,
+            priority: 0,
+            dependencies: Vec::new(),
+            enabled: true
+        }
+    }
+
+    pub fn with_instance<T: Any + Send + Sync + 'static>(mut self, instance: T) -> Self {
+        self.instance = Some(Box::new(instance));
+        self.lazy = false;
+        self
+    }
+
+    pub fn with_factory<F>(mut self, factory: F) -> Self
+    where
+        F: Fn() -> Box<dyn Any + Send + Sync> + Send + Sync + 'static
+    {
+        self.factory = Some(Box::new(factory));
+        self
+    }
+
+    pub fn with_provider(mut self, mod_id: &str) -> Self {
+        self.provider_mod = mod_id.to_string();
+        self
+    }
+
+    pub fn transient(mut self) -> Self {
+        self.singleton = false;
+        self
+    }
+
+    pub fn eager(mut self) -> Self {
+        self.lazy = false;
+        self
+    }
+
+    pub fn with_priority(mut self, priority: i32) -> Self {
+        self.priority = priority;
+        self
+    }
+
+    pub fn with_dependency(mut self, dep: &str) -> Self {
+        self.dependencies.push(dep.to_string());
+        self
+    }
+
+    pub fn id(&self) -> &str { &self.id }
+    pub fn name(&self) -> &str { &self.name }
+    pub fn interface_type(&self) -> &str { &self.interface_type }
+    pub fn provider_mod(&self) -> &str { &self.provider_mod }
+    pub fn is_singleton(&self) -> bool { self.singleton }
+    pub fn is_lazy(&self) -> bool { self.lazy }
+    pub fn is_enabled(&self) -> bool { self.enabled }
+
+    pub fn get_or_create(&mut self) -> Option<&Box<dyn Any + Send + Sync>> {
+        if self.instance.is_none() {
+            if let Some(ref factory) = self.factory {
+                self.instance = Some(factory());
+            }
+        }
+        self.instance.as_ref()
+    }
+
+    pub fn create_new(&self) -> Option<Box<dyn Any + Send + Sync>> {
+        self.factory.as_ref().map(|f| f())
+    }
+
+    pub fn enable(&mut self) { self.enabled = true; }
+    pub fn disable(&mut self) { self.enabled = false; }
+}
+
+// ============================================================================
+// Component Registry
+// ============================================================================
+
+/// Registry for components
+pub struct ComponentRegistry {
+    components: HashMap<String, ComponentEntry>,
+    by_type: HashMap<String, Vec<String>>,
+    by_provider: HashMap<String, Vec<String>>,
+    instances: HashMap<String, Box<dyn Any + Send + Sync>>,
+    listeners: Vec<Box<dyn Fn(RegistryEvent) + Send + Sync>>
+}
+
+impl ComponentRegistry {
+    pub fn new() -> Self {
+        Self {
+            components: HashMap::new(),
+            by_type: HashMap::new(),
+            by_provider: HashMap::new(),
+            instances: HashMap::new(),
+            listeners: Vec::new()
+        }
+    }
+
+    /// Register a component
+    pub fn register(&mut self, entry: ComponentEntry) -> Result<(), RegistryError> {
+        let id = entry.id().to_string();
+        let component_type = entry.component_type().to_string();
+        let provider = entry.provider_mod().to_string();
+
+        if self.components.contains_key(&id) {
+            return Err(RegistryError::AlreadyRegistered(id));
+        }
+
+        // Check dependencies
+        for dep in &entry.dependencies {
+            if !self.components.contains_key(dep) {
+                return Err(RegistryError::MissingDependency {
+                    component: id.clone(),
+                    dependency: dep.clone()
+                });
+            }
+        }
+
+        self.by_type.entry(component_type.clone())
+            .or_insert_with(Vec::new)
+            .push(id.clone());
+
+        if !provider.is_empty() {
+            self.by_provider.entry(provider)
+                .or_insert_with(Vec::new)
+                .push(id.clone());
+        }
+
+        self.notify(RegistryEvent::ComponentRegistered(id.clone()));
+        self.components.insert(id, entry);
+
+        Ok(())
+    }
+
+    /// Unregister a component
+    pub fn unregister(&mut self, id: &str) -> bool {
+        if let Some(entry) = self.components.remove(id) {
+            // Remove from type index
+            if let Some(list) = self.by_type.get_mut(entry.component_type()) {
+                list.retain(|i| i != id);
+            }
+
+            // Remove from provider index
+            if !entry.provider_mod().is_empty() {
+                if let Some(list) = self.by_provider.get_mut(entry.provider_mod()) {
+                    list.retain(|i| i != id);
+                }
+            }
+
+            // Remove instance
+            self.instances.remove(id);
+
+            self.notify(RegistryEvent::ComponentUnregistered(id.to_string()));
+            return true;
+        }
+        false
+    }
+
+    /// Unregister all components from a mod
+    pub fn unregister_mod(&mut self, mod_id: &str) {
+        let ids: Vec<String> = self.by_provider.get(mod_id)
+            .map(|v| v.clone())
+            .unwrap_or_default();
+
+        for id in ids {
+            self.unregister(&id);
+        }
+    }
+
+    /// Get a component by ID
+    pub fn get(&self, id: &str) -> Option<&ComponentEntry> {
+        self.components.get(id)
+    }
+
+    /// Get all components of a type
+    pub fn get_by_type(&self, component_type: &str) -> Vec<&ComponentEntry> {
+        self.by_type.get(component_type)
+            .map(|ids| {
+                ids.iter()
+                    .filter_map(|id| self.components.get(id))
+                    .filter(|e| e.is_enabled())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Get all components from a mod
+    pub fn get_by_provider(&self, mod_id: &str) -> Vec<&ComponentEntry> {
+        self.by_provider.get(mod_id)
+            .map(|ids| {
+                ids.iter()
+                    .filter_map(|id| self.components.get(id))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Create an instance of a component
+    pub fn create(&mut self, id: &str) -> Option<&Box<dyn Any + Send + Sync>> {
+        if self.instances.contains_key(id) {
+            return self.instances.get(id);
+        }
+
+        if let Some(entry) = self.components.get(id) {
+            if !entry.is_enabled() {
+                return None;
+            }
+
+            let instance = entry.create();
+            self.instances.insert(id.to_string(), instance);
+            return self.instances.get(id);
+        }
+
+        None
+    }
+
+    /// Get or create an instance
+    pub fn get_instance(&mut self, id: &str) -> Option<&Box<dyn Any + Send + Sync>> {
+        if !self.instances.contains_key(id) {
+            self.create(id);
+        }
+        self.instances.get(id)
+    }
+
+    /// Check if a component exists
+    pub fn has(&self, id: &str) -> bool {
+        self.components.contains_key(id)
+    }
+
+    /// Get component count
+    pub fn count(&self) -> usize {
+        self.components.len()
+    }
+
+    /// Get all component IDs
+    pub fn ids(&self) -> Vec<&str> {
+        self.components.keys().map(|s| s.as_str()).collect()
+    }
+
+    /// Add a listener
+    pub fn on_change<F>(&mut self, listener: F)
+    where
+        F: Fn(RegistryEvent) + Send + Sync + 'static
+    {
+        self.listeners.push(Box::new(listener));
+    }
+
+    fn notify(&self, event: RegistryEvent) {
+        for listener in &self.listeners {
+            listener(event.clone());
+        }
+    }
+}
+
+// ============================================================================
+// Service Registry
+// ============================================================================
+
+/// Registry for services (dependency injection)
+pub struct ServiceRegistry {
+    services: HashMap<String, ServiceEntry>,
+    by_interface: HashMap<String, Vec<String>>,
+    by_provider: HashMap<String, Vec<String>>,
+    resolving: HashSet<String>,
+    listeners: Vec<Box<dyn Fn(RegistryEvent) + Send + Sync>>
+}
+
+impl ServiceRegistry {
+    pub fn new() -> Self {
+        Self {
+            services: HashMap::new(),
+            by_interface: HashMap::new(),
+            by_provider: HashMap::new(),
+            resolving: HashSet::new(),
+            listeners: Vec::new()
+        }
+    }
+
+    /// Register a service
+    pub fn register(&mut self, entry: ServiceEntry) -> Result<(), RegistryError> {
+        let id = entry.id().to_string();
+        let interface = entry.interface_type().to_string();
+        let provider = entry.provider_mod().to_string();
+
+        if self.services.contains_key(&id) {
+            return Err(RegistryError::AlreadyRegistered(id));
+        }
+
+        self.by_interface.entry(interface)
+            .or_insert_with(Vec::new)
+            .push(id.clone());
+
+        if !provider.is_empty() {
+            self.by_provider.entry(provider)
+                .or_insert_with(Vec::new)
+                .push(id.clone());
+        }
+
+        // Initialize eager services
+        let should_init = !entry.is_lazy();
+        self.services.insert(id.clone(), entry);
+
+        if should_init {
+            self.resolve(&id)?;
+        }
+
+        self.notify(RegistryEvent::ServiceRegistered(id));
+        Ok(())
+    }
+
+    /// Unregister a service
+    pub fn unregister(&mut self, id: &str) -> bool {
+        if let Some(entry) = self.services.remove(id) {
+            if let Some(list) = self.by_interface.get_mut(entry.interface_type()) {
+                list.retain(|i| i != id);
+            }
+
+            if !entry.provider_mod().is_empty() {
+                if let Some(list) = self.by_provider.get_mut(entry.provider_mod()) {
+                    list.retain(|i| i != id);
+                }
+            }
+
+            self.notify(RegistryEvent::ServiceUnregistered(id.to_string()));
+            return true;
+        }
+        false
+    }
+
+    /// Unregister all services from a mod
+    pub fn unregister_mod(&mut self, mod_id: &str) {
+        let ids: Vec<String> = self.by_provider.get(mod_id)
+            .map(|v| v.clone())
+            .unwrap_or_default();
+
+        for id in ids {
+            self.unregister(&id);
+        }
+    }
+
+    /// Resolve a service by ID
+    pub fn resolve(&mut self, id: &str) -> Result<&Box<dyn Any + Send + Sync>, RegistryError> {
+        // Check for circular dependencies
+        if self.resolving.contains(id) {
+            return Err(RegistryError::CircularDependency(id.to_string()));
+        }
+
+        // Check if service exists
+        if !self.services.contains_key(id) {
+            return Err(RegistryError::ServiceNotFound(id.to_string()));
+        }
+
+        // Resolve dependencies first
+        let deps: Vec<String> = {
+            let entry = self.services.get(id).unwrap();
+            entry.dependencies.clone()
+        };
+
+        self.resolving.insert(id.to_string());
+
+        for dep in &deps {
+            self.resolve(dep)?;
+        }
+
+        self.resolving.remove(id);
+
+        // Get or create the service
+        let entry = self.services.get_mut(id).unwrap();
+        entry.get_or_create()
+            .ok_or_else(|| RegistryError::ServiceCreationFailed(id.to_string()))
+    }
+
+    /// Resolve a service by interface type
+    pub fn resolve_by_interface(&mut self, interface: &str) -> Result<&Box<dyn Any + Send + Sync>, RegistryError> {
+        let id = self.by_interface.get(interface)
+            .and_then(|ids| {
+                // Get highest priority enabled service
+                ids.iter()
+                    .filter_map(|id| self.services.get(id))
+                    .filter(|e| e.is_enabled())
+                    .max_by_key(|e| e.priority)
+                    .map(|e| e.id().to_string())
+            })
+            .ok_or_else(|| RegistryError::InterfaceNotFound(interface.to_string()))?;
+
+        self.resolve(&id)
+    }
+
+    /// Resolve all services of an interface type
+    pub fn resolve_all(&mut self, interface: &str) -> Vec<&Box<dyn Any + Send + Sync>> {
+        let ids: Vec<String> = self.by_interface.get(interface)
+            .map(|v| v.clone())
+            .unwrap_or_default();
+
+        let mut results = Vec::new();
+        for id in ids {
+            if let Ok(service) = self.resolve(&id) {
+                results.push(service);
+            }
+        }
+        results
+    }
+
+    /// Check if a service exists
+    pub fn has(&self, id: &str) -> bool {
+        self.services.contains_key(id)
+    }
+
+    /// Check if an interface has implementations
+    pub fn has_interface(&self, interface: &str) -> bool {
+        self.by_interface.get(interface)
+            .map(|v| !v.is_empty())
+            .unwrap_or(false)
+    }
+
+    /// Get service count
+    pub fn count(&self) -> usize {
+        self.services.len()
+    }
+
+    /// Add a listener
+    pub fn on_change<F>(&mut self, listener: F)
+    where
+        F: Fn(RegistryEvent) + Send + Sync + 'static
+    {
+        self.listeners.push(Box::new(listener));
+    }
+
+    fn notify(&self, event: RegistryEvent) {
+        for listener in &self.listeners {
+            listener(event.clone());
+        }
+    }
+}
+
+// ============================================================================
+// Extension Points
+// ============================================================================
+
+/// Extension point that can be extended by mods
+pub struct ExtensionPoint {
+    id: String,
+    name: String,
+    description: String,
+    schema: ExtensionSchema,
+    extensions: Vec<Extension>,
+    enabled: bool
+}
+
+impl ExtensionPoint {
+    pub fn new(id: &str, schema: ExtensionSchema) -> Self {
+        Self {
+            id: id.to_string(),
+            name: id.to_string(),
+            description: String::new(),
+            schema,
+            extensions: Vec::new(),
+            enabled: true
+        }
+    }
+
+    pub fn with_name(mut self, name: &str) -> Self {
+        self.name = name.to_string();
+        self
+    }
+
+    pub fn with_description(mut self, desc: &str) -> Self {
+        self.description = desc.to_string();
+        self
+    }
+
+    pub fn id(&self) -> &str { &self.id }
+    pub fn name(&self) -> &str { &self.name }
+    pub fn description(&self) -> &str { &self.description }
+    pub fn schema(&self) -> &ExtensionSchema { &self.schema }
+    pub fn is_enabled(&self) -> bool { self.enabled }
+
+    /// Add an extension
+    pub fn add_extension(&mut self, ext: Extension) -> Result<(), RegistryError> {
+        // Validate against schema
+        self.schema.validate(&ext)?;
+
+        self.extensions.push(ext);
+        self.extensions.sort_by_key(|e| std::cmp::Reverse(e.priority));
+
+        Ok(())
+    }
+
+    /// Remove an extension
+    pub fn remove_extension(&mut self, ext_id: &str) -> bool {
+        let len = self.extensions.len();
+        self.extensions.retain(|e| e.id() != ext_id);
+        self.extensions.len() != len
+    }
+
+    /// Remove all extensions from a mod
+    pub fn remove_mod_extensions(&mut self, mod_id: &str) {
+        self.extensions.retain(|e| e.provider_mod() != mod_id);
+    }
+
+    /// Get all extensions
+    pub fn extensions(&self) -> &[Extension] {
+        &self.extensions
+    }
+
+    /// Get enabled extensions
+    pub fn enabled_extensions(&self) -> Vec<&Extension> {
+        self.extensions.iter().filter(|e| e.is_enabled()).collect()
+    }
+
+    pub fn enable(&mut self) { self.enabled = true; }
+    pub fn disable(&mut self) { self.enabled = false; }
+}
+
+/// Schema for extension validation
+pub struct ExtensionSchema {
+    required_fields: Vec<SchemaField>,
+    optional_fields: Vec<SchemaField>,
+    allow_extra: bool
+}
+
+impl ExtensionSchema {
+    pub fn new() -> Self {
+        Self {
+            required_fields: Vec::new(),
+            optional_fields: Vec::new(),
+            allow_extra: false
+        }
+    }
+
+    pub fn require(mut self, field: SchemaField) -> Self {
+        self.required_fields.push(field);
+        self
+    }
+
+    pub fn optional(mut self, field: SchemaField) -> Self {
+        self.optional_fields.push(field);
+        self
+    }
+
+    pub fn allow_extra_fields(mut self) -> Self {
+        self.allow_extra = true;
+        self
+    }
+
+    pub fn validate(&self, ext: &Extension) -> Result<(), RegistryError> {
+        // Check required fields
+        for field in &self.required_fields {
+            if !ext.data.contains_key(&field.name) {
+                return Err(RegistryError::ValidationFailed {
+                    extension: ext.id().to_string(),
+                    reason: format!("Missing required field: {}", field.name)
+                });
+            }
+
+            let value = &ext.data[&field.name];
+            if !field.value_type.matches(value) {
+                return Err(RegistryError::ValidationFailed {
+                    extension: ext.id().to_string(),
+                    reason: format!("Field {} has wrong type", field.name)
+                });
+            }
+        }
+
+        // Validate optional fields if present
+        for field in &self.optional_fields {
+            if let Some(value) = ext.data.get(&field.name) {
+                if !field.value_type.matches(value) {
+                    return Err(RegistryError::ValidationFailed {
+                        extension: ext.id().to_string(),
+                        reason: format!("Field {} has wrong type", field.name)
+                    });
+                }
+            }
+        }
+
+        // Check for extra fields
+        if !self.allow_extra {
+            let known: HashSet<&str> = self.required_fields.iter()
+                .chain(self.optional_fields.iter())
+                .map(|f| f.name.as_str())
+                .collect();
+
+            for key in ext.data.keys() {
+                if !known.contains(key.as_str()) {
+                    return Err(RegistryError::ValidationFailed {
+                        extension: ext.id().to_string(),
+                        reason: format!("Unknown field: {}", key)
+                    });
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
+/// Schema field definition
+pub struct SchemaField {
+    name: String,
+    value_type: FieldType,
+    description: String
+}
+
+impl SchemaField {
+    pub fn new(name: &str, value_type: FieldType) -> Self {
+        Self {
+            name: name.to_string(),
+            value_type,
+            description: String::new()
+        }
+    }
+
+    pub fn with_description(mut self, desc: &str) -> Self {
+        self.description = desc.to_string();
+        self
+    }
+}
+
+/// Field types for schema
+pub enum FieldType {
+    String,
+    Int,
+    Float,
+    Bool,
+    Array(Box<FieldType>),
+    Object,
+    Any
+}
+
+impl FieldType {
+    pub fn matches(&self, value: &ExtensionValue) -> bool {
+        match (self, value) {
+            (FieldType::String, ExtensionValue::String(_)) => true,
+            (FieldType::Int, ExtensionValue::Int(_)) => true,
+            (FieldType::Float, ExtensionValue::Float(_)) => true,
+            (FieldType::Float, ExtensionValue::Int(_)) => true,
+            (FieldType::Bool, ExtensionValue::Bool(_)) => true,
+            (FieldType::Array(_), ExtensionValue::Array(_)) => true,
+            (FieldType::Object, ExtensionValue::Object(_)) => true,
+            (FieldType::Any, _) => true,
+            _ => false
+        }
+    }
+}
+
+/// An extension to an extension point
+pub struct Extension {
+    id: String,
+    extension_point: String,
+    provider_mod: String,
+    priority: i32,
+    data: HashMap<String, ExtensionValue>,
+    enabled: bool
+}
+
+impl Extension {
+    pub fn new(id: &str, extension_point: &str) -> Self {
+        Self {
+            id: id.to_string(),
+            extension_point: extension_point.to_string(),
+            provider_mod: String::new(),
+            priority: 0,
+            data: HashMap::new(),
+            enabled: true
+        }
+    }
+
+    pub fn with_provider(mut self, mod_id: &str) -> Self {
+        self.provider_mod = mod_id.to_string();
+        self
+    }
+
+    pub fn with_priority(mut self, priority: i32) -> Self {
+        self.priority = priority;
+        self
+    }
+
+    pub fn with_data(mut self, key: &str, value: ExtensionValue) -> Self {
+        self.data.insert(key.to_string(), value);
+        self
+    }
+
+    pub fn id(&self) -> &str { &self.id }
+    pub fn extension_point(&self) -> &str { &self.extension_point }
+    pub fn provider_mod(&self) -> &str { &self.provider_mod }
+    pub fn priority(&self) -> i32 { self.priority }
+    pub fn is_enabled(&self) -> bool { self.enabled }
+
+    pub fn get(&self, key: &str) -> Option<&ExtensionValue> {
+        self.data.get(key)
+    }
+
+    pub fn get_string(&self, key: &str) -> Option<&str> {
+        self.data.get(key).and_then(|v| v.as_string())
+    }
+
+    pub fn get_int(&self, key: &str) -> Option<i64> {
+        self.data.get(key).and_then(|v| v.as_int())
+    }
+
+    pub fn get_bool(&self, key: &str) -> Option<bool> {
+        self.data.get(key).and_then(|v| v.as_bool())
+    }
+
+    pub fn enable(&mut self) { self.enabled = true; }
+    pub fn disable(&mut self) { self.enabled = false; }
+}
+
+/// Extension value type
+@derive(Clone)]
+pub enum ExtensionValue {
+    String(String),
+    Int(i64),
+    Float(f64),
+    Bool(bool),
+    Array(Vec<ExtensionValue>),
+    Object(HashMap<String, ExtensionValue>)
+}
+
+impl ExtensionValue {
+    pub fn as_string(&self) -> Option<&str> {
+        match self {
+            Self::String(s) => Some(s),
+            _ => None
+        }
+    }
+
+    pub fn as_int(&self) -> Option<i64> {
+        match self {
+            Self::Int(i) => Some(*i),
+            _ => None
+        }
+    }
+
+    pub fn as_float(&self) -> Option<f64> {
+        match self {
+            Self::Float(f) => Some(*f),
+            Self::Int(i) => Some(*i as f64),
+            _ => None
+        }
+    }
+
+    pub fn as_bool(&self) -> Option<bool> {
+        match self {
+            Self::Bool(b) => Some(*b),
+            _ => None
+        }
+    }
+}
+
+// ============================================================================
+// Plugin Slots
+// ============================================================================
+
+/// Plugin slot for UI or functional extensions
+pub struct PluginSlot {
+    id: String,
+    name: String,
+    slot_type: SlotType,
+    plugins: Vec<PluginEntry>,
+    max_plugins: Option<usize>,
+    enabled: bool
+}
+
+impl PluginSlot {
+    pub fn new(id: &str, slot_type: SlotType) -> Self {
+        Self {
+            id: id.to_string(),
+            name: id.to_string(),
+            slot_type,
+            plugins: Vec::new(),
+            max_plugins: None,
+            enabled: true
+        }
+    }
+
+    pub fn with_name(mut self, name: &str) -> Self {
+        self.name = name.to_string();
+        self
+    }
+
+    pub fn with_max_plugins(mut self, max: usize) -> Self {
+        self.max_plugins = Some(max);
+        self
+    }
+
+    pub fn id(&self) -> &str { &self.id }
+    pub fn name(&self) -> &str { &self.name }
+    pub fn slot_type(&self) -> SlotType { self.slot_type }
+    pub fn is_enabled(&self) -> bool { self.enabled }
+
+    /// Add a plugin to this slot
+    pub fn add_plugin(&mut self, plugin: PluginEntry) -> Result<(), RegistryError> {
+        if let Some(max) = self.max_plugins {
+            if self.plugins.len() >= max {
+                return Err(RegistryError::SlotFull(self.id.clone()));
+            }
+        }
+
+        self.plugins.push(plugin);
+        self.plugins.sort_by_key(|p| std::cmp::Reverse(p.priority));
+
+        Ok(())
+    }
+
+    /// Remove a plugin
+    pub fn remove_plugin(&mut self, plugin_id: &str) -> bool {
+        let len = self.plugins.len();
+        self.plugins.retain(|p| p.id() != plugin_id);
+        self.plugins.len() != len
+    }
+
+    /// Get all plugins
+    pub fn plugins(&self) -> &[PluginEntry] {
+        &self.plugins
+    }
+
+    /// Get enabled plugins
+    pub fn enabled_plugins(&self) -> Vec<&PluginEntry> {
+        self.plugins.iter().filter(|p| p.is_enabled()).collect()
+    }
+
+    pub fn enable(&mut self) { self.enabled = true; }
+    pub fn disable(&mut self) { self.enabled = false; }
+}
+
+/// Plugin slot types
+@derive(Clone, Copy, PartialEq, Eq)]
+pub enum SlotType {
+    Ui,           // UI widget slot
+    Menu,         // Menu item slot
+    Toolbar,      // Toolbar button slot
+    Panel,        // Panel content slot
+    Processor,    // Data processor slot
+    Handler,      // Event handler slot
+    Filter,       // Filter chain slot
+    Custom
+}
+
+/// Plugin entry in a slot
+pub struct PluginEntry {
+    id: String,
+    name: String,
+    provider_mod: String,
+    priority: i32,
+    handler: Box<dyn Fn(&PluginContext) + Send + Sync>,
+    enabled: bool
+}
+
+impl PluginEntry {
+    pub fn new<F>(id: &str, handler: F) -> Self
+    where
+        F: Fn(&PluginContext) + Send + Sync + 'static
+    {
+        Self {
+            id: id.to_string(),
+            name: id.to_string(),
+            provider_mod: String::new(),
+            priority: 0,
+            handler: Box::new(handler),
+            enabled: true
+        }
+    }
+
+    pub fn with_name(mut self, name: &str) -> Self {
+        self.name = name.to_string();
+        self
+    }
+
+    pub fn with_provider(mut self, mod_id: &str) -> Self {
+        self.provider_mod = mod_id.to_string();
+        self
+    }
+
+    pub fn with_priority(mut self, priority: i32) -> Self {
+        self.priority = priority;
+        self
+    }
+
+    pub fn id(&self) -> &str { &self.id }
+    pub fn name(&self) -> &str { &self.name }
+    pub fn provider_mod(&self) -> &str { &self.provider_mod }
+    pub fn priority(&self) -> i32 { self.priority }
+    pub fn is_enabled(&self) -> bool { self.enabled }
+
+    pub fn execute(&self, context: &PluginContext) {
+        (self.handler)(context);
+    }
+
+    pub fn enable(&mut self) { self.enabled = true; }
+    pub fn disable(&mut self) { self.enabled = false; }
+}
+
+/// Context passed to plugins
+pub struct PluginContext {
+    pub slot_id: String,
+    pub data: HashMap<String, Box<dyn Any + Send + Sync>>
+}
+
+impl PluginContext {
+    pub fn new(slot_id: &str) -> Self {
+        Self {
+            slot_id: slot_id.to_string(),
+            data: HashMap::new()
+        }
+    }
+
+    pub fn set<T: Any + Send + Sync + 'static>(&mut self, key: &str, value: T) {
+        self.data.insert(key.to_string(), Box::new(value));
+    }
+
+    pub fn get<T: 'static>(&self, key: &str) -> Option<&T> {
+        self.data.get(key).and_then(|v| v.downcast_ref())
+    }
+}
+
+// ============================================================================
+// Mod Registry
+// ============================================================================
+
+/// Central registry combining all registries
+pub struct ModRegistry {
+    components: ComponentRegistry,
+    services: ServiceRegistry,
+    extension_points: HashMap<String, ExtensionPoint>,
+    plugin_slots: HashMap<String, PluginSlot>
+}
+
+impl ModRegistry {
+    pub fn new() -> Self {
+        Self {
+            components: ComponentRegistry::new(),
+            services: ServiceRegistry::new(),
+            extension_points: HashMap::new(),
+            plugin_slots: HashMap::new()
+        }
+    }
+
+    pub fn components(&self) -> &ComponentRegistry { &self.components }
+    pub fn components_mut(&mut self) -> &mut ComponentRegistry { &mut self.components }
+
+    pub fn services(&self) -> &ServiceRegistry { &self.services }
+    pub fn services_mut(&mut self) -> &mut ServiceRegistry { &mut self.services }
+
+    /// Register an extension point
+    pub fn register_extension_point(&mut self, point: ExtensionPoint) -> Result<(), RegistryError> {
+        if self.extension_points.contains_key(point.id()) {
+            return Err(RegistryError::AlreadyRegistered(point.id().to_string()));
+        }
+        self.extension_points.insert(point.id().to_string(), point);
+        Ok(())
+    }
+
+    /// Get an extension point
+    pub fn get_extension_point(&self, id: &str) -> Option<&ExtensionPoint> {
+        self.extension_points.get(id)
+    }
+
+    /// Get a mutable extension point
+    pub fn get_extension_point_mut(&mut self, id: &str) -> Option<&mut ExtensionPoint> {
+        self.extension_points.get_mut(id)
+    }
+
+    /// Register a plugin slot
+    pub fn register_plugin_slot(&mut self, slot: PluginSlot) -> Result<(), RegistryError> {
+        if self.plugin_slots.contains_key(slot.id()) {
+            return Err(RegistryError::AlreadyRegistered(slot.id().to_string()));
+        }
+        self.plugin_slots.insert(slot.id().to_string(), slot);
+        Ok(())
+    }
+
+    /// Get a plugin slot
+    pub fn get_plugin_slot(&self, id: &str) -> Option<&PluginSlot> {
+        self.plugin_slots.get(id)
+    }
+
+    /// Get a mutable plugin slot
+    pub fn get_plugin_slot_mut(&mut self, id: &str) -> Option<&mut PluginSlot> {
+        self.plugin_slots.get_mut(id)
+    }
+
+    /// Unregister everything from a mod
+    pub fn unregister_mod(&mut self, mod_id: &str) {
+        self.components.unregister_mod(mod_id);
+        self.services.unregister_mod(mod_id);
+
+        for point in self.extension_points.values_mut() {
+            point.remove_mod_extensions(mod_id);
+        }
+
+        for slot in self.plugin_slots.values_mut() {
+            let ids: Vec<String> = slot.plugins()
+                .iter()
+                .filter(|p| p.provider_mod() == mod_id)
+                .map(|p| p.id().to_string())
+                .collect();
+
+            for id in ids {
+                slot.remove_plugin(&id);
+            }
+        }
+    }
+}
+
+// ============================================================================
+// Events
+// ============================================================================
+
+/// Registry events
+@derive(Clone)]
+pub enum RegistryEvent {
+    ComponentRegistered(String),
+    ComponentUnregistered(String),
+    ServiceRegistered(String),
+    ServiceUnregistered(String),
+    ExtensionAdded { point: String, extension: String },
+    ExtensionRemoved { point: String, extension: String },
+    PluginAdded { slot: String, plugin: String },
+    PluginRemoved { slot: String, plugin: String }
+}
+
+// ============================================================================
+// Errors
+// ============================================================================
+
+@derive(Clone)]
+pub enum RegistryError {
+    AlreadyRegistered(String),
+    NotFound(String),
+    ServiceNotFound(String),
+    InterfaceNotFound(String),
+    MissingDependency { component: String, dependency: String },
+    CircularDependency(String),
+    ServiceCreationFailed(String),
+    ValidationFailed { extension: String, reason: String },
+    SlotFull(String)
+}
+
+impl RegistryError {
+    pub fn message(&self) -> String {
+        match self {
+            Self::AlreadyRegistered(id) => format!("Already registered: {}", id),
+            Self::NotFound(id) => format!("Not found: {}", id),
+            Self::ServiceNotFound(id) => format!("Service not found: {}", id),
+            Self::InterfaceNotFound(iface) => format!("Interface not found: {}", iface),
+            Self::MissingDependency { component, dependency } => {
+                format!("Component {} missing dependency: {}", component, dependency)
+            }
+            Self::CircularDependency(id) => format!("Circular dependency detected: {}", id),
+            Self::ServiceCreationFailed(id) => format!("Failed to create service: {}", id),
+            Self::ValidationFailed { extension, reason } => {
+                format!("Extension {} validation failed: {}", extension, reason)
+            }
+            Self::SlotFull(id) => format!("Plugin slot {} is full", id)
+        }
+    }
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_component_registration() {
+        let mut registry = ComponentRegistry::new();
+
+        let entry = ComponentEntry::new("my_component", "renderer", || {
+            Box::new(42i32)
+        });
+
+        assert!(registry.register(entry).is_ok());
+        assert!(registry.has("my_component"));
+        assert_eq!(registry.count(), 1);
+    }
+
+    #[test]
+    fn test_component_by_type() {
+        let mut registry = ComponentRegistry::new();
+
+        registry.register(ComponentEntry::new("comp1", "renderer", || Box::new(1i32))).unwrap();
+        registry.register(ComponentEntry::new("comp2", "renderer", || Box::new(2i32))).unwrap();
+        registry.register(ComponentEntry::new("comp3", "audio", || Box::new(3i32))).unwrap();
+
+        assert_eq!(registry.get_by_type("renderer").len(), 2);
+        assert_eq!(registry.get_by_type("audio").len(), 1);
+    }
+
+    #[test]
+    fn test_service_registration() {
+        let mut registry = ServiceRegistry::new();
+
+        let entry = ServiceEntry::new("my_service", "ILogger")
+            .with_instance(42i32);
+
+        assert!(registry.register(entry).is_ok());
+        assert!(registry.has("my_service"));
+    }
+
+    #[test]
+    fn test_service_resolution() {
+        let mut registry = ServiceRegistry::new();
+
+        registry.register(
+            ServiceEntry::new("logger", "ILogger")
+                .with_factory(|| Box::new("Logger instance".to_string()))
+        ).unwrap();
+
+        let result = registry.resolve("logger");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_extension_point() {
+        let schema = ExtensionSchema::new()
+            .require(SchemaField::new("name", FieldType::String))
+            .optional(SchemaField::new("priority", FieldType::Int));
+
+        let mut point = ExtensionPoint::new("commands", schema);
+
+        let ext = Extension::new("my_command", "commands")
+            .with_data("name", ExtensionValue::String("Test Command".to_string()));
+
+        assert!(point.add_extension(ext).is_ok());
+        assert_eq!(point.extensions().len(), 1);
+    }
+
+    #[test]
+    fn test_extension_validation() {
+        let schema = ExtensionSchema::new()
+            .require(SchemaField::new("name", FieldType::String));
+
+        let mut point = ExtensionPoint::new("test", schema);
+
+        // Missing required field
+        let ext = Extension::new("ext1", "test");
+        assert!(point.add_extension(ext).is_err());
+
+        // With required field
+        let ext2 = Extension::new("ext2", "test")
+            .with_data("name", ExtensionValue::String("Valid".to_string()));
+        assert!(point.add_extension(ext2).is_ok());
+    }
+
+    #[test]
+    fn test_plugin_slot() {
+        let mut slot = PluginSlot::new("toolbar", SlotType::Toolbar);
+
+        let plugin = PluginEntry::new("my_button", |ctx| {
+            // Handler logic
+        });
+
+        assert!(slot.add_plugin(plugin).is_ok());
+        assert_eq!(slot.plugins().len(), 1);
+    }
+
+    #[test]
+    fn test_mod_registry() {
+        let mut registry = ModRegistry::new();
+
+        registry.components_mut().register(
+            ComponentEntry::new("comp1", "type1", || Box::new(1i32))
+                .with_provider("mod_a")
+        ).unwrap();
+
+        registry.services_mut().register(
+            ServiceEntry::new("svc1", "IService")
+                .with_provider("mod_a")
+                .with_instance(1i32)
+        ).unwrap();
+
+        // Unregister mod
+        registry.unregister_mod("mod_a");
+
+        assert!(!registry.components().has("comp1"));
+        assert!(!registry.services().has("svc1"));
+    }
+}

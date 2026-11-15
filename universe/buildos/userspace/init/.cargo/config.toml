@@ -1,0 +1,21 @@
+# ============================================================================
+# BUILDOS USER-SPACE BUILD CONFIGURATION
+# ============================================================================
+# Copyright (c) 2024-2025 Zain Dana Harper. All Rights Reserved.
+# ============================================================================
+
+[build]
+target = "../x86_64-buildos-user.json"
+
+[target.'cfg(target_os = "none")']
+linker = "rust-lld"
+rustflags = [
+    "-C", "link-arg=-Tlinker.ld",
+    "-C", "link-arg=--gc-sections",
+    "-C", "relocation-model=static",
+    "-C", "code-model=small",
+]
+
+[unstable]
+build-std = ["core", "alloc"]
+build-std-features = ["compiler-builtins-mem"]

@@ -1,0 +1,1048 @@
+// =============================================================================
+// qjq — jq-lite query engine written in BuildLang
+// =============================================================================
+// Built on top of the JSON parser from json.bld. Supports:
+//   .           identity (pretty-print input)
+//   .foo        field access
+//   .foo.bar    chained field access
+//   .[N]        array index
+//   .[]         array iteration
+//   expr | expr pipe operator (chain expressions)
+//   keys        object keys as array
+//   values      object values as array
+//   length      array/string/object length
+//   type        value type as string
+//   add         sum numbers / concatenate strings in array
+//
+// Usage: echo '{"name":"Zain"}' | qjq '.name'
+//        echo '{"a":{"b":42}}' | qjq '.a | .b'
+//        echo '{"a":1,"b":2}' | qjq 'keys'
+// =============================================================================
+
+// --- Helpers ---
+fn digit_char(d: i32) -> String {
+    if d == 0 { return "0"; } if d == 1 { return "1"; } if d == 2 { return "2"; }
+    if d == 3 { return "3"; } if d == 4 { return "4"; } if d == 5 { return "5"; }
+    if d == 6 { return "6"; } if d == 7 { return "7"; } if d == 8 { return "8"; }
+    "9"
+}
+fn i32_to_str(v: i32) -> String {
+    if v == 0 { return "0"; }
+    let mut n = v;
+    let mut neg = false;
+    if n < 0 { neg = true; n = 0 - n; }
+    let mut buf = "";
+    while n > 0 {
+        let d = n - (n / 10) * 10;
+        buf = digit_char(d) + buf;
+        n = n / 10;
+    }
+    if neg { buf = "-" + buf; }
+    buf
+}
+fn is_ws(c: String) -> bool { c == " " || c == "\n" || c == "\r" || c == "\t" }
+fn is_digit(c: String) -> bool { c == "0" || c == "1" || c == "2" || c == "3" || c == "4" || c == "5" || c == "6" || c == "7" || c == "8" || c == "9" }
+fn is_lower(c: String) -> bool { c == "a" || c == "b" || c == "c" || c == "d" || c == "e" || c == "f" || c == "g" || c == "h" || c == "i" || c == "j" || c == "k" || c == "l" || c == "m" || c == "n" || c == "o" || c == "p" || c == "q" || c == "r" || c == "s" || c == "t" || c == "u" || c == "v" || c == "w" || c == "x" || c == "y" || c == "z" }
+fn is_upper(c: String) -> bool { c == "A" || c == "B" || c == "C" || c == "D" || c == "E" || c == "F" || c == "G" || c == "H" || c == "I" || c == "J" || c == "K" || c == "L" || c == "M" || c == "N" || c == "O" || c == "P" || c == "Q" || c == "R" || c == "S" || c == "T" || c == "U" || c == "V" || c == "W" || c == "X" || c == "Y" || c == "Z" }
+fn is_ident(c: String) -> bool { is_lower(c) || is_upper(c) || is_digit(c) || c == "_" || c == "-" }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// JSON PARSER (from json.bld)
+// ═══════════════════════════════════════════════════════════════════════════════
+// Kind tags: 0=null, 1=true, 2=false, 3=number, 4=string, 5=array, 6=object
+
+struct JP {
+    // Lexer
+    input: String, pos: i32, ilen: i32,
+    // Token
+    tk: i32, tv: String, tp: i32,
+    // String pool
+    sp_buf: String, sp_n: i32, sp_starts: Vec<i32>, sp_lens: Vec<i32>,
+    // Arena
+    ar_n: i32, ar_kinds: Vec<i32>, ar_sids: Vec<i32>,
+    ar_cs: Vec<i32>, ar_cc: Vec<i32>, ar_oks: Vec<i32>,
+    // Children / object keys
+    ch: Vec<i32>, ok: Vec<i32>,
+    // Temp stacks
+    tmp_vals: Vec<i32>, tv_top: i32,
+    tmp_keys: Vec<i32>, tk_top: i32,
+    // Query steps: parallel arrays
+    // qt[i] = type: 0=field, 1=array_iter, 2=array_index,
+    //               3=builtin_keys, 4=builtin_values, 5=builtin_length,
+    //               6=builtin_type, 7=builtin_add
+    // qd[i] = data: string-pool ID (type 0), 0 (type 1), index (type 2), 0 (types 3-7)
+    qt: Vec<i32>, qd: Vec<i32>,
+    // Pipe segments: ps_starts[i] = first step index, ps_counts[i] = step count
+    ps_starts: Vec<i32>, ps_counts: Vec<i32>, ps_n: i32,
+}
+
+fn jp_new(input: String) -> JP {
+    let ilen = input.len();
+    let mut j = JP {
+        input: input, pos: 0, ilen: ilen,
+        tk: 11, tv: "", tp: 0,
+        sp_buf: "", sp_n: 0, sp_starts: vec![], sp_lens: vec![],
+        ar_n: 0, ar_kinds: vec![], ar_sids: vec![],
+        ar_cs: vec![], ar_cc: vec![], ar_oks: vec![],
+        ch: vec![], ok: vec![],
+        tmp_vals: vec![], tv_top: 0,
+        tmp_keys: vec![], tk_top: 0,
+        qt: vec![], qd: vec![],
+        ps_starts: vec![], ps_counts: vec![], ps_n: 0,
+    };
+    jp_next(&mut j);
+    j
+}
+
+// --- String pool ops ---
+fn jp_sp_add(j: &mut JP, s: String) -> i32 {
+    let id = j.sp_n;
+    let st = j.sp_buf.len();
+    j.sp_buf = j.sp_buf + s;
+    let en = j.sp_buf.len();
+    vec_push(j.sp_starts, st);
+    vec_push(j.sp_lens, en - st);
+    j.sp_n = j.sp_n + 1;
+    id
+}
+
+fn jp_sp_get(j: &JP, id: i32) -> String {
+    let st = vec_get(j.sp_starts, id);
+    let ln = vec_get(j.sp_lens, id);
+    j.sp_buf.substring(st, ln)
+}
+
+// --- Arena ops ---
+fn jp_ar(j: &mut JP, kind: i32, sid: i32, cs: i32, cc: i32, oks: i32) -> i32 {
+    let id = j.ar_n;
+    vec_push(j.ar_kinds, kind);
+    vec_push(j.ar_sids, sid);
+    vec_push(j.ar_cs, cs);
+    vec_push(j.ar_cc, cc);
+    vec_push(j.ar_oks, oks);
+    j.ar_n = j.ar_n + 1;
+    id
+}
+
+// --- Lexer ops ---
+fn jp_skip_ws(j: &mut JP) {
+    let mut go = true;
+    while go {
+        if j.pos >= j.ilen { go = false; }
+        else { let c = j.input.char_at(j.pos); if is_ws(c) { j.pos = j.pos + 1; } else { go = false; } }
+    }
+}
+
+fn jp_read_str(j: &mut JP) -> String {
+    j.pos = j.pos + 1;
+    let mut r = "";
+    let mut go = true;
+    while go {
+        if j.pos >= j.ilen { go = false; }
+        else {
+            let c = j.input.char_at(j.pos);
+            if c == "\"" { go = false; }
+            else if c == "\\" {
+                j.pos = j.pos + 1;
+                if j.pos < j.ilen {
+                    let e = j.input.char_at(j.pos);
+                    if e == "\"" { r = r + "\""; }
+                    else if e == "\\" { r = r + "\\"; }
+                    else if e == "/" { r = r + "/"; }
+                    else if e == "n" { r = r + "\n"; }
+                    else if e == "t" { r = r + "\t"; }
+                    else if e == "r" { r = r + "\r"; }
+                    else if e == "b" { r = r + "b"; }
+                    else if e == "f" { r = r + "f"; }
+                    else { r = r + e; }
+                    j.pos = j.pos + 1;
+                }
+            } else { r = r + c; j.pos = j.pos + 1; }
+        }
+    }
+    if j.pos < j.ilen { j.pos = j.pos + 1; }
+    r
+}
+
+fn jp_read_num(j: &mut JP) -> String {
+    let st = j.pos;
+    let mut ln = 0;
+    if j.pos < j.ilen { let c = j.input.char_at(j.pos); if c == "-" { j.pos = j.pos + 1; ln = ln + 1; } }
+    let mut go = true;
+    while go {
+        if j.pos >= j.ilen { go = false; }
+        else { let c = j.input.char_at(j.pos); if is_digit(c) { j.pos = j.pos + 1; ln = ln + 1; } else { go = false; } }
+    }
+    if j.pos < j.ilen {
+        let c = j.input.char_at(j.pos);
+        if c == "." {
+            j.pos = j.pos + 1; ln = ln + 1;
+            let mut g2 = true;
+            while g2 { if j.pos >= j.ilen { g2 = false; } else { let d = j.input.char_at(j.pos); if is_digit(d) { j.pos = j.pos + 1; ln = ln + 1; } else { g2 = false; } } }
+        }
+    }
+    if j.pos < j.ilen {
+        let c = j.input.char_at(j.pos);
+        if c == "e" || c == "E" {
+            j.pos = j.pos + 1; ln = ln + 1;
+            if j.pos < j.ilen { let s = j.input.char_at(j.pos); if s == "+" || s == "-" { j.pos = j.pos + 1; ln = ln + 1; } }
+            let mut g3 = true;
+            while g3 { if j.pos >= j.ilen { g3 = false; } else { let d = j.input.char_at(j.pos); if is_digit(d) { j.pos = j.pos + 1; ln = ln + 1; } else { g3 = false; } } }
+        }
+    }
+    j.input.substring(st, ln)
+}
+
+fn jp_read_kw(j: &mut JP) -> String {
+    let st = j.pos;
+    let mut ln = 0;
+    let mut go = true;
+    while go { if j.pos >= j.ilen { go = false; } else { let c = j.input.char_at(j.pos); if is_lower(c) { j.pos = j.pos + 1; ln = ln + 1; } else { go = false; } } }
+    j.input.substring(st, ln)
+}
+
+fn jp_next(j: &mut JP) {
+    jp_skip_ws(j);
+    if j.pos >= j.ilen { j.tk = 11; j.tv = ""; j.tp = j.pos; return; }
+    let st = j.pos;
+    let c = j.input.char_at(j.pos);
+    if c == "{" { j.pos = j.pos + 1; j.tk = 0; j.tv = "{"; j.tp = st; return; }
+    if c == "}" { j.pos = j.pos + 1; j.tk = 1; j.tv = "}"; j.tp = st; return; }
+    if c == "[" { j.pos = j.pos + 1; j.tk = 2; j.tv = "["; j.tp = st; return; }
+    if c == "]" { j.pos = j.pos + 1; j.tk = 3; j.tv = "]"; j.tp = st; return; }
+    if c == ":" { j.pos = j.pos + 1; j.tk = 4; j.tv = ":"; j.tp = st; return; }
+    if c == "," { j.pos = j.pos + 1; j.tk = 5; j.tv = ","; j.tp = st; return; }
+    if c == "\"" { let s = jp_read_str(j); j.tk = 6; j.tv = s; j.tp = st; return; }
+    if c == "-" || is_digit(c) { let n = jp_read_num(j); j.tk = 7; j.tv = n; j.tp = st; return; }
+    if c == "t" || c == "f" || c == "n" {
+        let kw = jp_read_kw(j);
+        if kw == "true"  { j.tk = 8; j.tv = "true"; j.tp = st; return; }
+        if kw == "false" { j.tk = 9; j.tv = "false"; j.tp = st; return; }
+        if kw == "null"  { j.tk = 10; j.tv = "null"; j.tp = st; return; }
+        j.tk = 12; j.tv = kw; j.tp = st; return;
+    }
+    j.pos = j.pos + 1; j.tk = 12; j.tv = c; j.tp = st;
+}
+
+// --- Parser ---
+fn jp_expect(j: &mut JP, exp: i32) ~ Console + Process {
+    if j.tk != exp { println!("Error: expected token {} got {} at pos {}", exp, j.tk, j.tp); process_exit(1); }
+    jp_next(j);
+}
+
+fn jp_parse(j: &mut JP) -> i32 ~ Console + Process { jp_value(j) }
+
+fn jp_value(j: &mut JP) -> i32 ~ Console + Process {
+    let k = j.tk;
+    if k == 10 { jp_next(j); return jp_ar(j, 0, 0, 0, 0, 0); }
+    if k == 8  { jp_next(j); return jp_ar(j, 1, 0, 0, 0, 0); }
+    if k == 9  { jp_next(j); return jp_ar(j, 2, 0, 0, 0, 0); }
+    if k == 7 { let v = j.tv; jp_next(j); let sid = jp_sp_add(j, v); return jp_ar(j, 3, sid, 0, 0, 0); }
+    if k == 6 { let v = j.tv; jp_next(j); let sid = jp_sp_add(j, v); return jp_ar(j, 4, sid, 0, 0, 0); }
+    if k == 2 { return jp_array(j); }
+    if k == 0 { return jp_object(j); }
+    println!("Error: unexpected token {} at pos {}", k, j.tp);
+    process_exit(1);
+    0
+}
+
+fn jp_array(j: &mut JP) -> i32 ~ Console + Process {
+    jp_next(j);
+    if j.tk == 3 { jp_next(j); let s = vec_len(j.ch); return jp_ar(j, 5, 0, s, 0, 0); }
+    let frame = vec_len(j.tmp_vals);
+    vec_push(j.tmp_vals, -1);
+    let first = jp_value(j);
+    vec_push(j.tmp_vals, first);
+    let mut n = 1;
+    let mut go = true;
+    while go {
+        if j.tk == 5 { jp_next(j); let e = jp_value(j); vec_push(j.tmp_vals, e); n = n + 1; }
+        else { go = false; }
+    }
+    jp_expect(j, 3);
+    vec_push(j.tmp_vals, -2);
+    let total = vec_len(j.tmp_vals);
+    let start = vec_len(j.ch);
+    let mut p = frame;
+    let mut depth = 0;
+    while p < total {
+        let v = vec_get(j.tmp_vals, p);
+        if v == -1 { depth = depth + 1; }
+        else if v == -2 { depth = depth - 1; }
+        else if depth == 1 { vec_push(j.ch, v); }
+        p = p + 1;
+    }
+    jp_ar(j, 5, 0, start, n, 0)
+}
+
+fn jp_object(j: &mut JP) -> i32 ~ Console + Process {
+    jp_next(j);
+    if j.tk == 1 { jp_next(j); let ks = vec_len(j.ok); let vs = vec_len(j.ch); return jp_ar(j, 6, 0, vs, 0, ks); }
+    let frame_v = vec_len(j.tmp_vals);
+    let frame_k = vec_len(j.tmp_keys);
+    vec_push(j.tmp_vals, -1);
+    vec_push(j.tmp_keys, -1);
+    if j.tk != 6 { println!("Error: expected string key at pos {}", j.tp); process_exit(1); }
+    let k1 = j.tv; jp_next(j); jp_expect(j, 4);
+    let v1 = jp_value(j);
+    let kid1 = jp_sp_add(j, k1);
+    vec_push(j.tmp_keys, kid1);
+    vec_push(j.tmp_vals, v1);
+    let mut n = 1;
+    let mut go = true;
+    while go {
+        if j.tk == 5 {
+            jp_next(j);
+            if j.tk != 6 { println!("Error: expected string key at pos {}", j.tp); process_exit(1); }
+            let k = j.tv; jp_next(j); jp_expect(j, 4);
+            let v = jp_value(j);
+            let kid = jp_sp_add(j, k);
+            vec_push(j.tmp_keys, kid);
+            vec_push(j.tmp_vals, v);
+            n = n + 1;
+        } else { go = false; }
+    }
+    jp_expect(j, 1);
+    vec_push(j.tmp_vals, -2);
+    vec_push(j.tmp_keys, -2);
+    let ks = vec_len(j.ok);
+    let vs = vec_len(j.ch);
+    let total_v = vec_len(j.tmp_vals);
+    let total_k = vec_len(j.tmp_keys);
+    let mut p = frame_v;
+    let mut depth = 0;
+    while p < total_v {
+        let v = vec_get(j.tmp_vals, p);
+        if v == -1 { depth = depth + 1; }
+        else if v == -2 { depth = depth - 1; }
+        else if depth == 1 { vec_push(j.ch, v); }
+        p = p + 1;
+    }
+    let mut pk = frame_k;
+    let mut dk = 0;
+    while pk < total_k {
+        let kv = vec_get(j.tmp_keys, pk);
+        if kv == -1 { dk = dk + 1; }
+        else if kv == -2 { dk = dk - 1; }
+        else if dk == 1 { vec_push(j.ok, kv); }
+        pk = pk + 1;
+    }
+    jp_ar(j, 6, 0, vs, n, ks)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// OUTPUT — pretty-print and compact
+// ═══════════════════════════════════════════════════════════════════════════════
+
+fn make_indent(level: i32) -> String {
+    let mut o = ""; let mut i = 0;
+    while i < level { o = o + "  "; i = i + 1; }
+    o
+}
+
+fn pretty(j: &JP, ch: Vec<i32>, ok: Vec<i32>, id: i32, ind: i32) -> String {
+    let kind = vec_get(j.ar_kinds, id);
+    if kind == 0 { return "null"; }
+    if kind == 1 { return "true"; }
+    if kind == 2 { return "false"; }
+    if kind == 3 { let sid = vec_get(j.ar_sids, id); return jp_sp_get(j, sid); }
+    if kind == 4 {
+        let sid = vec_get(j.ar_sids, id);
+        let s = jp_sp_get(j, sid);
+        return "\"" + s + "\"";
+    }
+    if kind == 5 {
+        let st = vec_get(j.ar_cs, id);
+        let cnt = vec_get(j.ar_cc, id);
+        if cnt == 0 { return "[]"; }
+        let ni = ind + 1;
+        let pad = make_indent(ni);
+        let ep = make_indent(ind);
+        let mut o = "[\n";
+        let mut i = 0;
+        while i < cnt {
+            let cid = vec_get(ch, st + i);
+            let cv = pretty(j, ch, ok, cid, ni);
+            o = o + pad + cv;
+            if i < cnt - 1 { o = o + ","; }
+            o = o + "\n";
+            i = i + 1;
+        }
+        return o + ep + "]";
+    }
+    if kind == 6 {
+        let kst = vec_get(j.ar_oks, id);
+        let vst = vec_get(j.ar_cs, id);
+        let cnt = vec_get(j.ar_cc, id);
+        if cnt == 0 { return "{}"; }
+        let ni = ind + 1;
+        let pad = make_indent(ni);
+        let ep = make_indent(ind);
+        let mut o = "{\n";
+        let mut i = 0;
+        while i < cnt {
+            let kid = vec_get(ok, kst + i);
+            let key = jp_sp_get(j, kid);
+            let vid = vec_get(ch, vst + i);
+            let val = pretty(j, ch, ok, vid, ni);
+            o = o + pad + "\"" + key + "\": " + val;
+            if i < cnt - 1 { o = o + ","; }
+            o = o + "\n";
+            i = i + 1;
+        }
+        return o + ep + "}";
+    }
+    "null"
+}
+
+fn compact(j: &JP, ch: Vec<i32>, ok: Vec<i32>, id: i32) -> String {
+    let kind = vec_get(j.ar_kinds, id);
+    if kind == 0 { return "null"; }
+    if kind == 1 { return "true"; }
+    if kind == 2 { return "false"; }
+    if kind == 3 { let sid = vec_get(j.ar_sids, id); return jp_sp_get(j, sid); }
+    if kind == 4 {
+        let sid = vec_get(j.ar_sids, id);
+        let s = jp_sp_get(j, sid);
+        return "\"" + s + "\"";
+    }
+    if kind == 5 {
+        let st = vec_get(j.ar_cs, id);
+        let cnt = vec_get(j.ar_cc, id);
+        if cnt == 0 { return "[]"; }
+        let mut o = "[";
+        let mut i = 0;
+        while i < cnt {
+            let cid = vec_get(ch, st + i);
+            let cv = compact(j, ch, ok, cid);
+            o = o + cv; if i < cnt - 1 { o = o + ","; }
+            i = i + 1;
+        }
+        return o + "]";
+    }
+    if kind == 6 {
+        let kst = vec_get(j.ar_oks, id);
+        let vst = vec_get(j.ar_cs, id);
+        let cnt = vec_get(j.ar_cc, id);
+        if cnt == 0 { return "{}"; }
+        let mut o = "{";
+        let mut i = 0;
+        while i < cnt {
+            let kid = vec_get(ok, kst + i);
+            let key = jp_sp_get(j, kid);
+            let vid = vec_get(ch, vst + i);
+            let val = compact(j, ch, ok, vid);
+            o = o + "\"" + key + "\":" + val;
+            if i < cnt - 1 { o = o + ","; }
+            i = i + 1;
+        }
+        return o + "}";
+    }
+    "null"
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// QUERY ENGINE
+// ═══════════════════════════════════════════════════════════════════════════════
+// Step types: 0=field, 1=array_iter, 2=array_index,
+//             3=keys, 4=values, 5=length, 6=type, 7=add
+
+// Parse a single pipe segment (e.g. ".a.b" or "keys" or ".[]") into steps.
+// Returns the number of steps added for this segment.
+fn parse_segment(j: &mut JP, seg: String) -> i32 ~ Console + Process {
+    let slen = seg.len();
+    if slen == 0 { return 0; }
+    let first = seg.char_at(0);
+    // Check if this segment is a builtin function (bare word, no dot prefix)
+    if first != "." && first != "[" {
+        // Read a bare word
+        let mut wpos = 0;
+        let mut wlen = 0;
+        let mut wg = true;
+        while wg {
+            if wpos >= slen { wg = false; }
+            else {
+                let wc = seg.char_at(wpos);
+                if is_ident(wc) { wpos = wpos + 1; wlen = wlen + 1; }
+                else { wg = false; }
+            }
+        }
+        let word = seg.substring(0, wlen);
+        if word == "keys" {
+            vec_push(j.qt, 3); vec_push(j.qd, 0); return 1;
+        }
+        if word == "values" {
+            vec_push(j.qt, 4); vec_push(j.qd, 0); return 1;
+        }
+        if word == "length" {
+            vec_push(j.qt, 5); vec_push(j.qd, 0); return 1;
+        }
+        if word == "type" {
+            vec_push(j.qt, 6); vec_push(j.qd, 0); return 1;
+        }
+        if word == "add" {
+            vec_push(j.qt, 7); vec_push(j.qd, 0); return 1;
+        }
+        if word == "null" {
+            // "null" literal — identity on null input or just output null
+            // We treat it as a no-op identity (the input is null, output is null)
+            return 0;
+        }
+        println!("Error: unknown function '{}'", word);
+        process_exit(1);
+    }
+    // Dot-based query: must start with '.'
+    if first != "." { println!("Error: query segment must start with '.'"); process_exit(1); }
+    // "." alone = identity (0 steps)
+    if slen == 1 { return 0; }
+    let mut n = 0;
+    let mut pos = 1;
+    let mut go = true;
+    while go {
+        if pos >= slen { go = false; }
+        else {
+            let c = seg.char_at(pos);
+            if c == "." {
+                pos = pos + 1;
+            } else if c == "[" {
+                pos = pos + 1;
+                if pos < slen {
+                    let nc = seg.char_at(pos);
+                    if nc == "]" {
+                        vec_push(j.qt, 1);
+                        vec_push(j.qd, 0);
+                        n = n + 1;
+                        pos = pos + 1;
+                    } else {
+                        let num_start = pos;
+                        let mut num_len = 0;
+                        let mut ng = true;
+                        while ng {
+                            if pos >= slen { ng = false; }
+                            else {
+                                let dc = seg.char_at(pos);
+                                if is_digit(dc) { pos = pos + 1; num_len = num_len + 1; }
+                                else { ng = false; }
+                            }
+                        }
+                        let num_str = seg.substring(num_start, num_len);
+                        let idx = num_str.parse_int();
+                        if pos < slen { pos = pos + 1; }
+                        vec_push(j.qt, 2);
+                        vec_push(j.qd, idx);
+                        n = n + 1;
+                    }
+                }
+            } else if is_ident(c) {
+                let istart = pos;
+                let mut ilen = 0;
+                let mut ig = true;
+                while ig {
+                    if pos >= slen { ig = false; }
+                    else {
+                        let ic = seg.char_at(pos);
+                        if is_ident(ic) { pos = pos + 1; ilen = ilen + 1; }
+                        else { ig = false; }
+                    }
+                }
+                let ident = seg.substring(istart, ilen);
+                let sid = jp_sp_add(j, ident);
+                vec_push(j.qt, 0);
+                vec_push(j.qd, sid);
+                n = n + 1;
+            } else {
+                println!("Error: unexpected char '{}' in query at position {}", c, pos);
+                process_exit(1);
+            }
+        }
+    }
+    n
+}
+
+// Parse a full query with pipes into pipe segments.
+// Populates j.ps_starts, j.ps_counts, j.ps_n.
+fn parse_query(j: &mut JP, query: String) ~ Console + Process {
+    let qlen = query.len();
+    if qlen == 0 {
+        // Single identity segment
+        let step_start = vec_len(j.qt);
+        vec_push(j.ps_starts, step_start);
+        vec_push(j.ps_counts, 0);
+        j.ps_n = 1;
+        return;
+    }
+    // Split on '|' at top level (not inside brackets)
+    let mut seg_start = 0;
+    let mut pos = 0;
+    let mut bracket_depth = 0;
+    let mut seg_count = 0;
+    let mut go = true;
+    while go {
+        if pos >= qlen {
+            // Emit the last segment
+            let mut ss = seg_start;
+            let mut se = pos;
+            // Trim leading whitespace
+            let mut tg1 = true;
+            while tg1 {
+                if ss >= se { tg1 = false; }
+                else { let tc = query.char_at(ss); if is_ws(tc) { ss = ss + 1; } else { tg1 = false; } }
+            }
+            // Trim trailing whitespace
+            let mut tg2 = true;
+            while tg2 {
+                if se <= ss { tg2 = false; }
+                else { let tc = query.char_at(se - 1); if is_ws(tc) { se = se - 1; } else { tg2 = false; } }
+            }
+            let seg_len = se - ss;
+            let seg = if seg_len > 0 { query.substring(ss, seg_len) } else { "." };
+            let step_start_idx = vec_len(j.qt);
+            let step_n = parse_segment(j, seg);
+            vec_push(j.ps_starts, step_start_idx);
+            vec_push(j.ps_counts, step_n);
+            seg_count = seg_count + 1;
+            go = false;
+        } else {
+            let c = query.char_at(pos);
+            if c == "[" { bracket_depth = bracket_depth + 1; pos = pos + 1; }
+            else if c == "]" { bracket_depth = bracket_depth - 1; pos = pos + 1; }
+            else if c == "|" && bracket_depth == 0 {
+                // Found a pipe — emit segment from seg_start to pos
+                let mut ss = seg_start;
+                let mut se = pos;
+                // Trim leading whitespace
+                let mut tg1 = true;
+                while tg1 {
+                    if ss >= se { tg1 = false; }
+                    else { let tc = query.char_at(ss); if is_ws(tc) { ss = ss + 1; } else { tg1 = false; } }
+                }
+                // Trim trailing whitespace
+                let mut tg2 = true;
+                while tg2 {
+                    if se <= ss { tg2 = false; }
+                    else { let tc = query.char_at(se - 1); if is_ws(tc) { se = se - 1; } else { tg2 = false; } }
+                }
+                let seg_len = se - ss;
+                let seg = if seg_len > 0 { query.substring(ss, seg_len) } else { "." };
+                let step_start_idx = vec_len(j.qt);
+                let step_n = parse_segment(j, seg);
+                vec_push(j.ps_starts, step_start_idx);
+                vec_push(j.ps_counts, step_n);
+                seg_count = seg_count + 1;
+                pos = pos + 1; // skip the '|'
+                seg_start = pos;
+            } else {
+                pos = pos + 1;
+            }
+        }
+    }
+    j.ps_n = seg_count;
+}
+
+// Execute one step of field access on a set of nodes.
+// field_sid = string-pool ID of the field name to look up.
+fn exec_field(j: &mut JP, ch: Vec<i32>, ok: Vec<i32>, nodes: Vec<i32>, node_count: i32, field_sid: i32) -> Vec<i32> ~ Console + Process {
+    let mut result: Vec<i32> = vec![];
+    let field_name = jp_sp_get(j, field_sid);
+    let mut ni = 0;
+    while ni < node_count {
+        let nid = vec_get(nodes, ni);
+        let kind = vec_get(j.ar_kinds, nid);
+        if kind == 6 {
+            let kst = vec_get(j.ar_oks, nid);
+            let vst = vec_get(j.ar_cs, nid);
+            let cnt = vec_get(j.ar_cc, nid);
+            let mut found = false;
+            let mut fi = 0;
+            while fi < cnt {
+                let kid = vec_get(ok, kst + fi);
+                let key = jp_sp_get(j, kid);
+                if key == field_name {
+                    let vid = vec_get(ch, vst + fi);
+                    vec_push(result, vid);
+                    found = true;
+                    fi = cnt;
+                }
+                fi = fi + 1;
+            }
+            if !found {
+                println!("Error: field '{}' not found in object", field_name);
+                process_exit(1);
+            }
+        } else {
+            println!("Error: field access on non-object (kind={})", kind);
+            process_exit(1);
+        }
+        ni = ni + 1;
+    }
+    result
+}
+
+// Execute one step of array iteration on a set of nodes.
+fn exec_iter(j: &mut JP, ch: Vec<i32>, nodes: Vec<i32>, node_count: i32) -> Vec<i32> ~ Console + Process {
+    let mut result: Vec<i32> = vec![];
+    let mut ni = 0;
+    while ni < node_count {
+        let nid = vec_get(nodes, ni);
+        let kind = vec_get(j.ar_kinds, nid);
+        if kind == 5 {
+            let st = vec_get(j.ar_cs, nid);
+            let cnt = vec_get(j.ar_cc, nid);
+            let mut ci = 0;
+            while ci < cnt {
+                let cid = vec_get(ch, st + ci);
+                vec_push(result, cid);
+                ci = ci + 1;
+            }
+        } else {
+            println!("Error: .[] applied to non-array (kind={})", kind);
+            process_exit(1);
+        }
+        ni = ni + 1;
+    }
+    result
+}
+
+// Execute one step of array indexing on a set of nodes.
+fn exec_index(j: &mut JP, ch: Vec<i32>, nodes: Vec<i32>, node_count: i32, idx: i32) -> Vec<i32> ~ Console + Process {
+    let mut result: Vec<i32> = vec![];
+    let mut ni = 0;
+    while ni < node_count {
+        let nid = vec_get(nodes, ni);
+        let kind = vec_get(j.ar_kinds, nid);
+        if kind == 5 {
+            let st = vec_get(j.ar_cs, nid);
+            let cnt = vec_get(j.ar_cc, nid);
+            if idx >= 0 && idx < cnt {
+                let cid = vec_get(ch, st + idx);
+                vec_push(result, cid);
+            } else {
+                println!("Error: array index {} out of bounds (length {})", idx, cnt);
+                process_exit(1);
+            }
+        } else {
+            println!("Error: array index on non-array (kind={})", kind);
+            process_exit(1);
+        }
+        ni = ni + 1;
+    }
+    result
+}
+
+// Execute builtin: keys — for each object node, produce an array of its keys.
+// Returns new arena node IDs.
+fn exec_keys(j: &mut JP, ok: Vec<i32>, nodes: Vec<i32>, node_count: i32) -> Vec<i32> ~ Console + Process {
+    let mut result: Vec<i32> = vec![];
+    let mut ni = 0;
+    while ni < node_count {
+        let nid = vec_get(nodes, ni);
+        let kind = vec_get(j.ar_kinds, nid);
+        if kind == 6 {
+            let kst = vec_get(j.ar_oks, nid);
+            let cnt = vec_get(j.ar_cc, nid);
+            // Create string nodes for each key, build array
+            let arr_cs = vec_len(j.ch);
+            let mut ki = 0;
+            while ki < cnt {
+                let kid = vec_get(ok, kst + ki);
+                let key_str = jp_sp_get(j, kid);
+                let new_sid = jp_sp_add(j, key_str);
+                let str_node = jp_ar(j, 4, new_sid, 0, 0, 0);
+                vec_push(j.ch, str_node);
+                ki = ki + 1;
+            }
+            let arr_node = jp_ar(j, 5, 0, arr_cs, cnt, 0);
+            vec_push(result, arr_node);
+        } else {
+            println!("Error: keys applied to non-object (kind={})", kind);
+            process_exit(1);
+        }
+        ni = ni + 1;
+    }
+    result
+}
+
+// Execute builtin: values — for each object node, produce an array of its values.
+fn exec_values(j: &mut JP, ch: Vec<i32>, nodes: Vec<i32>, node_count: i32) -> Vec<i32> ~ Console + Process {
+    let mut result: Vec<i32> = vec![];
+    let mut ni = 0;
+    while ni < node_count {
+        let nid = vec_get(nodes, ni);
+        let kind = vec_get(j.ar_kinds, nid);
+        if kind == 6 {
+            let vst = vec_get(j.ar_cs, nid);
+            let cnt = vec_get(j.ar_cc, nid);
+            // Copy value references into ch for the new array
+            let arr_cs = vec_len(j.ch);
+            let mut vi = 0;
+            while vi < cnt {
+                let vid = vec_get(ch, vst + vi);
+                vec_push(j.ch, vid);
+                vi = vi + 1;
+            }
+            let arr_node = jp_ar(j, 5, 0, arr_cs, cnt, 0);
+            vec_push(result, arr_node);
+        } else {
+            println!("Error: values applied to non-object (kind={})", kind);
+            process_exit(1);
+        }
+        ni = ni + 1;
+    }
+    result
+}
+
+// Execute builtin: length — for arrays/strings/objects, return count as number.
+fn exec_length(j: &mut JP, nodes: Vec<i32>, node_count: i32) -> Vec<i32> ~ Console + Process {
+    let mut result: Vec<i32> = vec![];
+    let mut ni = 0;
+    while ni < node_count {
+        let nid = vec_get(nodes, ni);
+        let kind = vec_get(j.ar_kinds, nid);
+        let mut len_val = 0;
+        if kind == 5 {
+            // Array length
+            len_val = vec_get(j.ar_cc, nid);
+        } else if kind == 6 {
+            // Object length (number of keys)
+            len_val = vec_get(j.ar_cc, nid);
+        } else if kind == 4 {
+            // String length
+            let sid = vec_get(j.ar_sids, nid);
+            let s = jp_sp_get(j, sid);
+            len_val = s.len();
+        } else if kind == 0 {
+            len_val = 0; // null has length 0
+        } else {
+            println!("Error: length applied to unsupported type (kind={})", kind);
+            process_exit(1);
+        }
+        // Create a number node with the length value
+        let len_str = i32_to_str(len_val);
+        let new_sid = jp_sp_add(j, len_str);
+        let num_node = jp_ar(j, 3, new_sid, 0, 0, 0);
+        vec_push(result, num_node);
+        ni = ni + 1;
+    }
+    result
+}
+
+// Execute builtin: type — return type name as a string.
+fn exec_type(j: &mut JP, nodes: Vec<i32>, node_count: i32) -> Vec<i32> {
+    let mut result: Vec<i32> = vec![];
+    let mut ni = 0;
+    while ni < node_count {
+        let nid = vec_get(nodes, ni);
+        let kind = vec_get(j.ar_kinds, nid);
+        let type_name = if kind == 0 { "null" }
+            else if kind == 1 { "boolean" }
+            else if kind == 2 { "boolean" }
+            else if kind == 3 { "number" }
+            else if kind == 4 { "string" }
+            else if kind == 5 { "array" }
+            else if kind == 6 { "object" }
+            else { "unknown" };
+        let new_sid = jp_sp_add(j, type_name);
+        let str_node = jp_ar(j, 4, new_sid, 0, 0, 0);
+        vec_push(result, str_node);
+        ni = ni + 1;
+    }
+    result
+}
+
+// Helper: get the string value for array element at index
+fn add_elem_str(j: &JP, ch: Vec<i32>, st: i32, idx: i32) -> String {
+    let elem = vec_get(ch, st + idx);
+    let sid = vec_get(j.ar_sids, elem);
+    jp_sp_get(j, sid)
+}
+
+// Helper: get kind of first element in array (0 if empty)
+fn add_first_kind(j: &JP, ch: Vec<i32>, st: i32, cnt: i32) -> i32 {
+    if cnt == 0 { return 0; }
+    let fid = vec_get(ch, st);
+    vec_get(j.ar_kinds, fid)
+}
+
+// Execute builtin: add — for number arrays, sum; for string arrays, concatenate.
+fn exec_add(j: &mut JP, ch: Vec<i32>, nodes: Vec<i32>, node_count: i32) -> Vec<i32> ~ Console + Process {
+    let mut result: Vec<i32> = vec![];
+    let mut ni = 0;
+    while ni < node_count {
+        let nid = vec_get(nodes, ni);
+        let kind = vec_get(j.ar_kinds, nid);
+        if kind == 5 {
+            let st = vec_get(j.ar_cs, nid);
+            let cnt = vec_get(j.ar_cc, nid);
+            let mut found = false;
+            let mut ek = 0;
+            let mut sum = 0;
+            let mut cat = "";
+            let mut fi = 0;
+            while fi < cnt {
+                if fi == 0 { ek = add_first_kind(j, ch, st, cnt); }
+                if ek == 3 { sum = sum + add_elem_str(j, ch, st, fi).parse_int(); }
+                if ek == 4 { cat = cat + add_elem_str(j, ch, st, fi); }
+                found = true;
+                fi = fi + 1;
+            }
+            if !found { vec_push(result, jp_ar(j, 0, 0, 0, 0, 0)); }
+            if ek == 3 { vec_push(result, jp_ar(j, 3, jp_sp_add(j, i32_to_str(sum)), 0, 0, 0)); }
+            if ek == 4 { vec_push(result, jp_ar(j, 4, jp_sp_add(j, cat), 0, 0, 0)); }
+        } else {
+            println!("Error: add applied to non-array (kind={})", kind);
+            process_exit(1);
+        }
+        ni = ni + 1;
+    }
+    result
+}
+
+// Execute a single step on the current node set.
+fn execute_step(j: &mut JP, ch: Vec<i32>, ok: Vec<i32>, current: Vec<i32>, cur_count: i32, qidx: i32) -> Vec<i32> ~ Console + Process {
+    let stype = vec_get(j.qt, qidx);
+    let sdata = vec_get(j.qd, qidx);
+    if stype == 0 {
+        return exec_field(j, ch, ok, current, cur_count, sdata);
+    }
+    if stype == 1 {
+        return exec_iter(j, ch, current, cur_count);
+    }
+    if stype == 2 {
+        return exec_index(j, ch, current, cur_count, sdata);
+    }
+    if stype == 3 {
+        return exec_keys(j, ok, current, cur_count);
+    }
+    if stype == 4 {
+        return exec_values(j, ch, current, cur_count);
+    }
+    if stype == 5 {
+        return exec_length(j, current, cur_count);
+    }
+    if stype == 6 {
+        return exec_type(j, current, cur_count);
+    }
+    if stype == 7 {
+        return exec_add(j, ch, current, cur_count);
+    }
+    println!("Error: unknown step type {}", stype);
+    process_exit(1);
+    vec![]
+}
+
+// Execute one pipe segment (a sequence of steps) on a set of input nodes.
+fn execute_segment(j: &mut JP, ch: Vec<i32>, ok: Vec<i32>, inputs: Vec<i32>, input_count: i32, seg_idx: i32) -> Vec<i32> ~ Console + Process {
+    let qstart = vec_get(j.ps_starts, seg_idx);
+    let step_count = vec_get(j.ps_counts, seg_idx);
+    let mut current = inputs;
+    let mut cur_count = input_count;
+    let mut si = 0;
+    while si < step_count {
+        let next = execute_step(j, ch, ok, current, cur_count, qstart + si);
+        current = next;
+        cur_count = vec_len(current);
+        si = si + 1;
+    }
+    current
+}
+
+// Execute the full pipeline: for each pipe segment, feed results from the
+// previous segment. When array iteration produces multiple results, each
+// result is piped individually to the next segment.
+fn execute_pipeline(j: &mut JP, ch: Vec<i32>, ok: Vec<i32>, root: i32) -> Vec<i32> ~ Console + Process {
+    let num_segments = j.ps_n;
+    if num_segments == 0 {
+        let mut r: Vec<i32> = vec![];
+        vec_push(r, root);
+        return r;
+    }
+    // Start with root
+    let mut current: Vec<i32> = vec![];
+    vec_push(current, root);
+    let mut cur_count = 1;
+    let mut seg_i = 0;
+    while seg_i < num_segments {
+        // For each input node, execute this segment, collect all outputs
+        let mut next_all: Vec<i32> = vec![];
+        let mut ci = 0;
+        while ci < cur_count {
+            let node_id = vec_get(current, ci);
+            let mut single_in: Vec<i32> = vec![];
+            vec_push(single_in, node_id);
+            let seg_result = execute_segment(j, ch, ok, single_in, 1, seg_i);
+            let seg_result_count = vec_len(seg_result);
+            let mut ri = 0;
+            while ri < seg_result_count {
+                let rid = vec_get(seg_result, ri);
+                vec_push(next_all, rid);
+                ri = ri + 1;
+            }
+            ci = ci + 1;
+        }
+        current = next_all;
+        cur_count = vec_len(current);
+        seg_i = seg_i + 1;
+    }
+    current
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MAIN
+// ═══════════════════════════════════════════════════════════════════════════════
+
+fn main() ~ Console + Environment + FileSystem + Process {
+    let ac = args_count();
+
+    // --help / -h
+    if ac > 1 {
+        let first = args_get(1);
+        if first == "--help" || first == "-h" {
+            println!("Usage: qjq [filter] [file]");
+            println!("       echo '{{\"a\":1}}' | qjq '.a'");
+            println!("       qjq '.name' data.json");
+            println!("");
+            println!("Filters:");
+            println!("  .           identity (pretty-print)");
+            println!("  .foo        field access");
+            println!("  .foo.bar    chained field access");
+            println!("  .[N]        array index");
+            println!("  .[]         array iteration");
+            println!("  expr | expr pipe (chain expressions)");
+            println!("  keys        object keys as array");
+            println!("  values      object values as array");
+            println!("  length      array/string/object length");
+            println!("  type        value type as string");
+            println!("  add         sum numbers / concat strings");
+            process_exit(0);
+        }
+    }
+
+    // If no args and stdin is not a pipe, show help instead of hanging
+    if ac < 2 {
+        if !stdin_is_pipe() {
+            println!("Usage: qjq [filter] [file]");
+            println!("Try 'qjq --help' for more information.");
+            process_exit(0);
+        }
+    }
+
+    // First arg is query, second (optional) is file
+    let query = if ac > 1 { args_get(1) } else { "." };
+    let input = if ac > 2 { read_file(args_get(2)) } else { read_all() };
+    let trimmed = input.trim();
+    if trimmed.len() == 0 { println!("Error: empty input"); process_exit(1); }
+    let mut jp = jp_new(trimmed);
+    let root = jp_parse(&mut jp);
+    // Parse query with pipe support — segments stored in jp.ps_starts/ps_counts
+    parse_query(&mut jp, query);
+    let results = execute_pipeline(&mut jp, jp.ch, jp.ok, root);
+    let result_count = vec_len(results);
+    // Output results
+    let mut ri = 0;
+    while ri < result_count {
+        let nid = vec_get(results, ri);
+        let out = pretty(&jp, jp.ch, jp.ok, nid, 0);
+        println!("{}", out);
+        ri = ri + 1;
+    }
+}

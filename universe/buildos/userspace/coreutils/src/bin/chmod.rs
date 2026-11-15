@@ -1,0 +1,116 @@
+// ===============================================================================
+// CHMOD - CHANGE FILE MODE BITS
+// ===============================================================================
+// Copyright (c) 2024-2025 Zain Dana Harper. All Rights Reserved.
+// ===============================================================================
+
+#![no_std]
+#![no_main]
+#![allow(unused_variables)]
+#![allow(unused_assignments)]
+
+use coreutils_common::*;
+
+entry!(main);
+
+fn main(argc: usize, argv: *const *const u8) -> i32 {
+    let mut verbose = false;
+    let mut recursive = false;
+    let mut mode_arg: Option<&[u8]> = None;
+    let mut files: [&[u8]; 64] = [&[]; 64];
+    let mut file_count = 0;
+
+    let args = unsafe { ArgIter::new(argc, argv) };
+    let mut skip_first = true;
+
+    for arg in args {
+        if skip_first {
+            skip_first = false;
+            continue;
+        }
+
+        if arg.len() > 1 && arg[0] == b'-' {
+            if arg[1] == b'-' {
+                if str_eq(arg, b"--verbose") {
+                    verbose = true;
+                } else if str_eq(arg, b"--recursive") {
+                    recursive = true;
+                } else if str_eq(arg, b"--help") {
+                    println("Usage: chmod [OPTION]... MODE[,MODE]... FILE...");
+                    println("Change the mode of each FILE to MODE.");
+                    println("");
+                    println("  -R, --recursive  change files and directories recursively");
+                    println("  -v, --verbose    output a diagnostic for every file");
+                    return 0;
+                }
+            } else {
+                for i in 1..arg.len() {
+                    match arg[i] {
+                        b'R' => recursive = true,
+                        b'v' => verbose = true,
+                        _ => {
+                            eprint("chmod: invalid option -- '");
+                            write(STDERR, &[arg[i]]);
+                            eprintln("'");
+                            return 1;
+                        }
+                    }
+                }
+            }
+        } else if mode_arg.is_none() {
+            mode_arg = Some(arg);
+        } else if file_count < 64 {
+            files[file_count] = arg;
+            file_count += 1;
+        }
+    }
+
+    let mode_str = match mode_arg {
+        Some(m) => m,
+        None => {
+            eprintln("chmod: missing operand");
+            return 1;
+        }
+    };
+
+    if file_count == 0 {
+        eprintln("chmod: missing operand after mode");
+        return 1;
+    }
+
+    // Parse mode (octal only for simplicity)
+    let mode = match parse_octal(mode_str) {
+        Some(m) => m,
+        None => {
+            eprint("chmod: invalid mode: '");
+            print_bytes(mode_str);
+            eprintln("'");
+            return 1;
+        }
+    };
+
+    let mut exit_code = 0;
+
+    for i in 0..file_count {
+        let mut path_buf = [0u8; 512];
+        let len = files[i].len().min(511);
+        path_buf[..len].copy_from_slice(&files[i][..len]);
+        path_buf[len] = 0;
+
+        let result = chmod(&path_buf[..len + 1], mode);
+        if result < 0 {
+            eprint("chmod: cannot access '");
+            print_bytes(files[i]);
+            eprintln("'");
+            exit_code = 1;
+        } else if verbose {
+            eprint("mode of '");
+            print_bytes(files[i]);
+            eprint("' changed to ");
+            print_octal(mode as u64);
+            println("");
+        }
+    }
+
+    exit_code
+}

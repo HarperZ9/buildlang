@@ -1,0 +1,430 @@
+// BuildLang Tokenizer — shared stdlib module
+// Include via: include!("stdlib/tokenizer.bld");
+//
+// Requires: include!("stdlib/chars.bld") before this file.
+
+// ---------------------------------------------------------------------------
+// Token type constants
+// ---------------------------------------------------------------------------
+fn TK_KEYWORD() -> i32 { 1 }
+fn TK_IDENT() -> i32 { 2 }
+fn TK_INT_LIT() -> i32 { 3 }
+fn TK_FLOAT_LIT() -> i32 { 4 }
+fn TK_STR_LIT() -> i32 { 5 }
+fn TK_CHAR_LIT() -> i32 { 6 }
+fn TK_PLUS() -> i32 { 10 }
+fn TK_MINUS() -> i32 { 11 }
+fn TK_STAR() -> i32 { 12 }
+fn TK_SLASH() -> i32 { 13 }
+fn TK_PERCENT() -> i32 { 14 }
+fn TK_ASSIGN() -> i32 { 15 }
+fn TK_EQ() -> i32 { 16 }
+fn TK_NEQ() -> i32 { 17 }
+fn TK_LT() -> i32 { 18 }
+fn TK_GT() -> i32 { 19 }
+fn TK_LE() -> i32 { 20 }
+fn TK_GE() -> i32 { 21 }
+fn TK_AND() -> i32 { 22 }
+fn TK_OR() -> i32 { 23 }
+fn TK_NOT() -> i32 { 24 }
+fn TK_BIT_AND() -> i32 { 25 }
+fn TK_BIT_OR() -> i32 { 26 }
+fn TK_BIT_XOR() -> i32 { 27 }
+fn TK_SHL() -> i32 { 28 }
+fn TK_SHR() -> i32 { 29 }
+fn TK_PLUS_EQ() -> i32 { 30 }
+fn TK_MINUS_EQ() -> i32 { 31 }
+fn TK_STAR_EQ() -> i32 { 32 }
+fn TK_SLASH_EQ() -> i32 { 33 }
+fn TK_ARROW() -> i32 { 34 }
+fn TK_FAT_ARROW() -> i32 { 35 }
+fn TK_COLONCOLON() -> i32 { 36 }
+fn TK_DOTDOT() -> i32 { 37 }
+fn TK_DOTDOTEQ() -> i32 { 38 }
+fn TK_LPAREN() -> i32 { 40 }
+fn TK_RPAREN() -> i32 { 41 }
+fn TK_LBRACE() -> i32 { 42 }
+fn TK_RBRACE() -> i32 { 43 }
+fn TK_LBRACK() -> i32 { 44 }
+fn TK_RBRACK() -> i32 { 45 }
+fn TK_COMMA() -> i32 { 46 }
+fn TK_SEMI() -> i32 { 47 }
+fn TK_COLON() -> i32 { 48 }
+fn TK_DOT() -> i32 { 49 }
+fn TK_AT() -> i32 { 50 }
+fn TK_HASH() -> i32 { 51 }
+fn TK_QUESTION() -> i32 { 52 }
+
+// ---------------------------------------------------------------------------
+// Tokenizer state
+// ---------------------------------------------------------------------------
+struct Tok {
+    input: String,
+    ilen: i32,
+    pos: i32,
+    line: i32,
+    col: i32,
+    pool: String,
+    t_types: Vec<i32>,
+    t_starts: Vec<i32>,
+    t_lens: Vec<i32>,
+    t_lines: Vec<i32>,
+    t_cols: Vec<i32>,
+    count: i32,
+}
+
+fn tok_new(input: String) -> Tok {
+    let ilen = input.len();
+    Tok {
+        input: input, ilen: ilen,
+        pos: 0, line: 1, col: 1,
+        pool: "",
+        t_types: vec![], t_starts: vec![], t_lens: vec![],
+        t_lines: vec![], t_cols: vec![],
+        count: 0,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Pool helpers
+// ---------------------------------------------------------------------------
+fn pool_add(t: &mut Tok, text: String) -> i32 {
+    let st = t.pool.len();
+    t.pool = t.pool + text;
+    st
+}
+
+fn pool_get(t: &Tok, start: i32, length: i32) -> String {
+    if length == 0 { return ""; }
+    t.pool.substring(start, length)
+}
+
+// --- Get token text by index ---
+fn tok_text(t: &Tok, index: i32) -> String {
+    let tstart = vec_get(t.t_starts, index);
+    let tlen = vec_get(t.t_lens, index);
+    pool_get(t, tstart, tlen)
+}
+
+// ---------------------------------------------------------------------------
+// Emit a token
+// ---------------------------------------------------------------------------
+fn tok_emit(t: &mut Tok, ttype: i32, text: String, tline: i32, tcol: i32) {
+    let st = pool_add(t, text);
+    let tlen = text.len();
+    vec_push(t.t_types, ttype);
+    vec_push(t.t_starts, st);
+    vec_push(t.t_lens, tlen);
+    vec_push(t.t_lines, tline);
+    vec_push(t.t_cols, tcol);
+    t.count = t.count + 1;
+}
+
+// ---------------------------------------------------------------------------
+// Peek / advance
+// ---------------------------------------------------------------------------
+fn peek_tok(t: &Tok) -> String {
+    if t.pos >= t.ilen { return ""; }
+    t.input.char_at(t.pos)
+}
+
+fn peek_at(t: &Tok, offset: i32) -> String {
+    let p = t.pos + offset;
+    if p >= t.ilen { return ""; }
+    t.input.char_at(p)
+}
+
+fn advance_tok(t: &mut Tok) -> String {
+    if t.pos >= t.ilen { return ""; }
+    let c = t.input.char_at(t.pos);
+    t.pos = t.pos + 1;
+    if c == "\n" { t.line = t.line + 1; t.col = 1; }
+    else { t.col = t.col + 1; }
+    c
+}
+
+// ---------------------------------------------------------------------------
+// Keyword check
+// ---------------------------------------------------------------------------
+fn is_keyword(s: String) -> bool {
+    if s == "fn" { return true; } if s == "let" { return true; }
+    if s == "mut" { return true; } if s == "if" { return true; }
+    if s == "else" { return true; } if s == "while" { return true; }
+    if s == "for" { return true; } if s == "in" { return true; }
+    if s == "return" { return true; } if s == "struct" { return true; }
+    if s == "enum" { return true; } if s == "impl" { return true; }
+    if s == "pub" { return true; } if s == "mod" { return true; }
+    if s == "use" { return true; } if s == "match" { return true; }
+    if s == "trait" { return true; } if s == "const" { return true; }
+    if s == "true" { return true; } if s == "false" { return true; }
+    if s == "self" { return true; } if s == "Self" { return true; }
+    if s == "super" { return true; } if s == "where" { return true; }
+    if s == "as" { return true; } if s == "break" { return true; }
+    if s == "continue" { return true; } if s == "loop" { return true; }
+    if s == "type" { return true; }
+    false
+}
+
+// ---------------------------------------------------------------------------
+// Skip whitespace / comments
+// ---------------------------------------------------------------------------
+fn skip_whitespace(t: &mut Tok) {
+    let mut go = true;
+    while go {
+        if t.pos >= t.ilen { go = false; }
+        else {
+            let c = peek_tok(t);
+            if is_whitespace(c) { advance_tok(t); }
+            else { go = false; }
+        }
+    }
+}
+
+fn skip_line_comment(t: &mut Tok) {
+    advance_tok(t); advance_tok(t);
+    let mut go = true;
+    while go {
+        if t.pos >= t.ilen { go = false; }
+        else {
+            let c = peek_tok(t);
+            if c == "\n" { advance_tok(t); go = false; }
+            else { advance_tok(t); }
+        }
+    }
+}
+
+fn skip_block_comment(t: &mut Tok) {
+    advance_tok(t); advance_tok(t);
+    let mut depth: i32 = 1;
+    let mut go = true;
+    while go {
+        if t.pos >= t.ilen { go = false; }
+        else {
+            let c = peek_tok(t);
+            let c2 = peek_at(t, 1);
+            if c == "/" && c2 == "*" {
+                advance_tok(t); advance_tok(t); depth = depth + 1;
+            } else if c == "*" && c2 == "/" {
+                advance_tok(t); advance_tok(t); depth = depth - 1;
+                if depth == 0 { go = false; }
+            } else { advance_tok(t); }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Read string literal: "..." with escapes
+// ---------------------------------------------------------------------------
+fn read_string(t: &mut Tok) {
+    let tline = t.line; let tcol = t.col;
+    let mut text = "\"";
+    advance_tok(t);
+    let mut go = true;
+    while go {
+        if t.pos >= t.ilen { go = false; }
+        else {
+            let c = peek_tok(t);
+            if c == "\\" {
+                text = text + advance_tok(t);
+                if t.pos < t.ilen { text = text + advance_tok(t); }
+            } else if c == "\"" { text = text + advance_tok(t); go = false; }
+            else { text = text + advance_tok(t); }
+        }
+    }
+    tok_emit(t, TK_STR_LIT(), text, tline, tcol);
+}
+
+// ---------------------------------------------------------------------------
+// Read char literal: '.' with escapes
+// ---------------------------------------------------------------------------
+fn read_char_lit(t: &mut Tok) {
+    let tline = t.line; let tcol = t.col;
+    let mut text = "'";
+    advance_tok(t);
+    let mut go = true;
+    while go {
+        if t.pos >= t.ilen { go = false; }
+        else {
+            let c = peek_tok(t);
+            if c == "\\" {
+                text = text + advance_tok(t);
+                if t.pos < t.ilen { text = text + advance_tok(t); }
+            } else if c == "'" { text = text + advance_tok(t); go = false; }
+            else { text = text + advance_tok(t); }
+        }
+    }
+    tok_emit(t, TK_CHAR_LIT(), text, tline, tcol);
+}
+
+// ---------------------------------------------------------------------------
+// Read number: int or float, with 0x/0b/0o prefix
+// ---------------------------------------------------------------------------
+fn read_number(t: &mut Tok) {
+    let tline = t.line; let tcol = t.col;
+    let mut text = "";
+    let c0 = peek_tok(t);
+    if c0 == "0" {
+        let c1 = peek_at(t, 1);
+        if c1 == "x" || c1 == "X" {
+            text = text + advance_tok(t); text = text + advance_tok(t);
+            let mut go = true;
+            while go {
+                if t.pos >= t.ilen { go = false; }
+                else { let c = peek_tok(t); if is_hex_digit(c) || c == "_" { text = text + advance_tok(t); } else { go = false; } }
+            }
+            tok_emit(t, TK_INT_LIT(), text, tline, tcol); return;
+        }
+        if c1 == "b" || c1 == "B" {
+            text = text + advance_tok(t); text = text + advance_tok(t);
+            let mut go = true;
+            while go {
+                if t.pos >= t.ilen { go = false; }
+                else { let c = peek_tok(t); if is_bin_digit(c) || c == "_" { text = text + advance_tok(t); } else { go = false; } }
+            }
+            tok_emit(t, TK_INT_LIT(), text, tline, tcol); return;
+        }
+        if c1 == "o" || c1 == "O" {
+            text = text + advance_tok(t); text = text + advance_tok(t);
+            let mut go = true;
+            while go {
+                if t.pos >= t.ilen { go = false; }
+                else { let c = peek_tok(t); if is_oct_digit(c) || c == "_" { text = text + advance_tok(t); } else { go = false; } }
+            }
+            tok_emit(t, TK_INT_LIT(), text, tline, tcol); return;
+        }
+    }
+    let mut go = true;
+    while go {
+        if t.pos >= t.ilen { go = false; }
+        else { let c = peek_tok(t); if is_digit(c) || c == "_" { text = text + advance_tok(t); } else { go = false; } }
+    }
+    let mut is_float = false;
+    if t.pos < t.ilen {
+        let dot = peek_tok(t);
+        if dot == "." {
+            let after = peek_at(t, 1);
+            if is_digit(after) {
+                is_float = true;
+                text = text + advance_tok(t);
+                let mut go2 = true;
+                while go2 {
+                    if t.pos >= t.ilen { go2 = false; }
+                    else { let c = peek_tok(t); if is_digit(c) || c == "_" { text = text + advance_tok(t); } else { go2 = false; } }
+                }
+            }
+        }
+    }
+    if t.pos < t.ilen {
+        let ec = peek_tok(t);
+        if ec == "e" || ec == "E" {
+            is_float = true;
+            text = text + advance_tok(t);
+            if t.pos < t.ilen {
+                let sign = peek_tok(t);
+                if sign == "+" || sign == "-" { text = text + advance_tok(t); }
+            }
+            let mut go3 = true;
+            while go3 {
+                if t.pos >= t.ilen { go3 = false; }
+                else { let c = peek_tok(t); if is_digit(c) { text = text + advance_tok(t); } else { go3 = false; } }
+            }
+        }
+    }
+    if is_float { tok_emit(t, TK_FLOAT_LIT(), text, tline, tcol); }
+    else { tok_emit(t, TK_INT_LIT(), text, tline, tcol); }
+}
+
+// ---------------------------------------------------------------------------
+// Read identifier or keyword
+// ---------------------------------------------------------------------------
+fn read_ident_or_keyword(t: &mut Tok) {
+    let tline = t.line; let tcol = t.col;
+    let mut text = "";
+    let mut go = true;
+    while go {
+        if t.pos >= t.ilen { go = false; }
+        else { let c = peek_tok(t); if is_alnum(c) { text = text + advance_tok(t); } else { go = false; } }
+    }
+    if is_keyword(text) { tok_emit(t, TK_KEYWORD(), text, tline, tcol); }
+    else { tok_emit(t, TK_IDENT(), text, tline, tcol); }
+}
+
+// ---------------------------------------------------------------------------
+// Read operator or punctuation
+// ---------------------------------------------------------------------------
+fn read_operator(t: &mut Tok) {
+    let tline = t.line; let tcol = t.col;
+    let c = peek_tok(t); let c2 = peek_at(t, 1); let c3 = peek_at(t, 2);
+    // Three-character operators
+    if c == "." && c2 == "." && c3 == "=" { advance_tok(t); advance_tok(t); advance_tok(t); tok_emit(t, TK_DOTDOTEQ(), "..=", tline, tcol); return; }
+    if c == "<" && c2 == "<" { advance_tok(t); advance_tok(t); tok_emit(t, TK_SHL(), "<<", tline, tcol); return; }
+    if c == ">" && c2 == ">" { advance_tok(t); advance_tok(t); tok_emit(t, TK_SHR(), ">>", tline, tcol); return; }
+    // Two-character operators
+    if c == "=" && c2 == "=" { advance_tok(t); advance_tok(t); tok_emit(t, TK_EQ(), "==", tline, tcol); return; }
+    if c == "!" && c2 == "=" { advance_tok(t); advance_tok(t); tok_emit(t, TK_NEQ(), "!=", tline, tcol); return; }
+    if c == "<" && c2 == "=" { advance_tok(t); advance_tok(t); tok_emit(t, TK_LE(), "<=", tline, tcol); return; }
+    if c == ">" && c2 == "=" { advance_tok(t); advance_tok(t); tok_emit(t, TK_GE(), ">=", tline, tcol); return; }
+    if c == "&" && c2 == "&" { advance_tok(t); advance_tok(t); tok_emit(t, TK_AND(), "&&", tline, tcol); return; }
+    if c == "|" && c2 == "|" { advance_tok(t); advance_tok(t); tok_emit(t, TK_OR(), "||", tline, tcol); return; }
+    if c == "+" && c2 == "=" { advance_tok(t); advance_tok(t); tok_emit(t, TK_PLUS_EQ(), "+=", tline, tcol); return; }
+    if c == "-" && c2 == "=" { advance_tok(t); advance_tok(t); tok_emit(t, TK_MINUS_EQ(), "-=", tline, tcol); return; }
+    if c == "*" && c2 == "=" { advance_tok(t); advance_tok(t); tok_emit(t, TK_STAR_EQ(), "*=", tline, tcol); return; }
+    if c == "/" && c2 == "=" { advance_tok(t); advance_tok(t); tok_emit(t, TK_SLASH_EQ(), "/=", tline, tcol); return; }
+    if c == "-" && c2 == ">" { advance_tok(t); advance_tok(t); tok_emit(t, TK_ARROW(), "->", tline, tcol); return; }
+    if c == "=" && c2 == ">" { advance_tok(t); advance_tok(t); tok_emit(t, TK_FAT_ARROW(), "=>", tline, tcol); return; }
+    if c == ":" && c2 == ":" { advance_tok(t); advance_tok(t); tok_emit(t, TK_COLONCOLON(), "::", tline, tcol); return; }
+    if c == "." && c2 == "." { advance_tok(t); advance_tok(t); tok_emit(t, TK_DOTDOT(), "..", tline, tcol); return; }
+    // Single-character operators and punctuation
+    advance_tok(t);
+    if c == "+" { tok_emit(t, TK_PLUS(), "+", tline, tcol); return; }
+    if c == "-" { tok_emit(t, TK_MINUS(), "-", tline, tcol); return; }
+    if c == "*" { tok_emit(t, TK_STAR(), "*", tline, tcol); return; }
+    if c == "/" { tok_emit(t, TK_SLASH(), "/", tline, tcol); return; }
+    if c == "%" { tok_emit(t, TK_PERCENT(), "%", tline, tcol); return; }
+    if c == "=" { tok_emit(t, TK_ASSIGN(), "=", tline, tcol); return; }
+    if c == "<" { tok_emit(t, TK_LT(), "<", tline, tcol); return; }
+    if c == ">" { tok_emit(t, TK_GT(), ">", tline, tcol); return; }
+    if c == "!" { tok_emit(t, TK_NOT(), "!", tline, tcol); return; }
+    if c == "&" { tok_emit(t, TK_BIT_AND(), "&", tline, tcol); return; }
+    if c == "|" { tok_emit(t, TK_BIT_OR(), "|", tline, tcol); return; }
+    if c == "^" { tok_emit(t, TK_BIT_XOR(), "^", tline, tcol); return; }
+    if c == "(" { tok_emit(t, TK_LPAREN(), "(", tline, tcol); return; }
+    if c == ")" { tok_emit(t, TK_RPAREN(), ")", tline, tcol); return; }
+    if c == "{" { tok_emit(t, TK_LBRACE(), "{", tline, tcol); return; }
+    if c == "}" { tok_emit(t, TK_RBRACE(), "}", tline, tcol); return; }
+    if c == "[" { tok_emit(t, TK_LBRACK(), "[", tline, tcol); return; }
+    if c == "]" { tok_emit(t, TK_RBRACK(), "]", tline, tcol); return; }
+    if c == "," { tok_emit(t, TK_COMMA(), ",", tline, tcol); return; }
+    if c == ";" { tok_emit(t, TK_SEMI(), ";", tline, tcol); return; }
+    if c == ":" { tok_emit(t, TK_COLON(), ":", tline, tcol); return; }
+    if c == "." { tok_emit(t, TK_DOT(), ".", tline, tcol); return; }
+    if c == "@" { tok_emit(t, TK_AT(), "@", tline, tcol); return; }
+    if c == "#" { tok_emit(t, TK_HASH(), "#", tline, tcol); return; }
+    if c == "?" { tok_emit(t, TK_QUESTION(), "?", tline, tcol); return; }
+    // Unknown character: skip silently
+}
+
+// ---------------------------------------------------------------------------
+// Main tokenize loop
+// ---------------------------------------------------------------------------
+fn tokenize(t: &mut Tok) {
+    let mut go = true;
+    while go {
+        if t.pos >= t.ilen { go = false; }
+        else {
+            skip_whitespace(t);
+            if t.pos >= t.ilen { go = false; }
+            else {
+                let c = peek_tok(t);
+                let c2 = peek_at(t, 1);
+                if c == "/" && c2 == "/" { skip_line_comment(t); }
+                else if c == "/" && c2 == "*" { skip_block_comment(t); }
+                else if c == "\"" { read_string(t); }
+                else if c == "'" { read_char_lit(t); }
+                else if is_digit(c) { read_number(t); }
+                else if is_alpha(c) { read_ident_or_keyword(t); }
+                else { read_operator(t); }
+            }
+        }
+    }
+}

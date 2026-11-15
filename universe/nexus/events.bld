@@ -1,0 +1,1242 @@
+// ============================================================================
+// NEXUS - Event System
+// ============================================================================
+// Comprehensive event bus for mod communication and game event interception
+// Supports typed events, filtering, priority dispatch, and async handlers
+// ============================================================================
+
+module nexus::events;
+
+use core::sync::{Mutex, RwLock, Arc, mpsc};
+use core::collections::{HashMap, Vec, BTreeMap, VecDeque};
+use core::any::Any;
+
+// ============================================================================
+// Event Types
+// ============================================================================
+
+/// Event priority for handler ordering
+@derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum EventPriority {
+    Highest = 0,
+    High = 1,
+    Normal = 2,
+    Low = 3,
+    Lowest = 4,
+    Monitor = 5
+}
+
+impl EventPriority {
+    pub fn value(&self) -> i32 {
+        *self as i32
+    }
+}
+
+/// Event propagation control
+@derive(Clone, Copy, PartialEq, Eq)]
+pub enum EventPropagation {
+    Continue,      // Continue to next handler
+    Stop,          // Stop propagation
+    Consume        // Consume event (stop + mark handled)
+}
+
+/// Event phase in the lifecycle
+@derive(Clone, Copy, PartialEq, Eq)]
+pub enum EventPhase {
+    Capture,       // Propagating down
+    Target,        // At target
+    Bubble         // Propagating up
+}
+
+/// Base event trait
+pub trait EventTrait: Any + Send + Sync {
+    fn event_type(&self) -> &str;
+    fn is_cancellable(&self) -> bool { true }
+    fn timestamp(&self) -> u64;
+    fn source(&self) -> Option<&str> { None }
+}
+
+/// Generic event wrapper
+pub struct Event {
+    event_type: String,
+    data: Box<dyn Any + Send + Sync>,
+    timestamp: u64,
+    source: Option<String>,
+    cancelled: bool,
+    consumed: bool,
+    propagation: EventPropagation,
+    phase: EventPhase,
+    metadata: HashMap<String, String>
+}
+
+impl Event {
+    pub fn new(event_type: &str) -> Self {
+        Self {
+            event_type: event_type.to_string(),
+            data: Box::new(()),
+            timestamp: 0,
+            source: None,
+            cancelled: false,
+            consumed: false,
+            propagation: EventPropagation::Continue,
+            phase: EventPhase::Target,
+            metadata: HashMap::new()
+        }
+    }
+
+    pub fn with_data<T: Any + Send + Sync + 'static>(mut self, data: T) -> Self {
+        self.data = Box::new(data);
+        self
+    }
+
+    pub fn with_source(mut self, source: &str) -> Self {
+        self.source = Some(source.to_string());
+        self
+    }
+
+    pub fn with_timestamp(mut self, ts: u64) -> Self {
+        self.timestamp = ts;
+        self
+    }
+
+    pub fn with_metadata(mut self, key: &str, value: &str) -> Self {
+        self.metadata.insert(key.to_string(), value.to_string());
+        self
+    }
+
+    pub fn event_type(&self) -> &str { &self.event_type }
+    pub fn timestamp(&self) -> u64 { self.timestamp }
+    pub fn source(&self) -> Option<&str> { self.source.as_deref() }
+    pub fn phase(&self) -> EventPhase { self.phase }
+
+    pub fn data<T: 'static>(&self) -> Option<&T> {
+        self.data.downcast_ref()
+    }
+
+    pub fn data_mut<T: 'static>(&mut self) -> Option<&mut T> {
+        self.data.downcast_mut()
+    }
+
+    pub fn metadata(&self, key: &str) -> Option<&str> {
+        self.metadata.get(key).map(|s| s.as_str())
+    }
+
+    pub fn cancel(&mut self) {
+        self.cancelled = true;
+    }
+
+    pub fn is_cancelled(&self) -> bool { self.cancelled }
+
+    pub fn consume(&mut self) {
+        self.consumed = true;
+        self.propagation = EventPropagation::Consume;
+    }
+
+    pub fn is_consumed(&self) -> bool { self.consumed }
+
+    pub fn stop_propagation(&mut self) {
+        self.propagation = EventPropagation::Stop;
+    }
+
+    pub fn should_propagate(&self) -> bool {
+        self.propagation == EventPropagation::Continue
+    }
+
+    pub fn set_phase(&mut self, phase: EventPhase) {
+        self.phase = phase;
+    }
+}
+
+// ============================================================================
+// Common Event Types
+// ============================================================================
+
+/// Game lifecycle events
+pub mod game_events {
+    use super::*;
+
+    pub struct GameStartEvent {
+        pub game_id: String,
+        pub game_version: String,
+        pub timestamp: u64
+    }
+
+    pub struct GameStopEvent {
+        pub game_id: String,
+        pub exit_code: i32,
+        pub timestamp: u64
+    }
+
+    pub struct FrameBeginEvent {
+        pub frame_number: u64,
+        pub delta_time: f32,
+        pub timestamp: u64
+    }
+
+    pub struct FrameEndEvent {
+        pub frame_number: u64,
+        pub frame_time: f32,
+        pub timestamp: u64
+    }
+
+    pub struct SceneLoadEvent {
+        pub scene_name: String,
+        pub scene_id: u32,
+        pub timestamp: u64
+    }
+
+    pub struct SceneUnloadEvent {
+        pub scene_name: String,
+        pub timestamp: u64
+    }
+}
+
+/// Mod lifecycle events
+pub mod mod_events {
+    use super::*;
+
+    pub struct ModLoadedEvent {
+        pub mod_id: String,
+        pub mod_version: String,
+        pub timestamp: u64
+    }
+
+    pub struct ModUnloadedEvent {
+        pub mod_id: String,
+        pub timestamp: u64
+    }
+
+    pub struct ModEnabledEvent {
+        pub mod_id: String,
+        pub timestamp: u64
+    }
+
+    pub struct ModDisabledEvent {
+        pub mod_id: String,
+        pub timestamp: u64
+    }
+
+    pub struct ModErrorEvent {
+        pub mod_id: String,
+        pub error: String,
+        pub timestamp: u64
+    }
+
+    pub struct ModConfigChangedEvent {
+        pub mod_id: String,
+        pub key: String,
+        pub old_value: String,
+        pub new_value: String,
+        pub timestamp: u64
+    }
+}
+
+/// Input events
+pub mod input_events {
+    use super::*;
+
+    pub struct KeyEvent {
+        pub key_code: u32,
+        pub scan_code: u32,
+        pub pressed: bool,
+        pub modifiers: KeyModifiers,
+        pub timestamp: u64
+    }
+
+    pub struct KeyModifiers {
+        pub shift: bool,
+        pub ctrl: bool,
+        pub alt: bool,
+        pub super_key: bool
+    }
+
+    impl KeyModifiers {
+        pub fn none() -> Self {
+            Self { shift: false, ctrl: false, alt: false, super_key: false }
+        }
+    }
+
+    pub struct MouseButtonEvent {
+        pub button: MouseButton,
+        pub pressed: bool,
+        pub x: f32,
+        pub y: f32,
+        pub timestamp: u64
+    }
+
+    pub enum MouseButton {
+        Left, Right, Middle, X1, X2
+    }
+
+    pub struct MouseMoveEvent {
+        pub x: f32,
+        pub y: f32,
+        pub delta_x: f32,
+        pub delta_y: f32,
+        pub timestamp: u64
+    }
+
+    pub struct MouseWheelEvent {
+        pub delta: f32,
+        pub horizontal: bool,
+        pub timestamp: u64
+    }
+
+    pub struct GamepadButtonEvent {
+        pub gamepad_id: u32,
+        pub button: u32,
+        pub pressed: bool,
+        pub timestamp: u64
+    }
+
+    pub struct GamepadAxisEvent {
+        pub gamepad_id: u32,
+        pub axis: u32,
+        pub value: f32,
+        pub timestamp: u64
+    }
+}
+
+/// Graphics events
+pub mod graphics_events {
+    use super::*;
+
+    pub struct RenderBeginEvent {
+        pub render_target: u64,
+        pub width: u32,
+        pub height: u32,
+        pub timestamp: u64
+    }
+
+    pub struct RenderEndEvent {
+        pub render_target: u64,
+        pub timestamp: u64
+    }
+
+    pub struct PresentEvent {
+        pub swap_chain: u64,
+        pub sync_interval: u32,
+        pub timestamp: u64
+    }
+
+    pub struct ResizeEvent {
+        pub width: u32,
+        pub height: u32,
+        pub old_width: u32,
+        pub old_height: u32,
+        pub timestamp: u64
+    }
+
+    pub struct DeviceLostEvent {
+        pub reason: String,
+        pub timestamp: u64
+    }
+
+    pub struct DeviceResetEvent {
+        pub timestamp: u64
+    }
+}
+
+// ============================================================================
+// Event Filters
+// ============================================================================
+
+/// Filter for event matching
+pub struct EventFilter {
+    event_types: Option<Vec<String>>,
+    sources: Option<Vec<String>>,
+    metadata_conditions: Vec<(String, FilterCondition)>,
+    custom_filter: Option<Box<dyn Fn(&Event) -> bool + Send + Sync>>
+}
+
+impl EventFilter {
+    pub fn new() -> Self {
+        Self {
+            event_types: None,
+            sources: None,
+            metadata_conditions: Vec::new(),
+            custom_filter: None
+        }
+    }
+
+    pub fn for_type(mut self, event_type: &str) -> Self {
+        self.event_types = Some(vec![event_type.to_string()]);
+        self
+    }
+
+    pub fn for_types(mut self, types: Vec<&str>) -> Self {
+        self.event_types = Some(types.iter().map(|s| s.to_string()).collect());
+        self
+    }
+
+    pub fn from_source(mut self, source: &str) -> Self {
+        self.sources = Some(vec![source.to_string()]);
+        self
+    }
+
+    pub fn from_sources(mut self, sources: Vec<&str>) -> Self {
+        self.sources = Some(sources.iter().map(|s| s.to_string()).collect());
+        self
+    }
+
+    pub fn with_metadata(mut self, key: &str, condition: FilterCondition) -> Self {
+        self.metadata_conditions.push((key.to_string(), condition));
+        self
+    }
+
+    pub fn with_custom<F>(mut self, filter: F) -> Self
+    where
+        F: Fn(&Event) -> bool + Send + Sync + 'static
+    {
+        self.custom_filter = Some(Box::new(filter));
+        self
+    }
+
+    pub fn matches(&self, event: &Event) -> bool {
+        // Check event type
+        if let Some(ref types) = self.event_types {
+            if !types.iter().any(|t| t == event.event_type()) {
+                return false;
+            }
+        }
+
+        // Check source
+        if let Some(ref sources) = self.sources {
+            match event.source() {
+                Some(src) => {
+                    if !sources.iter().any(|s| s == src) {
+                        return false;
+                    }
+                }
+                None => return false
+            }
+        }
+
+        // Check metadata conditions
+        for (key, condition) in &self.metadata_conditions {
+            match event.metadata(key) {
+                Some(value) => {
+                    if !condition.matches(value) {
+                        return false;
+                    }
+                }
+                None => return false
+            }
+        }
+
+        // Check custom filter
+        if let Some(ref filter) = self.custom_filter {
+            if !filter(event) {
+                return false;
+            }
+        }
+
+        true
+    }
+}
+
+impl Default for EventFilter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Condition for metadata filtering
+pub enum FilterCondition {
+    Equals(String),
+    NotEquals(String),
+    Contains(String),
+    StartsWith(String),
+    EndsWith(String),
+    Regex(String),
+    Any(Vec<String>),
+    None(Vec<String>)
+}
+
+impl FilterCondition {
+    pub fn matches(&self, value: &str) -> bool {
+        match self {
+            Self::Equals(s) => value == s,
+            Self::NotEquals(s) => value != s,
+            Self::Contains(s) => value.contains(s),
+            Self::StartsWith(s) => value.starts_with(s),
+            Self::EndsWith(s) => value.ends_with(s),
+            Self::Regex(pattern) => {
+                // Would use actual regex here
+                value.contains(pattern)
+            }
+            Self::Any(options) => options.iter().any(|o| value == o),
+            Self::None(excluded) => !excluded.iter().any(|e| value == e)
+        }
+    }
+}
+
+// ============================================================================
+// Event Handler
+// ============================================================================
+
+/// Handler function type
+pub type HandlerFn = Box<dyn Fn(&mut Event) -> EventPropagation + Send + Sync>;
+
+/// Async handler function type
+pub type AsyncHandlerFn = Box<dyn Fn(Event) + Send + Sync>;
+
+/// Event handler registration
+pub struct EventHandler {
+    id: String,
+    name: String,
+    priority: EventPriority,
+    filter: Option<EventFilter>,
+    handler: HandlerFn,
+    owner_mod: Option<String>,
+    enabled: bool,
+    call_count: u64,
+    once: bool,
+    called: bool
+}
+
+impl EventHandler {
+    pub fn new<F>(id: &str, handler: F) -> Self
+    where
+        F: Fn(&mut Event) -> EventPropagation + Send + Sync + 'static
+    {
+        Self {
+            id: id.to_string(),
+            name: id.to_string(),
+            priority: EventPriority::Normal,
+            filter: None,
+            handler: Box::new(handler),
+            owner_mod: None,
+            enabled: true,
+            call_count: 0,
+            once: false,
+            called: false
+        }
+    }
+
+    pub fn with_name(mut self, name: &str) -> Self {
+        self.name = name.to_string();
+        self
+    }
+
+    pub fn with_priority(mut self, priority: EventPriority) -> Self {
+        self.priority = priority;
+        self
+    }
+
+    pub fn with_filter(mut self, filter: EventFilter) -> Self {
+        self.filter = Some(filter);
+        self
+    }
+
+    pub fn with_owner(mut self, mod_id: &str) -> Self {
+        self.owner_mod = Some(mod_id.to_string());
+        self
+    }
+
+    pub fn once(mut self) -> Self {
+        self.once = true;
+        self
+    }
+
+    pub fn id(&self) -> &str { &self.id }
+    pub fn name(&self) -> &str { &self.name }
+    pub fn priority(&self) -> EventPriority { self.priority }
+    pub fn owner_mod(&self) -> Option<&str> { self.owner_mod.as_deref() }
+    pub fn is_enabled(&self) -> bool { self.enabled }
+    pub fn call_count(&self) -> u64 { self.call_count }
+
+    pub fn enable(&mut self) { self.enabled = true; }
+    pub fn disable(&mut self) { self.enabled = false; }
+
+    pub fn should_handle(&self, event: &Event) -> bool {
+        if !self.enabled {
+            return false;
+        }
+
+        if self.once && self.called {
+            return false;
+        }
+
+        match &self.filter {
+            Some(filter) => filter.matches(event),
+            None => true
+        }
+    }
+
+    pub fn handle(&mut self, event: &mut Event) -> EventPropagation {
+        if !self.should_handle(event) {
+            return EventPropagation::Continue;
+        }
+
+        self.call_count += 1;
+        self.called = true;
+
+        (self.handler)(event)
+    }
+
+    pub fn is_once_and_called(&self) -> bool {
+        self.once && self.called
+    }
+}
+
+// ============================================================================
+// Event Bus
+// ============================================================================
+
+/// Central event bus for the application
+pub struct EventBus {
+    handlers: RwLock<HashMap<String, Vec<EventHandler>>>,
+    global_handlers: RwLock<Vec<EventHandler>>,
+    async_queue: Mutex<VecDeque<Event>>,
+    deferred_queue: Mutex<VecDeque<Event>>,
+    handler_count: u64,
+    events_dispatched: u64,
+    events_cancelled: u64,
+    enabled: bool,
+    async_enabled: bool
+}
+
+impl EventBus {
+    pub fn new() -> Self {
+        Self {
+            handlers: RwLock::new(HashMap::new()),
+            global_handlers: RwLock::new(Vec::new()),
+            async_queue: Mutex::new(VecDeque::new()),
+            deferred_queue: Mutex::new(VecDeque::new()),
+            handler_count: 0,
+            events_dispatched: 0,
+            events_cancelled: 0,
+            enabled: true,
+            async_enabled: true
+        }
+    }
+
+    /// Subscribe to a specific event type
+    pub fn subscribe(&mut self, event_type: &str, handler: EventHandler) -> String {
+        let handler_id = handler.id().to_string();
+
+        let mut handlers = self.handlers.write().unwrap();
+        handlers
+            .entry(event_type.to_string())
+            .or_insert_with(Vec::new)
+            .push(handler);
+
+        self.handler_count += 1;
+        self.sort_handlers_for_type(&mut handlers, event_type);
+
+        handler_id
+    }
+
+    /// Subscribe to all events
+    pub fn subscribe_all(&mut self, handler: EventHandler) -> String {
+        let handler_id = handler.id().to_string();
+
+        let mut global_handlers = self.global_handlers.write().unwrap();
+        global_handlers.push(handler);
+        global_handlers.sort_by(|a, b| a.priority().cmp(&b.priority()));
+
+        self.handler_count += 1;
+        handler_id
+    }
+
+    /// Unsubscribe a handler
+    pub fn unsubscribe(&mut self, handler_id: &str) -> bool {
+        // Check type-specific handlers
+        let mut handlers = self.handlers.write().unwrap();
+        for handlers_list in handlers.values_mut() {
+            let initial_len = handlers_list.len();
+            handlers_list.retain(|h| h.id() != handler_id);
+            if handlers_list.len() != initial_len {
+                self.handler_count -= 1;
+                return true;
+            }
+        }
+
+        // Check global handlers
+        let mut global_handlers = self.global_handlers.write().unwrap();
+        let initial_len = global_handlers.len();
+        global_handlers.retain(|h| h.id() != handler_id);
+        if global_handlers.len() != initial_len {
+            self.handler_count -= 1;
+            return true;
+        }
+
+        false
+    }
+
+    /// Unsubscribe all handlers for a mod
+    pub fn unsubscribe_mod(&mut self, mod_id: &str) {
+        let mut handlers = self.handlers.write().unwrap();
+        for handlers_list in handlers.values_mut() {
+            handlers_list.retain(|h| h.owner_mod() != Some(mod_id));
+        }
+
+        let mut global_handlers = self.global_handlers.write().unwrap();
+        global_handlers.retain(|h| h.owner_mod() != Some(mod_id));
+    }
+
+    fn sort_handlers_for_type(&self, handlers: &mut HashMap<String, Vec<EventHandler>>, event_type: &str) {
+        if let Some(list) = handlers.get_mut(event_type) {
+            list.sort_by(|a, b| a.priority().cmp(&b.priority()));
+        }
+    }
+
+    /// Dispatch an event synchronously
+    pub fn dispatch(&mut self, mut event: Event) -> bool {
+        if !self.enabled {
+            return false;
+        }
+
+        self.events_dispatched += 1;
+
+        // Global handlers first
+        {
+            let mut global_handlers = self.global_handlers.write().unwrap();
+            for handler in global_handlers.iter_mut() {
+                if !event.should_propagate() {
+                    break;
+                }
+
+                match handler.handle(&mut event) {
+                    EventPropagation::Stop | EventPropagation::Consume => {
+                        event.stop_propagation();
+                    }
+                    _ => {}
+                }
+            }
+
+            // Remove once handlers that have been called
+            global_handlers.retain(|h| !h.is_once_and_called());
+        }
+
+        // Type-specific handlers
+        if event.should_propagate() {
+            let event_type = event.event_type().to_string();
+            let mut handlers = self.handlers.write().unwrap();
+
+            if let Some(handlers_list) = handlers.get_mut(&event_type) {
+                for handler in handlers_list.iter_mut() {
+                    if !event.should_propagate() {
+                        break;
+                    }
+
+                    match handler.handle(&mut event) {
+                        EventPropagation::Stop | EventPropagation::Consume => {
+                            event.stop_propagation();
+                        }
+                        _ => {}
+                    }
+                }
+
+                // Remove once handlers that have been called
+                handlers_list.retain(|h| !h.is_once_and_called());
+            }
+        }
+
+        if event.is_cancelled() {
+            self.events_cancelled += 1;
+        }
+
+        !event.is_cancelled()
+    }
+
+    /// Dispatch an event asynchronously (queued for later processing)
+    pub fn dispatch_async(&self, event: Event) {
+        if !self.enabled || !self.async_enabled {
+            return;
+        }
+
+        let mut queue = self.async_queue.lock().unwrap();
+        queue.push_back(event);
+    }
+
+    /// Dispatch an event at the end of the current frame
+    pub fn dispatch_deferred(&self, event: Event) {
+        if !self.enabled {
+            return;
+        }
+
+        let mut queue = self.deferred_queue.lock().unwrap();
+        queue.push_back(event);
+    }
+
+    /// Process all async events
+    pub fn process_async(&mut self) {
+        let events: Vec<Event> = {
+            let mut queue = self.async_queue.lock().unwrap();
+            queue.drain(..).collect()
+        };
+
+        for event in events {
+            self.dispatch(event);
+        }
+    }
+
+    /// Process all deferred events
+    pub fn process_deferred(&mut self) {
+        let events: Vec<Event> = {
+            let mut queue = self.deferred_queue.lock().unwrap();
+            queue.drain(..).collect()
+        };
+
+        for event in events {
+            self.dispatch(event);
+        }
+    }
+
+    /// Get handler count for an event type
+    pub fn handler_count_for(&self, event_type: &str) -> usize {
+        let handlers = self.handlers.read().unwrap();
+        handlers.get(event_type).map(|h| h.len()).unwrap_or(0)
+    }
+
+    /// Check if any handlers exist for an event type
+    pub fn has_handlers(&self, event_type: &str) -> bool {
+        let handlers = self.handlers.read().unwrap();
+        handlers.get(event_type).map(|h| !h.is_empty()).unwrap_or(false)
+    }
+
+    pub fn total_handler_count(&self) -> u64 { self.handler_count }
+    pub fn events_dispatched(&self) -> u64 { self.events_dispatched }
+    pub fn events_cancelled(&self) -> u64 { self.events_cancelled }
+
+    pub fn enable(&mut self) { self.enabled = true; }
+    pub fn disable(&mut self) { self.enabled = false; }
+    pub fn is_enabled(&self) -> bool { self.enabled }
+
+    pub fn enable_async(&mut self) { self.async_enabled = true; }
+    pub fn disable_async(&mut self) { self.async_enabled = false; }
+}
+
+impl Default for EventBus {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ============================================================================
+// Event Dispatcher
+// ============================================================================
+
+/// Specialized event dispatcher with channels
+pub struct EventDispatcher {
+    bus: Arc<RwLock<EventBus>>,
+    channels: HashMap<String, EventChannel>,
+    enabled: bool
+}
+
+impl EventDispatcher {
+    pub fn new(bus: Arc<RwLock<EventBus>>) -> Self {
+        Self {
+            bus,
+            channels: HashMap::new(),
+            enabled: true
+        }
+    }
+
+    /// Create a named channel
+    pub fn create_channel(&mut self, name: &str) -> &EventChannel {
+        self.channels.entry(name.to_string())
+            .or_insert_with(|| EventChannel::new(name))
+    }
+
+    /// Get a channel
+    pub fn channel(&self, name: &str) -> Option<&EventChannel> {
+        self.channels.get(name)
+    }
+
+    /// Get a mutable channel
+    pub fn channel_mut(&mut self, name: &str) -> Option<&mut EventChannel> {
+        self.channels.get_mut(name)
+    }
+
+    /// Dispatch to the main bus
+    pub fn dispatch(&self, event: Event) {
+        if !self.enabled {
+            return;
+        }
+
+        let mut bus = self.bus.write().unwrap();
+        bus.dispatch(event);
+    }
+
+    /// Dispatch to a specific channel
+    pub fn dispatch_to_channel(&mut self, channel_name: &str, event: Event) {
+        if !self.enabled {
+            return;
+        }
+
+        if let Some(channel) = self.channels.get_mut(channel_name) {
+            channel.dispatch(event);
+        }
+    }
+
+    /// Broadcast to all channels
+    pub fn broadcast(&mut self, event: Event) {
+        if !self.enabled {
+            return;
+        }
+
+        // Clone event for each channel
+        for channel in self.channels.values_mut() {
+            let event_clone = Event::new(event.event_type())
+                .with_timestamp(event.timestamp());
+            channel.dispatch(event_clone);
+        }
+
+        // Also dispatch to main bus
+        let mut bus = self.bus.write().unwrap();
+        bus.dispatch(event);
+    }
+
+    pub fn enable(&mut self) { self.enabled = true; }
+    pub fn disable(&mut self) { self.enabled = false; }
+}
+
+/// Named event channel with its own handlers
+pub struct EventChannel {
+    name: String,
+    handlers: Vec<EventHandler>,
+    queue: VecDeque<Event>,
+    enabled: bool,
+    events_processed: u64
+}
+
+impl EventChannel {
+    pub fn new(name: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            handlers: Vec::new(),
+            queue: VecDeque::new(),
+            enabled: true,
+            events_processed: 0
+        }
+    }
+
+    pub fn name(&self) -> &str { &self.name }
+
+    pub fn subscribe(&mut self, handler: EventHandler) {
+        self.handlers.push(handler);
+        self.handlers.sort_by(|a, b| a.priority().cmp(&b.priority()));
+    }
+
+    pub fn unsubscribe(&mut self, handler_id: &str) -> bool {
+        let initial_len = self.handlers.len();
+        self.handlers.retain(|h| h.id() != handler_id);
+        self.handlers.len() != initial_len
+    }
+
+    pub fn dispatch(&mut self, mut event: Event) {
+        if !self.enabled {
+            return;
+        }
+
+        self.events_processed += 1;
+
+        for handler in &mut self.handlers {
+            if !event.should_propagate() {
+                break;
+            }
+
+            match handler.handle(&mut event) {
+                EventPropagation::Stop | EventPropagation::Consume => {
+                    event.stop_propagation();
+                }
+                _ => {}
+            }
+        }
+
+        self.handlers.retain(|h| !h.is_once_and_called());
+    }
+
+    pub fn queue_event(&mut self, event: Event) {
+        self.queue.push_back(event);
+    }
+
+    pub fn process_queue(&mut self) {
+        let events: Vec<Event> = self.queue.drain(..).collect();
+        for event in events {
+            self.dispatch(event);
+        }
+    }
+
+    pub fn enable(&mut self) { self.enabled = true; }
+    pub fn disable(&mut self) { self.enabled = false; }
+    pub fn is_enabled(&self) -> bool { self.enabled }
+    pub fn events_processed(&self) -> u64 { self.events_processed }
+}
+
+// ============================================================================
+// Event Emitter
+// ============================================================================
+
+/// Trait for types that can emit events
+pub trait EventEmitter {
+    fn emit(&self, event: Event);
+    fn emit_async(&self, event: Event);
+}
+
+/// Simple event emitter implementation
+pub struct SimpleEmitter {
+    bus: Arc<RwLock<EventBus>>,
+    source_id: String
+}
+
+impl SimpleEmitter {
+    pub fn new(bus: Arc<RwLock<EventBus>>, source_id: &str) -> Self {
+        Self {
+            bus,
+            source_id: source_id.to_string()
+        }
+    }
+}
+
+impl EventEmitter for SimpleEmitter {
+    fn emit(&self, mut event: Event) {
+        event.source = Some(self.source_id.clone());
+        let mut bus = self.bus.write().unwrap();
+        bus.dispatch(event);
+    }
+
+    fn emit_async(&self, mut event: Event) {
+        event.source = Some(self.source_id.clone());
+        let bus = self.bus.read().unwrap();
+        bus.dispatch_async(event);
+    }
+}
+
+// ============================================================================
+// Event Builder
+// ============================================================================
+
+/// Builder for creating events fluently
+pub struct EventBuilder {
+    event_type: String,
+    data: Option<Box<dyn Any + Send + Sync>>,
+    source: Option<String>,
+    metadata: HashMap<String, String>
+}
+
+impl EventBuilder {
+    pub fn new(event_type: &str) -> Self {
+        Self {
+            event_type: event_type.to_string(),
+            data: None,
+            source: None,
+            metadata: HashMap::new()
+        }
+    }
+
+    pub fn data<T: Any + Send + Sync + 'static>(mut self, data: T) -> Self {
+        self.data = Some(Box::new(data));
+        self
+    }
+
+    pub fn source(mut self, source: &str) -> Self {
+        self.source = Some(source.to_string());
+        self
+    }
+
+    pub fn metadata(mut self, key: &str, value: &str) -> Self {
+        self.metadata.insert(key.to_string(), value.to_string());
+        self
+    }
+
+    pub fn build(self) -> Event {
+        let mut event = Event::new(&self.event_type);
+
+        if let Some(data) = self.data {
+            event.data = data;
+        }
+
+        event.source = self.source;
+        event.metadata = self.metadata;
+        event.timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+
+        event
+    }
+}
+
+// ============================================================================
+// Convenience Macros
+// ============================================================================
+
+/// Create an event handler
+macro_rules! on_event {
+    ($id:expr, $handler:expr) => {
+        EventHandler::new($id, $handler)
+    };
+    ($id:expr, $priority:expr, $handler:expr) => {
+        EventHandler::new($id, $handler).with_priority($priority)
+    };
+}
+
+/// Create an event
+macro_rules! event {
+    ($type:expr) => {
+        Event::new($type)
+    };
+    ($type:expr, $data:expr) => {
+        Event::new($type).with_data($data)
+    };
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_event_creation() {
+        let event = Event::new("test_event")
+            .with_data(42i32)
+            .with_source("test_source")
+            .with_metadata("key", "value");
+
+        assert_eq!(event.event_type(), "test_event");
+        assert_eq!(event.data::<i32>(), Some(&42));
+        assert_eq!(event.source(), Some("test_source"));
+        assert_eq!(event.metadata("key"), Some("value"));
+    }
+
+    #[test]
+    fn test_event_cancellation() {
+        let mut event = Event::new("test");
+        assert!(!event.is_cancelled());
+
+        event.cancel();
+        assert!(event.is_cancelled());
+    }
+
+    #[test]
+    fn test_event_propagation() {
+        let mut event = Event::new("test");
+        assert!(event.should_propagate());
+
+        event.stop_propagation();
+        assert!(!event.should_propagate());
+    }
+
+    #[test]
+    fn test_event_filter() {
+        let filter = EventFilter::new()
+            .for_type("game_event")
+            .from_source("player");
+
+        let matching_event = Event::new("game_event")
+            .with_source("player");
+        assert!(filter.matches(&matching_event));
+
+        let non_matching_event = Event::new("other_event")
+            .with_source("enemy");
+        assert!(!filter.matches(&non_matching_event));
+    }
+
+    #[test]
+    fn test_event_handler() {
+        let mut call_count = 0;
+        let mut handler = EventHandler::new("test_handler", |_| {
+            EventPropagation::Continue
+        });
+
+        let mut event = Event::new("test");
+        handler.handle(&mut event);
+        assert_eq!(handler.call_count(), 1);
+    }
+
+    #[test]
+    fn test_event_handler_priority() {
+        let high = EventHandler::new("high", |_| EventPropagation::Continue)
+            .with_priority(EventPriority::High);
+        let low = EventHandler::new("low", |_| EventPropagation::Continue)
+            .with_priority(EventPriority::Low);
+
+        assert!(high.priority() < low.priority());
+    }
+
+    #[test]
+    fn test_event_bus_subscribe() {
+        let mut bus = EventBus::new();
+
+        let handler = EventHandler::new("handler1", |_| EventPropagation::Continue);
+        bus.subscribe("test_event", handler);
+
+        assert!(bus.has_handlers("test_event"));
+        assert_eq!(bus.handler_count_for("test_event"), 1);
+    }
+
+    #[test]
+    fn test_event_bus_dispatch() {
+        let mut bus = EventBus::new();
+
+        let handler = EventHandler::new("handler1", |event| {
+            event.cancel();
+            EventPropagation::Stop
+        });
+        bus.subscribe("test_event", handler);
+
+        let event = Event::new("test_event");
+        let not_cancelled = bus.dispatch(event);
+
+        assert!(!not_cancelled);
+        assert_eq!(bus.events_cancelled(), 1);
+    }
+
+    #[test]
+    fn test_event_bus_unsubscribe() {
+        let mut bus = EventBus::new();
+
+        let handler = EventHandler::new("handler1", |_| EventPropagation::Continue);
+        bus.subscribe("test_event", handler);
+
+        assert!(bus.unsubscribe("handler1"));
+        assert!(!bus.has_handlers("test_event"));
+    }
+
+    #[test]
+    fn test_event_channel() {
+        let mut channel = EventChannel::new("test_channel");
+
+        let handler = EventHandler::new("ch_handler", |_| EventPropagation::Continue);
+        channel.subscribe(handler);
+
+        let event = Event::new("test");
+        channel.dispatch(event);
+
+        assert_eq!(channel.events_processed(), 1);
+    }
+
+    #[test]
+    fn test_event_builder() {
+        let event = EventBuilder::new("custom_event")
+            .data(100u32)
+            .source("builder")
+            .metadata("key", "value")
+            .build();
+
+        assert_eq!(event.event_type(), "custom_event");
+        assert_eq!(event.data::<u32>(), Some(&100));
+        assert_eq!(event.source(), Some("builder"));
+    }
+
+    #[test]
+    fn test_once_handler() {
+        let mut handler = EventHandler::new("once_handler", |_| EventPropagation::Continue)
+            .once();
+
+        let mut event1 = Event::new("test");
+        handler.handle(&mut event1);
+        assert_eq!(handler.call_count(), 1);
+
+        let mut event2 = Event::new("test");
+        handler.handle(&mut event2);
+        assert_eq!(handler.call_count(), 1); // Should not increment
+    }
+}

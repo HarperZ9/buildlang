@@ -1,0 +1,2253 @@
+// ============================================================================
+// PHOTON ENGINE - VISIBILITY BUFFER RENDERING SYSTEM
+// Advanced V-Buffer Architecture for GPU-Driven Rendering
+// Based on Harper Engine WP-004: Visibility Buffer Rendering Architecture
+// ============================================================================
+
+module photon::visibility_buffer;
+
+use core::memory::{GpuBuffer, GpuTexture, MemoryPool};
+use core::math::{Vec2, Vec3, Vec4, Mat4, Frustum, AABB};
+use photon::gpu::{CommandBuffer, ComputeShader, RenderPipeline, BindGroup};
+use photon::mesh::{Mesh, MeshInstance, DrawIndirectCommand};
+use photon::material::{Material, MaterialId};
+
+// ============================================================================
+// VISIBILITY BUFFER CORE TYPES
+// Based on Harper Engine RT-0004: Visibility Buffer Fundamentals
+// ============================================================================
+
+/// Triangle ID encoding format for visibility buffer
+/// Format: | Instance ID (20 bits) | Triangle ID (12 bits) |
+/// Allows up to 1M instances and 4K triangles per meshlet
+struct VisibilityId {
+    packed: u32,
+}
+
+impl VisibilityId {
+    const TRIANGLE_BITS: u32 = 12;
+    const INSTANCE_BITS: u32 = 20;
+    const TRIANGLE_MASK: u32 = (1 << Self::TRIANGLE_BITS) - 1;
+    const INSTANCE_MASK: u32 = (1 << Self::INSTANCE_BITS) - 1;
+    const INVALID: u32 = 0xFFFFFFFF;
+
+    /// Create visibility ID from instance and triangle indices
+    fn new(instance_id: u32, triangle_id: u32) -> Self {
+        assert!(instance_id <= Self::INSTANCE_MASK);
+        assert!(triangle_id <= Self::TRIANGLE_MASK);
+
+        Self {
+            packed: (instance_id << Self::TRIANGLE_BITS) | triangle_id
+        }
+    }
+
+    /// Extract instance ID from packed value
+    fn instance_id(self) -> u32 {
+        (self.packed >> Self::TRIANGLE_BITS) & Self::INSTANCE_MASK
+    }
+
+    /// Extract triangle ID from packed value
+    fn triangle_id(self) -> u32 {
+        self.packed & Self::TRIANGLE_MASK
+    }
+
+    /// Check if this is a valid visibility ID
+    fn is_valid(self) -> bool {
+        self.packed != Self::INVALID
+    }
+
+    /// Create invalid visibility ID (background)
+    fn invalid() -> Self {
+        Self { packed: Self::INVALID }
+    }
+}
+
+/// Extended visibility ID with 64-bit precision
+/// Format: | Draw ID (16 bits) | Instance ID (24 bits) | Triangle ID (24 bits) |
+struct VisibilityId64 {
+    packed: u64,
+}
+
+impl VisibilityId64 {
+    const TRIANGLE_BITS: u64 = 24;
+    const INSTANCE_BITS: u64 = 24;
+    const DRAW_BITS: u64 = 16;
+    const TRIANGLE_MASK: u64 = (1 << Self::TRIANGLE_BITS) - 1;
+    const INSTANCE_MASK: u64 = (1 << Self::INSTANCE_BITS) - 1;
+    const DRAW_MASK: u64 = (1 << Self::DRAW_BITS) - 1;
+
+    fn new(draw_id: u32, instance_id: u32, triangle_id: u32) -> Self {
+        Self {
+            packed: ((draw_id as u64 & Self::DRAW_MASK) << (Self::TRIANGLE_BITS + Self::INSTANCE_BITS)) |
+                    ((instance_id as u64 & Self::INSTANCE_MASK) << Self::TRIANGLE_BITS) |
+                    (triangle_id as u64 & Self::TRIANGLE_MASK)
+        }
+    }
+
+    fn draw_id(self) -> u32 {
+        ((self.packed >> (Self::TRIANGLE_BITS + Self::INSTANCE_BITS)) & Self::DRAW_MASK) as u32
+    }
+
+    fn instance_id(self) -> u32 {
+        ((self.packed >> Self::TRIANGLE_BITS) & Self::INSTANCE_MASK) as u32
+    }
+
+    fn triangle_id(self) -> u32 {
+        (self.packed & Self::TRIANGLE_MASK) as u32
+    }
+}
+
+/// Visibility buffer render target configuration
+struct VisibilityBufferConfig {
+    /// Render resolution
+    width: u32,
+    height: u32,
+    /// Use 64-bit visibility IDs for very large scenes
+    use_64bit_ids: bool,
+    /// Enable depth pre-pass for early-z culling
+    depth_prepass: bool,
+    /// Enable hierarchical-Z for occlusion culling
+    enable_hiz: bool,
+    /// Enable two-phase occlusion culling
+    two_phase_culling: bool,
+    /// Enable software rasterization for small triangles
+    software_rasterizer: bool,
+    /// Threshold for software rasterization (pixels)
+    software_raster_threshold: f32,
+    /// Enable meshlet-based rendering
+    use_meshlets: bool,
+    /// Maximum meshlet size
+    max_meshlet_vertices: u32,
+    max_meshlet_triangles: u32,
+    /// Material tile size for classification
+    material_tile_size: u32,
+}
+
+impl Default for VisibilityBufferConfig {
+    fn default() -> Self {
+        Self {
+            width: 1920,
+            height: 1080,
+            use_64bit_ids: false,
+            depth_prepass: true,
+            enable_hiz: true,
+            two_phase_culling: true,
+            software_rasterizer: true,
+            software_raster_threshold: 16.0,
+            use_meshlets: true,
+            max_meshlet_vertices: 64,
+            max_meshlet_triangles: 124,
+            material_tile_size: 8,
+        }
+    }
+}
+
+// ============================================================================
+// MESHLET SYSTEM
+// Based on Harper Engine RT-0321: Meshlet-Based Geometry Pipeline
+// ============================================================================
+
+/// Meshlet data structure for visibility buffer rendering
+struct Meshlet {
+    /// Offset into vertex indices buffer
+    vertex_offset: u32,
+    /// Number of vertices in this meshlet
+    vertex_count: u8,
+    /// Offset into triangle indices buffer
+    triangle_offset: u32,
+    /// Number of triangles in this meshlet
+    triangle_count: u8,
+    /// Bounding sphere center (object space)
+    bounding_center: Vec3,
+    /// Bounding sphere radius
+    bounding_radius: f32,
+    /// Cone apex for backface culling
+    cone_apex: Vec3,
+    /// Cone axis (normalized)
+    cone_axis: Vec3,
+    /// Cone cutoff (cos of half angle)
+    cone_cutoff: f32,
+}
+
+impl Meshlet {
+    /// Check if meshlet is potentially visible from camera position
+    fn is_visible(&self, camera_pos: Vec3, frustum: &Frustum) -> bool {
+        // Frustum culling with bounding sphere
+        if !frustum.contains_sphere(self.bounding_center, self.bounding_radius) {
+            return false;
+        }
+
+        // Cone culling for backface rejection
+        let view_dir = (self.cone_apex - camera_pos).normalize();
+        let dot = view_dir.dot(self.cone_axis);
+
+        if dot < self.cone_cutoff {
+            return false;
+        }
+
+        true
+    }
+}
+
+/// GPU-packed meshlet for efficient memory access
+#[repr(C)]
+struct GpuMeshlet {
+    vertex_offset: u32,
+    vertex_count_triangle_offset: u32,  // vertex_count (8) | triangle_offset (24)
+    triangle_count_flags: u32,          // triangle_count (8) | flags (24)
+    bounding_sphere: Vec4,              // xyz = center, w = radius
+    cone_apex_cutoff: Vec4,             // xyz = apex, w = cutoff
+    cone_axis_pad: Vec4,                // xyz = axis, w = unused
+}
+
+impl GpuMeshlet {
+    fn from_meshlet(meshlet: &Meshlet) -> Self {
+        Self {
+            vertex_offset: meshlet.vertex_offset,
+            vertex_count_triangle_offset:
+                ((meshlet.vertex_count as u32) << 24) | (meshlet.triangle_offset & 0xFFFFFF),
+            triangle_count_flags: meshlet.triangle_count as u32,
+            bounding_sphere: Vec4::new(
+                meshlet.bounding_center.x,
+                meshlet.bounding_center.y,
+                meshlet.bounding_center.z,
+                meshlet.bounding_radius
+            ),
+            cone_apex_cutoff: Vec4::new(
+                meshlet.cone_apex.x,
+                meshlet.cone_apex.y,
+                meshlet.cone_apex.z,
+                meshlet.cone_cutoff
+            ),
+            cone_axis_pad: Vec4::new(
+                meshlet.cone_axis.x,
+                meshlet.cone_axis.y,
+                meshlet.cone_axis.z,
+                0.0
+            ),
+        }
+    }
+}
+
+/// Meshlet builder for converting meshes to meshlet representation
+struct MeshletBuilder {
+    max_vertices: u32,
+    max_triangles: u32,
+    cone_weight: f32,
+}
+
+impl MeshletBuilder {
+    fn new(max_vertices: u32, max_triangles: u32) -> Self {
+        Self {
+            max_vertices,
+            max_triangles,
+            cone_weight: 0.5,
+        }
+    }
+
+    /// Build meshlets from mesh data
+    fn build(&self, vertices: &[Vec3], indices: &[u32]) -> MeshletData {
+        let triangle_count = indices.len() / 3;
+        let mut meshlets = Vec::new();
+        let mut meshlet_vertices = Vec::new();
+        let mut meshlet_triangles = Vec::new();
+
+        // Use greedy meshletization algorithm
+        let mut used_triangles = vec![false; triangle_count];
+        let mut adjacency = self.build_adjacency(indices, triangle_count);
+
+        while meshlets.len() < triangle_count {
+            // Find seed triangle
+            let seed = used_triangles.iter().position(|&u| !u);
+            if seed.is_none() {
+                break;
+            }
+            let seed = seed.unwrap();
+
+            // Build meshlet starting from seed
+            let meshlet = self.build_meshlet(
+                vertices,
+                indices,
+                &mut used_triangles,
+                &adjacency,
+                seed,
+                &mut meshlet_vertices,
+                &mut meshlet_triangles
+            );
+
+            meshlets.push(meshlet);
+        }
+
+        MeshletData {
+            meshlets,
+            vertex_indices: meshlet_vertices,
+            triangle_indices: meshlet_triangles,
+        }
+    }
+
+    fn build_adjacency(&self, indices: &[u32], triangle_count: usize) -> Vec<Vec<u32>> {
+        // Build edge -> triangle adjacency
+        use std::collections::HashMap;
+        let mut edge_triangles: HashMap<(u32, u32), Vec<u32>> = HashMap::new();
+
+        for tri in 0..triangle_count {
+            let i0 = indices[tri * 3];
+            let i1 = indices[tri * 3 + 1];
+            let i2 = indices[tri * 3 + 2];
+
+            let edges = [
+                (i0.min(i1), i0.max(i1)),
+                (i1.min(i2), i1.max(i2)),
+                (i2.min(i0), i2.max(i0)),
+            ];
+
+            for edge in &edges {
+                edge_triangles.entry(*edge).or_default().push(tri as u32);
+            }
+        }
+
+        // Build triangle adjacency
+        let mut adjacency = vec![Vec::new(); triangle_count];
+
+        for (_, tris) in edge_triangles {
+            for i in 0..tris.len() {
+                for j in i+1..tris.len() {
+                    adjacency[tris[i] as usize].push(tris[j]);
+                    adjacency[tris[j] as usize].push(tris[i]);
+                }
+            }
+        }
+
+        adjacency
+    }
+
+    fn build_meshlet(
+        &self,
+        vertices: &[Vec3],
+        indices: &[u32],
+        used_triangles: &mut [bool],
+        adjacency: &[Vec<u32>],
+        seed: usize,
+        meshlet_vertices: &mut Vec<u32>,
+        meshlet_triangles: &mut Vec<u8>
+    ) -> Meshlet {
+        let vertex_offset = meshlet_vertices.len() as u32;
+        let triangle_offset = meshlet_triangles.len() as u32;
+
+        let mut local_vertices: Vec<u32> = Vec::new();
+        let mut local_triangles: Vec<(u8, u8, u8)> = Vec::new();
+        let mut candidates: Vec<u32> = vec![seed as u32];
+
+        // Greedy add triangles
+        while !candidates.is_empty() &&
+              local_triangles.len() < self.max_triangles as usize {
+            // Pick best candidate
+            let best_idx = candidates.pop().unwrap();
+
+            if used_triangles[best_idx as usize] {
+                continue;
+            }
+
+            let i0 = indices[best_idx as usize * 3];
+            let i1 = indices[best_idx as usize * 3 + 1];
+            let i2 = indices[best_idx as usize * 3 + 2];
+
+            // Check if adding would exceed vertex limit
+            let mut new_verts = 0;
+            if !local_vertices.contains(&i0) { new_verts += 1; }
+            if !local_vertices.contains(&i1) { new_verts += 1; }
+            if !local_vertices.contains(&i2) { new_verts += 1; }
+
+            if local_vertices.len() + new_verts > self.max_vertices as usize {
+                continue;
+            }
+
+            // Add triangle
+            used_triangles[best_idx as usize] = true;
+
+            let mut local_idx = [0u8; 3];
+            for (j, &global_idx) in [i0, i1, i2].iter().enumerate() {
+                if let Some(pos) = local_vertices.iter().position(|&v| v == global_idx) {
+                    local_idx[j] = pos as u8;
+                } else {
+                    local_idx[j] = local_vertices.len() as u8;
+                    local_vertices.push(global_idx);
+                }
+            }
+
+            local_triangles.push((local_idx[0], local_idx[1], local_idx[2]));
+
+            // Add adjacent triangles as candidates
+            for &adj in &adjacency[best_idx as usize] {
+                if !used_triangles[adj as usize] {
+                    candidates.push(adj);
+                }
+            }
+        }
+
+        // Compute bounding sphere
+        let mut center = Vec3::ZERO;
+        for &vi in &local_vertices {
+            center += vertices[vi as usize];
+        }
+        center /= local_vertices.len() as f32;
+
+        let mut radius = 0.0f32;
+        for &vi in &local_vertices {
+            let d = (vertices[vi as usize] - center).length();
+            radius = radius.max(d);
+        }
+
+        // Compute cone for backface culling
+        let (cone_apex, cone_axis, cone_cutoff) = self.compute_cone(
+            vertices,
+            indices,
+            &local_triangles,
+            &local_vertices
+        );
+
+        // Store meshlet data
+        meshlet_vertices.extend_from_slice(&local_vertices);
+        for (a, b, c) in &local_triangles {
+            meshlet_triangles.push(*a);
+            meshlet_triangles.push(*b);
+            meshlet_triangles.push(*c);
+        }
+
+        Meshlet {
+            vertex_offset,
+            vertex_count: local_vertices.len() as u8,
+            triangle_offset,
+            triangle_count: local_triangles.len() as u8,
+            bounding_center: center,
+            bounding_radius: radius,
+            cone_apex,
+            cone_axis,
+            cone_cutoff,
+        }
+    }
+
+    fn compute_cone(
+        &self,
+        vertices: &[Vec3],
+        indices: &[u32],
+        triangles: &[(u8, u8, u8)],
+        local_vertices: &[u32]
+    ) -> (Vec3, Vec3, f32) {
+        // Compute average normal
+        let mut avg_normal = Vec3::ZERO;
+
+        for &(a, b, c) in triangles {
+            let v0 = vertices[local_vertices[a as usize] as usize];
+            let v1 = vertices[local_vertices[b as usize] as usize];
+            let v2 = vertices[local_vertices[c as usize] as usize];
+
+            let e1 = v1 - v0;
+            let e2 = v2 - v0;
+            let normal = e1.cross(e2);
+
+            avg_normal += normal; // Weight by area
+        }
+
+        let cone_axis = avg_normal.normalize();
+
+        // Compute cone apex as center of bounding sphere
+        let mut center = Vec3::ZERO;
+        for &vi in local_vertices {
+            center += vertices[vi as usize];
+        }
+        let cone_apex = center / local_vertices.len() as f32;
+
+        // Compute minimum dot product for cutoff
+        let mut min_dot = 1.0f32;
+        for &(a, b, c) in triangles {
+            let v0 = vertices[local_vertices[a as usize] as usize];
+            let v1 = vertices[local_vertices[b as usize] as usize];
+            let v2 = vertices[local_vertices[c as usize] as usize];
+
+            let e1 = v1 - v0;
+            let e2 = v2 - v0;
+            let normal = e1.cross(e2).normalize();
+
+            min_dot = min_dot.min(normal.dot(cone_axis));
+        }
+
+        let cone_cutoff = min_dot;
+
+        (cone_apex, cone_axis, cone_cutoff)
+    }
+}
+
+/// Meshlet data containing all meshlet information
+struct MeshletData {
+    meshlets: Vec<Meshlet>,
+    vertex_indices: Vec<u32>,
+    triangle_indices: Vec<u8>,
+}
+
+// ============================================================================
+// VISIBILITY BUFFER RENDERER
+// Based on Harper Engine RT-0322: Visibility Buffer Pipeline
+// ============================================================================
+
+/// Main visibility buffer renderer
+struct VisibilityBufferRenderer {
+    config: VisibilityBufferConfig,
+
+    // Render targets
+    visibility_buffer: GpuTexture,         // R32_UINT or R32G32_UINT
+    depth_buffer: GpuTexture,              // D32_FLOAT
+    hiz_pyramid: GpuTexture,               // Hierarchical-Z pyramid
+
+    // Buffers
+    meshlet_buffer: GpuBuffer,             // All meshlets
+    vertex_index_buffer: GpuBuffer,        // Meshlet vertex indices
+    triangle_index_buffer: GpuBuffer,      // Meshlet triangle indices
+    instance_buffer: GpuBuffer,            // Instance transforms
+    draw_command_buffer: GpuBuffer,        // Indirect draw commands
+    visible_meshlet_buffer: GpuBuffer,     // Visible meshlet indices
+
+    // Material classification
+    material_tiles: GpuBuffer,             // Per-tile material mask
+    material_worklist: GpuBuffer,          // Per-material pixel lists
+
+    // Pipelines
+    depth_prepass_pipeline: RenderPipeline,
+    visibility_pipeline: RenderPipeline,
+    hiz_pipeline: ComputeShader,
+    cull_pipeline: ComputeShader,
+    material_classify_pipeline: ComputeShader,
+    material_shade_pipeline: ComputeShader,
+    software_raster_pipeline: ComputeShader,
+
+    // Statistics
+    stats: VisibilityBufferStats,
+}
+
+/// Rendering statistics for visibility buffer
+struct VisibilityBufferStats {
+    meshlets_total: u32,
+    meshlets_visible: u32,
+    meshlets_culled_frustum: u32,
+    meshlets_culled_occlusion: u32,
+    meshlets_culled_backface: u32,
+    triangles_rasterized: u32,
+    triangles_software_raster: u32,
+    pixels_shaded: u32,
+    material_batches: u32,
+}
+
+impl VisibilityBufferRenderer {
+    const MAX_MESHLETS: u32 = 1_000_000;
+    const MAX_INSTANCES: u32 = 100_000;
+    const MAX_MATERIALS: u32 = 4096;
+
+    fn new(device: &GpuDevice, config: VisibilityBufferConfig) -> Self {
+        // Create visibility buffer
+        let visibility_format = if config.use_64bit_ids {
+            TextureFormat::R32G32_UINT
+        } else {
+            TextureFormat::R32_UINT
+        };
+
+        let visibility_buffer = device.create_texture(&TextureDescriptor {
+            width: config.width,
+            height: config.height,
+            format: visibility_format,
+            usage: TextureUsage::RENDER_TARGET | TextureUsage::SHADER_READ,
+            ..Default::default()
+        });
+
+        let depth_buffer = device.create_texture(&TextureDescriptor {
+            width: config.width,
+            height: config.height,
+            format: TextureFormat::D32_FLOAT,
+            usage: TextureUsage::DEPTH_STENCIL | TextureUsage::SHADER_READ,
+            ..Default::default()
+        });
+
+        // Create Hi-Z pyramid
+        let hiz_mips = (config.width.max(config.height) as f32).log2().ceil() as u32;
+        let hiz_pyramid = device.create_texture(&TextureDescriptor {
+            width: config.width,
+            height: config.height,
+            format: TextureFormat::R32_FLOAT,
+            mip_levels: hiz_mips,
+            usage: TextureUsage::SHADER_READ | TextureUsage::SHADER_WRITE,
+            ..Default::default()
+        });
+
+        // Create buffers
+        let meshlet_buffer = device.create_buffer(&BufferDescriptor {
+            size: Self::MAX_MESHLETS as u64 * std::mem::size_of::<GpuMeshlet>() as u64,
+            usage: BufferUsage::STORAGE,
+            ..Default::default()
+        });
+
+        let vertex_index_buffer = device.create_buffer(&BufferDescriptor {
+            size: Self::MAX_MESHLETS as u64 * 64 * 4, // 64 vertices per meshlet
+            usage: BufferUsage::STORAGE,
+            ..Default::default()
+        });
+
+        let triangle_index_buffer = device.create_buffer(&BufferDescriptor {
+            size: Self::MAX_MESHLETS as u64 * 124 * 3, // 124 triangles per meshlet
+            usage: BufferUsage::STORAGE,
+            ..Default::default()
+        });
+
+        let instance_buffer = device.create_buffer(&BufferDescriptor {
+            size: Self::MAX_INSTANCES as u64 * std::mem::size_of::<GpuInstance>() as u64,
+            usage: BufferUsage::STORAGE,
+            ..Default::default()
+        });
+
+        let tile_count = ((config.width + config.material_tile_size - 1) / config.material_tile_size) *
+                         ((config.height + config.material_tile_size - 1) / config.material_tile_size);
+
+        let material_tiles = device.create_buffer(&BufferDescriptor {
+            size: tile_count as u64 * (Self::MAX_MATERIALS as u64 / 32) * 4, // Bit mask per tile
+            usage: BufferUsage::STORAGE,
+            ..Default::default()
+        });
+
+        let draw_command_buffer = device.create_buffer(&BufferDescriptor {
+            size: Self::MAX_MESHLETS as u64 * std::mem::size_of::<DrawIndirectCommand>() as u64,
+            usage: BufferUsage::INDIRECT | BufferUsage::STORAGE,
+            ..Default::default()
+        });
+
+        let visible_meshlet_buffer = device.create_buffer(&BufferDescriptor {
+            size: Self::MAX_MESHLETS as u64 * 4,
+            usage: BufferUsage::STORAGE,
+            ..Default::default()
+        });
+
+        let material_worklist = device.create_buffer(&BufferDescriptor {
+            size: config.width as u64 * config.height as u64 * 4, // Pixel indices per material
+            usage: BufferUsage::STORAGE,
+            ..Default::default()
+        });
+
+        // Create pipelines
+        let depth_prepass_pipeline = Self::create_depth_prepass_pipeline(device);
+        let visibility_pipeline = Self::create_visibility_pipeline(device, &config);
+        let hiz_pipeline = Self::create_hiz_pipeline(device);
+        let cull_pipeline = Self::create_cull_pipeline(device, &config);
+        let material_classify_pipeline = Self::create_material_classify_pipeline(device, &config);
+        let material_shade_pipeline = Self::create_material_shade_pipeline(device);
+        let software_raster_pipeline = Self::create_software_raster_pipeline(device);
+
+        Self {
+            config,
+            visibility_buffer,
+            depth_buffer,
+            hiz_pyramid,
+            meshlet_buffer,
+            vertex_index_buffer,
+            triangle_index_buffer,
+            instance_buffer,
+            draw_command_buffer,
+            visible_meshlet_buffer,
+            material_tiles,
+            material_worklist,
+            depth_prepass_pipeline,
+            visibility_pipeline,
+            hiz_pipeline,
+            cull_pipeline,
+            material_classify_pipeline,
+            material_shade_pipeline,
+            software_raster_pipeline,
+            stats: VisibilityBufferStats::default(),
+        }
+    }
+
+    fn create_depth_prepass_pipeline(device: &GpuDevice) -> RenderPipeline {
+        let vertex_shader = r#"
+            struct VertexInput {
+                @location(0) position: vec3<f32>,
+                @builtin(instance_index) instance: u32,
+            };
+
+            struct VertexOutput {
+                @builtin(position) position: vec4<f32>,
+            };
+
+            struct Instance {
+                world_matrix: mat4x4<f32>,
+                prev_world_matrix: mat4x4<f32>,
+                bounds: vec4<f32>,
+                material_id: u32,
+                flags: u32,
+                _padding: vec2<u32>,
+            };
+
+            @group(0) @binding(0) var<uniform> view_proj: mat4x4<f32>;
+            @group(0) @binding(1) var<storage, read> instances: array<Instance>;
+
+            @vertex
+            fn main(in: VertexInput) -> VertexOutput {
+                var out: VertexOutput;
+                let instance = instances[in.instance];
+                let world_pos = instance.world_matrix * vec4<f32>(in.position, 1.0);
+                out.position = view_proj * world_pos;
+                return out;
+            }
+        "#;
+
+        device.create_render_pipeline(&RenderPipelineDescriptor {
+            vertex: vertex_shader,
+            fragment: None, // Depth-only
+            depth_stencil: Some(DepthStencilState {
+                format: TextureFormat::D32_FLOAT,
+                depth_write: true,
+                depth_compare: CompareFunction::Greater, // Reverse-Z
+            }),
+            ..Default::default()
+        })
+    }
+
+    fn create_visibility_pipeline(device: &GpuDevice, config: &VisibilityBufferConfig) -> RenderPipeline {
+        let vertex_shader = r#"
+            struct VertexInput {
+                @builtin(vertex_index) vertex_index: u32,
+                @builtin(instance_index) meshlet_index: u32,
+            };
+
+            struct VertexOutput {
+                @builtin(position) position: vec4<f32>,
+                @location(0) @interpolate(flat) visibility_id: u32,
+            };
+
+            struct Meshlet {
+                vertex_offset: u32,
+                vertex_count_triangle_offset: u32,
+                triangle_count_flags: u32,
+                bounding_sphere: vec4<f32>,
+                cone_apex_cutoff: vec4<f32>,
+                cone_axis_pad: vec4<f32>,
+            };
+
+            @group(0) @binding(0) var<uniform> view_proj: mat4x4<f32>;
+            @group(0) @binding(1) var<storage, read> meshlets: array<Meshlet>;
+            @group(0) @binding(2) var<storage, read> vertex_indices: array<u32>;
+            @group(0) @binding(3) var<storage, read> triangle_indices: array<u32>; // Packed 3 bytes
+            @group(0) @binding(4) var<storage, read> vertices: array<vec4<f32>>;
+            @group(0) @binding(5) var<storage, read> visible_meshlets: array<u32>;
+            @group(0) @binding(6) var<storage, read> instances: array<Instance>;
+
+            @vertex
+            fn main(in: VertexInput) -> VertexOutput {
+                var out: VertexOutput;
+
+                let visible_idx = visible_meshlets[in.meshlet_index];
+                let instance_id = visible_idx >> 20u;
+                let meshlet_local = visible_idx & 0xFFFFFu;
+
+                let meshlet = meshlets[meshlet_local];
+                let instance = instances[instance_id];
+
+                // Decode triangle indices
+                let vertex_count = meshlet.vertex_count_triangle_offset >> 24u;
+                let triangle_offset = meshlet.triangle_count_triangle_offset & 0xFFFFFFu;
+                let triangle_id = in.vertex_index / 3u;
+                let local_vert = in.vertex_index % 3u;
+
+                // Get local vertex index from triangle
+                let packed_tri = triangle_indices[(triangle_offset + triangle_id) / 4u];
+                let byte_offset = ((triangle_offset + triangle_id) % 4u) * 8u;
+                let local_idx = (packed_tri >> byte_offset) & 0xFFu;
+
+                // Get global vertex index
+                let global_idx = vertex_indices[meshlet.vertex_offset + local_idx];
+                let position = vertices[global_idx].xyz;
+
+                // Transform
+                let world_pos = instance.world_matrix * vec4<f32>(position, 1.0);
+                out.position = view_proj * world_pos;
+
+                // Pack visibility ID: instance (20 bits) | triangle (12 bits)
+                out.visibility_id = (instance_id << 12u) | (meshlet_local * 128u + triangle_id);
+
+                return out;
+            }
+        "#;
+
+        let fragment_shader = r#"
+            struct FragmentInput {
+                @location(0) @interpolate(flat) visibility_id: u32,
+            };
+
+            @fragment
+            fn main(in: FragmentInput) -> @location(0) u32 {
+                return in.visibility_id;
+            }
+        "#;
+
+        device.create_render_pipeline(&RenderPipelineDescriptor {
+            vertex: vertex_shader,
+            fragment: Some(fragment_shader),
+            color_targets: vec![ColorTargetState {
+                format: TextureFormat::R32_UINT,
+                blend: None,
+            }],
+            depth_stencil: Some(DepthStencilState {
+                format: TextureFormat::D32_FLOAT,
+                depth_write: true,
+                depth_compare: CompareFunction::Greater,
+            }),
+            ..Default::default()
+        })
+    }
+
+    fn create_hiz_pipeline(device: &GpuDevice) -> ComputeShader {
+        let shader = r#"
+            @group(0) @binding(0) var depth_src: texture_2d<f32>;
+            @group(0) @binding(1) var hiz_dst: texture_storage_2d<r32float, write>;
+
+            struct PushConstants {
+                src_mip: u32,
+                dst_size: vec2<u32>,
+            };
+            @group(0) @binding(2) var<push_constant> pc: PushConstants;
+
+            @compute @workgroup_size(8, 8, 1)
+            fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+                if (gid.x >= pc.dst_size.x || gid.y >= pc.dst_size.y) {
+                    return;
+                }
+
+                let src_coord = gid.xy * 2u;
+
+                // Sample 2x2 block and take minimum (reverse-Z, so min is furthest)
+                let d00 = textureLoad(depth_src, src_coord + vec2<u32>(0, 0), i32(pc.src_mip)).r;
+                let d01 = textureLoad(depth_src, src_coord + vec2<u32>(0, 1), i32(pc.src_mip)).r;
+                let d10 = textureLoad(depth_src, src_coord + vec2<u32>(1, 0), i32(pc.src_mip)).r;
+                let d11 = textureLoad(depth_src, src_coord + vec2<u32>(1, 1), i32(pc.src_mip)).r;
+
+                let min_depth = min(min(d00, d01), min(d10, d11));
+
+                textureStore(hiz_dst, gid.xy, vec4<f32>(min_depth, 0.0, 0.0, 0.0));
+            }
+        "#;
+
+        device.create_compute_shader(shader)
+    }
+
+    fn create_cull_pipeline(device: &GpuDevice, config: &VisibilityBufferConfig) -> ComputeShader {
+        let two_phase = if config.two_phase_culling { "1" } else { "0" };
+
+        let shader = format!(r#"
+            const TWO_PHASE_CULLING: bool = {two_phase} == 1;
+
+            struct Meshlet {{
+                vertex_offset: u32,
+                vertex_count_triangle_offset: u32,
+                triangle_count_flags: u32,
+                bounding_sphere: vec4<f32>,
+                cone_apex_cutoff: vec4<f32>,
+                cone_axis_pad: vec4<f32>,
+            }};
+
+            struct Instance {{
+                world_matrix: mat4x4<f32>,
+                prev_world_matrix: mat4x4<f32>,
+                bounds: vec4<f32>,
+                material_id: u32,
+                flags: u32,
+                _padding: vec2<u32>,
+            }};
+
+            struct CullUniforms {{
+                view_proj: mat4x4<f32>,
+                frustum_planes: array<vec4<f32>, 6>,
+                camera_pos: vec3<f32>,
+                hiz_size: vec2<f32>,
+                near_plane: f32,
+                phase: u32,
+            }};
+
+            @group(0) @binding(0) var<uniform> uniforms: CullUniforms;
+            @group(0) @binding(1) var<storage, read> meshlets: array<Meshlet>;
+            @group(0) @binding(2) var<storage, read> instances: array<Instance>;
+            @group(0) @binding(3) var hiz_texture: texture_2d<f32>;
+            @group(0) @binding(4) var<storage, read_write> visible_count: atomic<u32>;
+            @group(0) @binding(5) var<storage, read_write> visible_meshlets: array<u32>;
+            @group(0) @binding(6) var<storage, read_write> draw_commands: array<DrawIndirectCommand>;
+
+            struct DrawIndirectCommand {{
+                vertex_count: u32,
+                instance_count: u32,
+                first_vertex: u32,
+                first_instance: u32,
+            }};
+
+            fn sphere_inside_frustum(center: vec3<f32>, radius: f32) -> bool {{
+                for (var i = 0u; i < 6u; i++) {{
+                    let plane = uniforms.frustum_planes[i];
+                    let dist = dot(plane.xyz, center) + plane.w;
+                    if (dist < -radius) {{
+                        return false;
+                    }}
+                }}
+                return true;
+            }}
+
+            fn cone_cull(apex: vec3<f32>, axis: vec3<f32>, cutoff: f32, camera_pos: vec3<f32>) -> bool {{
+                let view_dir = normalize(apex - camera_pos);
+                return dot(view_dir, axis) >= cutoff;
+            }}
+
+            fn occlusion_cull(center: vec3<f32>, radius: f32) -> bool {{
+                // Project sphere to screen space
+                let clip_pos = uniforms.view_proj * vec4<f32>(center, 1.0);
+
+                if (clip_pos.w <= 0.0) {{
+                    return true; // Behind camera
+                }}
+
+                let ndc = clip_pos.xyz / clip_pos.w;
+                let screen_center = (ndc.xy * 0.5 + 0.5) * uniforms.hiz_size;
+
+                // Calculate screen-space radius
+                let screen_radius = (radius / clip_pos.w) * uniforms.hiz_size.x * 0.5;
+
+                // Determine mip level based on radius
+                let mip = max(0.0, log2(screen_radius * 2.0));
+                let mip_i = u32(mip);
+
+                // Sample Hi-Z at appropriate mip
+                let hiz_depth = textureLoad(hiz_texture, vec2<u32>(screen_center), i32(mip_i)).r;
+
+                // Calculate conservative depth of sphere front
+                let sphere_front_z = ndc.z - radius / clip_pos.w;
+
+                // Reverse-Z: sphere is occluded if its front is less than Hi-Z value
+                return sphere_front_z > hiz_depth;
+            }}
+
+            @compute @workgroup_size(64, 1, 1)
+            fn main(@builtin(global_invocation_id) gid: vec3<u32>) {{
+                let meshlet_idx = gid.x;
+                let meshlet = meshlets[meshlet_idx];
+                let instance_idx = gid.y; // Batched per instance
+                let instance = instances[instance_idx];
+
+                // Transform bounding sphere to world space
+                let world_center = (instance.world_matrix * vec4<f32>(meshlet.bounding_sphere.xyz, 1.0)).xyz;
+                let world_radius = meshlet.bounding_sphere.w * length(instance.world_matrix[0].xyz);
+
+                // Frustum culling
+                if (!sphere_inside_frustum(world_center, world_radius)) {{
+                    return;
+                }}
+
+                // Backface cone culling
+                let world_apex = (instance.world_matrix * vec4<f32>(meshlet.cone_apex_cutoff.xyz, 1.0)).xyz;
+                let world_axis = normalize((instance.world_matrix * vec4<f32>(meshlet.cone_axis_pad.xyz, 0.0)).xyz);
+
+                if (!cone_cull(world_apex, world_axis, meshlet.cone_apex_cutoff.w, uniforms.camera_pos)) {{
+                    return;
+                }}
+
+                // Occlusion culling (phase 2 only, or always if not two-phase)
+                if (TWO_PHASE_CULLING && uniforms.phase == 0u) {{
+                    // First phase: skip occlusion culling, will be done in second phase
+                }} else {{
+                    if (!occlusion_cull(world_center, world_radius)) {{
+                        return;
+                    }}
+                }}
+
+                // Add to visible list
+                let idx = atomicAdd(&visible_count, 1u);
+                visible_meshlets[idx] = (instance_idx << 20u) | meshlet_idx;
+
+                // Update draw command
+                let triangle_count = meshlet.triangle_count_flags & 0xFFu;
+                draw_commands[idx].vertex_count = triangle_count * 3u;
+                draw_commands[idx].instance_count = 1u;
+                draw_commands[idx].first_vertex = 0u;
+                draw_commands[idx].first_instance = idx;
+            }}
+        "#);
+
+        device.create_compute_shader(&shader)
+    }
+
+    fn create_material_classify_pipeline(device: &GpuDevice, config: &VisibilityBufferConfig) -> ComputeShader {
+        let tile_size = config.material_tile_size;
+
+        let shader = format!(r#"
+            const TILE_SIZE: u32 = {tile_size}u;
+            const MAX_MATERIALS: u32 = 4096u;
+            const MATERIAL_WORDS: u32 = MAX_MATERIALS / 32u;
+
+            @group(0) @binding(0) var visibility_buffer: texture_2d<u32>;
+            @group(0) @binding(1) var<storage, read> instances: array<Instance>;
+            @group(0) @binding(2) var<storage, read_write> tile_materials: array<u32>;
+            @group(0) @binding(3) var<storage, read_write> material_pixel_counts: array<atomic<u32>>;
+
+            struct Instance {{
+                world_matrix: mat4x4<f32>,
+                prev_world_matrix: mat4x4<f32>,
+                bounds: vec4<f32>,
+                material_id: u32,
+                flags: u32,
+                _padding: vec2<u32>,
+            }};
+
+            struct ClassifyUniforms {{
+                screen_size: vec2<u32>,
+                tile_count: vec2<u32>,
+            }};
+            @group(0) @binding(4) var<uniform> uniforms: ClassifyUniforms;
+
+            var<workgroup> local_materials: array<u32, MATERIAL_WORDS>;
+
+            @compute @workgroup_size(8, 8, 1)
+            fn main(
+                @builtin(global_invocation_id) gid: vec3<u32>,
+                @builtin(local_invocation_id) lid: vec3<u32>,
+                @builtin(workgroup_id) wid: vec3<u32>
+            ) {{
+                // Initialize local material mask
+                let flat_lid = lid.y * 8u + lid.x;
+                if (flat_lid < MATERIAL_WORDS) {{
+                    local_materials[flat_lid] = 0u;
+                }}
+                workgroupBarrier();
+
+                // Read visibility buffer
+                if (gid.x < uniforms.screen_size.x && gid.y < uniforms.screen_size.y) {{
+                    let vis_id = textureLoad(visibility_buffer, gid.xy, 0).r;
+
+                    if (vis_id != 0xFFFFFFFFu) {{
+                        let instance_id = vis_id >> 12u;
+                        let material_id = instances[instance_id].material_id;
+
+                        // Set bit in local mask
+                        let word = material_id / 32u;
+                        let bit = material_id % 32u;
+                        atomicOr(&local_materials[word], 1u << bit);
+
+                        // Increment pixel count for this material
+                        atomicAdd(&material_pixel_counts[material_id], 1u);
+                    }}
+                }}
+
+                workgroupBarrier();
+
+                // Write local mask to global tile buffer
+                if (flat_lid < MATERIAL_WORDS) {{
+                    let tile_idx = wid.y * uniforms.tile_count.x + wid.x;
+                    let global_offset = tile_idx * MATERIAL_WORDS + flat_lid;
+                    tile_materials[global_offset] = local_materials[flat_lid];
+                }}
+            }}
+        "#);
+
+        device.create_compute_shader(&shader)
+    }
+
+    fn create_material_shade_pipeline(device: &GpuDevice) -> ComputeShader {
+        let shader = r#"
+            struct ShadeUniforms {
+                view_proj: mat4x4<f32>,
+                inv_view_proj: mat4x4<f32>,
+                camera_pos: vec3<f32>,
+                screen_size: vec2<u32>,
+                current_material: u32,
+            };
+
+            @group(0) @binding(0) var<uniform> uniforms: ShadeUniforms;
+            @group(0) @binding(1) var visibility_buffer: texture_2d<u32>;
+            @group(0) @binding(2) var depth_buffer: texture_2d<f32>;
+            @group(0) @binding(3) var<storage, read> instances: array<Instance>;
+            @group(0) @binding(4) var<storage, read> meshlets: array<Meshlet>;
+            @group(0) @binding(5) var<storage, read> vertex_indices: array<u32>;
+            @group(0) @binding(6) var<storage, read> triangle_indices: array<u32>;
+            @group(0) @binding(7) var<storage, read> vertices: array<Vertex>;
+            @group(0) @binding(8) var<storage, read> materials: array<Material>;
+            @group(0) @binding(9) var output_color: texture_storage_2d<rgba16float, write>;
+
+            struct Instance {
+                world_matrix: mat4x4<f32>,
+                prev_world_matrix: mat4x4<f32>,
+                bounds: vec4<f32>,
+                material_id: u32,
+                flags: u32,
+                _padding: vec2<u32>,
+            };
+
+            struct Meshlet {
+                vertex_offset: u32,
+                vertex_count_triangle_offset: u32,
+                triangle_count_flags: u32,
+                bounding_sphere: vec4<f32>,
+                cone_apex_cutoff: vec4<f32>,
+                cone_axis_pad: vec4<f32>,
+            };
+
+            struct Vertex {
+                position: vec3<f32>,
+                normal: vec3<f32>,
+                tangent: vec4<f32>,
+                uv: vec2<f32>,
+            };
+
+            struct Material {
+                base_color: vec4<f32>,
+                metallic: f32,
+                roughness: f32,
+                emissive: vec3<f32>,
+                // ... more material parameters
+            };
+
+            fn reconstruct_world_pos(screen_pos: vec2<f32>, depth: f32) -> vec3<f32> {
+                let ndc = vec4<f32>(
+                    screen_pos.x / f32(uniforms.screen_size.x) * 2.0 - 1.0,
+                    1.0 - screen_pos.y / f32(uniforms.screen_size.y) * 2.0,
+                    depth,
+                    1.0
+                );
+                let world = uniforms.inv_view_proj * ndc;
+                return world.xyz / world.w;
+            }
+
+            fn get_triangle_vertices(vis_id: u32) -> array<Vertex, 3> {
+                let instance_id = vis_id >> 12u;
+                let packed_tri_id = vis_id & 0xFFFu;
+                let meshlet_idx = packed_tri_id / 128u;
+                let tri_idx = packed_tri_id % 128u;
+
+                let meshlet = meshlets[meshlet_idx];
+                let triangle_offset = meshlet.vertex_count_triangle_offset & 0xFFFFFFu;
+
+                // Decode triangle indices
+                let packed = triangle_indices[(triangle_offset + tri_idx) / 4u];
+                let base_byte = ((triangle_offset + tri_idx) % 4u) * 8u;
+
+                let i0 = (packed >> base_byte) & 0xFFu;
+                let i1 = (packed >> (base_byte + 8u)) & 0xFFu;
+                let i2 = (packed >> (base_byte + 16u)) & 0xFFu;
+
+                let v0_idx = vertex_indices[meshlet.vertex_offset + i0];
+                let v1_idx = vertex_indices[meshlet.vertex_offset + i1];
+                let v2_idx = vertex_indices[meshlet.vertex_offset + i2];
+
+                return array<Vertex, 3>(
+                    vertices[v0_idx],
+                    vertices[v1_idx],
+                    vertices[v2_idx]
+                );
+            }
+
+            fn compute_barycentrics(world_pos: vec3<f32>, v0: vec3<f32>, v1: vec3<f32>, v2: vec3<f32>) -> vec3<f32> {
+                let e0 = v1 - v0;
+                let e1 = v2 - v0;
+                let e2 = world_pos - v0;
+
+                let d00 = dot(e0, e0);
+                let d01 = dot(e0, e1);
+                let d11 = dot(e1, e1);
+                let d20 = dot(e2, e0);
+                let d21 = dot(e2, e1);
+
+                let denom = d00 * d11 - d01 * d01;
+                let v = (d11 * d20 - d01 * d21) / denom;
+                let w = (d00 * d21 - d01 * d20) / denom;
+                let u = 1.0 - v - w;
+
+                return vec3<f32>(u, v, w);
+            }
+
+            fn evaluate_pbr(
+                world_pos: vec3<f32>,
+                normal: vec3<f32>,
+                base_color: vec3<f32>,
+                metallic: f32,
+                roughness: f32
+            ) -> vec3<f32> {
+                let view_dir = normalize(uniforms.camera_pos - world_pos);
+
+                // Simple directional light for demo
+                let light_dir = normalize(vec3<f32>(1.0, 1.0, 0.5));
+                let light_color = vec3<f32>(1.0, 0.98, 0.95) * 3.0;
+
+                let n_dot_l = max(dot(normal, light_dir), 0.0);
+                let n_dot_v = max(dot(normal, view_dir), 0.0);
+
+                let h = normalize(view_dir + light_dir);
+                let n_dot_h = max(dot(normal, h), 0.0);
+                let v_dot_h = max(dot(view_dir, h), 0.0);
+
+                // F0 for dielectric/metallic
+                let f0 = mix(vec3<f32>(0.04), base_color, metallic);
+
+                // Fresnel (Schlick)
+                let fresnel = f0 + (1.0 - f0) * pow(1.0 - v_dot_h, 5.0);
+
+                // Distribution (GGX)
+                let alpha = roughness * roughness;
+                let alpha2 = alpha * alpha;
+                let denom = n_dot_h * n_dot_h * (alpha2 - 1.0) + 1.0;
+                let distribution = alpha2 / (3.14159 * denom * denom);
+
+                // Geometry (Smith GGX)
+                let k = (roughness + 1.0) * (roughness + 1.0) / 8.0;
+                let g1_v = n_dot_v / (n_dot_v * (1.0 - k) + k);
+                let g1_l = n_dot_l / (n_dot_l * (1.0 - k) + k);
+                let geometry = g1_v * g1_l;
+
+                // Specular BRDF
+                let specular = (fresnel * distribution * geometry) /
+                              max(4.0 * n_dot_v * n_dot_l, 0.001);
+
+                // Diffuse (Lambert)
+                let diffuse = (1.0 - fresnel) * (1.0 - metallic) * base_color / 3.14159;
+
+                // Combine
+                let color = (diffuse + specular) * light_color * n_dot_l;
+
+                // Ambient
+                let ambient = base_color * 0.03;
+
+                return color + ambient;
+            }
+
+            @compute @workgroup_size(8, 8, 1)
+            fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+                if (gid.x >= uniforms.screen_size.x || gid.y >= uniforms.screen_size.y) {
+                    return;
+                }
+
+                let vis_id = textureLoad(visibility_buffer, gid.xy, 0).r;
+
+                if (vis_id == 0xFFFFFFFFu) {
+                    return; // Background pixel
+                }
+
+                let instance_id = vis_id >> 12u;
+                let instance = instances[instance_id];
+
+                // Skip if not current material
+                if (instance.material_id != uniforms.current_material) {
+                    return;
+                }
+
+                // Reconstruct world position from depth
+                let depth = textureLoad(depth_buffer, gid.xy, 0).r;
+                let world_pos = reconstruct_world_pos(vec2<f32>(gid.xy), depth);
+
+                // Get triangle vertices and compute barycentrics
+                let tri_verts = get_triangle_vertices(vis_id);
+
+                let v0_world = (instance.world_matrix * vec4<f32>(tri_verts[0].position, 1.0)).xyz;
+                let v1_world = (instance.world_matrix * vec4<f32>(tri_verts[1].position, 1.0)).xyz;
+                let v2_world = (instance.world_matrix * vec4<f32>(tri_verts[2].position, 1.0)).xyz;
+
+                let bary = compute_barycentrics(world_pos, v0_world, v1_world, v2_world);
+
+                // Interpolate attributes
+                let normal_obj = tri_verts[0].normal * bary.x +
+                                 tri_verts[1].normal * bary.y +
+                                 tri_verts[2].normal * bary.z;
+                let normal = normalize((instance.world_matrix * vec4<f32>(normal_obj, 0.0)).xyz);
+
+                let uv = tri_verts[0].uv * bary.x +
+                         tri_verts[1].uv * bary.y +
+                         tri_verts[2].uv * bary.z;
+
+                // Get material
+                let material = materials[instance.material_id];
+
+                // Evaluate shading
+                let color = evaluate_pbr(
+                    world_pos,
+                    normal,
+                    material.base_color.rgb,
+                    material.metallic,
+                    material.roughness
+                );
+
+                // Add emissive
+                let final_color = color + material.emissive;
+
+                textureStore(output_color, gid.xy, vec4<f32>(final_color, 1.0));
+            }
+        "#;
+
+        device.create_compute_shader(shader)
+    }
+
+    fn create_software_raster_pipeline(device: &GpuDevice) -> ComputeShader {
+        let shader = r#"
+            struct SoftwareRasterUniforms {
+                view_proj: mat4x4<f32>,
+                screen_size: vec2<u32>,
+                depth_bias: f32,
+            };
+
+            @group(0) @binding(0) var<uniform> uniforms: SoftwareRasterUniforms;
+            @group(0) @binding(1) var<storage, read> small_triangles: array<SmallTriangle>;
+            @group(0) @binding(2) var<storage, read> triangle_count: u32;
+            @group(0) @binding(3) var visibility_buffer: texture_storage_2d<r32uint, write>;
+            @group(0) @binding(4) var depth_buffer: texture_storage_2d<r32float, read_write>;
+
+            struct SmallTriangle {
+                v0: vec4<f32>,
+                v1: vec4<f32>,
+                v2: vec4<f32>,
+                visibility_id: u32,
+            };
+
+            fn edge_function(a: vec2<f32>, b: vec2<f32>, c: vec2<f32>) -> f32 {
+                return (c.x - a.x) * (b.y - a.y) - (c.y - a.y) * (b.x - a.x);
+            }
+
+            @compute @workgroup_size(64, 1, 1)
+            fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+                if (gid.x >= triangle_count) {
+                    return;
+                }
+
+                let tri = small_triangles[gid.x];
+
+                // Convert to screen space
+                let p0 = tri.v0.xy / tri.v0.w;
+                let p1 = tri.v1.xy / tri.v1.w;
+                let p2 = tri.v2.xy / tri.v2.w;
+
+                let s0 = (p0 * 0.5 + 0.5) * vec2<f32>(uniforms.screen_size);
+                let s1 = (p1 * 0.5 + 0.5) * vec2<f32>(uniforms.screen_size);
+                let s2 = (p2 * 0.5 + 0.5) * vec2<f32>(uniforms.screen_size);
+
+                // Compute bounding box
+                let min_x = max(i32(floor(min(min(s0.x, s1.x), s2.x))), 0);
+                let max_x = min(i32(ceil(max(max(s0.x, s1.x), s2.x))), i32(uniforms.screen_size.x) - 1);
+                let min_y = max(i32(floor(min(min(s0.y, s1.y), s2.y))), 0);
+                let max_y = min(i32(ceil(max(max(s0.y, s1.y), s2.y))), i32(uniforms.screen_size.y) - 1);
+
+                let area = edge_function(s0, s1, s2);
+                if (area <= 0.0) {
+                    return; // Backface or degenerate
+                }
+
+                let inv_area = 1.0 / area;
+
+                // Rasterize small triangle
+                for (var y = min_y; y <= max_y; y++) {
+                    for (var x = min_x; x <= max_x; x++) {
+                        let p = vec2<f32>(f32(x) + 0.5, f32(y) + 0.5);
+
+                        let w0 = edge_function(s1, s2, p);
+                        let w1 = edge_function(s2, s0, p);
+                        let w2 = edge_function(s0, s1, p);
+
+                        if (w0 >= 0.0 && w1 >= 0.0 && w2 >= 0.0) {
+                            // Inside triangle
+                            let bary = vec3<f32>(w0, w1, w2) * inv_area;
+
+                            // Interpolate depth
+                            let depth = bary.x * tri.v0.z / tri.v0.w +
+                                        bary.y * tri.v1.z / tri.v1.w +
+                                        bary.z * tri.v2.z / tri.v2.w;
+
+                            // Depth test (reverse-Z)
+                            let current_depth = textureLoad(depth_buffer, vec2<u32>(u32(x), u32(y))).r;
+                            if (depth > current_depth) {
+                                textureStore(depth_buffer, vec2<u32>(u32(x), u32(y)), vec4<f32>(depth, 0.0, 0.0, 0.0));
+                                textureStore(visibility_buffer, vec2<u32>(u32(x), u32(y)), vec4<u32>(tri.visibility_id, 0u, 0u, 0u));
+                            }
+                        }
+                    }
+                }
+            }
+        "#;
+
+        device.create_compute_shader(shader)
+    }
+
+    /// Render visibility buffer for the scene
+    fn render(&mut self, cmd: &mut CommandBuffer, scene: &Scene, camera: &Camera) {
+        self.stats = VisibilityBufferStats::default();
+
+        // Phase 1: Optional depth pre-pass
+        if self.config.depth_prepass {
+            self.render_depth_prepass(cmd, scene, camera);
+        }
+
+        // Phase 2: Build Hi-Z pyramid from depth
+        if self.config.enable_hiz {
+            self.build_hiz_pyramid(cmd);
+        }
+
+        // Phase 3: GPU culling
+        self.cull_meshlets(cmd, scene, camera);
+
+        // Phase 4: Visibility buffer rasterization
+        self.rasterize_visibility(cmd, scene, camera);
+
+        // Phase 5: Software rasterization for small triangles
+        if self.config.software_rasterizer {
+            self.software_rasterize_small_triangles(cmd);
+        }
+
+        // Phase 6: Material classification
+        self.classify_materials(cmd);
+
+        // Phase 7: Deferred shading per material
+        self.shade_materials(cmd, scene, camera);
+    }
+
+    fn render_depth_prepass(&mut self, cmd: &mut CommandBuffer, scene: &Scene, camera: &Camera) {
+        cmd.begin_render_pass(&RenderPassDescriptor {
+            color_attachments: &[],
+            depth_stencil_attachment: Some(DepthStencilAttachment {
+                texture: &self.depth_buffer,
+                clear: Some(0.0), // Reverse-Z
+                store: true,
+            }),
+        });
+
+        cmd.set_pipeline(&self.depth_prepass_pipeline);
+        cmd.set_bind_group(0, &self.create_depth_bind_group(camera));
+
+        // Draw all instances (simplified, no culling in prepass)
+        for instance in &scene.instances {
+            cmd.draw_indexed(instance.mesh.index_count, 1, 0, 0, instance.id);
+        }
+
+        cmd.end_render_pass();
+    }
+
+    fn build_hiz_pyramid(&mut self, cmd: &mut CommandBuffer) {
+        let mut width = self.config.width;
+        let mut height = self.config.height;
+        let mut mip = 0u32;
+
+        while width > 1 || height > 1 {
+            width = (width + 1) / 2;
+            height = (height + 1) / 2;
+
+            cmd.set_compute_shader(&self.hiz_pipeline);
+            cmd.set_push_constants(&HizPushConstants {
+                src_mip: mip,
+                dst_size: Vec2::new(width as f32, height as f32),
+            });
+
+            cmd.dispatch(
+                (width + 7) / 8,
+                (height + 7) / 8,
+                1
+            );
+
+            cmd.barrier(BarrierType::TextureWriteToRead);
+            mip += 1;
+        }
+    }
+
+    fn cull_meshlets(&mut self, cmd: &mut CommandBuffer, scene: &Scene, camera: &Camera) {
+        // Reset visible count
+        cmd.fill_buffer(&self.visible_meshlet_buffer, 0, 4, 0);
+        cmd.barrier(BarrierType::BufferWriteToRead);
+
+        // First culling phase (no occlusion)
+        if self.config.two_phase_culling {
+            cmd.set_compute_shader(&self.cull_pipeline);
+            cmd.set_bind_group(0, &self.create_cull_bind_group(camera, 0));
+
+            let meshlet_count = scene.total_meshlet_count();
+            let instance_count = scene.instances.len() as u32;
+
+            cmd.dispatch(
+                (meshlet_count + 63) / 64,
+                instance_count,
+                1
+            );
+
+            cmd.barrier(BarrierType::ComputeToCompute);
+
+            // Render first phase visibility for Hi-Z update
+            self.rasterize_visibility(cmd, scene, camera);
+            self.build_hiz_pyramid(cmd);
+
+            // Reset for second phase
+            cmd.fill_buffer(&self.visible_meshlet_buffer, 0, 4, 0);
+            cmd.barrier(BarrierType::BufferWriteToRead);
+        }
+
+        // Final culling phase (with occlusion)
+        cmd.set_compute_shader(&self.cull_pipeline);
+        cmd.set_bind_group(0, &self.create_cull_bind_group(camera, 1));
+
+        let meshlet_count = scene.total_meshlet_count();
+        let instance_count = scene.instances.len() as u32;
+
+        cmd.dispatch(
+            (meshlet_count + 63) / 64,
+            instance_count,
+            1
+        );
+
+        cmd.barrier(BarrierType::ComputeToIndirect);
+    }
+
+    fn rasterize_visibility(&mut self, cmd: &mut CommandBuffer, scene: &Scene, camera: &Camera) {
+        cmd.begin_render_pass(&RenderPassDescriptor {
+            color_attachments: &[ColorAttachment {
+                texture: &self.visibility_buffer,
+                clear: Some(ClearValue::Uint(0xFFFFFFFF)),
+                store: true,
+            }],
+            depth_stencil_attachment: Some(DepthStencilAttachment {
+                texture: &self.depth_buffer,
+                clear: if !self.config.depth_prepass { Some(0.0) } else { None },
+                store: true,
+            }),
+        });
+
+        cmd.set_pipeline(&self.visibility_pipeline);
+        cmd.set_bind_group(0, &self.create_visibility_bind_group(camera));
+
+        // Indirect draw based on visible meshlets
+        cmd.draw_indirect(&self.draw_command_buffer, 0);
+
+        cmd.end_render_pass();
+    }
+
+    fn software_rasterize_small_triangles(&mut self, cmd: &mut CommandBuffer) {
+        cmd.set_compute_shader(&self.software_raster_pipeline);
+        cmd.set_bind_group(0, &self.create_software_raster_bind_group());
+
+        // Dispatch based on number of small triangles (from GPU counter)
+        cmd.dispatch_indirect(&self.small_triangle_count_buffer, 0);
+
+        cmd.barrier(BarrierType::TextureWriteToRead);
+    }
+
+    fn classify_materials(&mut self, cmd: &mut CommandBuffer) {
+        // Reset material pixel counts
+        cmd.fill_buffer(&self.material_pixel_count_buffer, 0,
+                        Self::MAX_MATERIALS as u64 * 4, 0);
+        cmd.barrier(BarrierType::BufferWriteToRead);
+
+        cmd.set_compute_shader(&self.material_classify_pipeline);
+        cmd.set_bind_group(0, &self.create_classify_bind_group());
+
+        let tile_x = (self.config.width + self.config.material_tile_size - 1) /
+                     self.config.material_tile_size;
+        let tile_y = (self.config.height + self.config.material_tile_size - 1) /
+                     self.config.material_tile_size;
+
+        cmd.dispatch(tile_x, tile_y, 1);
+
+        cmd.barrier(BarrierType::ComputeToCompute);
+    }
+
+    fn shade_materials(&mut self, cmd: &mut CommandBuffer, scene: &Scene, camera: &Camera) {
+        // Sort materials by pixel count for optimal shading order
+        let material_order = self.sort_materials_by_coverage(cmd);
+
+        cmd.set_compute_shader(&self.material_shade_pipeline);
+
+        for material_id in material_order {
+            cmd.set_bind_group(0, &self.create_shade_bind_group(camera, material_id));
+
+            cmd.dispatch(
+                (self.config.width + 7) / 8,
+                (self.config.height + 7) / 8,
+                1
+            );
+
+            // No barrier needed between materials as they write different pixels
+        }
+
+        cmd.barrier(BarrierType::TextureWriteToRead);
+    }
+
+    fn sort_materials_by_coverage(&self, cmd: &mut CommandBuffer) -> Vec<u32> {
+        // In practice, this would be a GPU sort
+        // For now, return all materials in order
+        (0..Self::MAX_MATERIALS).collect()
+    }
+
+    fn create_depth_bind_group(&self, camera: &Camera) -> BindGroup {
+        // Implementation details...
+        BindGroup::default()
+    }
+
+    fn create_cull_bind_group(&self, camera: &Camera, phase: u32) -> BindGroup {
+        BindGroup::default()
+    }
+
+    fn create_visibility_bind_group(&self, camera: &Camera) -> BindGroup {
+        BindGroup::default()
+    }
+
+    fn create_software_raster_bind_group(&self) -> BindGroup {
+        BindGroup::default()
+    }
+
+    fn create_classify_bind_group(&self) -> BindGroup {
+        BindGroup::default()
+    }
+
+    fn create_shade_bind_group(&self, camera: &Camera, material_id: u32) -> BindGroup {
+        BindGroup::default()
+    }
+}
+
+// ============================================================================
+// DEFERRED MATERIAL EVALUATION
+// Based on Harper Engine RT-0323: Deferred Attribute Interpolation
+// ============================================================================
+
+/// Deferred material evaluator for visibility buffer
+struct DeferredMaterialEvaluator {
+    /// Gradient estimation method
+    gradient_method: GradientMethod,
+    /// Enable anisotropic filtering
+    anisotropic_filtering: bool,
+    /// Enable derivative LOD calculation
+    derivative_lod: bool,
+}
+
+/// Method for estimating screen-space gradients
+enum GradientMethod {
+    /// Finite differences (2x2 quad)
+    FiniteDifference,
+    /// Analytic gradients from barycentric derivatives
+    Analytic,
+    /// Hybrid approach
+    Hybrid,
+}
+
+impl DeferredMaterialEvaluator {
+    fn new() -> Self {
+        Self {
+            gradient_method: GradientMethod::Analytic,
+            anisotropic_filtering: true,
+            derivative_lod: true,
+        }
+    }
+
+    /// Generate shader code for attribute interpolation
+    fn generate_interpolation_shader(&self) -> String {
+        format!(r#"
+            struct InterpolatedAttributes {{
+                position: vec3<f32>,
+                normal: vec3<f32>,
+                tangent: vec4<f32>,
+                uv: vec2<f32>,
+                uv_dx: vec2<f32>,
+                uv_dy: vec2<f32>,
+            }};
+
+            fn interpolate_attributes(
+                vis_id: u32,
+                screen_pos: vec2<f32>,
+                depth: f32,
+                inv_view_proj: mat4x4<f32>,
+                instances: ptr<storage, array<Instance>>,
+                meshlets: ptr<storage, array<Meshlet>>,
+                vertices: ptr<storage, array<Vertex>>
+            ) -> InterpolatedAttributes {{
+                var result: InterpolatedAttributes;
+
+                // Decode visibility ID
+                let instance_id = vis_id >> 12u;
+                let packed_tri = vis_id & 0xFFFu;
+                let meshlet_idx = packed_tri / 128u;
+                let tri_idx = packed_tri % 128u;
+
+                let instance = (*instances)[instance_id];
+                let meshlet = (*meshlets)[meshlet_idx];
+
+                // Get triangle vertices
+                let tri_offset = meshlet.vertex_count_triangle_offset & 0xFFFFFFu;
+                // ... decode indices ...
+
+                // Reconstruct world position
+                let ndc = vec4<f32>(
+                    screen_pos.x * 2.0 - 1.0,
+                    1.0 - screen_pos.y * 2.0,
+                    depth,
+                    1.0
+                );
+                let world_pos = inv_view_proj * ndc;
+                result.position = world_pos.xyz / world_pos.w;
+
+                // Compute barycentrics
+                // ... implementation ...
+
+                // Interpolate vertex attributes
+                // ... implementation ...
+
+                // Compute UV derivatives for texture LOD
+                {gradient_code}
+
+                return result;
+            }}
+        "#, gradient_code = self.generate_gradient_code())
+    }
+
+    fn generate_gradient_code(&self) -> String {
+        match self.gradient_method {
+            GradientMethod::FiniteDifference => r#"
+                // Sample adjacent pixels for finite differences
+                let right_vis = textureLoad(visibility_buffer, vec2<u32>(screen_pos) + vec2<u32>(1, 0), 0).r;
+                let down_vis = textureLoad(visibility_buffer, vec2<u32>(screen_pos) + vec2<u32>(0, 1), 0).r;
+
+                if (right_vis == vis_id) {
+                    result.uv_dx = /* interpolate right */ - result.uv;
+                } else {
+                    result.uv_dx = vec2<f32>(0.0);
+                }
+
+                if (down_vis == vis_id) {
+                    result.uv_dy = /* interpolate down */ - result.uv;
+                } else {
+                    result.uv_dy = vec2<f32>(0.0);
+                }
+            "#.to_string(),
+
+            GradientMethod::Analytic => r#"
+                // Compute analytic derivatives from barycentric gradients
+                let bary_dx = compute_barycentric_dx(v0_screen, v1_screen, v2_screen);
+                let bary_dy = compute_barycentric_dy(v0_screen, v1_screen, v2_screen);
+
+                result.uv_dx = v0.uv * bary_dx.x + v1.uv * bary_dx.y + v2.uv * bary_dx.z;
+                result.uv_dy = v0.uv * bary_dy.x + v1.uv * bary_dy.y + v2.uv * bary_dy.z;
+
+                // Account for perspective correction
+                let w_dx = v0.inv_w * bary_dx.x + v1.inv_w * bary_dx.y + v2.inv_w * bary_dx.z;
+                let w_dy = v0.inv_w * bary_dy.x + v1.inv_w * bary_dy.y + v2.inv_w * bary_dy.z;
+
+                let inv_w = 1.0 / (v0.inv_w * bary.x + v1.inv_w * bary.y + v2.inv_w * bary.z);
+                result.uv_dx = (result.uv_dx - result.uv * w_dx) * inv_w;
+                result.uv_dy = (result.uv_dy - result.uv * w_dy) * inv_w;
+            "#.to_string(),
+
+            GradientMethod::Hybrid => r#"
+                // Use analytic for continuous triangles, finite difference at edges
+                let analytic_dx = compute_analytic_gradient_x(...);
+                let analytic_dy = compute_analytic_gradient_y(...);
+
+                let right_vis = textureLoad(visibility_buffer, vec2<u32>(screen_pos) + vec2<u32>(1, 0), 0).r;
+                let down_vis = textureLoad(visibility_buffer, vec2<u32>(screen_pos) + vec2<u32>(0, 1), 0).r;
+
+                let use_analytic_x = right_vis == vis_id;
+                let use_analytic_y = down_vis == vis_id;
+
+                result.uv_dx = select(vec2<f32>(0.0), analytic_dx, use_analytic_x);
+                result.uv_dy = select(vec2<f32>(0.0), analytic_dy, use_analytic_y);
+            "#.to_string(),
+        }
+    }
+}
+
+// ============================================================================
+// VISIBILITY BUFFER COMPRESSION
+// Based on Harper Engine RT-0324: Compact Visibility Buffer Formats
+// ============================================================================
+
+/// Compressed visibility buffer format
+enum VisibilityFormat {
+    /// Standard 32-bit (20-bit instance, 12-bit triangle)
+    R32_Uint,
+    /// Extended 64-bit for massive scenes
+    R32G32_Uint,
+    /// Compressed with depth (24-bit vis, 8-bit depth fraction)
+    R32_WithDepth,
+    /// Multi-sample with coverage mask
+    R32_MSAA { sample_count: u32 },
+}
+
+/// Visibility buffer with optional compression
+struct CompressedVisibilityBuffer {
+    format: VisibilityFormat,
+    texture: GpuTexture,
+    /// Per-pixel instance ID (for format with separate buffers)
+    instance_buffer: Option<GpuTexture>,
+    /// Compressed triangle ID using meshlet-local indexing
+    triangle_buffer: Option<GpuTexture>,
+}
+
+impl CompressedVisibilityBuffer {
+    fn new(device: &GpuDevice, width: u32, height: u32, format: VisibilityFormat) -> Self {
+        match format {
+            VisibilityFormat::R32_Uint => {
+                Self {
+                    format,
+                    texture: device.create_texture(&TextureDescriptor {
+                        width,
+                        height,
+                        format: TextureFormat::R32_UINT,
+                        usage: TextureUsage::RENDER_TARGET | TextureUsage::SHADER_READ,
+                        ..Default::default()
+                    }),
+                    instance_buffer: None,
+                    triangle_buffer: None,
+                }
+            }
+            VisibilityFormat::R32G32_Uint => {
+                Self {
+                    format,
+                    texture: device.create_texture(&TextureDescriptor {
+                        width,
+                        height,
+                        format: TextureFormat::R32G32_UINT,
+                        usage: TextureUsage::RENDER_TARGET | TextureUsage::SHADER_READ,
+                        ..Default::default()
+                    }),
+                    instance_buffer: None,
+                    triangle_buffer: None,
+                }
+            }
+            VisibilityFormat::R32_WithDepth => {
+                Self {
+                    format,
+                    texture: device.create_texture(&TextureDescriptor {
+                        width,
+                        height,
+                        format: TextureFormat::R32_UINT,
+                        usage: TextureUsage::RENDER_TARGET | TextureUsage::SHADER_READ,
+                        ..Default::default()
+                    }),
+                    instance_buffer: Some(device.create_texture(&TextureDescriptor {
+                        width,
+                        height,
+                        format: TextureFormat::R16_UINT,
+                        usage: TextureUsage::RENDER_TARGET | TextureUsage::SHADER_READ,
+                        ..Default::default()
+                    })),
+                    triangle_buffer: Some(device.create_texture(&TextureDescriptor {
+                        width,
+                        height,
+                        format: TextureFormat::R16_UINT,
+                        usage: TextureUsage::RENDER_TARGET | TextureUsage::SHADER_READ,
+                        ..Default::default()
+                    })),
+                }
+            }
+            VisibilityFormat::R32_MSAA { sample_count } => {
+                Self {
+                    format,
+                    texture: device.create_texture(&TextureDescriptor {
+                        width,
+                        height,
+                        format: TextureFormat::R32_UINT,
+                        sample_count,
+                        usage: TextureUsage::RENDER_TARGET | TextureUsage::SHADER_READ,
+                        ..Default::default()
+                    }),
+                    instance_buffer: None,
+                    triangle_buffer: None,
+                }
+            }
+        }
+    }
+}
+
+// ============================================================================
+// MATERIAL TILE CLASSIFICATION
+// Based on Harper Engine RT-0325: Efficient Material Batching
+// ============================================================================
+
+/// Material tile classifier for efficient shading dispatch
+struct MaterialTileClassifier {
+    tile_size: u32,
+    max_materials_per_tile: u32,
+
+    /// Per-tile material masks
+    tile_masks: GpuBuffer,
+    /// Prefix sum of tile material counts
+    tile_prefix_sums: GpuBuffer,
+    /// Per-material work lists
+    material_worklists: Vec<GpuBuffer>,
+    /// Material statistics
+    material_stats: GpuBuffer,
+
+    classify_pipeline: ComputeShader,
+    build_worklist_pipeline: ComputeShader,
+}
+
+impl MaterialTileClassifier {
+    fn new(device: &GpuDevice, width: u32, height: u32, tile_size: u32) -> Self {
+        let tile_count_x = (width + tile_size - 1) / tile_size;
+        let tile_count_y = (height + tile_size - 1) / tile_size;
+        let total_tiles = tile_count_x * tile_count_y;
+
+        let max_materials = 4096u32;
+        let mask_words = (max_materials + 31) / 32;
+
+        let tile_masks = device.create_buffer(&BufferDescriptor {
+            size: total_tiles as u64 * mask_words as u64 * 4,
+            usage: BufferUsage::STORAGE,
+            ..Default::default()
+        });
+
+        let tile_prefix_sums = device.create_buffer(&BufferDescriptor {
+            size: total_tiles as u64 * 4,
+            usage: BufferUsage::STORAGE,
+            ..Default::default()
+        });
+
+        let material_worklists = (0..max_materials)
+            .map(|_| device.create_buffer(&BufferDescriptor {
+                size: total_tiles as u64 * 4, // Tile indices
+                usage: BufferUsage::STORAGE,
+                ..Default::default()
+            }))
+            .collect();
+
+        let material_stats = device.create_buffer(&BufferDescriptor {
+            size: max_materials as u64 * std::mem::size_of::<MaterialStats>() as u64,
+            usage: BufferUsage::STORAGE,
+            ..Default::default()
+        });
+
+        let classify_pipeline = Self::create_classify_pipeline(device, tile_size);
+        let build_worklist_pipeline = Self::create_build_worklist_pipeline(device);
+
+        Self {
+            tile_size,
+            max_materials_per_tile: 64,
+            tile_masks,
+            tile_prefix_sums,
+            material_worklists,
+            material_stats,
+            classify_pipeline,
+            build_worklist_pipeline,
+        }
+    }
+
+    fn create_classify_pipeline(device: &GpuDevice, tile_size: u32) -> ComputeShader {
+        let shader = format!(r#"
+            const TILE_SIZE: u32 = {tile_size}u;
+            const MAX_MATERIALS: u32 = 4096u;
+            const MASK_WORDS: u32 = MAX_MATERIALS / 32u;
+
+            @group(0) @binding(0) var visibility_buffer: texture_2d<u32>;
+            @group(0) @binding(1) var<storage, read> instances: array<Instance>;
+            @group(0) @binding(2) var<storage, read_write> tile_masks: array<u32>;
+            @group(0) @binding(3) var<storage, read_write> material_tile_counts: array<atomic<u32>>;
+
+            struct Instance {{
+                world_matrix: mat4x4<f32>,
+                prev_world_matrix: mat4x4<f32>,
+                bounds: vec4<f32>,
+                material_id: u32,
+                flags: u32,
+                _padding: vec2<u32>,
+            }};
+
+            var<workgroup> local_mask: array<atomic<u32>, MASK_WORDS>;
+
+            @compute @workgroup_size(TILE_SIZE, TILE_SIZE, 1)
+            fn main(
+                @builtin(global_invocation_id) gid: vec3<u32>,
+                @builtin(local_invocation_index) lid: u32,
+                @builtin(workgroup_id) wid: vec3<u32>
+            ) {{
+                // Initialize local mask
+                if (lid < MASK_WORDS) {{
+                    atomicStore(&local_mask[lid], 0u);
+                }}
+                workgroupBarrier();
+
+                // Read visibility buffer and set material bit
+                let dims = textureDimensions(visibility_buffer);
+                if (gid.x < dims.x && gid.y < dims.y) {{
+                    let vis_id = textureLoad(visibility_buffer, gid.xy, 0).r;
+
+                    if (vis_id != 0xFFFFFFFFu) {{
+                        let instance_id = vis_id >> 12u;
+                        let material_id = instances[instance_id].material_id;
+
+                        let word = material_id / 32u;
+                        let bit = material_id % 32u;
+                        atomicOr(&local_mask[word], 1u << bit);
+                    }}
+                }}
+
+                workgroupBarrier();
+
+                // Write local mask to global tile buffer
+                if (lid < MASK_WORDS) {{
+                    let tile_count_x = (dims.x + TILE_SIZE - 1u) / TILE_SIZE;
+                    let tile_idx = wid.y * tile_count_x + wid.x;
+                    let global_idx = tile_idx * MASK_WORDS + lid;
+
+                    let mask = atomicLoad(&local_mask[lid]);
+                    tile_masks[global_idx] = mask;
+
+                    // Count materials in this word
+                    let count = countOneBits(mask);
+                    if (count > 0u) {{
+                        // Increment tile count for each active material
+                        for (var i = 0u; i < 32u; i++) {{
+                            if ((mask & (1u << i)) != 0u) {{
+                                let material_id = lid * 32u + i;
+                                atomicAdd(&material_tile_counts[material_id], 1u);
+                            }}
+                        }}
+                    }}
+                }}
+            }}
+        "#);
+
+        device.create_compute_shader(&shader)
+    }
+
+    fn create_build_worklist_pipeline(device: &GpuDevice) -> ComputeShader {
+        let shader = r#"
+            const MAX_MATERIALS: u32 = 4096u;
+            const MASK_WORDS: u32 = MAX_MATERIALS / 32u;
+
+            @group(0) @binding(0) var<storage, read> tile_masks: array<u32>;
+            @group(0) @binding(1) var<storage, read> tile_prefix_sums: array<u32>;
+            @group(0) @binding(2) var<storage, read_write> material_worklists: array<u32>;
+            @group(0) @binding(3) var<storage, read_write> worklist_counters: array<atomic<u32>>;
+
+            struct BuildUniforms {
+                tile_count: vec2<u32>,
+                material_id: u32,
+            };
+            @group(0) @binding(4) var<uniform> uniforms: BuildUniforms;
+
+            @compute @workgroup_size(64, 1, 1)
+            fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+                let tile_idx = gid.x;
+                let total_tiles = uniforms.tile_count.x * uniforms.tile_count.y;
+
+                if (tile_idx >= total_tiles) {
+                    return;
+                }
+
+                // Check if this tile contains the material
+                let word = uniforms.material_id / 32u;
+                let bit = uniforms.material_id % 32u;
+                let mask_idx = tile_idx * MASK_WORDS + word;
+
+                if ((tile_masks[mask_idx] & (1u << bit)) != 0u) {
+                    // Add tile to material's worklist
+                    let worklist_idx = atomicAdd(&worklist_counters[uniforms.material_id], 1u);
+                    let worklist_base = uniforms.material_id * total_tiles;
+                    material_worklists[worklist_base + worklist_idx] = tile_idx;
+                }
+            }
+        "#;
+
+        device.create_compute_shader(shader)
+    }
+
+    /// Classify tiles and build material worklists
+    fn classify(&self, cmd: &mut CommandBuffer, visibility_buffer: &GpuTexture) {
+        // Phase 1: Classify tiles
+        cmd.set_compute_shader(&self.classify_pipeline);
+        // ... set bind group ...
+
+        let tile_count_x = (visibility_buffer.width() + self.tile_size - 1) / self.tile_size;
+        let tile_count_y = (visibility_buffer.height() + self.tile_size - 1) / self.tile_size;
+
+        cmd.dispatch(tile_count_x, tile_count_y, 1);
+        cmd.barrier(BarrierType::ComputeToCompute);
+
+        // Phase 2: Build worklists per material
+        cmd.set_compute_shader(&self.build_worklist_pipeline);
+        // This could be done in parallel for all materials with a single dispatch
+        // or serially for simplicity
+    }
+}
+
+#[repr(C)]
+struct MaterialStats {
+    tile_count: u32,
+    pixel_count: u32,
+    first_tile: u32,
+    _padding: u32,
+}
+
+// ============================================================================
+// UNIT TESTS
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_visibility_id_encoding() {
+        let vis_id = VisibilityId::new(12345, 256);
+        assert_eq!(vis_id.instance_id(), 12345);
+        assert_eq!(vis_id.triangle_id(), 256);
+        assert!(vis_id.is_valid());
+
+        let invalid = VisibilityId::invalid();
+        assert!(!invalid.is_valid());
+    }
+
+    #[test]
+    fn test_visibility_id_limits() {
+        // Max instance ID: 2^20 - 1 = 1,048,575
+        let max_instance = VisibilityId::new(1_048_575, 0);
+        assert_eq!(max_instance.instance_id(), 1_048_575);
+
+        // Max triangle ID: 2^12 - 1 = 4,095
+        let max_triangle = VisibilityId::new(0, 4095);
+        assert_eq!(max_triangle.triangle_id(), 4095);
+    }
+
+    #[test]
+    fn test_visibility_id_64_encoding() {
+        let vis_id = VisibilityId64::new(100, 50000, 1000000);
+        assert_eq!(vis_id.draw_id(), 100);
+        assert_eq!(vis_id.instance_id(), 50000);
+        assert_eq!(vis_id.triangle_id(), 1000000);
+    }
+
+    #[test]
+    fn test_meshlet_visibility() {
+        let meshlet = Meshlet {
+            vertex_offset: 0,
+            vertex_count: 64,
+            triangle_offset: 0,
+            triangle_count: 124,
+            bounding_center: Vec3::new(0.0, 0.0, 0.0),
+            bounding_radius: 1.0,
+            cone_apex: Vec3::new(0.0, 0.0, 0.0),
+            cone_axis: Vec3::new(0.0, 0.0, 1.0),
+            cone_cutoff: 0.5,
+        };
+
+        let frustum = Frustum::from_view_proj(&Mat4::IDENTITY);
+        let camera_pos = Vec3::new(0.0, 0.0, 5.0);
+
+        // Meshlet facing camera should be visible
+        assert!(meshlet.is_visible(camera_pos, &frustum));
+    }
+
+    #[test]
+    fn test_meshlet_backface_culling() {
+        let meshlet = Meshlet {
+            vertex_offset: 0,
+            vertex_count: 64,
+            triangle_offset: 0,
+            triangle_count: 124,
+            bounding_center: Vec3::new(0.0, 0.0, 0.0),
+            bounding_radius: 1.0,
+            cone_apex: Vec3::new(0.0, 0.0, 0.0),
+            cone_axis: Vec3::new(0.0, 0.0, -1.0), // Facing away
+            cone_cutoff: 0.5,
+        };
+
+        let frustum = Frustum::from_view_proj(&Mat4::IDENTITY);
+        let camera_pos = Vec3::new(0.0, 0.0, 5.0);
+
+        // Meshlet facing away should be culled
+        assert!(!meshlet.is_visible(camera_pos, &frustum));
+    }
+
+    #[test]
+    fn test_gpu_meshlet_packing() {
+        let meshlet = Meshlet {
+            vertex_offset: 1000,
+            vertex_count: 64,
+            triangle_offset: 5000,
+            triangle_count: 124,
+            bounding_center: Vec3::new(1.0, 2.0, 3.0),
+            bounding_radius: 5.0,
+            cone_apex: Vec3::new(1.0, 2.0, 3.0),
+            cone_axis: Vec3::new(0.0, 1.0, 0.0),
+            cone_cutoff: 0.7,
+        };
+
+        let gpu_meshlet = GpuMeshlet::from_meshlet(&meshlet);
+
+        assert_eq!(gpu_meshlet.vertex_offset, 1000);
+        assert_eq!(gpu_meshlet.bounding_sphere.w, 5.0);
+        assert_eq!(gpu_meshlet.cone_apex_cutoff.w, 0.7);
+    }
+
+    #[test]
+    fn test_meshlet_builder() {
+        let builder = MeshletBuilder::new(64, 124);
+
+        // Simple quad (2 triangles)
+        let vertices = vec![
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(1.0, 1.0, 0.0),
+            Vec3::new(0.0, 1.0, 0.0),
+        ];
+        let indices = vec![0, 1, 2, 0, 2, 3];
+
+        let meshlet_data = builder.build(&vertices, &indices);
+
+        // Should produce 1 meshlet for a simple quad
+        assert_eq!(meshlet_data.meshlets.len(), 1);
+        assert_eq!(meshlet_data.meshlets[0].triangle_count, 2);
+        assert_eq!(meshlet_data.meshlets[0].vertex_count, 4);
+    }
+
+    #[test]
+    fn test_visibility_buffer_config_default() {
+        let config = VisibilityBufferConfig::default();
+
+        assert_eq!(config.width, 1920);
+        assert_eq!(config.height, 1080);
+        assert!(!config.use_64bit_ids);
+        assert!(config.depth_prepass);
+        assert!(config.enable_hiz);
+        assert!(config.two_phase_culling);
+        assert!(config.software_rasterizer);
+        assert_eq!(config.max_meshlet_vertices, 64);
+        assert_eq!(config.max_meshlet_triangles, 124);
+    }
+
+    #[test]
+    fn test_gradient_method_shader_generation() {
+        let evaluator = DeferredMaterialEvaluator::new();
+
+        let shader = evaluator.generate_interpolation_shader();
+
+        assert!(shader.contains("InterpolatedAttributes"));
+        assert!(shader.contains("uv_dx"));
+        assert!(shader.contains("uv_dy"));
+    }
+
+    #[test]
+    fn test_visibility_format_sizes() {
+        // R32_Uint: 4 bytes per pixel
+        // R32G32_Uint: 8 bytes per pixel
+        // R32_MSAA 4x: 16 bytes per pixel
+
+        let width = 1920u32;
+        let height = 1080u32;
+
+        let r32_size = width * height * 4;
+        let r32g32_size = width * height * 8;
+        let msaa_4x_size = width * height * 4 * 4;
+
+        assert_eq!(r32_size, 8_294_400);
+        assert_eq!(r32g32_size, 16_588_800);
+        assert_eq!(msaa_4x_size, 33_177_600);
+    }
+
+    #[test]
+    fn test_material_tile_counts() {
+        let width = 1920u32;
+        let height = 1080u32;
+        let tile_size = 8u32;
+
+        let tile_count_x = (width + tile_size - 1) / tile_size;
+        let tile_count_y = (height + tile_size - 1) / tile_size;
+
+        assert_eq!(tile_count_x, 240);
+        assert_eq!(tile_count_y, 135);
+        assert_eq!(tile_count_x * tile_count_y, 32400);
+    }
+}

@@ -1,0 +1,752 @@
+// =============================================================================
+// qcalc — Mathematical expression calculator written in BuildLang
+// =============================================================================
+// A recursive descent parser/evaluator like bc or expr. Supports:
+//   - Arithmetic: + - * / % ^
+//   - Parentheses for grouping
+//   - Math functions: sqrt, sin, cos, tan, abs, floor, ceil, round, log, ln, exp
+//   - Constants: pi, e, tau
+//   - Variables: x = 42, then use x in expressions
+//   - Interactive REPL mode
+//
+// Usage:
+//   qcalc "2 + 3 * 4"           -> 14
+//   qcalc "(2 + 3) * 4"         -> 20
+//   qcalc "sqrt(144)"           -> 12
+//   qcalc "sin(3.14159/2)"      -> ~1
+//   qcalc "2^10"                -> 1024
+//   qcalc "100 / 3"             -> 33.3333
+//   qcalc                       -> REPL mode
+//
+// Grammar (recursive descent):
+//   expression = term (('+' | '-') term)*
+//   term       = power (('*' | '/' | '%') power)*
+//   power      = unary ('^' power)?
+//   unary      = '-' unary | '+' unary | atom
+//   atom       = number | '(' expr ')' | func '(' expr ')' | variable
+// =============================================================================
+
+// --- Character classification helpers ---
+
+fn is_digit(c: String) -> bool {
+    c == "0" || c == "1" || c == "2" || c == "3" || c == "4" ||
+    c == "5" || c == "6" || c == "7" || c == "8" || c == "9"
+}
+
+fn is_alpha(c: String) -> bool {
+    c == "a" || c == "b" || c == "c" || c == "d" || c == "e" || c == "f" ||
+    c == "g" || c == "h" || c == "i" || c == "j" || c == "k" || c == "l" ||
+    c == "m" || c == "n" || c == "o" || c == "p" || c == "q" || c == "r" ||
+    c == "s" || c == "t" || c == "u" || c == "v" || c == "w" || c == "x" ||
+    c == "y" || c == "z" ||
+    c == "A" || c == "B" || c == "C" || c == "D" || c == "E" || c == "F" ||
+    c == "G" || c == "H" || c == "I" || c == "J" || c == "K" || c == "L" ||
+    c == "M" || c == "N" || c == "O" || c == "P" || c == "Q" || c == "R" ||
+    c == "S" || c == "T" || c == "U" || c == "V" || c == "W" || c == "X" ||
+    c == "Y" || c == "Z"
+}
+
+fn is_alnum(c: String) -> bool {
+    is_alpha(c) || is_digit(c) || c == "_"
+}
+
+fn is_wsp(c: String) -> bool {
+    c == " " || c == "\t"
+}
+
+// =============================================================================
+// PARSER STATE
+// =============================================================================
+
+struct Calc {
+    input: String,
+    pos: i64,
+    ilen: i64,
+    err: bool,
+    err_msg: String,
+}
+
+// =============================================================================
+// VARIABLE STORE — string pool with parallel value array
+// =============================================================================
+
+struct Vars {
+    np: String,
+    ns: Vec<i32>,
+    nl: Vec<i32>,
+    vp: String,
+    vs: Vec<i32>,
+    vl: Vec<i32>,
+    n: i32,
+}
+
+fn vars_new() -> Vars {
+    Vars {
+        np: "", ns: vec![], nl: vec![],
+        vp: "", vs: vec![], vl: vec![],
+        n: 0,
+    }
+}
+
+fn vars_name_get(v: &Vars, idx: i64) -> String {
+    let st = vec_get(v.ns, idx);
+    let ln = vec_get(v.nl, idx);
+    v.np.substring(st, ln)
+}
+
+fn vars_val_get(v: &Vars, idx: i64) -> f64 {
+    let st = vec_get(v.vs, idx);
+    let ln = vec_get(v.vl, idx);
+    let s = v.vp.substring(st, ln);
+    s.parse_float()
+}
+
+fn vars_find(v: &Vars, name: String) -> i64 {
+    let mut i: i64 = 0;
+    let count = v.n;
+    let mut result: i64 = 0 - 1;
+    while i < count {
+        let vname = vars_name_get(v, i);
+        if vname == name {
+            result = i;
+            return result;
+        }
+        i = i + 1;
+    }
+    result
+}
+
+fn vars_set(v: &mut Vars, name: String, val: f64) {
+    let existing = vars_find(v, name);
+    let val_str = to_string_f64(val);
+
+    if existing >= 0 {
+        let vst = v.vp.len();
+        v.vp = v.vp + val_str;
+        let ven = v.vp.len();
+        let count = v.n;
+        let mut new_vs: Vec<i32> = vec![];
+        let mut new_vl: Vec<i32> = vec![];
+        let mut i: i64 = 0;
+        while i < count {
+            if i == existing {
+                vec_push(new_vs, vst);
+                vec_push(new_vl, ven - vst);
+            } else {
+                vec_push(new_vs, vec_get(v.vs, i));
+                vec_push(new_vl, vec_get(v.vl, i));
+            }
+            i = i + 1;
+        }
+        v.vs = new_vs;
+        v.vl = new_vl;
+    } else {
+        let nst = v.np.len();
+        v.np = v.np + name;
+        let nen = v.np.len();
+        vec_push(v.ns, nst);
+        vec_push(v.nl, nen - nst);
+
+        let vst = v.vp.len();
+        v.vp = v.vp + val_str;
+        let ven = v.vp.len();
+        vec_push(v.vs, vst);
+        vec_push(v.vl, ven - vst);
+
+        v.n = v.n + 1;
+    }
+}
+
+fn vars_lookup(v: &Vars, name: String, c: &mut Calc) -> f64 {
+    if name == "pi"  { return 3.14159265358979; }
+    if name == "e"   { return 2.71828182845905; }
+    if name == "tau" { return 6.28318530717959; }
+
+    let idx = vars_find(v, name);
+    if idx < 0 {
+        if !c.err {
+            c.err = true;
+            c.err_msg = "Unknown variable: " + name;
+        }
+        return 0.0;
+    }
+    vars_val_get(v, idx)
+}
+
+// =============================================================================
+// PARSER NAVIGATION
+// =============================================================================
+
+fn skip_ws(c: &mut Calc) {
+    let mut go = true;
+    while go {
+        if c.pos >= c.ilen {
+            go = false;
+        } else {
+            let ch = c.input.char_at(c.pos);
+            if is_wsp(ch) {
+                c.pos = c.pos + 1;
+            } else {
+                go = false;
+            }
+        }
+    }
+}
+
+fn peek(c: &Calc) -> String {
+    if c.pos >= c.ilen {
+        return "";
+    }
+    c.input.char_at(c.pos)
+}
+
+// =============================================================================
+// MATH FUNCTION DISPATCH
+// =============================================================================
+
+fn call_func(name: String, arg: f64, c: &mut Calc) -> f64 {
+    // Free-function builtins (in MATH_BUILTINS, return f64 correctly)
+    if name == "sqrt"  { return sqrt(arg); }
+    if name == "sin"   { return sin(arg); }
+    if name == "cos"   { return cos(arg); }
+    if name == "tan"   { return tan(arg); }
+    if name == "abs"   { return abs(arg); }
+    if name == "floor" { return floor(arg); }
+    if name == "ceil"  { return ceil(arg); }
+    if name == "round" { return round(arg); }
+    // Method-style builtins (must use .method() syntax for correct codegen)
+    if name == "log"   { return arg.ln(); }
+    if name == "ln"    { return arg.ln(); }
+    if name == "log10" { return arg.log10(); }
+    if name == "log2"  { return arg.log2(); }
+    if name == "exp"   { return arg.exp(); }
+    if !c.err {
+        c.err = true;
+        c.err_msg = "Unknown function: " + name;
+    }
+    0.0
+}
+
+// =============================================================================
+// RECURSIVE DESCENT PARSER
+// =============================================================================
+
+fn parse_number(c: &mut Calc) -> f64 {
+    skip_ws(c);
+    let start = c.pos;
+    let mut go = true;
+    while go {
+        if c.pos >= c.ilen {
+            go = false;
+        } else {
+            let ch = c.input.char_at(c.pos);
+            if is_digit(ch) {
+                c.pos = c.pos + 1;
+            } else {
+                go = false;
+            }
+        }
+    }
+    if c.pos < c.ilen {
+        let dot = c.input.char_at(c.pos);
+        if dot == "." {
+            c.pos = c.pos + 1;
+            let mut go2 = true;
+            while go2 {
+                if c.pos >= c.ilen {
+                    go2 = false;
+                } else {
+                    let ch = c.input.char_at(c.pos);
+                    if is_digit(ch) {
+                        c.pos = c.pos + 1;
+                    } else {
+                        go2 = false;
+                    }
+                }
+            }
+        }
+    }
+    let len = c.pos - start;
+    if len == 0 {
+        if !c.err {
+            c.err = true;
+            c.err_msg = "Expected number";
+        }
+        return 0.0;
+    }
+    let num_str = c.input.substring(start, len);
+    num_str.parse_float()
+}
+
+fn parse_ident(c: &mut Calc) -> String {
+    skip_ws(c);
+    let start = c.pos;
+    let mut go = true;
+    while go {
+        if c.pos >= c.ilen {
+            go = false;
+        } else {
+            let ch = c.input.char_at(c.pos);
+            if is_alnum(ch) {
+                c.pos = c.pos + 1;
+            } else {
+                go = false;
+            }
+        }
+    }
+    let len = c.pos - start;
+    if len == 0 {
+        return "";
+    }
+    c.input.substring(start, len)
+}
+
+fn parse_atom(c: &mut Calc, v: &mut Vars) -> f64 {
+    skip_ws(c);
+    if c.err { return 0.0; }
+    if c.pos >= c.ilen {
+        c.err = true;
+        c.err_msg = "Unexpected end of expression";
+        return 0.0;
+    }
+    let ch = c.input.char_at(c.pos);
+
+    if ch == "(" {
+        c.pos = c.pos + 1;
+        let val = parse_expression(c, v);
+        skip_ws(c);
+        if c.pos < c.ilen {
+            let close = c.input.char_at(c.pos);
+            if close == ")" {
+                c.pos = c.pos + 1;
+            } else {
+                if !c.err { c.err = true; c.err_msg = "Expected ')'"; }
+            }
+        } else {
+            if !c.err { c.err = true; c.err_msg = "Expected ')'"; }
+        }
+        return val;
+    }
+
+    if is_digit(ch) || ch == "." {
+        return parse_number(c);
+    }
+
+    if is_alpha(ch) || ch == "_" {
+        let name = parse_ident(c);
+        skip_ws(c);
+        if c.pos < c.ilen {
+            let next = c.input.char_at(c.pos);
+            if next == "(" {
+                c.pos = c.pos + 1;
+                let arg = parse_expression(c, v);
+                skip_ws(c);
+                if c.pos < c.ilen {
+                    let close = c.input.char_at(c.pos);
+                    if close == ")" {
+                        c.pos = c.pos + 1;
+                    } else {
+                        if !c.err { c.err = true; c.err_msg = "Expected ')'"; }
+                    }
+                } else {
+                    if !c.err { c.err = true; c.err_msg = "Expected ')'"; }
+                }
+                return call_func(name, arg, c);
+            }
+        }
+        return vars_lookup(v, name, c);
+    }
+
+    c.err = true;
+    c.err_msg = "Unexpected character";
+    0.0
+}
+
+fn parse_unary(c: &mut Calc, v: &mut Vars) -> f64 {
+    skip_ws(c);
+    if c.err { return 0.0; }
+    if c.pos >= c.ilen { return parse_atom(c, v); }
+    let ch = c.input.char_at(c.pos);
+    if ch == "-" {
+        c.pos = c.pos + 1;
+        let val = parse_unary(c, v);
+        return 0.0 - val;
+    }
+    if ch == "+" {
+        c.pos = c.pos + 1;
+        return parse_unary(c, v);
+    }
+    parse_atom(c, v)
+}
+
+fn parse_power(c: &mut Calc, v: &mut Vars) -> f64 {
+    if c.err { return 0.0; }
+    let base = parse_unary(c, v);
+    skip_ws(c);
+    if c.pos < c.ilen {
+        let ch = c.input.char_at(c.pos);
+        if ch == "^" {
+            c.pos = c.pos + 1;
+            let exp_val = parse_power(c, v);
+            return pow(base, exp_val);
+        }
+    }
+    base
+}
+
+fn parse_term(c: &mut Calc, v: &mut Vars) -> f64 {
+    if c.err { return 0.0; }
+    let mut result = parse_power(c, v);
+    let mut go = true;
+    while go {
+        skip_ws(c);
+        if c.pos >= c.ilen {
+            go = false;
+        } else {
+            let ch = c.input.char_at(c.pos);
+            if ch == "*" {
+                c.pos = c.pos + 1;
+                let right = parse_power(c, v);
+                result = result * right;
+            } else if ch == "/" {
+                c.pos = c.pos + 1;
+                let right = parse_power(c, v);
+                if right == 0.0 {
+                    c.err = true;
+                    c.err_msg = "Division by zero";
+                    go = false;
+                } else {
+                    result = result / right;
+                }
+            } else if ch == "%" {
+                c.pos = c.pos + 1;
+                let right = parse_power(c, v);
+                if right == 0.0 {
+                    c.err = true;
+                    c.err_msg = "Modulo by zero";
+                    go = false;
+                } else {
+                    let d = result / right;
+                    let f = floor(d);
+                    result = result - f * right;
+                }
+            } else {
+                go = false;
+            }
+        }
+    }
+    result
+}
+
+fn parse_expression(c: &mut Calc, v: &mut Vars) -> f64 {
+    if c.err { return 0.0; }
+    let mut result = parse_term(c, v);
+    let mut go = true;
+    while go {
+        skip_ws(c);
+        if c.pos >= c.ilen {
+            go = false;
+        } else {
+            let ch = c.input.char_at(c.pos);
+            if ch == "+" {
+                c.pos = c.pos + 1;
+                let right = parse_term(c, v);
+                result = result + right;
+            } else if ch == "-" {
+                c.pos = c.pos + 1;
+                let right = parse_term(c, v);
+                result = result - right;
+            } else {
+                go = false;
+            }
+        }
+    }
+    result
+}
+
+// =============================================================================
+// EVALUATE
+// =============================================================================
+
+fn eval_expr(expr: String, v: &mut Vars, show_err: bool) -> f64 ~ Console {
+    let elen = expr.len();
+    let mut c = Calc {
+        input: expr,
+        pos: 0,
+        ilen: elen,
+        err: false,
+        err_msg: "",
+    };
+    let result = parse_expression(&mut c, v);
+    skip_ws(&mut c);
+    if !c.err && c.pos < c.ilen {
+        c.err = true;
+        c.err_msg = "Unexpected characters after expression";
+    }
+    if c.err {
+        if show_err {
+            println!("Error: {}", c.err_msg);
+        }
+        return 0.0;
+    }
+    result
+}
+
+fn eval_ok(expr: String, v: &mut Vars) -> bool {
+    let elen = expr.len();
+    let mut c = Calc {
+        input: expr,
+        pos: 0,
+        ilen: elen,
+        err: false,
+        err_msg: "",
+    };
+    parse_expression(&mut c, v);
+    skip_ws(&mut c);
+    if !c.err && c.pos < c.ilen {
+        return false;
+    }
+    !c.err
+}
+
+// =============================================================================
+// OUTPUT
+// =============================================================================
+
+fn print_result(val: f64) ~ Console {
+    println!("{}", val);
+}
+
+// =============================================================================
+// STRING HELPERS
+// =============================================================================
+
+fn strip_nl(s: String) -> String {
+    let mut result = s;
+    let mut go = true;
+    while go {
+        let rlen = result.len();
+        if rlen == 0 {
+            go = false;
+        } else {
+            let last = result.char_at(rlen - 1);
+            if last == "\n" || last == "\r" {
+                result = result.substring(0, rlen - 1);
+            } else {
+                go = false;
+            }
+        }
+    }
+    result
+}
+
+// =============================================================================
+// ASSIGNMENT DETECTION
+// =============================================================================
+// Scans for pattern: identifier = expression
+// Uses a mini parser: skip whitespace, read identifier, skip whitespace,
+// check for '=' (not '=='), return identifier end and eq position.
+// Returns: eq position or -1. Sets name_end to end of identifier.
+
+fn try_parse_assign(line: String) -> i64 {
+    let llen = line.len();
+    // Skip leading whitespace
+    let mut p: i64 = 0;
+    let mut go = true;
+    while go {
+        if p >= llen { return -1; }
+        let ch = line.char_at(p);
+        if is_wsp(ch) { p = p + 1; } else { go = false; }
+    }
+    // Must start with alpha
+    if p >= llen { return -1; }
+    let first = line.char_at(p);
+    if !is_alpha(first) { return -1; }
+    // Read identifier
+    let mut go2 = true;
+    while go2 {
+        if p >= llen { go2 = false; }
+        else {
+            let ch = line.char_at(p);
+            if is_alnum(ch) { p = p + 1; } else { go2 = false; }
+        }
+    }
+    // Skip whitespace
+    let mut go3 = true;
+    while go3 {
+        if p >= llen { return -1; }
+        let ch = line.char_at(p);
+        if is_wsp(ch) { p = p + 1; } else { go3 = false; }
+    }
+    // Check for '='
+    if p >= llen { return -1; }
+    let eq_ch = line.char_at(p);
+    if eq_ch != "=" { return -1; }
+    // Not '=='
+    if p + 1 < llen {
+        let next = line.char_at(p + 1);
+        if next == "=" { return -1; }
+    }
+    p
+}
+
+// Extract identifier from beginning of line (skipping whitespace)
+fn extract_ident(line: String) -> String {
+    let llen = line.len();
+    let mut p: i64 = 0;
+    // Skip leading whitespace
+    let mut go = true;
+    while go {
+        if p >= llen { return line.substring(0, 0); }
+        let ch = line.char_at(p);
+        if is_wsp(ch) { p = p + 1; } else { go = false; }
+    }
+    let start = p;
+    let mut go2 = true;
+    while go2 {
+        if p >= llen { go2 = false; }
+        else {
+            let ch = line.char_at(p);
+            if is_alnum(ch) { p = p + 1; } else { go2 = false; }
+        }
+    }
+    if p == start { return line.substring(0, 0); }
+    line.substring(start, p - start)
+}
+
+// =============================================================================
+// HELP
+// =============================================================================
+
+fn print_help() ~ Console {
+    println!("qcalc - Mathematical expression calculator");
+    println!("");
+    println!("Usage:");
+    println!("  qcalc \"EXPRESSION\"    Evaluate and print result");
+    println!("  qcalc                 Interactive REPL mode");
+    println!("  qcalc --help          Show this help message");
+    println!("");
+    println!("Operators:  + - * / %% ^");
+    println!("Functions:  sqrt sin cos tan abs floor ceil round log ln exp");
+    println!("Constants:  pi e tau");
+    println!("Variables:  x = 42, then use x in expressions");
+    println!("");
+    println!("Examples:");
+    println!("  qcalc \"2 + 3 * 4\"         => 14");
+    println!("  qcalc \"(2 + 3) * 4\"       => 20");
+    println!("  qcalc \"sqrt(144)\"          => 12");
+    println!("  qcalc \"2^10\"              => 1024");
+    println!("");
+    println!("REPL commands: quit, exit, help");
+}
+
+// =============================================================================
+// REPL LINE CHECK — is the cleaned line empty (all whitespace)?
+// =============================================================================
+
+fn is_blank(s: String) -> bool {
+    let slen = s.len();
+    let mut i: i64 = 0;
+    while i < slen {
+        let ch = s.char_at(i);
+        if !is_wsp(ch) && ch != "\n" && ch != "\r" {
+            return false;
+        }
+        i = i + 1;
+    }
+    true
+}
+
+fn str_eq(s: String, t: String) -> bool {
+    s == t
+}
+
+// =============================================================================
+// MAIN
+// =============================================================================
+
+fn main() ~ Console + Environment + Process {
+    let nargs = args_count();
+    let mut v = vars_new();
+
+    if nargs > 1 {
+        let first = args_get(1);
+        if first == "--help" || first == "-h" {
+            print_help();
+            process_exit(0);
+        }
+
+        // Concatenate all args as expression
+        let mut expr = args_get(1);
+        let mut i: i64 = 2;
+        while i < nargs {
+            expr = expr + " " + args_get(i);
+            i = i + 1;
+        }
+
+        let result = eval_expr(expr, &mut v, true);
+        // Re-build to check if ok
+        let mut expr2 = args_get(1);
+        let mut j: i64 = 2;
+        while j < nargs {
+            expr2 = expr2 + " " + args_get(j);
+            j = j + 1;
+        }
+        let ok = eval_ok(expr2, &mut v);
+        if ok {
+            print_result(result);
+        }
+    } else {
+        // REPL mode — same input pattern as qdb (buildlang bdb/db.bld)
+        let mut go = true;
+        while go {
+            print!("qcalc> ");
+            let mut line = read_line();
+            // Strip trailing \n and \r (same pattern as the qdb REPL)
+            let clen = line.len();
+            if clen > 0 {
+                let last = line.char_at(clen - 1);
+                if last == "\n" { line = line.substring(0, clen - 1); }
+            }
+            let clen2 = line.len();
+            if clen2 > 0 {
+                let last2 = line.char_at(clen2 - 1);
+                if last2 == "\r" { line = line.substring(0, clen2 - 1); }
+            }
+
+            if is_blank(line) {
+                // Skip empty
+            } else if line == "quit" || line == "exit" {
+                go = false;
+            } else if line == "help" {
+                print_help();
+            } else {
+                // Check for assignment: ident = expr
+                let eq_pos = try_parse_assign(line);
+                if eq_pos > 0 {
+                    let var_name = extract_ident(line);
+                    let llen = line.len();
+                    let expr_start = eq_pos + 1;
+                    let expr_len = llen - expr_start;
+                    let expr_str = line.substring(expr_start, expr_len);
+
+                    if expr_len > 0 {
+                        let result = eval_expr(expr_str, &mut v, true);
+                        let expr_str2 = line.substring(expr_start, expr_len);
+                        let ok = eval_ok(expr_str2, &mut v);
+                        if ok {
+                            vars_set(&mut v, var_name, result);
+                        }
+                    }
+                } else {
+                    // Normal expression
+                    let result = eval_expr(line, &mut v, true);
+                    let ok = eval_ok(line, &mut v);
+                    if ok {
+                        print_result(result);
+                    }
+                }
+            }
+        }
+    }
+}

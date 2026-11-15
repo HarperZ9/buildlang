@@ -1,0 +1,1234 @@
+// ============================================================================
+// NEXUS - Scripting Engine
+// ============================================================================
+// Embedded scripting engine for mod logic execution
+// Supports multiple script languages with sandboxed execution
+// ============================================================================
+
+module nexus::scripting;
+
+use core::sync::{Mutex, RwLock, Arc};
+use core::collections::{HashMap, Vec};
+
+// ============================================================================
+// Script Types
+// ============================================================================
+
+/// Supported scripting languages
+@derive(Clone, Copy, PartialEq, Eq)]
+pub enum ScriptLanguage {
+    Build,      // Native Build scripts
+    Lua,         // Lua 5.4
+    JavaScript,  // QuickJS-based
+    Python,      // MicroPython subset
+    Wren,        // Wren scripting language
+    Custom(u32)  // Custom language ID
+}
+
+impl ScriptLanguage {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Build => "Build",
+            Self::Lua => "Lua",
+            Self::JavaScript => "JavaScript",
+            Self::Python => "Python",
+            Self::Wren => "Wren",
+            Self::Custom(_) => "Custom"
+        }
+    }
+
+    pub fn file_extensions(&self) -> &[&'static str] {
+        match self {
+            Self::Build => &["build", "qnt"],
+            Self::Lua => &["lua"],
+            Self::JavaScript => &["js", "mjs"],
+            Self::Python => &["py"],
+            Self::Wren => &["wren"],
+            Self::Custom(_) => &[]
+        }
+    }
+
+    pub fn from_extension(ext: &str) -> Option<Self> {
+        match ext.to_lowercase().as_str() {
+            "build" | "qnt" => Some(Self::Build),
+            "lua" => Some(Self::Lua),
+            "js" | "mjs" => Some(Self::JavaScript),
+            "py" => Some(Self::Python),
+            "wren" => Some(Self::Wren),
+            _ => None
+        }
+    }
+}
+
+/// Script execution state
+@derive(Clone, Copy, PartialEq, Eq)]
+pub enum ScriptState {
+    Unloaded,
+    Loading,
+    Loaded,
+    Initializing,
+    Running,
+    Suspended,
+    Error,
+    Terminated
+}
+
+// ============================================================================
+// Script Value
+// ============================================================================
+
+/// Value that can be passed to/from scripts
+@derive(Clone)]
+pub enum ScriptValue {
+    Null,
+    Bool(bool),
+    Int(i64),
+    Float(f64),
+    String(String),
+    Array(Vec<ScriptValue>),
+    Object(HashMap<String, ScriptValue>),
+    Function(FunctionHandle),
+    UserData(UserDataHandle),
+    Reference(ReferenceHandle)
+}
+
+impl ScriptValue {
+    pub fn type_name(&self) -> &'static str {
+        match self {
+            Self::Null => "null",
+            Self::Bool(_) => "bool",
+            Self::Int(_) => "int",
+            Self::Float(_) => "float",
+            Self::String(_) => "string",
+            Self::Array(_) => "array",
+            Self::Object(_) => "object",
+            Self::Function(_) => "function",
+            Self::UserData(_) => "userdata",
+            Self::Reference(_) => "reference"
+        }
+    }
+
+    pub fn as_bool(&self) -> Option<bool> {
+        match self {
+            Self::Bool(v) => Some(*v),
+            Self::Int(v) => Some(*v != 0),
+            Self::Null => Some(false),
+            _ => None
+        }
+    }
+
+    pub fn as_int(&self) -> Option<i64> {
+        match self {
+            Self::Int(v) => Some(*v),
+            Self::Float(v) => Some(*v as i64),
+            Self::Bool(v) => Some(if *v { 1 } else { 0 }),
+            _ => None
+        }
+    }
+
+    pub fn as_float(&self) -> Option<f64> {
+        match self {
+            Self::Float(v) => Some(*v),
+            Self::Int(v) => Some(*v as f64),
+            _ => None
+        }
+    }
+
+    pub fn as_string(&self) -> Option<&str> {
+        match self {
+            Self::String(v) => Some(v),
+            _ => None
+        }
+    }
+
+    pub fn as_array(&self) -> Option<&Vec<ScriptValue>> {
+        match self {
+            Self::Array(v) => Some(v),
+            _ => None
+        }
+    }
+
+    pub fn as_object(&self) -> Option<&HashMap<String, ScriptValue>> {
+        match self {
+            Self::Object(v) => Some(v),
+            _ => None
+        }
+    }
+
+    pub fn is_truthy(&self) -> bool {
+        match self {
+            Self::Null => false,
+            Self::Bool(v) => *v,
+            Self::Int(v) => *v != 0,
+            Self::Float(v) => *v != 0.0,
+            Self::String(v) => !v.is_empty(),
+            Self::Array(v) => !v.is_empty(),
+            Self::Object(v) => !v.is_empty(),
+            _ => true
+        }
+    }
+}
+
+/// Handle to a script function
+@derive(Clone)]
+pub struct FunctionHandle {
+    id: u64,
+    name: String,
+    module_id: u64
+}
+
+/// Handle to user data
+@derive(Clone)]
+pub struct UserDataHandle {
+    id: u64,
+    type_name: String
+}
+
+/// Handle to a reference
+@derive(Clone)]
+pub struct ReferenceHandle {
+    id: u64
+}
+
+// ============================================================================
+// Native Function Binding
+// ============================================================================
+
+/// Native function that can be called from scripts
+pub type NativeFn = Box<dyn Fn(&mut ScriptContext, Vec<ScriptValue>) -> ScriptResult + Send + Sync>;
+
+/// Native function registration
+pub struct NativeFunction {
+    name: String,
+    function: NativeFn,
+    param_count: Option<usize>,
+    variadic: bool,
+    description: String,
+    param_names: Vec<String>
+}
+
+impl NativeFunction {
+    pub fn new<F>(name: &str, f: F) -> Self
+    where
+        F: Fn(&mut ScriptContext, Vec<ScriptValue>) -> ScriptResult + Send + Sync + 'static
+    {
+        Self {
+            name: name.to_string(),
+            function: Box::new(f),
+            param_count: None,
+            variadic: false,
+            description: String::new(),
+            param_names: Vec::new()
+        }
+    }
+
+    pub fn with_params(mut self, count: usize) -> Self {
+        self.param_count = Some(count);
+        self
+    }
+
+    pub fn variadic(mut self) -> Self {
+        self.variadic = true;
+        self
+    }
+
+    pub fn with_description(mut self, desc: &str) -> Self {
+        self.description = desc.to_string();
+        self
+    }
+
+    pub fn with_param_names(mut self, names: Vec<&str>) -> Self {
+        self.param_names = names.iter().map(|s| s.to_string()).collect();
+        self
+    }
+
+    pub fn name(&self) -> &str { &self.name }
+
+    pub fn call(&self, context: &mut ScriptContext, args: Vec<ScriptValue>) -> ScriptResult {
+        // Validate argument count
+        if let Some(count) = self.param_count {
+            if !self.variadic && args.len() != count {
+                return Err(ScriptError::ArgumentError {
+                    expected: count,
+                    got: args.len()
+                });
+            }
+            if args.len() < count {
+                return Err(ScriptError::ArgumentError {
+                    expected: count,
+                    got: args.len()
+                });
+            }
+        }
+
+        (self.function)(context, args)
+    }
+}
+
+/// Result type for script operations
+pub type ScriptResult = Result<ScriptValue, ScriptError>;
+
+// ============================================================================
+// Script Module
+// ============================================================================
+
+/// A loaded script module
+pub struct ScriptModule {
+    id: u64,
+    name: String,
+    source: String,
+    language: ScriptLanguage,
+    state: ScriptState,
+    exports: HashMap<String, ScriptValue>,
+    dependencies: Vec<u64>,
+    bytecode: Option<Vec<u8>>,
+    source_map: Option<SourceMap>,
+    metadata: ModuleMetadata
+}
+
+impl ScriptModule {
+    pub fn new(id: u64, name: &str, source: String, language: ScriptLanguage) -> Self {
+        Self {
+            id,
+            name: name.to_string(),
+            source,
+            language,
+            state: ScriptState::Unloaded,
+            exports: HashMap::new(),
+            dependencies: Vec::new(),
+            bytecode: None,
+            source_map: None,
+            metadata: ModuleMetadata::default()
+        }
+    }
+
+    pub fn id(&self) -> u64 { self.id }
+    pub fn name(&self) -> &str { &self.name }
+    pub fn language(&self) -> ScriptLanguage { self.language }
+    pub fn state(&self) -> ScriptState { self.state }
+    pub fn source(&self) -> &str { &self.source }
+
+    pub fn get_export(&self, name: &str) -> Option<&ScriptValue> {
+        self.exports.get(name)
+    }
+
+    pub fn set_export(&mut self, name: &str, value: ScriptValue) {
+        self.exports.insert(name.to_string(), value);
+    }
+
+    pub fn exports(&self) -> &HashMap<String, ScriptValue> {
+        &self.exports
+    }
+}
+
+/// Module metadata
+#[derive(Default)]
+pub struct ModuleMetadata {
+    pub version: String,
+    pub author: String,
+    pub description: String,
+    pub requires: Vec<String>
+}
+
+/// Source map for debugging
+pub struct SourceMap {
+    mappings: Vec<SourceMapping>
+}
+
+struct SourceMapping {
+    generated_line: u32,
+    generated_column: u32,
+    source_line: u32,
+    source_column: u32
+}
+
+impl SourceMap {
+    pub fn new() -> Self {
+        Self { mappings: Vec::new() }
+    }
+
+    pub fn add_mapping(&mut self, gen_line: u32, gen_col: u32, src_line: u32, src_col: u32) {
+        self.mappings.push(SourceMapping {
+            generated_line: gen_line,
+            generated_column: gen_col,
+            source_line: src_line,
+            source_column: src_col
+        });
+    }
+
+    pub fn lookup(&self, gen_line: u32, gen_col: u32) -> Option<(u32, u32)> {
+        for mapping in &self.mappings {
+            if mapping.generated_line == gen_line && mapping.generated_column <= gen_col {
+                return Some((mapping.source_line, mapping.source_column));
+            }
+        }
+        None
+    }
+}
+
+// ============================================================================
+// Script Context
+// ============================================================================
+
+/// Execution context for scripts
+pub struct ScriptContext {
+    module_id: u64,
+    globals: HashMap<String, ScriptValue>,
+    locals: Vec<HashMap<String, ScriptValue>>,
+    call_stack: Vec<CallFrame>,
+    user_data: HashMap<String, Box<dyn std::any::Any + Send + Sync>>,
+    permissions: Vec<String>,
+    memory_used: usize,
+    max_memory: usize,
+    instruction_count: u64,
+    max_instructions: u64,
+    timeout_ms: u64,
+    start_time: u64
+}
+
+impl ScriptContext {
+    pub fn new(module_id: u64) -> Self {
+        Self {
+            module_id,
+            globals: HashMap::new(),
+            locals: vec![HashMap::new()],
+            call_stack: Vec::new(),
+            user_data: HashMap::new(),
+            permissions: Vec::new(),
+            memory_used: 0,
+            max_memory: 64 * 1024 * 1024, // 64 MB default
+            instruction_count: 0,
+            max_instructions: 10_000_000,
+            timeout_ms: 30000,
+            start_time: 0
+        }
+    }
+
+    pub fn with_memory_limit(mut self, bytes: usize) -> Self {
+        self.max_memory = bytes;
+        self
+    }
+
+    pub fn with_instruction_limit(mut self, count: u64) -> Self {
+        self.max_instructions = count;
+        self
+    }
+
+    pub fn with_timeout(mut self, ms: u64) -> Self {
+        self.timeout_ms = ms;
+        self
+    }
+
+    // Variable access
+    pub fn get_global(&self, name: &str) -> Option<&ScriptValue> {
+        self.globals.get(name)
+    }
+
+    pub fn set_global(&mut self, name: &str, value: ScriptValue) {
+        self.globals.insert(name.to_string(), value);
+    }
+
+    pub fn get_local(&self, name: &str) -> Option<&ScriptValue> {
+        for scope in self.locals.iter().rev() {
+            if let Some(value) = scope.get(name) {
+                return Some(value);
+            }
+        }
+        None
+    }
+
+    pub fn set_local(&mut self, name: &str, value: ScriptValue) {
+        if let Some(scope) = self.locals.last_mut() {
+            scope.insert(name.to_string(), value);
+        }
+    }
+
+    pub fn get(&self, name: &str) -> Option<&ScriptValue> {
+        self.get_local(name).or_else(|| self.get_global(name))
+    }
+
+    // Scope management
+    pub fn push_scope(&mut self) {
+        self.locals.push(HashMap::new());
+    }
+
+    pub fn pop_scope(&mut self) {
+        if self.locals.len() > 1 {
+            self.locals.pop();
+        }
+    }
+
+    // Call stack
+    pub fn push_call(&mut self, frame: CallFrame) -> Result<(), ScriptError> {
+        if self.call_stack.len() >= 1000 {
+            return Err(ScriptError::StackOverflow);
+        }
+        self.call_stack.push(frame);
+        Ok(())
+    }
+
+    pub fn pop_call(&mut self) -> Option<CallFrame> {
+        self.call_stack.pop()
+    }
+
+    pub fn call_stack(&self) -> &[CallFrame] {
+        &self.call_stack
+    }
+
+    // User data
+    pub fn set_user_data<T: Send + Sync + 'static>(&mut self, key: &str, value: T) {
+        self.user_data.insert(key.to_string(), Box::new(value));
+    }
+
+    pub fn get_user_data<T: 'static>(&self, key: &str) -> Option<&T> {
+        self.user_data.get(key).and_then(|v| v.downcast_ref())
+    }
+
+    // Resource tracking
+    pub fn track_memory(&mut self, bytes: usize) -> Result<(), ScriptError> {
+        if self.memory_used + bytes > self.max_memory {
+            return Err(ScriptError::MemoryLimitExceeded);
+        }
+        self.memory_used += bytes;
+        Ok(())
+    }
+
+    pub fn release_memory(&mut self, bytes: usize) {
+        self.memory_used = self.memory_used.saturating_sub(bytes);
+    }
+
+    pub fn track_instruction(&mut self) -> Result<(), ScriptError> {
+        self.instruction_count += 1;
+        if self.instruction_count > self.max_instructions {
+            return Err(ScriptError::InstructionLimitExceeded);
+        }
+        Ok(())
+    }
+
+    pub fn check_timeout(&self) -> Result<(), ScriptError> {
+        // Would check actual time elapsed
+        Ok(())
+    }
+
+    // Permission checking
+    pub fn has_permission(&self, permission: &str) -> bool {
+        self.permissions.iter().any(|p| p == permission || p == "*")
+    }
+
+    pub fn require_permission(&self, permission: &str) -> Result<(), ScriptError> {
+        if self.has_permission(permission) {
+            Ok(())
+        } else {
+            Err(ScriptError::PermissionDenied(permission.to_string()))
+        }
+    }
+
+    pub fn grant_permission(&mut self, permission: &str) {
+        if !self.permissions.contains(&permission.to_string()) {
+            self.permissions.push(permission.to_string());
+        }
+    }
+}
+
+/// Call frame for stack traces
+#[derive(Clone)]
+pub struct CallFrame {
+    pub function_name: String,
+    pub module_name: String,
+    pub line: u32,
+    pub column: u32
+}
+
+// ============================================================================
+// Script Binding
+// ============================================================================
+
+/// Binding between native and script code
+pub struct ScriptBinding {
+    name: String,
+    namespace: Option<String>,
+    functions: HashMap<String, NativeFunction>,
+    constants: HashMap<String, ScriptValue>,
+    classes: HashMap<String, ClassBinding>
+}
+
+impl ScriptBinding {
+    pub fn new(name: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            namespace: None,
+            functions: HashMap::new(),
+            constants: HashMap::new(),
+            classes: HashMap::new()
+        }
+    }
+
+    pub fn with_namespace(mut self, ns: &str) -> Self {
+        self.namespace = Some(ns.to_string());
+        self
+    }
+
+    pub fn add_function(&mut self, func: NativeFunction) {
+        self.functions.insert(func.name.clone(), func);
+    }
+
+    pub fn add_constant(&mut self, name: &str, value: ScriptValue) {
+        self.constants.insert(name.to_string(), value);
+    }
+
+    pub fn add_class(&mut self, class: ClassBinding) {
+        self.classes.insert(class.name.clone(), class);
+    }
+
+    pub fn get_function(&self, name: &str) -> Option<&NativeFunction> {
+        self.functions.get(name)
+    }
+
+    pub fn get_constant(&self, name: &str) -> Option<&ScriptValue> {
+        self.constants.get(name)
+    }
+
+    pub fn get_class(&self, name: &str) -> Option<&ClassBinding> {
+        self.classes.get(name)
+    }
+
+    pub fn name(&self) -> &str { &self.name }
+    pub fn namespace(&self) -> Option<&str> { self.namespace.as_deref() }
+}
+
+/// Class binding for OOP support
+pub struct ClassBinding {
+    name: String,
+    methods: HashMap<String, NativeFunction>,
+    static_methods: HashMap<String, NativeFunction>,
+    properties: HashMap<String, PropertyBinding>,
+    constructor: Option<NativeFunction>
+}
+
+impl ClassBinding {
+    pub fn new(name: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            methods: HashMap::new(),
+            static_methods: HashMap::new(),
+            properties: HashMap::new(),
+            constructor: None
+        }
+    }
+
+    pub fn with_constructor(mut self, func: NativeFunction) -> Self {
+        self.constructor = Some(func);
+        self
+    }
+
+    pub fn add_method(&mut self, func: NativeFunction) {
+        self.methods.insert(func.name.clone(), func);
+    }
+
+    pub fn add_static_method(&mut self, func: NativeFunction) {
+        self.static_methods.insert(func.name.clone(), func);
+    }
+
+    pub fn add_property(&mut self, prop: PropertyBinding) {
+        self.properties.insert(prop.name.clone(), prop);
+    }
+}
+
+/// Property binding with getter/setter
+pub struct PropertyBinding {
+    name: String,
+    getter: Option<NativeFn>,
+    setter: Option<NativeFn>,
+    read_only: bool
+}
+
+impl PropertyBinding {
+    pub fn new(name: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            getter: None,
+            setter: None,
+            read_only: false
+        }
+    }
+
+    pub fn with_getter<F>(mut self, f: F) -> Self
+    where
+        F: Fn(&mut ScriptContext, Vec<ScriptValue>) -> ScriptResult + Send + Sync + 'static
+    {
+        self.getter = Some(Box::new(f));
+        self
+    }
+
+    pub fn with_setter<F>(mut self, f: F) -> Self
+    where
+        F: Fn(&mut ScriptContext, Vec<ScriptValue>) -> ScriptResult + Send + Sync + 'static
+    {
+        self.setter = Some(Box::new(f));
+        self
+    }
+
+    pub fn read_only(mut self) -> Self {
+        self.read_only = true;
+        self
+    }
+}
+
+// ============================================================================
+// Script Engine
+// ============================================================================
+
+/// Main script engine
+pub struct ScriptEngine {
+    modules: HashMap<u64, ScriptModule>,
+    bindings: HashMap<String, ScriptBinding>,
+    global_context: ScriptContext,
+    next_module_id: u64,
+    supported_languages: Vec<ScriptLanguage>,
+    debug_mode: bool,
+    stats: EngineStats
+}
+
+impl ScriptEngine {
+    pub fn new() -> Self {
+        Self {
+            modules: HashMap::new(),
+            bindings: HashMap::new(),
+            global_context: ScriptContext::new(0),
+            next_module_id: 1,
+            supported_languages: vec![
+                ScriptLanguage::Build,
+                ScriptLanguage::Lua,
+                ScriptLanguage::JavaScript
+            ],
+            debug_mode: false,
+            stats: EngineStats::new()
+        }
+    }
+
+    /// Register a script binding
+    pub fn register_binding(&mut self, binding: ScriptBinding) {
+        let name = binding.name.clone();
+        self.bindings.insert(name, binding);
+    }
+
+    /// Load a script module from source
+    pub fn load_module(&mut self, name: &str, source: &str, language: ScriptLanguage) -> Result<u64, ScriptError> {
+        if !self.supported_languages.contains(&language) {
+            return Err(ScriptError::UnsupportedLanguage(language));
+        }
+
+        let id = self.next_module_id;
+        self.next_module_id += 1;
+
+        let mut module = ScriptModule::new(id, name, source.to_string(), language);
+
+        // Parse and compile
+        module.state = ScriptState::Loading;
+        self.compile_module(&mut module)?;
+        module.state = ScriptState::Loaded;
+
+        self.modules.insert(id, module);
+        self.stats.modules_loaded += 1;
+
+        Ok(id)
+    }
+
+    /// Unload a module
+    pub fn unload_module(&mut self, id: u64) -> bool {
+        if self.modules.remove(&id).is_some() {
+            self.stats.modules_unloaded += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Get a loaded module
+    pub fn get_module(&self, id: u64) -> Option<&ScriptModule> {
+        self.modules.get(&id)
+    }
+
+    /// Execute a module's main function
+    pub fn execute_module(&mut self, id: u64) -> ScriptResult {
+        let module = self.modules.get_mut(&id)
+            .ok_or(ScriptError::ModuleNotFound(id))?;
+
+        if module.state != ScriptState::Loaded && module.state != ScriptState::Running {
+            return Err(ScriptError::InvalidState);
+        }
+
+        module.state = ScriptState::Running;
+
+        // Would actually execute the module here
+        self.stats.executions += 1;
+
+        Ok(ScriptValue::Null)
+    }
+
+    /// Call a function in a module
+    pub fn call_function(&mut self, module_id: u64, function: &str, args: Vec<ScriptValue>) -> ScriptResult {
+        let module = self.modules.get(&module_id)
+            .ok_or(ScriptError::ModuleNotFound(module_id))?;
+
+        let func = module.get_export(function)
+            .ok_or_else(|| ScriptError::FunctionNotFound(function.to_string()))?;
+
+        match func {
+            ScriptValue::Function(handle) => {
+                // Would actually call the function here
+                self.stats.function_calls += 1;
+                Ok(ScriptValue::Null)
+            }
+            _ => Err(ScriptError::NotAFunction(function.to_string()))
+        }
+    }
+
+    /// Evaluate a script expression
+    pub fn eval(&mut self, code: &str, language: ScriptLanguage) -> ScriptResult {
+        // Would parse and evaluate the expression
+        self.stats.evals += 1;
+        Ok(ScriptValue::Null)
+    }
+
+    fn compile_module(&mut self, module: &mut ScriptModule) -> Result<(), ScriptError> {
+        match module.language {
+            ScriptLanguage::Build => self.compile_build(module),
+            ScriptLanguage::Lua => self.compile_lua(module),
+            ScriptLanguage::JavaScript => self.compile_javascript(module),
+            _ => Err(ScriptError::UnsupportedLanguage(module.language))
+        }
+    }
+
+    fn compile_build(&mut self, module: &mut ScriptModule) -> Result<(), ScriptError> {
+        // Would compile Build script to bytecode
+        Ok(())
+    }
+
+    fn compile_lua(&mut self, module: &mut ScriptModule) -> Result<(), ScriptError> {
+        // Would compile Lua script to bytecode
+        Ok(())
+    }
+
+    fn compile_javascript(&mut self, module: &mut ScriptModule) -> Result<(), ScriptError> {
+        // Would compile JavaScript to bytecode
+        Ok(())
+    }
+
+    /// Set global variable
+    pub fn set_global(&mut self, name: &str, value: ScriptValue) {
+        self.global_context.set_global(name, value);
+    }
+
+    /// Get global variable
+    pub fn get_global(&self, name: &str) -> Option<&ScriptValue> {
+        self.global_context.get_global(name)
+    }
+
+    pub fn enable_debug(&mut self) { self.debug_mode = true; }
+    pub fn disable_debug(&mut self) { self.debug_mode = false; }
+    pub fn is_debug(&self) -> bool { self.debug_mode }
+
+    pub fn stats(&self) -> &EngineStats { &self.stats }
+}
+
+/// Engine statistics
+pub struct EngineStats {
+    pub modules_loaded: u64,
+    pub modules_unloaded: u64,
+    pub executions: u64,
+    pub function_calls: u64,
+    pub evals: u64,
+    pub errors: u64
+}
+
+impl EngineStats {
+    pub fn new() -> Self {
+        Self {
+            modules_loaded: 0,
+            modules_unloaded: 0,
+            executions: 0,
+            function_calls: 0,
+            evals: 0,
+            errors: 0
+        }
+    }
+}
+
+// ============================================================================
+// Standard Library
+// ============================================================================
+
+/// Create standard library bindings
+pub fn create_stdlib() -> Vec<ScriptBinding> {
+    vec![
+        create_math_binding(),
+        create_string_binding(),
+        create_array_binding(),
+        create_io_binding(),
+        create_time_binding()
+    ]
+}
+
+fn create_math_binding() -> ScriptBinding {
+    let mut binding = ScriptBinding::new("math");
+
+    binding.add_constant("PI", ScriptValue::Float(std::f64::consts::PI));
+    binding.add_constant("E", ScriptValue::Float(std::f64::consts::E));
+    binding.add_constant("TAU", ScriptValue::Float(std::f64::consts::TAU));
+
+    binding.add_function(NativeFunction::new("abs", |_, args| {
+        let n = args.get(0).and_then(|v| v.as_float()).unwrap_or(0.0);
+        Ok(ScriptValue::Float(n.abs()))
+    }).with_params(1));
+
+    binding.add_function(NativeFunction::new("sqrt", |_, args| {
+        let n = args.get(0).and_then(|v| v.as_float()).unwrap_or(0.0);
+        Ok(ScriptValue::Float(n.sqrt()))
+    }).with_params(1));
+
+    binding.add_function(NativeFunction::new("sin", |_, args| {
+        let n = args.get(0).and_then(|v| v.as_float()).unwrap_or(0.0);
+        Ok(ScriptValue::Float(n.sin()))
+    }).with_params(1));
+
+    binding.add_function(NativeFunction::new("cos", |_, args| {
+        let n = args.get(0).and_then(|v| v.as_float()).unwrap_or(0.0);
+        Ok(ScriptValue::Float(n.cos()))
+    }).with_params(1));
+
+    binding.add_function(NativeFunction::new("tan", |_, args| {
+        let n = args.get(0).and_then(|v| v.as_float()).unwrap_or(0.0);
+        Ok(ScriptValue::Float(n.tan()))
+    }).with_params(1));
+
+    binding.add_function(NativeFunction::new("floor", |_, args| {
+        let n = args.get(0).and_then(|v| v.as_float()).unwrap_or(0.0);
+        Ok(ScriptValue::Float(n.floor()))
+    }).with_params(1));
+
+    binding.add_function(NativeFunction::new("ceil", |_, args| {
+        let n = args.get(0).and_then(|v| v.as_float()).unwrap_or(0.0);
+        Ok(ScriptValue::Float(n.ceil()))
+    }).with_params(1));
+
+    binding.add_function(NativeFunction::new("round", |_, args| {
+        let n = args.get(0).and_then(|v| v.as_float()).unwrap_or(0.0);
+        Ok(ScriptValue::Float(n.round()))
+    }).with_params(1));
+
+    binding.add_function(NativeFunction::new("min", |_, args| {
+        let a = args.get(0).and_then(|v| v.as_float()).unwrap_or(0.0);
+        let b = args.get(1).and_then(|v| v.as_float()).unwrap_or(0.0);
+        Ok(ScriptValue::Float(a.min(b)))
+    }).with_params(2));
+
+    binding.add_function(NativeFunction::new("max", |_, args| {
+        let a = args.get(0).and_then(|v| v.as_float()).unwrap_or(0.0);
+        let b = args.get(1).and_then(|v| v.as_float()).unwrap_or(0.0);
+        Ok(ScriptValue::Float(a.max(b)))
+    }).with_params(2));
+
+    binding.add_function(NativeFunction::new("clamp", |_, args| {
+        let v = args.get(0).and_then(|v| v.as_float()).unwrap_or(0.0);
+        let min = args.get(1).and_then(|v| v.as_float()).unwrap_or(0.0);
+        let max = args.get(2).and_then(|v| v.as_float()).unwrap_or(1.0);
+        Ok(ScriptValue::Float(v.max(min).min(max)))
+    }).with_params(3));
+
+    binding.add_function(NativeFunction::new("lerp", |_, args| {
+        let a = args.get(0).and_then(|v| v.as_float()).unwrap_or(0.0);
+        let b = args.get(1).and_then(|v| v.as_float()).unwrap_or(0.0);
+        let t = args.get(2).and_then(|v| v.as_float()).unwrap_or(0.0);
+        Ok(ScriptValue::Float(a + (b - a) * t))
+    }).with_params(3));
+
+    binding.add_function(NativeFunction::new("pow", |_, args| {
+        let base = args.get(0).and_then(|v| v.as_float()).unwrap_or(0.0);
+        let exp = args.get(1).and_then(|v| v.as_float()).unwrap_or(1.0);
+        Ok(ScriptValue::Float(base.powf(exp)))
+    }).with_params(2));
+
+    binding.add_function(NativeFunction::new("log", |_, args| {
+        let n = args.get(0).and_then(|v| v.as_float()).unwrap_or(1.0);
+        Ok(ScriptValue::Float(n.ln()))
+    }).with_params(1));
+
+    binding
+}
+
+fn create_string_binding() -> ScriptBinding {
+    let mut binding = ScriptBinding::new("string");
+
+    binding.add_function(NativeFunction::new("length", |_, args| {
+        let s = args.get(0).and_then(|v| v.as_string()).unwrap_or("");
+        Ok(ScriptValue::Int(s.len() as i64))
+    }).with_params(1));
+
+    binding.add_function(NativeFunction::new("upper", |_, args| {
+        let s = args.get(0).and_then(|v| v.as_string()).unwrap_or("");
+        Ok(ScriptValue::String(s.to_uppercase()))
+    }).with_params(1));
+
+    binding.add_function(NativeFunction::new("lower", |_, args| {
+        let s = args.get(0).and_then(|v| v.as_string()).unwrap_or("");
+        Ok(ScriptValue::String(s.to_lowercase()))
+    }).with_params(1));
+
+    binding.add_function(NativeFunction::new("trim", |_, args| {
+        let s = args.get(0).and_then(|v| v.as_string()).unwrap_or("");
+        Ok(ScriptValue::String(s.trim().to_string()))
+    }).with_params(1));
+
+    binding.add_function(NativeFunction::new("split", |_, args| {
+        let s = args.get(0).and_then(|v| v.as_string()).unwrap_or("");
+        let delim = args.get(1).and_then(|v| v.as_string()).unwrap_or(" ");
+        let parts: Vec<ScriptValue> = s.split(delim)
+            .map(|p| ScriptValue::String(p.to_string()))
+            .collect();
+        Ok(ScriptValue::Array(parts))
+    }).with_params(2));
+
+    binding.add_function(NativeFunction::new("contains", |_, args| {
+        let s = args.get(0).and_then(|v| v.as_string()).unwrap_or("");
+        let substr = args.get(1).and_then(|v| v.as_string()).unwrap_or("");
+        Ok(ScriptValue::Bool(s.contains(substr)))
+    }).with_params(2));
+
+    binding.add_function(NativeFunction::new("replace", |_, args| {
+        let s = args.get(0).and_then(|v| v.as_string()).unwrap_or("");
+        let from = args.get(1).and_then(|v| v.as_string()).unwrap_or("");
+        let to = args.get(2).and_then(|v| v.as_string()).unwrap_or("");
+        Ok(ScriptValue::String(s.replace(from, to)))
+    }).with_params(3));
+
+    binding
+}
+
+fn create_array_binding() -> ScriptBinding {
+    let mut binding = ScriptBinding::new("array");
+
+    binding.add_function(NativeFunction::new("length", |_, args| {
+        let arr = args.get(0).and_then(|v| v.as_array());
+        Ok(ScriptValue::Int(arr.map(|a| a.len()).unwrap_or(0) as i64))
+    }).with_params(1));
+
+    binding.add_function(NativeFunction::new("push", |_, args| {
+        // Would modify array in place
+        Ok(ScriptValue::Null)
+    }).with_params(2));
+
+    binding.add_function(NativeFunction::new("pop", |_, args| {
+        // Would pop from array
+        Ok(ScriptValue::Null)
+    }).with_params(1));
+
+    binding.add_function(NativeFunction::new("join", |_, args| {
+        let arr = args.get(0).and_then(|v| v.as_array());
+        let sep = args.get(1).and_then(|v| v.as_string()).unwrap_or(",");
+
+        match arr {
+            Some(a) => {
+                let parts: Vec<String> = a.iter()
+                    .filter_map(|v| v.as_string().map(|s| s.to_string()))
+                    .collect();
+                Ok(ScriptValue::String(parts.join(sep)))
+            }
+            None => Ok(ScriptValue::String(String::new()))
+        }
+    }).with_params(2));
+
+    binding
+}
+
+fn create_io_binding() -> ScriptBinding {
+    let mut binding = ScriptBinding::new("io");
+
+    binding.add_function(NativeFunction::new("print", |_, args| {
+        for arg in &args {
+            match arg {
+                ScriptValue::String(s) => print!("{}", s),
+                ScriptValue::Int(i) => print!("{}", i),
+                ScriptValue::Float(f) => print!("{}", f),
+                ScriptValue::Bool(b) => print!("{}", b),
+                _ => print!("{:?}", arg.type_name())
+            }
+        }
+        println!();
+        Ok(ScriptValue::Null)
+    }).variadic());
+
+    binding
+}
+
+fn create_time_binding() -> ScriptBinding {
+    let mut binding = ScriptBinding::new("time");
+
+    binding.add_function(NativeFunction::new("now", |_, _| {
+        // Would return actual timestamp
+        Ok(ScriptValue::Int(0))
+    }).with_params(0));
+
+    binding.add_function(NativeFunction::new("sleep", |_, args| {
+        let ms = args.get(0).and_then(|v| v.as_int()).unwrap_or(0);
+        // Would actually sleep
+        Ok(ScriptValue::Null)
+    }).with_params(1));
+
+    binding
+}
+
+// ============================================================================
+// Errors
+// ============================================================================
+
+@derive(Clone)]
+pub enum ScriptError {
+    SyntaxError { line: u32, column: u32, message: String },
+    RuntimeError(String),
+    TypeError { expected: String, got: String },
+    ReferenceError(String),
+    ArgumentError { expected: usize, got: usize },
+    ModuleNotFound(u64),
+    FunctionNotFound(String),
+    NotAFunction(String),
+    StackOverflow,
+    MemoryLimitExceeded,
+    InstructionLimitExceeded,
+    TimeoutExceeded,
+    PermissionDenied(String),
+    UnsupportedLanguage(ScriptLanguage),
+    InvalidState,
+    IoError(String)
+}
+
+impl ScriptError {
+    pub fn message(&self) -> String {
+        match self {
+            Self::SyntaxError { line, column, message } => {
+                format!("Syntax error at {}:{}: {}", line, column, message)
+            }
+            Self::RuntimeError(msg) => format!("Runtime error: {}", msg),
+            Self::TypeError { expected, got } => {
+                format!("Type error: expected {}, got {}", expected, got)
+            }
+            Self::ReferenceError(name) => format!("Reference error: {} is not defined", name),
+            Self::ArgumentError { expected, got } => {
+                format!("Argument error: expected {} arguments, got {}", expected, got)
+            }
+            Self::ModuleNotFound(id) => format!("Module not found: {}", id),
+            Self::FunctionNotFound(name) => format!("Function not found: {}", name),
+            Self::NotAFunction(name) => format!("{} is not a function", name),
+            Self::StackOverflow => "Stack overflow".to_string(),
+            Self::MemoryLimitExceeded => "Memory limit exceeded".to_string(),
+            Self::InstructionLimitExceeded => "Instruction limit exceeded".to_string(),
+            Self::TimeoutExceeded => "Execution timeout exceeded".to_string(),
+            Self::PermissionDenied(perm) => format!("Permission denied: {}", perm),
+            Self::UnsupportedLanguage(lang) => format!("Unsupported language: {}", lang.name()),
+            Self::InvalidState => "Invalid script state".to_string(),
+            Self::IoError(msg) => format!("I/O error: {}", msg)
+        }
+    }
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_script_language_detection() {
+        assert_eq!(ScriptLanguage::from_extension("lua"), Some(ScriptLanguage::Lua));
+        assert_eq!(ScriptLanguage::from_extension("js"), Some(ScriptLanguage::JavaScript));
+        assert_eq!(ScriptLanguage::from_extension("build"), Some(ScriptLanguage::Build));
+        assert_eq!(ScriptLanguage::from_extension("unknown"), None);
+    }
+
+    #[test]
+    fn test_script_value_types() {
+        assert_eq!(ScriptValue::Bool(true).type_name(), "bool");
+        assert_eq!(ScriptValue::Int(42).type_name(), "int");
+        assert_eq!(ScriptValue::Float(3.14).type_name(), "float");
+        assert_eq!(ScriptValue::String("test".to_string()).type_name(), "string");
+    }
+
+    #[test]
+    fn test_script_value_conversions() {
+        assert_eq!(ScriptValue::Bool(true).as_bool(), Some(true));
+        assert_eq!(ScriptValue::Int(42).as_int(), Some(42));
+        assert_eq!(ScriptValue::Float(3.14).as_float(), Some(3.14));
+        assert_eq!(ScriptValue::Int(10).as_float(), Some(10.0));
+    }
+
+    #[test]
+    fn test_script_value_truthiness() {
+        assert!(ScriptValue::Bool(true).is_truthy());
+        assert!(!ScriptValue::Bool(false).is_truthy());
+        assert!(ScriptValue::Int(1).is_truthy());
+        assert!(!ScriptValue::Int(0).is_truthy());
+        assert!(!ScriptValue::Null.is_truthy());
+        assert!(ScriptValue::String("hello".to_string()).is_truthy());
+        assert!(!ScriptValue::String(String::new()).is_truthy());
+    }
+
+    #[test]
+    fn test_script_context() {
+        let mut ctx = ScriptContext::new(1);
+
+        ctx.set_global("x", ScriptValue::Int(10));
+        assert_eq!(ctx.get_global("x").and_then(|v| v.as_int()), Some(10));
+
+        ctx.push_scope();
+        ctx.set_local("y", ScriptValue::Float(3.14));
+        assert_eq!(ctx.get_local("y").and_then(|v| v.as_float()), Some(3.14));
+        ctx.pop_scope();
+    }
+
+    #[test]
+    fn test_script_context_permissions() {
+        let mut ctx = ScriptContext::new(1);
+
+        assert!(!ctx.has_permission("file.read"));
+        ctx.grant_permission("file.read");
+        assert!(ctx.has_permission("file.read"));
+
+        ctx.grant_permission("*");
+        assert!(ctx.has_permission("any.permission"));
+    }
+
+    #[test]
+    fn test_native_function() {
+        let func = NativeFunction::new("add", |_, args| {
+            let a = args.get(0).and_then(|v| v.as_int()).unwrap_or(0);
+            let b = args.get(1).and_then(|v| v.as_int()).unwrap_or(0);
+            Ok(ScriptValue::Int(a + b))
+        }).with_params(2);
+
+        let mut ctx = ScriptContext::new(1);
+        let result = func.call(&mut ctx, vec![ScriptValue::Int(2), ScriptValue::Int(3)]);
+        assert_eq!(result.ok().and_then(|v| v.as_int()), Some(5));
+    }
+
+    #[test]
+    fn test_script_engine() {
+        let mut engine = ScriptEngine::new();
+
+        let result = engine.load_module("test", "print('hello')", ScriptLanguage::Build);
+        assert!(result.is_ok());
+
+        let module_id = result.unwrap();
+        assert!(engine.get_module(module_id).is_some());
+    }
+
+    #[test]
+    fn test_stdlib_math() {
+        let binding = create_math_binding();
+
+        assert!(binding.get_constant("PI").is_some());
+        assert!(binding.get_function("sqrt").is_some());
+        assert!(binding.get_function("sin").is_some());
+    }
+}

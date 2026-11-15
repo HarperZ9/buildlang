@@ -1,0 +1,1619 @@
+// =============================================================================
+// PHOTON POST-PROCESSING PIPELINE - Harper Engine Visual Effects
+// =============================================================================
+// Implements complete post-processing stack with customizable effect chain
+// Based on Harper Engine Whitepapers:
+// - WP-096: Post-Processing Architecture
+// - WP-097: Depth of Field Techniques
+// - WP-098: Lens Effects (Flares, Distortion)
+// - WP-099: Screen-Space Effects
+// - WP-100: Image Sharpening and Enhancement
+// - WP-101: Anti-Aliasing Techniques
+// - WP-102: Upscaling and Super-Resolution
+// =============================================================================
+
+use core::mem;
+use core::simd;
+use crate::photon::{RenderContext, Pipeline, Buffer, Texture};
+
+// =============================================================================
+// POST-PROCESSING CONSTANTS
+// =============================================================================
+
+/// Maximum number of post-processing effects
+const MAX_POST_EFFECTS: usize = 32;
+
+/// Default render target format
+const DEFAULT_HDR_FORMAT: TextureFormat = TextureFormat::RGBA16F;
+
+/// Maximum blur kernel size
+const MAX_BLUR_KERNEL_SIZE: u32 = 127;
+
+/// Bokeh sample count for DoF
+const BOKEH_SAMPLE_COUNT: u32 = 64;
+
+// =============================================================================
+// EFFECT CHAIN ARCHITECTURE (WP-096)
+// =============================================================================
+
+/// Post-processing effect interface
+trait PostEffect {
+    /// Get effect name
+    fn name(&self) -> &str;
+
+    /// Check if effect is enabled
+    fn is_enabled(&self) -> bool;
+
+    /// Set enabled state
+    fn set_enabled(&mut self, enabled: bool);
+
+    /// Get effect priority (lower = earlier in chain)
+    fn priority(&self) -> i32;
+
+    /// Execute effect
+    fn execute(
+        &mut self,
+        ctx: &RenderContext,
+        cmd: &mut CommandBuffer,
+        input: &Texture,
+        output: &Texture,
+        depth: &Texture,
+        frame_data: &FrameData,
+    );
+
+    /// Check if effect requires depth buffer
+    fn requires_depth(&self) -> bool { false }
+
+    /// Check if effect requires motion vectors
+    fn requires_motion_vectors(&self) -> bool { false }
+}
+
+/// Frame data passed to all effects
+struct FrameData {
+    /// Screen dimensions
+    screen_size: Vec2<u32>,
+    /// Delta time
+    delta_time: f32,
+    /// Frame index
+    frame_index: u64,
+    /// Camera position
+    camera_position: Vec3<f32>,
+    /// View matrix
+    view_matrix: Mat4x4<f32>,
+    /// Projection matrix
+    proj_matrix: Mat4x4<f32>,
+    /// Inverse projection
+    inv_proj_matrix: Mat4x4<f32>,
+    /// Near plane
+    near_plane: f32,
+    /// Far plane
+    far_plane: f32,
+    /// Focus distance for DoF
+    focus_distance: f32,
+    /// Aperture for DoF
+    aperture: f32,
+}
+
+/// Effect chain manager
+struct PostProcessingPipeline {
+    /// Active effects
+    effects: Vec<Box<dyn PostEffect>>,
+    /// Ping-pong textures
+    ping_texture: Texture,
+    pong_texture: Texture,
+    /// Current source texture index
+    current_source: bool, // false = ping, true = pong
+    /// Screen dimensions
+    width: u32,
+    height: u32,
+}
+
+impl PostProcessingPipeline {
+    fn new(ctx: &RenderContext, width: u32, height: u32) -> Self {
+        Self {
+            effects: Vec::new(),
+            ping_texture: Texture::new_2d(ctx, width, height, DEFAULT_HDR_FORMAT),
+            pong_texture: Texture::new_2d(ctx, width, height, DEFAULT_HDR_FORMAT),
+            current_source: false,
+            width,
+            height,
+        }
+    }
+
+    /// Add effect to pipeline
+    fn add_effect<E: PostEffect + 'static>(&mut self, effect: E) {
+        self.effects.push(Box::new(effect));
+        self.sort_effects();
+    }
+
+    /// Remove effect by name
+    fn remove_effect(&mut self, name: &str) {
+        self.effects.retain(|e| e.name() != name);
+    }
+
+    /// Sort effects by priority
+    fn sort_effects(&mut self) {
+        self.effects.sort_by_key(|e| e.priority());
+    }
+
+    /// Execute all enabled effects
+    fn execute(
+        &mut self,
+        ctx: &RenderContext,
+        cmd: &mut CommandBuffer,
+        scene_color: &Texture,
+        depth: &Texture,
+        motion_vectors: Option<&Texture>,
+        frame_data: &FrameData,
+        output: &Texture,
+    ) {
+        // Copy scene color to ping buffer
+        cmd.copy_texture(scene_color, &self.ping_texture);
+        self.current_source = false;
+
+        // Execute each enabled effect
+        for effect in &mut self.effects {
+            if !effect.is_enabled() {
+                continue;
+            }
+
+            let (input, out) = if self.current_source {
+                (&self.pong_texture, &self.ping_texture)
+            } else {
+                (&self.ping_texture, &self.pong_texture)
+            };
+
+            effect.execute(ctx, cmd, input, out, depth, frame_data);
+
+            self.current_source = !self.current_source;
+        }
+
+        // Copy final result to output
+        let final_source = if self.current_source {
+            &self.pong_texture
+        } else {
+            &self.ping_texture
+        };
+        cmd.copy_texture(final_source, output);
+    }
+
+    /// Resize textures
+    fn resize(&mut self, ctx: &RenderContext, width: u32, height: u32) {
+        self.width = width;
+        self.height = height;
+        self.ping_texture = Texture::new_2d(ctx, width, height, DEFAULT_HDR_FORMAT);
+        self.pong_texture = Texture::new_2d(ctx, width, height, DEFAULT_HDR_FORMAT);
+    }
+}
+
+// =============================================================================
+// DEPTH OF FIELD (WP-097)
+// =============================================================================
+
+/// DoF technique
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DoFTechnique {
+    /// Simple Gaussian blur
+    Gaussian,
+    /// Bokeh with shape
+    Bokeh,
+    /// Circular separable
+    CircularSeparable,
+    /// Hexagonal
+    Hexagonal,
+    /// Physically-based
+    PhysicallyBased,
+}
+
+/// DoF configuration
+struct DoFConfig {
+    /// DoF technique
+    technique: DoFTechnique,
+    /// Focus distance
+    focus_distance: f32,
+    /// Focus range (depth of focus)
+    focus_range: f32,
+    /// Aperture (f-stop)
+    aperture: f32,
+    /// Focal length (mm)
+    focal_length: f32,
+    /// Near blur limit
+    near_blur_limit: f32,
+    /// Far blur limit
+    far_blur_limit: f32,
+    /// Bokeh brightness threshold
+    bokeh_threshold: f32,
+    /// Bokeh intensity
+    bokeh_intensity: f32,
+    /// Blade count for bokeh shape
+    blade_count: u32,
+    /// Blade rotation
+    blade_rotation: f32,
+}
+
+impl DoFConfig {
+    fn default() -> Self {
+        Self {
+            technique: DoFTechnique::Bokeh,
+            focus_distance: 10.0,
+            focus_range: 5.0,
+            aperture: 2.8,
+            focal_length: 50.0,
+            near_blur_limit: 1.0,
+            far_blur_limit: 1.0,
+            bokeh_threshold: 0.8,
+            bokeh_intensity: 1.0,
+            blade_count: 6,
+            blade_rotation: 0.0,
+        }
+    }
+
+    fn cinematic() -> Self {
+        Self {
+            technique: DoFTechnique::PhysicallyBased,
+            focus_distance: 5.0,
+            focus_range: 2.0,
+            aperture: 1.4,
+            focal_length: 85.0,
+            near_blur_limit: 2.0,
+            far_blur_limit: 2.0,
+            bokeh_threshold: 0.7,
+            bokeh_intensity: 1.5,
+            blade_count: 8,
+            blade_rotation: 15.0,
+        }
+    }
+}
+
+/// Depth of Field effect
+struct DepthOfFieldEffect {
+    enabled: bool,
+    config: DoFConfig,
+    /// CoC (Circle of Confusion) texture
+    coc_texture: Texture,
+    /// Downsampled color
+    downsample_texture: Texture,
+    /// Near blur texture
+    near_blur_texture: Texture,
+    /// Far blur texture
+    far_blur_texture: Texture,
+    /// Bokeh sprite texture
+    bokeh_sprite: Option<Texture>,
+    /// Bokeh point buffer
+    bokeh_points: Buffer<BokehPoint>,
+    /// DoF pipeline
+    pipeline: Pipeline,
+}
+
+/// Bokeh point for scattering
+@align(16)
+struct BokehPoint {
+    position: Vec2<f32>,
+    size: f32,
+    brightness: f32,
+    color: Vec3<f32>,
+    _padding: f32,
+}
+
+impl DepthOfFieldEffect {
+    fn new(ctx: &RenderContext, width: u32, height: u32, config: DoFConfig) -> Self {
+        let half_w = width / 2;
+        let half_h = height / 2;
+
+        Self {
+            enabled: true,
+            config,
+            coc_texture: Texture::new_2d(ctx, width, height, TextureFormat::R16F),
+            downsample_texture: Texture::new_2d(ctx, half_w, half_h, DEFAULT_HDR_FORMAT),
+            near_blur_texture: Texture::new_2d(ctx, half_w, half_h, DEFAULT_HDR_FORMAT),
+            far_blur_texture: Texture::new_2d(ctx, half_w, half_h, DEFAULT_HDR_FORMAT),
+            bokeh_sprite: None,
+            bokeh_points: Buffer::new_capacity(ctx, 65536, BufferUsage::STORAGE),
+            pipeline: Pipeline::new_dof(ctx),
+        }
+    }
+
+    /// Calculate Circle of Confusion
+    fn calculate_coc(&self, depth: f32) -> f32 {
+        let focus = self.config.focus_distance;
+        let focal_length = self.config.focal_length / 1000.0; // mm to m
+        let aperture = focal_length / self.config.aperture;
+
+        let coc = aperture * focal_length * (focus - depth) / (depth * (focus - focal_length));
+
+        // Normalize and clamp
+        let max_coc = if depth < focus {
+            self.config.near_blur_limit
+        } else {
+            self.config.far_blur_limit
+        };
+
+        coc.abs().min(max_coc) * coc.signum()
+    }
+
+    /// Execute Gaussian DoF
+    fn execute_gaussian(
+        &mut self,
+        ctx: &RenderContext,
+        cmd: &mut CommandBuffer,
+        input: &Texture,
+        output: &Texture,
+        depth: &Texture,
+    ) {
+        // Pass 1: Calculate CoC
+        cmd.bind_compute_pipeline(&self.pipeline);
+        cmd.bind_texture(0, depth);
+        cmd.bind_storage_texture(1, &self.coc_texture);
+
+        let coc_params = CoCParams {
+            focus_distance: self.config.focus_distance,
+            focus_range: self.config.focus_range,
+            aperture: self.config.aperture,
+            focal_length: self.config.focal_length,
+        };
+        cmd.push_constants(&coc_params);
+        cmd.dispatch_compute_2d(self.coc_texture.width(), self.coc_texture.height());
+
+        // Pass 2: Blur based on CoC
+        cmd.bind_texture(0, input);
+        cmd.bind_texture(1, &self.coc_texture);
+        cmd.bind_storage_texture(2, output);
+        cmd.dispatch_compute_2d(output.width(), output.height());
+    }
+
+    /// Execute Bokeh DoF
+    fn execute_bokeh(
+        &mut self,
+        ctx: &RenderContext,
+        cmd: &mut CommandBuffer,
+        input: &Texture,
+        output: &Texture,
+        depth: &Texture,
+    ) {
+        // Pass 1: Downsample and calculate CoC
+        self.downsample_with_coc(ctx, cmd, input, depth);
+
+        // Pass 2: Separate near and far fields
+        self.separate_fields(ctx, cmd);
+
+        // Pass 3: Blur near field (expanding)
+        self.blur_near_field(ctx, cmd);
+
+        // Pass 4: Blur far field
+        self.blur_far_field(ctx, cmd);
+
+        // Pass 5: Extract bright bokeh points for scattering
+        if self.bokeh_sprite.is_some() {
+            self.extract_bokeh_points(ctx, cmd);
+        }
+
+        // Pass 6: Composite
+        self.composite_dof(ctx, cmd, input, output);
+    }
+
+    fn downsample_with_coc(
+        &mut self,
+        ctx: &RenderContext,
+        cmd: &mut CommandBuffer,
+        input: &Texture,
+        depth: &Texture,
+    ) {
+        // Downsample to half resolution with CoC in alpha
+    }
+
+    fn separate_fields(&mut self, ctx: &RenderContext, cmd: &mut CommandBuffer) {
+        // Separate near and far field based on CoC sign
+    }
+
+    fn blur_near_field(&mut self, ctx: &RenderContext, cmd: &mut CommandBuffer) {
+        // Blur near field with expanding kernel (larger blur further from focus)
+    }
+
+    fn blur_far_field(&mut self, ctx: &RenderContext, cmd: &mut CommandBuffer) {
+        // Blur far field
+    }
+
+    fn extract_bokeh_points(&mut self, ctx: &RenderContext, cmd: &mut CommandBuffer) {
+        // Extract bright points for bokeh scattering
+    }
+
+    fn composite_dof(
+        &mut self,
+        ctx: &RenderContext,
+        cmd: &mut CommandBuffer,
+        input: &Texture,
+        output: &Texture,
+    ) {
+        // Composite near/far with original based on CoC
+    }
+}
+
+impl PostEffect for DepthOfFieldEffect {
+    fn name(&self) -> &str { "Depth of Field" }
+    fn is_enabled(&self) -> bool { self.enabled }
+    fn set_enabled(&mut self, enabled: bool) { self.enabled = enabled; }
+    fn priority(&self) -> i32 { 100 }
+    fn requires_depth(&self) -> bool { true }
+
+    fn execute(
+        &mut self,
+        ctx: &RenderContext,
+        cmd: &mut CommandBuffer,
+        input: &Texture,
+        output: &Texture,
+        depth: &Texture,
+        frame_data: &FrameData,
+    ) {
+        match self.config.technique {
+            DoFTechnique::Gaussian => self.execute_gaussian(ctx, cmd, input, output, depth),
+            DoFTechnique::Bokeh | DoFTechnique::PhysicallyBased => {
+                self.execute_bokeh(ctx, cmd, input, output, depth)
+            }
+            _ => self.execute_bokeh(ctx, cmd, input, output, depth),
+        }
+    }
+}
+
+/// CoC calculation parameters
+struct CoCParams {
+    focus_distance: f32,
+    focus_range: f32,
+    aperture: f32,
+    focal_length: f32,
+}
+
+// =============================================================================
+// LENS EFFECTS (WP-098)
+// =============================================================================
+
+/// Lens flare configuration
+struct LensFlareConfig {
+    /// Enable lens flares
+    enabled: bool,
+    /// Threshold for bright spots
+    threshold: f32,
+    /// Number of flare elements
+    element_count: u32,
+    /// Ghost spacing
+    ghost_spacing: f32,
+    /// Ghost intensity falloff
+    ghost_falloff: f32,
+    /// Halo radius
+    halo_radius: f32,
+    /// Halo width
+    halo_width: f32,
+    /// Chromatic aberration
+    chromatic_aberration: f32,
+    /// Flare tint
+    tint: Vec3<f32>,
+}
+
+impl LensFlareConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            threshold: 0.9,
+            element_count: 5,
+            ghost_spacing: 0.4,
+            ghost_falloff: 0.8,
+            halo_radius: 0.7,
+            halo_width: 0.1,
+            chromatic_aberration: 0.02,
+            tint: Vec3::new(1.0, 0.8, 0.6),
+        }
+    }
+}
+
+/// Lens flare effect
+struct LensFlareEffect {
+    enabled: bool,
+    config: LensFlareConfig,
+    /// Bright pass texture
+    bright_texture: Texture,
+    /// Flare texture
+    flare_texture: Texture,
+    /// Starburst texture
+    starburst_texture: Option<Texture>,
+    /// Dirt texture
+    dirt_texture: Option<Texture>,
+}
+
+impl LensFlareEffect {
+    fn new(ctx: &RenderContext, width: u32, height: u32, config: LensFlareConfig) -> Self {
+        Self {
+            enabled: config.enabled,
+            config,
+            bright_texture: Texture::new_2d(ctx, width / 2, height / 2, DEFAULT_HDR_FORMAT),
+            flare_texture: Texture::new_2d(ctx, width / 2, height / 2, DEFAULT_HDR_FORMAT),
+            starburst_texture: None,
+            dirt_texture: None,
+        }
+    }
+
+    fn execute_flares(
+        &mut self,
+        ctx: &RenderContext,
+        cmd: &mut CommandBuffer,
+        input: &Texture,
+        output: &Texture,
+    ) {
+        // Pass 1: Extract bright spots
+        self.extract_bright(ctx, cmd, input);
+
+        // Pass 2: Generate ghosts
+        self.generate_ghosts(ctx, cmd);
+
+        // Pass 3: Generate halo
+        self.generate_halo(ctx, cmd);
+
+        // Pass 4: Apply starburst (if available)
+        if self.starburst_texture.is_some() {
+            self.apply_starburst(ctx, cmd);
+        }
+
+        // Pass 5: Composite with original
+        self.composite_flares(ctx, cmd, input, output);
+    }
+
+    fn extract_bright(&mut self, ctx: &RenderContext, cmd: &mut CommandBuffer, input: &Texture) {
+        // Threshold and downsample bright spots
+    }
+
+    fn generate_ghosts(&mut self, ctx: &RenderContext, cmd: &mut CommandBuffer) {
+        // Generate ghost flares along line from center
+        // Each ghost is a scaled and flipped version of bright spots
+    }
+
+    fn generate_halo(&mut self, ctx: &RenderContext, cmd: &mut CommandBuffer) {
+        // Generate circular halo around bright spots
+    }
+
+    fn apply_starburst(&mut self, ctx: &RenderContext, cmd: &mut CommandBuffer) {
+        // Apply starburst pattern
+    }
+
+    fn composite_flares(
+        &mut self,
+        ctx: &RenderContext,
+        cmd: &mut CommandBuffer,
+        input: &Texture,
+        output: &Texture,
+    ) {
+        // Add flares to original image
+        // Apply dirt mask if available
+    }
+}
+
+impl PostEffect for LensFlareEffect {
+    fn name(&self) -> &str { "Lens Flare" }
+    fn is_enabled(&self) -> bool { self.enabled }
+    fn set_enabled(&mut self, enabled: bool) { self.enabled = enabled; }
+    fn priority(&self) -> i32 { 300 }
+
+    fn execute(
+        &mut self,
+        ctx: &RenderContext,
+        cmd: &mut CommandBuffer,
+        input: &Texture,
+        output: &Texture,
+        depth: &Texture,
+        frame_data: &FrameData,
+    ) {
+        self.execute_flares(ctx, cmd, input, output);
+    }
+}
+
+/// Lens distortion configuration
+struct LensDistortionConfig {
+    /// Barrel distortion amount
+    barrel: f32,
+    /// Pincushion distortion amount
+    pincushion: f32,
+    /// Chromatic aberration
+    chromatic_aberration: f32,
+    /// Vignette intensity
+    vignette: f32,
+    /// Vignette smoothness
+    vignette_smoothness: f32,
+}
+
+impl LensDistortionConfig {
+    fn default() -> Self {
+        Self {
+            barrel: 0.0,
+            pincushion: 0.0,
+            chromatic_aberration: 0.001,
+            vignette: 0.3,
+            vignette_smoothness: 0.5,
+        }
+    }
+}
+
+/// Lens distortion effect
+struct LensDistortionEffect {
+    enabled: bool,
+    config: LensDistortionConfig,
+    pipeline: Pipeline,
+}
+
+impl LensDistortionEffect {
+    fn new(ctx: &RenderContext, config: LensDistortionConfig) -> Self {
+        Self {
+            enabled: true,
+            config,
+            pipeline: Pipeline::new_lens_distortion(ctx),
+        }
+    }
+
+    fn distort_uv(&self, uv: Vec2<f32>) -> Vec2<f32> {
+        let centered = uv * 2.0 - Vec2::splat(1.0);
+        let r = centered.length();
+        let r2 = r * r;
+
+        let distortion = 1.0 + self.config.barrel * r2 + self.config.pincushion * r2 * r2;
+
+        let distorted = centered * distortion;
+        distorted * 0.5 + Vec2::splat(0.5)
+    }
+}
+
+impl PostEffect for LensDistortionEffect {
+    fn name(&self) -> &str { "Lens Distortion" }
+    fn is_enabled(&self) -> bool { self.enabled }
+    fn set_enabled(&mut self, enabled: bool) { self.enabled = enabled; }
+    fn priority(&self) -> i32 { 400 }
+
+    fn execute(
+        &mut self,
+        ctx: &RenderContext,
+        cmd: &mut CommandBuffer,
+        input: &Texture,
+        output: &Texture,
+        depth: &Texture,
+        frame_data: &FrameData,
+    ) {
+        cmd.bind_compute_pipeline(&self.pipeline);
+        cmd.bind_texture(0, input);
+        cmd.bind_storage_texture(1, output);
+
+        let params = LensDistortionParams {
+            barrel: self.config.barrel,
+            pincushion: self.config.pincushion,
+            chromatic_aberration: self.config.chromatic_aberration,
+            vignette: self.config.vignette,
+            vignette_smoothness: self.config.vignette_smoothness,
+            screen_size: Vec2::new(frame_data.screen_size.x as f32, frame_data.screen_size.y as f32),
+        };
+        cmd.push_constants(&params);
+
+        cmd.dispatch_compute_2d(frame_data.screen_size.x, frame_data.screen_size.y);
+    }
+}
+
+struct LensDistortionParams {
+    barrel: f32,
+    pincushion: f32,
+    chromatic_aberration: f32,
+    vignette: f32,
+    vignette_smoothness: f32,
+    screen_size: Vec2<f32>,
+}
+
+// =============================================================================
+// SCREEN-SPACE EFFECTS (WP-099)
+// =============================================================================
+
+/// Screen-space outline configuration
+struct OutlineConfig {
+    /// Outline color
+    color: Vec3<f32>,
+    /// Outline thickness
+    thickness: f32,
+    /// Depth threshold
+    depth_threshold: f32,
+    /// Normal threshold
+    normal_threshold: f32,
+    /// Color threshold
+    color_threshold: f32,
+}
+
+impl OutlineConfig {
+    fn default() -> Self {
+        Self {
+            color: Vec3::new(0.0, 0.0, 0.0),
+            thickness: 1.0,
+            depth_threshold: 0.1,
+            normal_threshold: 0.5,
+            color_threshold: 0.1,
+        }
+    }
+}
+
+/// Screen-space outline effect
+struct OutlineEffect {
+    enabled: bool,
+    config: OutlineConfig,
+    pipeline: Pipeline,
+}
+
+impl OutlineEffect {
+    fn new(ctx: &RenderContext, config: OutlineConfig) -> Self {
+        Self {
+            enabled: false, // Disabled by default
+            config,
+            pipeline: Pipeline::new_outline(ctx),
+        }
+    }
+}
+
+impl PostEffect for OutlineEffect {
+    fn name(&self) -> &str { "Outline" }
+    fn is_enabled(&self) -> bool { self.enabled }
+    fn set_enabled(&mut self, enabled: bool) { self.enabled = enabled; }
+    fn priority(&self) -> i32 { 50 }
+    fn requires_depth(&self) -> bool { true }
+
+    fn execute(
+        &mut self,
+        ctx: &RenderContext,
+        cmd: &mut CommandBuffer,
+        input: &Texture,
+        output: &Texture,
+        depth: &Texture,
+        frame_data: &FrameData,
+    ) {
+        cmd.bind_compute_pipeline(&self.pipeline);
+        cmd.bind_texture(0, input);
+        cmd.bind_texture(1, depth);
+        cmd.bind_storage_texture(2, output);
+
+        let params = OutlineParams {
+            color: self.config.color,
+            thickness: self.config.thickness,
+            depth_threshold: self.config.depth_threshold,
+            normal_threshold: self.config.normal_threshold,
+            screen_size: Vec2::new(frame_data.screen_size.x as f32, frame_data.screen_size.y as f32),
+        };
+        cmd.push_constants(&params);
+
+        cmd.dispatch_compute_2d(frame_data.screen_size.x, frame_data.screen_size.y);
+    }
+}
+
+struct OutlineParams {
+    color: Vec3<f32>,
+    thickness: f32,
+    depth_threshold: f32,
+    normal_threshold: f32,
+    screen_size: Vec2<f32>,
+}
+
+/// Screen-space fog configuration
+struct FogConfig {
+    /// Fog color
+    color: Vec3<f32>,
+    /// Fog density
+    density: f32,
+    /// Fog start distance
+    start: f32,
+    /// Fog end distance
+    end: f32,
+    /// Height fog density
+    height_density: f32,
+    /// Height falloff
+    height_falloff: f32,
+    /// Base height
+    base_height: f32,
+}
+
+impl FogConfig {
+    fn default() -> Self {
+        Self {
+            color: Vec3::new(0.7, 0.8, 0.9),
+            density: 0.01,
+            start: 10.0,
+            end: 500.0,
+            height_density: 0.05,
+            height_falloff: 0.1,
+            base_height: 0.0,
+        }
+    }
+}
+
+/// Screen-space fog effect
+struct FogEffect {
+    enabled: bool,
+    config: FogConfig,
+    pipeline: Pipeline,
+}
+
+impl FogEffect {
+    fn new(ctx: &RenderContext, config: FogConfig) -> Self {
+        Self {
+            enabled: true,
+            config,
+            pipeline: Pipeline::new_fog(ctx),
+        }
+    }
+
+    fn calculate_fog_factor(&self, distance: f32, height: f32) -> f32 {
+        // Distance fog (exponential)
+        let distance_fog = 1.0 - (-distance * self.config.density).exp();
+
+        // Height fog
+        let height_diff = height - self.config.base_height;
+        let height_fog = if height_diff > 0.0 {
+            (-height_diff * self.config.height_falloff).exp() * self.config.height_density
+        } else {
+            self.config.height_density
+        };
+
+        (distance_fog + height_fog).clamp(0.0, 1.0)
+    }
+}
+
+impl PostEffect for FogEffect {
+    fn name(&self) -> &str { "Fog" }
+    fn is_enabled(&self) -> bool { self.enabled }
+    fn set_enabled(&mut self, enabled: bool) { self.enabled = enabled; }
+    fn priority(&self) -> i32 { 200 }
+    fn requires_depth(&self) -> bool { true }
+
+    fn execute(
+        &mut self,
+        ctx: &RenderContext,
+        cmd: &mut CommandBuffer,
+        input: &Texture,
+        output: &Texture,
+        depth: &Texture,
+        frame_data: &FrameData,
+    ) {
+        cmd.bind_compute_pipeline(&self.pipeline);
+        cmd.bind_texture(0, input);
+        cmd.bind_texture(1, depth);
+        cmd.bind_storage_texture(2, output);
+
+        let params = FogParams {
+            color: self.config.color,
+            density: self.config.density,
+            start: self.config.start,
+            end: self.config.end,
+            height_density: self.config.height_density,
+            height_falloff: self.config.height_falloff,
+            base_height: self.config.base_height,
+            inv_proj: frame_data.inv_proj_matrix,
+            camera_pos: frame_data.camera_position,
+        };
+        cmd.push_constants(&params);
+
+        cmd.dispatch_compute_2d(frame_data.screen_size.x, frame_data.screen_size.y);
+    }
+}
+
+struct FogParams {
+    color: Vec3<f32>,
+    density: f32,
+    start: f32,
+    end: f32,
+    height_density: f32,
+    height_falloff: f32,
+    base_height: f32,
+    inv_proj: Mat4x4<f32>,
+    camera_pos: Vec3<f32>,
+}
+
+// =============================================================================
+// IMAGE SHARPENING (WP-100)
+// =============================================================================
+
+/// Sharpening technique
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SharpeningTechnique {
+    /// Unsharp mask
+    UnsharpMask,
+    /// CAS (Contrast Adaptive Sharpening)
+    CAS,
+    /// RCAS (Robust CAS from FSR)
+    RCAS,
+    /// High-pass
+    HighPass,
+}
+
+/// Sharpening configuration
+struct SharpeningConfig {
+    technique: SharpeningTechnique,
+    /// Sharpening amount
+    amount: f32,
+    /// Threshold (to avoid sharpening noise)
+    threshold: f32,
+    /// Radius for blur (unsharp mask)
+    radius: f32,
+}
+
+impl SharpeningConfig {
+    fn default() -> Self {
+        Self {
+            technique: SharpeningTechnique::CAS,
+            amount: 0.5,
+            threshold: 0.05,
+            radius: 1.0,
+        }
+    }
+}
+
+/// Sharpening effect
+struct SharpeningEffect {
+    enabled: bool,
+    config: SharpeningConfig,
+    pipeline: Pipeline,
+}
+
+impl SharpeningEffect {
+    fn new(ctx: &RenderContext, config: SharpeningConfig) -> Self {
+        Self {
+            enabled: true,
+            config,
+            pipeline: Pipeline::new_sharpen(ctx),
+        }
+    }
+
+    /// Apply CAS sharpening
+    fn apply_cas(
+        &self,
+        ctx: &RenderContext,
+        cmd: &mut CommandBuffer,
+        input: &Texture,
+        output: &Texture,
+    ) {
+        // AMD FidelityFX CAS algorithm
+        // Uses local contrast to adaptively sharpen
+    }
+
+    /// Apply unsharp mask
+    fn apply_unsharp_mask(
+        &self,
+        ctx: &RenderContext,
+        cmd: &mut CommandBuffer,
+        input: &Texture,
+        output: &Texture,
+    ) {
+        // Blur original, subtract from original, add scaled difference
+    }
+}
+
+impl PostEffect for SharpeningEffect {
+    fn name(&self) -> &str { "Sharpening" }
+    fn is_enabled(&self) -> bool { self.enabled }
+    fn set_enabled(&mut self, enabled: bool) { self.enabled = enabled; }
+    fn priority(&self) -> i32 { 450 }
+
+    fn execute(
+        &mut self,
+        ctx: &RenderContext,
+        cmd: &mut CommandBuffer,
+        input: &Texture,
+        output: &Texture,
+        depth: &Texture,
+        frame_data: &FrameData,
+    ) {
+        cmd.bind_compute_pipeline(&self.pipeline);
+        cmd.bind_texture(0, input);
+        cmd.bind_storage_texture(1, output);
+
+        let params = SharpenParams {
+            amount: self.config.amount,
+            threshold: self.config.threshold,
+            screen_size: Vec2::new(frame_data.screen_size.x as f32, frame_data.screen_size.y as f32),
+        };
+        cmd.push_constants(&params);
+
+        cmd.dispatch_compute_2d(frame_data.screen_size.x, frame_data.screen_size.y);
+    }
+}
+
+struct SharpenParams {
+    amount: f32,
+    threshold: f32,
+    screen_size: Vec2<f32>,
+}
+
+// =============================================================================
+// ANTI-ALIASING (WP-101)
+// =============================================================================
+
+/// AA technique
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AATechnique {
+    /// Fast Approximate AA (FXAA)
+    FXAA,
+    /// Subpixel Morphological AA (SMAA)
+    SMAA,
+    /// Temporal AA (TAA) - see temporal.bld
+    TAA,
+}
+
+/// FXAA quality preset
+#[derive(Clone, Copy)]
+enum FXAAQuality {
+    Low,
+    Medium,
+    High,
+    Ultra,
+}
+
+impl FXAAQuality {
+    fn edge_threshold(&self) -> f32 {
+        match self {
+            FXAAQuality::Low => 0.25,
+            FXAAQuality::Medium => 0.166,
+            FXAAQuality::High => 0.125,
+            FXAAQuality::Ultra => 0.063,
+        }
+    }
+
+    fn edge_threshold_min(&self) -> f32 {
+        match self {
+            FXAAQuality::Low => 0.0833,
+            FXAAQuality::Medium => 0.0625,
+            FXAAQuality::High => 0.0312,
+            FXAAQuality::Ultra => 0.0156,
+        }
+    }
+}
+
+/// FXAA effect
+struct FXAAEffect {
+    enabled: bool,
+    quality: FXAAQuality,
+    pipeline: Pipeline,
+}
+
+impl FXAAEffect {
+    fn new(ctx: &RenderContext, quality: FXAAQuality) -> Self {
+        Self {
+            enabled: true,
+            quality,
+            pipeline: Pipeline::new_fxaa(ctx),
+        }
+    }
+
+    fn rgb_to_luma(color: Vec3<f32>) -> f32 {
+        color.dot(Vec3::new(0.299, 0.587, 0.114))
+    }
+}
+
+impl PostEffect for FXAAEffect {
+    fn name(&self) -> &str { "FXAA" }
+    fn is_enabled(&self) -> bool { self.enabled }
+    fn set_enabled(&mut self, enabled: bool) { self.enabled = enabled; }
+    fn priority(&self) -> i32 { 500 }
+
+    fn execute(
+        &mut self,
+        ctx: &RenderContext,
+        cmd: &mut CommandBuffer,
+        input: &Texture,
+        output: &Texture,
+        depth: &Texture,
+        frame_data: &FrameData,
+    ) {
+        cmd.bind_compute_pipeline(&self.pipeline);
+        cmd.bind_texture(0, input);
+        cmd.bind_storage_texture(1, output);
+
+        let params = FXAAParams {
+            edge_threshold: self.quality.edge_threshold(),
+            edge_threshold_min: self.quality.edge_threshold_min(),
+            screen_size: Vec2::new(frame_data.screen_size.x as f32, frame_data.screen_size.y as f32),
+            inverse_screen_size: Vec2::new(
+                1.0 / frame_data.screen_size.x as f32,
+                1.0 / frame_data.screen_size.y as f32,
+            ),
+        };
+        cmd.push_constants(&params);
+
+        cmd.dispatch_compute_2d(frame_data.screen_size.x, frame_data.screen_size.y);
+    }
+}
+
+struct FXAAParams {
+    edge_threshold: f32,
+    edge_threshold_min: f32,
+    screen_size: Vec2<f32>,
+    inverse_screen_size: Vec2<f32>,
+}
+
+/// SMAA effect
+struct SMAAEffect {
+    enabled: bool,
+    /// Edge detection texture
+    edge_texture: Texture,
+    /// Blend weight texture
+    blend_texture: Texture,
+    /// Area lookup texture
+    area_texture: Texture,
+    /// Search lookup texture
+    search_texture: Texture,
+    /// Edge detection pipeline
+    edge_pipeline: Pipeline,
+    /// Blend weight pipeline
+    blend_pipeline: Pipeline,
+    /// Neighborhood blending pipeline
+    neighborhood_pipeline: Pipeline,
+}
+
+impl SMAAEffect {
+    fn new(ctx: &RenderContext, width: u32, height: u32) -> Self {
+        Self {
+            enabled: false,
+            edge_texture: Texture::new_2d(ctx, width, height, TextureFormat::RG8),
+            blend_texture: Texture::new_2d(ctx, width, height, TextureFormat::RGBA8),
+            area_texture: Self::create_area_texture(ctx),
+            search_texture: Self::create_search_texture(ctx),
+            edge_pipeline: Pipeline::new_smaa_edge(ctx),
+            blend_pipeline: Pipeline::new_smaa_blend(ctx),
+            neighborhood_pipeline: Pipeline::new_smaa_neighborhood(ctx),
+        }
+    }
+
+    fn create_area_texture(ctx: &RenderContext) -> Texture {
+        // SMAA area texture (precomputed lookup table)
+        Texture::new_2d(ctx, 160, 560, TextureFormat::RG8)
+    }
+
+    fn create_search_texture(ctx: &RenderContext) -> Texture {
+        // SMAA search texture
+        Texture::new_2d(ctx, 64, 16, TextureFormat::R8)
+    }
+}
+
+impl PostEffect for SMAAEffect {
+    fn name(&self) -> &str { "SMAA" }
+    fn is_enabled(&self) -> bool { self.enabled }
+    fn set_enabled(&mut self, enabled: bool) { self.enabled = enabled; }
+    fn priority(&self) -> i32 { 500 }
+
+    fn execute(
+        &mut self,
+        ctx: &RenderContext,
+        cmd: &mut CommandBuffer,
+        input: &Texture,
+        output: &Texture,
+        depth: &Texture,
+        frame_data: &FrameData,
+    ) {
+        // Pass 1: Edge detection
+        cmd.bind_compute_pipeline(&self.edge_pipeline);
+        cmd.bind_texture(0, input);
+        cmd.bind_storage_texture(1, &self.edge_texture);
+        cmd.dispatch_compute_2d(frame_data.screen_size.x, frame_data.screen_size.y);
+
+        // Pass 2: Blend weight calculation
+        cmd.bind_compute_pipeline(&self.blend_pipeline);
+        cmd.bind_texture(0, &self.edge_texture);
+        cmd.bind_texture(1, &self.area_texture);
+        cmd.bind_texture(2, &self.search_texture);
+        cmd.bind_storage_texture(3, &self.blend_texture);
+        cmd.dispatch_compute_2d(frame_data.screen_size.x, frame_data.screen_size.y);
+
+        // Pass 3: Neighborhood blending
+        cmd.bind_compute_pipeline(&self.neighborhood_pipeline);
+        cmd.bind_texture(0, input);
+        cmd.bind_texture(1, &self.blend_texture);
+        cmd.bind_storage_texture(2, output);
+        cmd.dispatch_compute_2d(frame_data.screen_size.x, frame_data.screen_size.y);
+    }
+}
+
+// =============================================================================
+// UPSCALING (WP-102)
+// =============================================================================
+
+/// Upscaling technique
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum UpscaleTechnique {
+    /// Bilinear
+    Bilinear,
+    /// Bicubic
+    Bicubic,
+    /// Lanczos
+    Lanczos,
+    /// AMD FSR 1.0
+    FSR1,
+    /// AMD FSR 2.0
+    FSR2,
+    /// NVIDIA DLSS-like temporal upscale
+    TemporalUpscale,
+}
+
+/// FSR configuration
+struct FSRConfig {
+    /// Sharpness (0.0 to 2.0)
+    sharpness: f32,
+    /// Quality mode (affects render scale)
+    quality: FSRQuality,
+}
+
+#[derive(Clone, Copy)]
+enum FSRQuality {
+    /// 77% scale
+    Quality,
+    /// 67% scale
+    Balanced,
+    /// 59% scale
+    Performance,
+    /// 50% scale
+    UltraPerformance,
+}
+
+impl FSRQuality {
+    fn scale_factor(&self) -> f32 {
+        match self {
+            FSRQuality::Quality => 0.77,
+            FSRQuality::Balanced => 0.67,
+            FSRQuality::Performance => 0.59,
+            FSRQuality::UltraPerformance => 0.50,
+        }
+    }
+}
+
+impl FSRConfig {
+    fn default() -> Self {
+        Self {
+            sharpness: 0.2,
+            quality: FSRQuality::Quality,
+        }
+    }
+}
+
+/// FSR upscaler
+struct FSRUpscaler {
+    enabled: bool,
+    config: FSRConfig,
+    /// EASU (Edge Adaptive Spatial Upsampling) pipeline
+    easu_pipeline: Pipeline,
+    /// RCAS (Robust Contrast Adaptive Sharpening) pipeline
+    rcas_pipeline: Pipeline,
+    /// Intermediate texture
+    upscaled_texture: Texture,
+}
+
+impl FSRUpscaler {
+    fn new(ctx: &RenderContext, width: u32, height: u32, config: FSRConfig) -> Self {
+        Self {
+            enabled: true,
+            config,
+            easu_pipeline: Pipeline::new_fsr_easu(ctx),
+            rcas_pipeline: Pipeline::new_fsr_rcas(ctx),
+            upscaled_texture: Texture::new_2d(ctx, width, height, DEFAULT_HDR_FORMAT),
+        }
+    }
+
+    fn get_render_resolution(&self, target_width: u32, target_height: u32) -> (u32, u32) {
+        let scale = self.config.quality.scale_factor();
+        (
+            (target_width as f32 * scale) as u32,
+            (target_height as f32 * scale) as u32,
+        )
+    }
+}
+
+impl PostEffect for FSRUpscaler {
+    fn name(&self) -> &str { "FSR" }
+    fn is_enabled(&self) -> bool { self.enabled }
+    fn set_enabled(&mut self, enabled: bool) { self.enabled = enabled; }
+    fn priority(&self) -> i32 { 600 }
+
+    fn execute(
+        &mut self,
+        ctx: &RenderContext,
+        cmd: &mut CommandBuffer,
+        input: &Texture,
+        output: &Texture,
+        depth: &Texture,
+        frame_data: &FrameData,
+    ) {
+        // Pass 1: EASU (upscaling)
+        cmd.bind_compute_pipeline(&self.easu_pipeline);
+        cmd.bind_texture(0, input);
+        cmd.bind_storage_texture(1, &self.upscaled_texture);
+
+        let easu_params = EASUParams {
+            input_size: Vec2::new(input.width() as f32, input.height() as f32),
+            output_size: Vec2::new(frame_data.screen_size.x as f32, frame_data.screen_size.y as f32),
+        };
+        cmd.push_constants(&easu_params);
+        cmd.dispatch_compute_2d(frame_data.screen_size.x, frame_data.screen_size.y);
+
+        // Pass 2: RCAS (sharpening)
+        cmd.bind_compute_pipeline(&self.rcas_pipeline);
+        cmd.bind_texture(0, &self.upscaled_texture);
+        cmd.bind_storage_texture(1, output);
+
+        let rcas_params = RCASParams {
+            sharpness: self.config.sharpness,
+        };
+        cmd.push_constants(&rcas_params);
+        cmd.dispatch_compute_2d(frame_data.screen_size.x, frame_data.screen_size.y);
+    }
+}
+
+struct EASUParams {
+    input_size: Vec2<f32>,
+    output_size: Vec2<f32>,
+}
+
+struct RCASParams {
+    sharpness: f32,
+}
+
+// =============================================================================
+// ADDITIONAL EFFECTS
+// =============================================================================
+
+/// Panini projection for ultra-wide FOV
+struct PaniniProjectionEffect {
+    enabled: bool,
+    /// Panini distance parameter (0 = rectilinear, 1 = full panini)
+    distance: f32,
+    /// Vertical compression
+    vertical_compression: f32,
+    pipeline: Pipeline,
+}
+
+impl PaniniProjectionEffect {
+    fn new(ctx: &RenderContext) -> Self {
+        Self {
+            enabled: false,
+            distance: 0.5,
+            vertical_compression: 0.0,
+            pipeline: Pipeline::new_panini(ctx),
+        }
+    }
+}
+
+impl PostEffect for PaniniProjectionEffect {
+    fn name(&self) -> &str { "Panini Projection" }
+    fn is_enabled(&self) -> bool { self.enabled }
+    fn set_enabled(&mut self, enabled: bool) { self.enabled = enabled; }
+    fn priority(&self) -> i32 { 25 }
+
+    fn execute(
+        &mut self,
+        ctx: &RenderContext,
+        cmd: &mut CommandBuffer,
+        input: &Texture,
+        output: &Texture,
+        depth: &Texture,
+        frame_data: &FrameData,
+    ) {
+        cmd.bind_compute_pipeline(&self.pipeline);
+        cmd.bind_texture(0, input);
+        cmd.bind_storage_texture(1, output);
+
+        let params = PaniniParams {
+            distance: self.distance,
+            vertical_compression: self.vertical_compression,
+            fov: 90.0, // Would come from camera
+            screen_size: Vec2::new(frame_data.screen_size.x as f32, frame_data.screen_size.y as f32),
+        };
+        cmd.push_constants(&params);
+
+        cmd.dispatch_compute_2d(frame_data.screen_size.x, frame_data.screen_size.y);
+    }
+}
+
+struct PaniniParams {
+    distance: f32,
+    vertical_compression: f32,
+    fov: f32,
+    screen_size: Vec2<f32>,
+}
+
+/// Pixelation effect (for stylized rendering)
+struct PixelationEffect {
+    enabled: bool,
+    /// Pixel size
+    pixel_size: u32,
+    /// Color depth (bits per channel)
+    color_depth: u32,
+    pipeline: Pipeline,
+}
+
+impl PixelationEffect {
+    fn new(ctx: &RenderContext) -> Self {
+        Self {
+            enabled: false,
+            pixel_size: 4,
+            color_depth: 8,
+            pipeline: Pipeline::new_pixelation(ctx),
+        }
+    }
+}
+
+impl PostEffect for PixelationEffect {
+    fn name(&self) -> &str { "Pixelation" }
+    fn is_enabled(&self) -> bool { self.enabled }
+    fn set_enabled(&mut self, enabled: bool) { self.enabled = enabled; }
+    fn priority(&self) -> i32 { 550 }
+
+    fn execute(
+        &mut self,
+        ctx: &RenderContext,
+        cmd: &mut CommandBuffer,
+        input: &Texture,
+        output: &Texture,
+        depth: &Texture,
+        frame_data: &FrameData,
+    ) {
+        cmd.bind_compute_pipeline(&self.pipeline);
+        cmd.bind_texture(0, input);
+        cmd.bind_storage_texture(1, output);
+
+        let params = PixelationParams {
+            pixel_size: self.pixel_size,
+            color_levels: 1 << self.color_depth,
+            screen_size: Vec2::new(frame_data.screen_size.x as f32, frame_data.screen_size.y as f32),
+        };
+        cmd.push_constants(&params);
+
+        cmd.dispatch_compute_2d(frame_data.screen_size.x, frame_data.screen_size.y);
+    }
+}
+
+struct PixelationParams {
+    pixel_size: u32,
+    color_levels: u32,
+    screen_size: Vec2<f32>,
+}
+
+// =============================================================================
+// POST-PROCESSING PRESETS
+// =============================================================================
+
+/// Complete post-processing preset
+struct PostProcessingPreset {
+    name: String,
+    dof_config: Option<DoFConfig>,
+    lens_flare_config: Option<LensFlareConfig>,
+    lens_distortion_config: Option<LensDistortionConfig>,
+    fog_config: Option<FogConfig>,
+    sharpening_config: Option<SharpeningConfig>,
+    aa_technique: Option<AATechnique>,
+    fsr_config: Option<FSRConfig>,
+}
+
+impl PostProcessingPreset {
+    fn cinematic() -> Self {
+        Self {
+            name: "Cinematic".to_string(),
+            dof_config: Some(DoFConfig::cinematic()),
+            lens_flare_config: Some(LensFlareConfig::default()),
+            lens_distortion_config: Some(LensDistortionConfig::default()),
+            fog_config: None,
+            sharpening_config: Some(SharpeningConfig::default()),
+            aa_technique: Some(AATechnique::TAA),
+            fsr_config: None,
+        }
+    }
+
+    fn performance() -> Self {
+        Self {
+            name: "Performance".to_string(),
+            dof_config: None,
+            lens_flare_config: None,
+            lens_distortion_config: None,
+            fog_config: None,
+            sharpening_config: Some(SharpeningConfig::default()),
+            aa_technique: Some(AATechnique::FXAA),
+            fsr_config: Some(FSRConfig {
+                sharpness: 0.2,
+                quality: FSRQuality::Performance,
+            }),
+        }
+    }
+
+    fn quality() -> Self {
+        Self {
+            name: "Quality".to_string(),
+            dof_config: Some(DoFConfig::default()),
+            lens_flare_config: Some(LensFlareConfig::default()),
+            lens_distortion_config: Some(LensDistortionConfig::default()),
+            fog_config: Some(FogConfig::default()),
+            sharpening_config: Some(SharpeningConfig {
+                technique: SharpeningTechnique::RCAS,
+                amount: 0.3,
+                threshold: 0.03,
+                radius: 1.0,
+            }),
+            aa_technique: Some(AATechnique::TAA),
+            fsr_config: None,
+        }
+    }
+}
+
+// =============================================================================
+// TESTS
+// =============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_coc_calculation() {
+        let dof = DepthOfFieldEffect::new(
+            &mock_ctx(),
+            1920, 1080,
+            DoFConfig::default(),
+        );
+
+        // At focus distance, CoC should be ~0
+        let coc_at_focus = dof.calculate_coc(dof.config.focus_distance);
+        assert!(coc_at_focus.abs() < 0.001);
+
+        // Far from focus, CoC should be larger
+        let coc_far = dof.calculate_coc(dof.config.focus_distance * 10.0);
+        assert!(coc_far.abs() > 0.0);
+    }
+
+    #[test]
+    fn test_lens_distortion_center() {
+        let distortion = LensDistortionEffect::new(&mock_ctx(), LensDistortionConfig::default());
+
+        // Center should not be distorted
+        let center = Vec2::new(0.5, 0.5);
+        let distorted = distortion.distort_uv(center);
+
+        assert!((distorted.x - 0.5).abs() < 0.001);
+        assert!((distorted.y - 0.5).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_fog_factor() {
+        let fog = FogEffect::new(&mock_ctx(), FogConfig::default());
+
+        // Close distance = no fog
+        let fog_close = fog.calculate_fog_factor(1.0, 0.0);
+        assert!(fog_close < 0.1);
+
+        // Far distance = more fog
+        let fog_far = fog.calculate_fog_factor(100.0, 0.0);
+        assert!(fog_far > fog_close);
+    }
+
+    #[test]
+    fn test_fxaa_quality_thresholds() {
+        assert!(FXAAQuality::Low.edge_threshold() > FXAAQuality::Ultra.edge_threshold());
+    }
+
+    #[test]
+    fn test_fsr_quality_scales() {
+        assert!(FSRQuality::Quality.scale_factor() > FSRQuality::UltraPerformance.scale_factor());
+    }
+
+    #[test]
+    fn test_effect_priority() {
+        let dof = DepthOfFieldEffect::new(&mock_ctx(), 1920, 1080, DoFConfig::default());
+        let fxaa = FXAAEffect::new(&mock_ctx(), FXAAQuality::High);
+
+        // DoF should come before AA
+        assert!(dof.priority() < fxaa.priority());
+    }
+
+    #[test]
+    fn test_rgb_to_luma() {
+        // White should have luma close to 1
+        let white_luma = FXAAEffect::rgb_to_luma(Vec3::new(1.0, 1.0, 1.0));
+        assert!((white_luma - 1.0).abs() < 0.01);
+
+        // Black should have luma 0
+        let black_luma = FXAAEffect::rgb_to_luma(Vec3::new(0.0, 0.0, 0.0));
+        assert!(black_luma < 0.01);
+    }
+
+    fn mock_ctx() -> RenderContext {
+        // Mock render context for tests
+        RenderContext::mock()
+    }
+}

@@ -1,0 +1,55 @@
+// Split a string into lines by scanning for \n characters.
+// Returns count; stores line starts and lengths in parallel vecs.
+//
+// Usage:
+//   include!("stdlib/lines.bld");
+//   let lr = lr_new(input);
+//   let i = 0;
+//   while i < lr.count {
+//       let line = lr_get(&lr, i);
+//       // process line
+//       i = i + 1;
+//   }
+
+struct LineReader {
+    source: String,
+    starts: Vec<i32>,
+    lens: Vec<i32>,
+    count: i32,
+}
+
+fn lr_new(input: String) -> LineReader {
+    let mut lr = LineReader {
+        source: input,
+        starts: vec![],
+        lens: vec![],
+        count: 0,
+    };
+    // Scan for \n, recording start/length of each line
+    let slen = lr.source.len();
+    let mut pos = 0;
+    let mut line_start = 0;
+    while pos < slen {
+        let ch = lr.source.char_at(pos);
+        if ch == "\n" {
+            vec_push(lr.starts, line_start);
+            vec_push(lr.lens, pos - line_start);
+            lr.count = lr.count + 1;
+            line_start = pos + 1;
+        }
+        pos = pos + 1;
+    }
+    // Last line (no trailing newline)
+    if line_start < slen {
+        vec_push(lr.starts, line_start);
+        vec_push(lr.lens, slen - line_start);
+        lr.count = lr.count + 1;
+    }
+    return lr;
+}
+
+fn lr_get(lr: &LineReader, index: i32) -> String {
+    let s = vec_get(lr.starts, index);
+    let l = vec_get(lr.lens, index);
+    return lr.source.substring(s, l);
+}

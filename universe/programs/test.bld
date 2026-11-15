@@ -1,0 +1,161 @@
+// =============================================================================
+// qtest — Evaluate conditional expressions (test/[ clone) written in BuildLang
+// =============================================================================
+// Usage:
+//   qtest -f file.txt       -> exit 0 if file exists
+//   qtest -d dir/            -> exit 0 if directory exists
+//   qtest -z ""              -> exit 0 if string is empty
+//   qtest -n "hello"         -> exit 0 if string is non-empty
+//   qtest 5 -eq 5            -> exit 0 (numeric equal)
+//   qtest 5 -ne 3            -> exit 0 (numeric not equal)
+//   qtest 5 -gt 3            -> exit 0 (numeric greater than)
+//   qtest 5 -ge 3            -> exit 0 (numeric greater or equal)
+//   qtest 3 -lt 5            -> exit 0 (numeric less than)
+//   qtest 3 -le 5            -> exit 0 (numeric less or equal)
+//   qtest "a" = "a"          -> exit 0 (string equal)
+//   qtest "a" != "b"         -> exit 0 (string not equal)
+//   qtest --help             -> usage
+//
+// Exit codes: 0 = true, 1 = false, 2 = usage error.
+// =============================================================================
+
+fn print_help() ~ Console {
+    println!("qtest -- evaluate conditional expressions");
+    println!("");
+    println!("Usage:");
+    println!("  qtest EXPRESSION");
+    println!("");
+    println!("File tests:");
+    println!("  -f FILE   true if FILE exists (regular file)");
+    println!("  -d DIR    true if DIR exists and is a directory");
+    println!("  -e PATH   true if PATH exists (file or directory)");
+    println!("");
+    println!("String tests:");
+    println!("  -z STRING   true if STRING is empty");
+    println!("  -n STRING   true if STRING is non-empty");
+    println!("  S1 = S2     true if strings are equal");
+    println!("  S1 != S2    true if strings are not equal");
+    println!("");
+    println!("Numeric tests:");
+    println!("  N1 -eq N2   true if N1 equals N2");
+    println!("  N1 -ne N2   true if N1 not equals N2");
+    println!("  N1 -gt N2   true if N1 greater than N2");
+    println!("  N1 -ge N2   true if N1 greater or equal N2");
+    println!("  N1 -lt N2   true if N1 less than N2");
+    println!("  N1 -le N2   true if N1 less or equal N2");
+    println!("");
+    println!("Exit status: 0 if true, 1 if false, 2 on error.");
+}
+
+fn main() ~ Console + Environment + FileSystem + Process {
+    let nargs = args_count();
+
+    if nargs < 2 {
+        // No expression — false
+        process_exit(1);
+    }
+
+    let first = args_get(1);
+    if first == "--help" || first == "-h" {
+        print_help();
+        process_exit(0);
+    }
+
+    // ---- Unary tests (2 args: qtest OP OPERAND) ----
+    if nargs == 3 {
+        let op = args_get(1);
+        let operand = args_get(2);
+
+        if op == "-f" {
+            // File exists (and is not a directory)
+            let exists = file_exists(operand);
+            let dir = is_dir(operand);
+            if exists && !dir {
+                process_exit(0);
+            }
+            process_exit(1);
+        }
+
+        if op == "-d" {
+            let dir = is_dir(operand);
+            if dir { process_exit(0); }
+            process_exit(1);
+        }
+
+        if op == "-e" {
+            // Exists (file or directory)
+            let exists = file_exists(operand);
+            let dir = is_dir(operand);
+            if exists || dir {
+                process_exit(0);
+            }
+            process_exit(1);
+        }
+
+        if op == "-z" {
+            if operand.len() == 0 { process_exit(0); }
+            process_exit(1);
+        }
+
+        if op == "-n" {
+            if operand.len() > 0 { process_exit(0); }
+            process_exit(1);
+        }
+
+        println!("qtest: unknown unary operator: {}", op);
+        process_exit(2);
+    }
+
+    // ---- Binary tests (4 args: qtest LEFT OP RIGHT) ----
+    if nargs == 4 {
+        let left = args_get(1);
+        let op = args_get(2);
+        let right = args_get(3);
+
+        // String comparisons
+        if op == "=" {
+            if left == right { process_exit(0); }
+            process_exit(1);
+        }
+        if op == "!=" {
+            if left != right { process_exit(0); }
+            process_exit(1);
+        }
+
+        // Numeric comparisons
+        let lval = left.parse_int();
+        let rval = right.parse_int();
+
+        if op == "-eq" {
+            if lval == rval { process_exit(0); }
+            process_exit(1);
+        }
+        if op == "-ne" {
+            if lval != rval { process_exit(0); }
+            process_exit(1);
+        }
+        if op == "-gt" {
+            if lval > rval { process_exit(0); }
+            process_exit(1);
+        }
+        if op == "-ge" {
+            if lval >= rval { process_exit(0); }
+            process_exit(1);
+        }
+        if op == "-lt" {
+            if lval < rval { process_exit(0); }
+            process_exit(1);
+        }
+        if op == "-le" {
+            if lval <= rval { process_exit(0); }
+            process_exit(1);
+        }
+
+        println!("qtest: unknown binary operator: {}", op);
+        process_exit(2);
+    }
+
+    // Unrecognized number of arguments
+    println!("qtest: too many arguments");
+    process_exit(2);
+}

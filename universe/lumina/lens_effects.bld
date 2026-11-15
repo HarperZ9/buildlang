@@ -1,0 +1,1259 @@
+// =============================================================================
+// Lumina Lens Effects - Optical Phenomena Simulation
+// =============================================================================
+// Comprehensive lens effects including flares, ghosts, chromatic aberration,
+// barrel/pincushion distortion, and anamorphic effects.
+// Target: Film production, game engines, virtual cinematography
+// =============================================================================
+
+module lumina::lens_effects;
+
+use core::math::{Vec2, Vec3, Vec4, Mat4, lerp, saturate, smoothstep};
+use core::simd::{f32x4, f32x8};
+use lumina::{RenderTarget, Texture2D, TextureFormat, SamplerState};
+
+// =============================================================================
+// Configuration
+// =============================================================================
+
+/// Lens flare type
+@[repr(u8)]
+enum FlareType {
+    Circular,       // Standard circular flare
+    Hexagonal,      // 6-blade aperture
+    Octagonal,      // 8-blade aperture
+    Anamorphic,     // Horizontal streak
+    Star,           // Cross pattern
+    Custom,         // User-defined
+}
+
+/// Distortion type
+@[repr(u8)]
+enum DistortionType {
+    None,
+    Barrel,         // Pincushion outward
+    Pincushion,     // Barrel inward
+    Mustache,       // Complex distortion
+    Anamorphic,     // Horizontal squeeze
+}
+
+/// Lens effects configuration
+struct LensConfig {
+    // Chromatic aberration
+    ca_enabled: bool,
+    ca_intensity: f32,          // Aberration strength
+    ca_samples: u32,            // Quality samples
+    ca_radial: bool,            // Radial vs uniform
+
+    // Distortion
+    distortion_enabled: bool,
+    distortion_type: DistortionType,
+    distortion_k1: f32,         // Primary distortion coefficient
+    distortion_k2: f32,         // Secondary distortion coefficient
+    distortion_k3: f32,         // Tertiary coefficient
+
+    // Lens flare
+    flare_enabled: bool,
+    flare_type: FlareType,
+    flare_intensity: f32,
+    flare_threshold: f32,
+    flare_ghost_count: u32,
+    flare_dispersion: f32,
+    flare_halo_width: f32,
+
+    // Anamorphic
+    anamorphic_enabled: bool,
+    anamorphic_ratio: f32,      // Squeeze ratio (1.33, 2.0)
+    anamorphic_flare: bool,     // Horizontal streaks
+
+    // Vignette
+    vignette_enabled: bool,
+    vignette_intensity: f32,
+    vignette_falloff: f32,
+    vignette_optical: bool,     // Physical vignette simulation
+
+    // Lens dirt
+    dirt_enabled: bool,
+    dirt_intensity: f32,
+}
+
+impl LensConfig {
+    /// Default configuration
+    pub fn default() -> Self {
+        Self {
+            ca_enabled: true,
+            ca_intensity: 0.5,
+            ca_samples: 8,
+            ca_radial: true,
+            distortion_enabled: false,
+            distortion_type: DistortionType::None,
+            distortion_k1: 0.0,
+            distortion_k2: 0.0,
+            distortion_k3: 0.0,
+            flare_enabled: true,
+            flare_type: FlareType::Hexagonal,
+            flare_intensity: 1.0,
+            flare_threshold: 0.9,
+            flare_ghost_count: 5,
+            flare_dispersion: 0.5,
+            flare_halo_width: 0.5,
+            anamorphic_enabled: false,
+            anamorphic_ratio: 2.0,
+            anamorphic_flare: true,
+            vignette_enabled: true,
+            vignette_intensity: 0.5,
+            vignette_falloff: 2.0,
+            vignette_optical: true,
+            dirt_enabled: false,
+            dirt_intensity: 0.5,
+        }
+    }
+
+    /// Cinematic anamorphic preset
+    pub fn anamorphic_cinema() -> Self {
+        Self {
+            ca_enabled: true,
+            ca_intensity: 0.3,
+            ca_samples: 8,
+            ca_radial: true,
+            distortion_enabled: true,
+            distortion_type: DistortionType::Barrel,
+            distortion_k1: -0.1,
+            distortion_k2: 0.0,
+            distortion_k3: 0.0,
+            flare_enabled: true,
+            flare_type: FlareType::Anamorphic,
+            flare_intensity: 1.5,
+            flare_threshold: 0.85,
+            flare_ghost_count: 7,
+            flare_dispersion: 0.6,
+            flare_halo_width: 0.8,
+            anamorphic_enabled: true,
+            anamorphic_ratio: 2.0,
+            anamorphic_flare: true,
+            vignette_enabled: true,
+            vignette_intensity: 0.6,
+            vignette_falloff: 1.8,
+            vignette_optical: true,
+            dirt_enabled: true,
+            dirt_intensity: 0.3,
+        }
+    }
+
+    /// Clean modern lens
+    pub fn modern() -> Self {
+        Self {
+            ca_enabled: true,
+            ca_intensity: 0.2,
+            ca_samples: 8,
+            ca_radial: true,
+            distortion_enabled: true,
+            distortion_type: DistortionType::Barrel,
+            distortion_k1: -0.05,
+            distortion_k2: 0.0,
+            distortion_k3: 0.0,
+            flare_enabled: false,
+            flare_type: FlareType::Circular,
+            flare_intensity: 0.5,
+            flare_threshold: 0.95,
+            flare_ghost_count: 3,
+            flare_dispersion: 0.3,
+            flare_halo_width: 0.3,
+            anamorphic_enabled: false,
+            anamorphic_ratio: 1.0,
+            anamorphic_flare: false,
+            vignette_enabled: true,
+            vignette_intensity: 0.3,
+            vignette_falloff: 2.5,
+            vignette_optical: true,
+            dirt_enabled: false,
+            dirt_intensity: 0.0,
+        }
+    }
+}
+
+// =============================================================================
+// Chromatic Aberration
+// =============================================================================
+
+/// Chromatic aberration processor
+struct ChromaticAberration {
+    intensity: f32,
+    samples: u32,
+    radial: bool,
+}
+
+impl ChromaticAberration {
+    pub fn new(config: &LensConfig) -> Self {
+        Self {
+            intensity: config.ca_intensity,
+            samples: config.ca_samples,
+            radial: config.ca_radial,
+        }
+    }
+
+    /// Calculate CA offset for a wavelength
+    fn offset_for_wavelength(&self, uv: Vec2, wavelength: f32) -> Vec2 {
+        if self.radial {
+            // Radial CA - stronger at edges
+            let center = Vec2::new(0.5, 0.5);
+            let to_edge = uv - center;
+            let dist = to_edge.length();
+
+            // Different wavelengths focus at different distances
+            // Red < Green < Blue (typical longitudinal CA)
+            let offset_scale = (wavelength - 0.5) * self.intensity * dist * 0.1;
+            to_edge * offset_scale
+        } else {
+            // Uniform CA
+            let offset_scale = (wavelength - 0.5) * self.intensity * 0.02;
+            Vec2::new(offset_scale, offset_scale * 0.5)
+        }
+    }
+
+    /// Apply chromatic aberration
+    pub fn apply(&self, color: &[Vec4], width: u32, height: u32) -> Vec<Vec4> {
+        let mut result = vec![Vec4::ZERO; color.len()];
+
+        for y in 0..height {
+            for x in 0..width {
+                let idx = (y * width + x) as usize;
+                let uv = Vec2::new(
+                    (x as f32 + 0.5) / width as f32,
+                    (y as f32 + 0.5) / height as f32
+                );
+
+                // Sample at different wavelengths
+                let red_offset = self.offset_for_wavelength(uv, 0.0);
+                let green_offset = self.offset_for_wavelength(uv, 0.5);
+                let blue_offset = self.offset_for_wavelength(uv, 1.0);
+
+                let red_uv = uv + red_offset;
+                let green_uv = uv + green_offset;
+                let blue_uv = uv + blue_offset;
+
+                // Sample each channel
+                let r = Self::sample_channel(color, red_uv, 0, width, height);
+                let g = Self::sample_channel(color, green_uv, 1, width, height);
+                let b = Self::sample_channel(color, blue_uv, 2, width, height);
+
+                result[idx] = Vec4::new(r, g, b, color[idx].w);
+            }
+        }
+
+        result
+    }
+
+    /// Sample a single color channel with bilinear interpolation
+    fn sample_channel(color: &[Vec4], uv: Vec2, channel: usize, width: u32, height: u32) -> f32 {
+        let x = uv.x * width as f32 - 0.5;
+        let y = uv.y * height as f32 - 0.5;
+
+        let x0 = x.floor() as i32;
+        let y0 = y.floor() as i32;
+
+        let fx = x - x0 as f32;
+        let fy = y - y0 as f32;
+
+        let sample = |sx: i32, sy: i32| -> f32 {
+            let cx = sx.max(0).min(width as i32 - 1) as u32;
+            let cy = sy.max(0).min(height as i32 - 1) as u32;
+            let pixel = color[(cy * width + cx) as usize];
+            match channel {
+                0 => pixel.x,
+                1 => pixel.y,
+                2 => pixel.z,
+                _ => pixel.w,
+            }
+        };
+
+        let c00 = sample(x0, y0);
+        let c10 = sample(x0 + 1, y0);
+        let c01 = sample(x0, y0 + 1);
+        let c11 = sample(x0 + 1, y0 + 1);
+
+        let top = c00 * (1.0 - fx) + c10 * fx;
+        let bottom = c01 * (1.0 - fx) + c11 * fx;
+
+        top * (1.0 - fy) + bottom * fy
+    }
+}
+
+// =============================================================================
+// Lens Distortion
+// =============================================================================
+
+/// Lens distortion processor
+struct LensDistortion {
+    distortion_type: DistortionType,
+    k1: f32,
+    k2: f32,
+    k3: f32,
+}
+
+impl LensDistortion {
+    pub fn new(config: &LensConfig) -> Self {
+        Self {
+            distortion_type: config.distortion_type,
+            k1: config.distortion_k1,
+            k2: config.distortion_k2,
+            k3: config.distortion_k3,
+        }
+    }
+
+    /// Calculate distorted UV
+    fn distort_uv(&self, uv: Vec2) -> Vec2 {
+        let centered = uv - Vec2::new(0.5, 0.5);
+        let r2 = centered.x * centered.x + centered.y * centered.y;
+        let r4 = r2 * r2;
+        let r6 = r4 * r2;
+
+        let factor = match self.distortion_type {
+            DistortionType::None => 1.0,
+            DistortionType::Barrel => {
+                1.0 + self.k1 * r2 + self.k2 * r4 + self.k3 * r6
+            },
+            DistortionType::Pincushion => {
+                1.0 / (1.0 + self.k1 * r2 + self.k2 * r4 + self.k3 * r6)
+            },
+            DistortionType::Mustache => {
+                // Combination that creates mustache pattern
+                1.0 + self.k1 * r2 - self.k2 * r4 + self.k3 * r6
+            },
+            DistortionType::Anamorphic => {
+                // Only affects horizontal
+                return Vec2::new(
+                    0.5 + centered.x * (1.0 + self.k1 * r2),
+                    uv.y
+                );
+            },
+        };
+
+        Vec2::new(0.5, 0.5) + centered * factor
+    }
+
+    /// Calculate undistorted UV (inverse mapping)
+    fn undistort_uv(&self, uv: Vec2) -> Vec2 {
+        // Newton-Raphson iteration for inverse
+        let mut undistorted = uv;
+
+        for _ in 0..5 {
+            let distorted = self.distort_uv(undistorted);
+            let error = uv - distorted;
+            undistorted = undistorted + error * 0.5;
+        }
+
+        undistorted
+    }
+
+    /// Apply distortion
+    pub fn apply(&self, color: &[Vec4], width: u32, height: u32) -> Vec<Vec4> {
+        if matches!(self.distortion_type, DistortionType::None) {
+            return color.to_vec();
+        }
+
+        let mut result = vec![Vec4::ZERO; color.len()];
+
+        for y in 0..height {
+            for x in 0..width {
+                let idx = (y * width + x) as usize;
+                let uv = Vec2::new(
+                    (x as f32 + 0.5) / width as f32,
+                    (y as f32 + 0.5) / height as f32
+                );
+
+                // For forward mapping, we sample from undistorted position
+                let source_uv = self.undistort_uv(uv);
+
+                if source_uv.x < 0.0 || source_uv.x > 1.0 ||
+                   source_uv.y < 0.0 || source_uv.y > 1.0 {
+                    result[idx] = Vec4::ZERO;
+                } else {
+                    result[idx] = Self::sample_bilinear(color, source_uv, width, height);
+                }
+            }
+        }
+
+        result
+    }
+
+    /// Bilinear sampling
+    fn sample_bilinear(color: &[Vec4], uv: Vec2, width: u32, height: u32) -> Vec4 {
+        let x = uv.x * width as f32 - 0.5;
+        let y = uv.y * height as f32 - 0.5;
+
+        let x0 = x.floor() as i32;
+        let y0 = y.floor() as i32;
+
+        let fx = x - x0 as f32;
+        let fy = y - y0 as f32;
+
+        let sample = |sx: i32, sy: i32| -> Vec4 {
+            let cx = sx.max(0).min(width as i32 - 1) as u32;
+            let cy = sy.max(0).min(height as i32 - 1) as u32;
+            color[(cy * width + cx) as usize]
+        };
+
+        let c00 = sample(x0, y0);
+        let c10 = sample(x0 + 1, y0);
+        let c01 = sample(x0, y0 + 1);
+        let c11 = sample(x0 + 1, y0 + 1);
+
+        let top = c00 * (1.0 - fx) + c10 * fx;
+        let bottom = c01 * (1.0 - fx) + c11 * fx;
+
+        top * (1.0 - fy) + bottom * fy
+    }
+}
+
+// =============================================================================
+// Lens Flare
+// =============================================================================
+
+/// Lens ghost element
+struct LensGhost {
+    position: f32,      // Position along flare axis (-1 to 1)
+    size: f32,          // Relative size
+    intensity: f32,     // Brightness
+    color: Vec3,        // Tint color
+}
+
+/// Lens flare processor
+struct LensFlare {
+    config: LensConfig,
+    ghosts: Vec<LensGhost>,
+}
+
+impl LensFlare {
+    pub fn new(config: LensConfig) -> Self {
+        let mut flare = Self {
+            ghosts: Vec::new(),
+            config,
+        };
+        flare.generate_ghosts();
+        flare
+    }
+
+    /// Generate ghost elements
+    fn generate_ghosts(&mut self) {
+        self.ghosts.clear();
+
+        for i in 0..self.config.flare_ghost_count {
+            let t = i as f32 / (self.config.flare_ghost_count - 1).max(1) as f32;
+
+            // Vary position, size, and intensity
+            let position = lerp(-0.8, 0.8, t);
+            let size = lerp(0.1, 0.4, (t * 3.14159).sin().abs());
+            let intensity = lerp(0.3, 1.0, 1.0 - (t - 0.5).abs() * 2.0);
+
+            // Chromatic dispersion
+            let hue = t * 360.0 * self.config.flare_dispersion;
+            let color = Self::hue_to_rgb(hue);
+
+            self.ghosts.push(LensGhost {
+                position,
+                size,
+                intensity,
+                color,
+            });
+        }
+    }
+
+    /// Convert hue to RGB
+    fn hue_to_rgb(hue: f32) -> Vec3 {
+        let h = (hue % 360.0) / 60.0;
+        let x = 1.0 - (h % 2.0 - 1.0).abs();
+
+        match h as u32 {
+            0 => Vec3::new(1.0, x, 0.0),
+            1 => Vec3::new(x, 1.0, 0.0),
+            2 => Vec3::new(0.0, 1.0, x),
+            3 => Vec3::new(0.0, x, 1.0),
+            4 => Vec3::new(x, 0.0, 1.0),
+            _ => Vec3::new(1.0, 0.0, x),
+        }
+    }
+
+    /// Find bright spots in image
+    fn find_light_sources(&self, color: &[Vec4], width: u32, height: u32) -> Vec<(Vec2, f32)> {
+        let mut sources = Vec::new();
+        let threshold = self.config.flare_threshold;
+
+        // Downsample and find local maxima
+        let step = 8u32;
+        for y in (0..height).step_by(step as usize) {
+            for x in (0..width).step_by(step as usize) {
+                let idx = (y * width + x) as usize;
+                let pixel = color[idx];
+                let lum = pixel.x * 0.2126 + pixel.y * 0.7152 + pixel.z * 0.0722;
+
+                if lum > threshold {
+                    let uv = Vec2::new(
+                        (x as f32 + 0.5) / width as f32,
+                        (y as f32 + 0.5) / height as f32
+                    );
+                    sources.push((uv, lum - threshold));
+                }
+            }
+        }
+
+        sources
+    }
+
+    /// Calculate ghost intensity at position
+    fn ghost_intensity(&self, uv: Vec2, ghost: &LensGhost, source: Vec2, source_intensity: f32) -> Vec3 {
+        let center = Vec2::new(0.5, 0.5);
+        let to_center = center - source;
+
+        // Ghost position along axis
+        let ghost_pos = center + to_center * ghost.position;
+
+        // Distance from ghost center
+        let dist = (uv - ghost_pos).length();
+        let size = ghost.size * 0.1;
+
+        if dist > size {
+            return Vec3::ZERO;
+        }
+
+        // Soft falloff
+        let falloff = 1.0 - (dist / size).powf(2.0);
+        ghost.color * falloff * ghost.intensity * source_intensity * self.config.flare_intensity
+    }
+
+    /// Calculate anamorphic streak
+    fn anamorphic_streak(&self, uv: Vec2, source: Vec2, source_intensity: f32) -> Vec3 {
+        // Horizontal distance from source
+        let dy = (uv.y - source.y).abs();
+
+        if dy > 0.02 {
+            return Vec3::ZERO;
+        }
+
+        // Streak extends horizontally
+        let dx = (uv.x - source.x).abs();
+        let streak_length = source_intensity * 0.5;
+
+        if dx > streak_length {
+            return Vec3::ZERO;
+        }
+
+        let intensity = (1.0 - dx / streak_length) * (1.0 - dy / 0.02);
+
+        // Chromatic dispersion in streak
+        let t = (uv.x - source.x + streak_length) / (streak_length * 2.0);
+        let hue = t * 60.0 - 30.0; // Slight color shift
+
+        Self::hue_to_rgb(hue + 180.0) * intensity * source_intensity * self.config.flare_intensity
+    }
+
+    /// Calculate starburst pattern
+    fn starburst(&self, uv: Vec2, source: Vec2, source_intensity: f32) -> Vec3 {
+        let to_source = uv - source;
+        let dist = to_source.length();
+
+        if dist > 0.3 || dist < 0.01 {
+            return Vec3::ZERO;
+        }
+
+        // Angular pattern
+        let angle = to_source.y.atan2(to_source.x);
+        let spokes = 6.0;
+        let spike = ((angle * spokes).sin().abs()).powf(8.0);
+
+        let radial_falloff = 1.0 - dist / 0.3;
+        Vec3::ONE * spike * radial_falloff * source_intensity * self.config.flare_intensity * 0.5
+    }
+
+    /// Calculate halo
+    fn halo(&self, uv: Vec2, source: Vec2, source_intensity: f32) -> Vec3 {
+        let dist = (uv - source).length();
+        let radius = self.config.flare_halo_width * 0.1;
+        let thickness = radius * 0.2;
+
+        let ring_dist = (dist - radius).abs();
+        if ring_dist > thickness {
+            return Vec3::ZERO;
+        }
+
+        let intensity = 1.0 - ring_dist / thickness;
+
+        // Chromatic ring
+        let hue = dist / radius * 60.0;
+        Self::hue_to_rgb(hue) * intensity * source_intensity * self.config.flare_intensity * 0.3
+    }
+
+    /// Apply lens flare
+    pub fn apply(&self, color: &[Vec4], width: u32, height: u32) -> Vec<Vec4> {
+        if !self.config.flare_enabled {
+            return color.to_vec();
+        }
+
+        let sources = self.find_light_sources(color, width, height);
+        if sources.is_empty() {
+            return color.to_vec();
+        }
+
+        let mut result = color.to_vec();
+
+        for y in 0..height {
+            for x in 0..width {
+                let idx = (y * width + x) as usize;
+                let uv = Vec2::new(
+                    (x as f32 + 0.5) / width as f32,
+                    (y as f32 + 0.5) / height as f32
+                );
+
+                let mut flare_contrib = Vec3::ZERO;
+
+                for (source_pos, source_intensity) in &sources {
+                    // Ghosts
+                    for ghost in &self.ghosts {
+                        flare_contrib = flare_contrib +
+                            self.ghost_intensity(uv, ghost, *source_pos, *source_intensity);
+                    }
+
+                    // Halo
+                    flare_contrib = flare_contrib +
+                        self.halo(uv, *source_pos, *source_intensity);
+
+                    // Type-specific effects
+                    match self.config.flare_type {
+                        FlareType::Anamorphic => {
+                            flare_contrib = flare_contrib +
+                                self.anamorphic_streak(uv, *source_pos, *source_intensity);
+                        },
+                        FlareType::Star => {
+                            flare_contrib = flare_contrib +
+                                self.starburst(uv, *source_pos, *source_intensity);
+                        },
+                        _ => {},
+                    }
+                }
+
+                result[idx] = Vec4::new(
+                    result[idx].x + flare_contrib.x,
+                    result[idx].y + flare_contrib.y,
+                    result[idx].z + flare_contrib.z,
+                    result[idx].w
+                );
+            }
+        }
+
+        result
+    }
+}
+
+// =============================================================================
+// Optical Vignette
+// =============================================================================
+
+/// Physical vignette simulation
+struct OpticalVignette {
+    intensity: f32,
+    falloff: f32,
+    optical: bool,
+}
+
+impl OpticalVignette {
+    pub fn new(config: &LensConfig) -> Self {
+        Self {
+            intensity: config.vignette_intensity,
+            falloff: config.vignette_falloff,
+            optical: config.vignette_optical,
+        }
+    }
+
+    /// Calculate vignette factor
+    fn calculate(&self, uv: Vec2) -> f32 {
+        let center = Vec2::new(0.5, 0.5);
+        let dist = (uv - center).length() * 2.0; // 0 at center, 1 at corner
+
+        if self.optical {
+            // Physical vignette based on cosine fourth law
+            let cos_theta = 1.0 / (1.0 + dist * dist).sqrt();
+            let natural_vignette = cos_theta.powf(4.0);
+
+            // Mechanical vignette (aperture clipping)
+            let mechanical = smoothstep(1.2, 0.8, dist);
+
+            lerp(1.0, natural_vignette * mechanical, self.intensity)
+        } else {
+            // Artistic vignette
+            let vignette = 1.0 - dist.powf(self.falloff);
+            lerp(1.0, vignette, self.intensity)
+        }
+    }
+
+    /// Apply vignette
+    pub fn apply(&self, color: &[Vec4], width: u32, height: u32) -> Vec<Vec4> {
+        let mut result = vec![Vec4::ZERO; color.len()];
+
+        for y in 0..height {
+            for x in 0..width {
+                let idx = (y * width + x) as usize;
+                let uv = Vec2::new(
+                    (x as f32 + 0.5) / width as f32,
+                    (y as f32 + 0.5) / height as f32
+                );
+
+                let vignette = self.calculate(uv);
+                result[idx] = color[idx] * vignette;
+                result[idx].w = color[idx].w; // Preserve alpha
+            }
+        }
+
+        result
+    }
+}
+
+// =============================================================================
+// Lens Dirt
+// =============================================================================
+
+/// Lens dirt/dust overlay
+struct LensDirt {
+    intensity: f32,
+    pattern: Vec<f32>,  // Dirt pattern (procedural)
+    pattern_size: u32,
+}
+
+impl LensDirt {
+    pub fn new(config: &LensConfig, pattern_size: u32) -> Self {
+        let mut dirt = Self {
+            intensity: config.dirt_intensity,
+            pattern: Vec::new(),
+            pattern_size,
+        };
+        dirt.generate_pattern();
+        dirt
+    }
+
+    /// Generate procedural dirt pattern
+    fn generate_pattern(&mut self) {
+        let size = self.pattern_size;
+        self.pattern = vec![0.0f32; (size * size) as usize];
+
+        // Generate noise-based dirt pattern
+        for y in 0..size {
+            for x in 0..size {
+                let idx = (y * size + x) as usize;
+
+                // Multiple octaves of noise
+                let mut dirt = 0.0;
+                let mut amplitude = 1.0;
+                let mut frequency = 1.0;
+
+                for _ in 0..4 {
+                    let nx = x as f32 * frequency / size as f32;
+                    let ny = y as f32 * frequency / size as f32;
+                    dirt += Self::value_noise(nx, ny) * amplitude;
+                    amplitude *= 0.5;
+                    frequency *= 2.0;
+                }
+
+                // Add some spots
+                let spots = Self::spot_noise(x, y, size);
+
+                self.pattern[idx] = (dirt * 0.5 + 0.5 + spots).min(1.0);
+            }
+        }
+    }
+
+    /// Simple value noise
+    fn value_noise(x: f32, y: f32) -> f32 {
+        let ix = x.floor() as i32;
+        let iy = y.floor() as i32;
+        let fx = x - ix as f32;
+        let fy = y - iy as f32;
+
+        let hash = |x: i32, y: i32| -> f32 {
+            let n = x + y * 57;
+            let n = (n << 13) ^ n;
+            (1.0 - ((n * (n * n * 15731 + 789221) + 1376312589) & 0x7fffffff) as f32 / 1073741824.0)
+        };
+
+        let v00 = hash(ix, iy);
+        let v10 = hash(ix + 1, iy);
+        let v01 = hash(ix, iy + 1);
+        let v11 = hash(ix + 1, iy + 1);
+
+        let sx = fx * fx * (3.0 - 2.0 * fx);
+        let sy = fy * fy * (3.0 - 2.0 * fy);
+
+        lerp(lerp(v00, v10, sx), lerp(v01, v11, sx), sy)
+    }
+
+    /// Random spots
+    fn spot_noise(x: u32, y: u32, size: u32) -> f32 {
+        // Check distance to random spot centers
+        let spot_count = 20;
+        let mut spot_value = 0.0f32;
+
+        for i in 0..spot_count {
+            let hash = (i * 1234567) as f32;
+            let spot_x = (hash * 0.618033).fract() * size as f32;
+            let spot_y = (hash * 0.381966).fract() * size as f32;
+            let spot_size = 5.0 + (hash * 0.123456).fract() * 20.0;
+
+            let dx = x as f32 - spot_x;
+            let dy = y as f32 - spot_y;
+            let dist = (dx * dx + dy * dy).sqrt();
+
+            if dist < spot_size {
+                spot_value += (1.0 - dist / spot_size) * 0.3;
+            }
+        }
+
+        spot_value.min(0.5)
+    }
+
+    /// Sample dirt pattern
+    fn sample(&self, uv: Vec2) -> f32 {
+        let x = (uv.x * self.pattern_size as f32) as u32;
+        let y = (uv.y * self.pattern_size as f32) as u32;
+        let x = x.min(self.pattern_size - 1);
+        let y = y.min(self.pattern_size - 1);
+
+        self.pattern[(y * self.pattern_size + x) as usize]
+    }
+
+    /// Apply lens dirt (enhances bright areas with dirt pattern)
+    pub fn apply(&self, color: &[Vec4], width: u32, height: u32) -> Vec<Vec4> {
+        let mut result = vec![Vec4::ZERO; color.len()];
+
+        for y in 0..height {
+            for x in 0..width {
+                let idx = (y * width + x) as usize;
+                let uv = Vec2::new(
+                    (x as f32 + 0.5) / width as f32,
+                    (y as f32 + 0.5) / height as f32
+                );
+
+                let pixel = color[idx];
+                let lum = pixel.x * 0.2126 + pixel.y * 0.7152 + pixel.z * 0.0722;
+
+                // Dirt is more visible in bright areas
+                let dirt = self.sample(uv);
+                let dirt_contrib = dirt * lum * self.intensity;
+
+                result[idx] = Vec4::new(
+                    pixel.x + dirt_contrib,
+                    pixel.y + dirt_contrib * 0.9,
+                    pixel.z + dirt_contrib * 0.8,
+                    pixel.w
+                );
+            }
+        }
+
+        result
+    }
+}
+
+// =============================================================================
+// Lens Effects Renderer
+// =============================================================================
+
+/// Main lens effects renderer
+struct LensEffectsRenderer {
+    config: LensConfig,
+    chromatic_aberration: ChromaticAberration,
+    distortion: LensDistortion,
+    flare: LensFlare,
+    vignette: OpticalVignette,
+    dirt: Option<LensDirt>,
+}
+
+impl LensEffectsRenderer {
+    /// Create new lens effects renderer
+    pub fn new(config: LensConfig) -> Self {
+        let dirt = if config.dirt_enabled {
+            Some(LensDirt::new(&config, 256))
+        } else {
+            None
+        };
+
+        Self {
+            chromatic_aberration: ChromaticAberration::new(&config),
+            distortion: LensDistortion::new(&config),
+            flare: LensFlare::new(config.clone()),
+            vignette: OpticalVignette::new(&config),
+            dirt,
+            config,
+        }
+    }
+
+    /// Apply all lens effects
+    pub fn apply(&self, color: &[Vec4], width: u32, height: u32) -> Vec<Vec4> {
+        let mut result = color.to_vec();
+
+        // 1. Distortion (first to avoid artifacts)
+        if self.config.distortion_enabled {
+            result = self.distortion.apply(&result, width, height);
+        }
+
+        // 2. Chromatic aberration
+        if self.config.ca_enabled {
+            result = self.chromatic_aberration.apply(&result, width, height);
+        }
+
+        // 3. Lens flare
+        if self.config.flare_enabled {
+            result = self.flare.apply(&result, width, height);
+        }
+
+        // 4. Lens dirt
+        if self.config.dirt_enabled {
+            if let Some(ref dirt) = self.dirt {
+                result = dirt.apply(&result, width, height);
+            }
+        }
+
+        // 5. Vignette (last)
+        if self.config.vignette_enabled {
+            result = self.vignette.apply(&result, width, height);
+        }
+
+        result
+    }
+}
+
+// =============================================================================
+// WGSL Shaders
+// =============================================================================
+
+mod shaders {
+    /// Chromatic aberration shader
+    pub const CHROMATIC_ABERRATION: &str = r#"
+struct CaParams {
+    intensity: f32,
+    radial: u32,
+    samples: u32,
+    _pad: u32,
+}
+
+@group(0) @binding(0) var<uniform> params: CaParams;
+@group(0) @binding(1) var input_tex: texture_2d<f32>;
+@group(0) @binding(2) var output_tex: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(3) var linear_sampler: sampler;
+
+fn offset_for_wavelength(uv: vec2<f32>, wavelength: f32) -> vec2<f32> {
+    if (params.radial == 1u) {
+        let center = vec2<f32>(0.5);
+        let to_edge = uv - center;
+        let dist = length(to_edge);
+        let offset_scale = (wavelength - 0.5) * params.intensity * dist * 0.1;
+        return to_edge * offset_scale;
+    } else {
+        let offset_scale = (wavelength - 0.5) * params.intensity * 0.02;
+        return vec2<f32>(offset_scale, offset_scale * 0.5);
+    }
+}
+
+@compute @workgroup_size(8, 8)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+    let dims = textureDimensions(input_tex);
+    if (id.x >= dims.x || id.y >= dims.y) {
+        return;
+    }
+
+    let uv = (vec2<f32>(id.xy) + 0.5) / vec2<f32>(dims);
+
+    let red_offset = offset_for_wavelength(uv, 0.0);
+    let green_offset = offset_for_wavelength(uv, 0.5);
+    let blue_offset = offset_for_wavelength(uv, 1.0);
+
+    let r = textureSampleLevel(input_tex, linear_sampler, uv + red_offset, 0.0).r;
+    let g = textureSampleLevel(input_tex, linear_sampler, uv + green_offset, 0.0).g;
+    let b = textureSampleLevel(input_tex, linear_sampler, uv + blue_offset, 0.0).b;
+    let a = textureSampleLevel(input_tex, linear_sampler, uv, 0.0).a;
+
+    textureStore(output_tex, id.xy, vec4<f32>(r, g, b, a));
+}
+"#;
+
+    /// Lens distortion shader
+    pub const LENS_DISTORTION: &str = r#"
+struct DistortionParams {
+    k1: f32,
+    k2: f32,
+    k3: f32,
+    distortion_type: u32,
+}
+
+@group(0) @binding(0) var<uniform> params: DistortionParams;
+@group(0) @binding(1) var input_tex: texture_2d<f32>;
+@group(0) @binding(2) var output_tex: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(3) var linear_sampler: sampler;
+
+fn distort_uv(uv: vec2<f32>) -> vec2<f32> {
+    let centered = uv - vec2<f32>(0.5);
+    let r2 = dot(centered, centered);
+    let r4 = r2 * r2;
+    let r6 = r4 * r2;
+
+    var factor = 1.0;
+
+    switch params.distortion_type {
+        case 1u: { // Barrel
+            factor = 1.0 + params.k1 * r2 + params.k2 * r4 + params.k3 * r6;
+        }
+        case 2u: { // Pincushion
+            factor = 1.0 / (1.0 + params.k1 * r2 + params.k2 * r4 + params.k3 * r6);
+        }
+        case 3u: { // Mustache
+            factor = 1.0 + params.k1 * r2 - params.k2 * r4 + params.k3 * r6;
+        }
+        default: {}
+    }
+
+    return vec2<f32>(0.5) + centered * factor;
+}
+
+@compute @workgroup_size(8, 8)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+    let dims = textureDimensions(input_tex);
+    if (id.x >= dims.x || id.y >= dims.y) {
+        return;
+    }
+
+    let uv = (vec2<f32>(id.xy) + 0.5) / vec2<f32>(dims);
+
+    // Inverse mapping
+    var source_uv = uv;
+    for (var i = 0; i < 5; i++) {
+        let distorted = distort_uv(source_uv);
+        let error = uv - distorted;
+        source_uv = source_uv + error * 0.5;
+    }
+
+    if (source_uv.x < 0.0 || source_uv.x > 1.0 || source_uv.y < 0.0 || source_uv.y > 1.0) {
+        textureStore(output_tex, id.xy, vec4<f32>(0.0, 0.0, 0.0, 1.0));
+    } else {
+        let color = textureSampleLevel(input_tex, linear_sampler, source_uv, 0.0);
+        textureStore(output_tex, id.xy, color);
+    }
+}
+"#;
+
+    /// Lens flare shader
+    pub const LENS_FLARE: &str = r#"
+struct FlareParams {
+    threshold: f32,
+    intensity: f32,
+    ghost_count: u32,
+    dispersion: f32,
+    halo_width: f32,
+    flare_type: u32,
+    _pad0: f32,
+    _pad1: f32,
+}
+
+struct LightSource {
+    position: vec2<f32>,
+    intensity: f32,
+    _pad: f32,
+}
+
+@group(0) @binding(0) var<uniform> params: FlareParams;
+@group(0) @binding(1) var<storage, read> sources: array<LightSource>;
+@group(0) @binding(2) var input_tex: texture_2d<f32>;
+@group(0) @binding(3) var output_tex: texture_storage_2d<rgba16float, write>;
+
+fn hue_to_rgb(hue: f32) -> vec3<f32> {
+    let h = (hue % 360.0) / 60.0;
+    let x = 1.0 - abs((h % 2.0) - 1.0);
+
+    switch u32(h) {
+        case 0u: { return vec3<f32>(1.0, x, 0.0); }
+        case 1u: { return vec3<f32>(x, 1.0, 0.0); }
+        case 2u: { return vec3<f32>(0.0, 1.0, x); }
+        case 3u: { return vec3<f32>(0.0, x, 1.0); }
+        case 4u: { return vec3<f32>(x, 0.0, 1.0); }
+        default: { return vec3<f32>(1.0, 0.0, x); }
+    }
+}
+
+fn ghost_contrib(uv: vec2<f32>, source: vec2<f32>, ghost_idx: u32, source_intensity: f32) -> vec3<f32> {
+    let center = vec2<f32>(0.5);
+    let to_center = center - source;
+
+    let t = f32(ghost_idx) / f32(params.ghost_count - 1u);
+    let ghost_pos_factor = mix(-0.8, 0.8, t);
+    let ghost_pos = center + to_center * ghost_pos_factor;
+
+    let ghost_size = mix(0.1, 0.4, abs(sin(t * 3.14159))) * 0.1;
+    let dist = length(uv - ghost_pos);
+
+    if (dist > ghost_size) {
+        return vec3<f32>(0.0);
+    }
+
+    let falloff = 1.0 - pow(dist / ghost_size, 2.0);
+    let ghost_intensity = mix(0.3, 1.0, 1.0 - abs(t - 0.5) * 2.0);
+    let hue = t * 360.0 * params.dispersion;
+
+    return hue_to_rgb(hue) * falloff * ghost_intensity * source_intensity * params.intensity;
+}
+
+@compute @workgroup_size(8, 8)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+    let dims = textureDimensions(input_tex);
+    if (id.x >= dims.x || id.y >= dims.y) {
+        return;
+    }
+
+    let uv = (vec2<f32>(id.xy) + 0.5) / vec2<f32>(dims);
+    var color = textureLoad(input_tex, id.xy, 0);
+
+    var flare = vec3<f32>(0.0);
+    let source_count = arrayLength(&sources);
+
+    for (var s = 0u; s < source_count; s++) {
+        let source = sources[s];
+
+        for (var g = 0u; g < params.ghost_count; g++) {
+            flare += ghost_contrib(uv, source.position, g, source.intensity);
+        }
+
+        // Halo
+        let dist = length(uv - source.position);
+        let radius = params.halo_width * 0.1;
+        let ring_dist = abs(dist - radius);
+        let thickness = radius * 0.2;
+
+        if (ring_dist < thickness) {
+            let ring = 1.0 - ring_dist / thickness;
+            let hue = dist / radius * 60.0;
+            flare += hue_to_rgb(hue) * ring * source.intensity * params.intensity * 0.3;
+        }
+    }
+
+    textureStore(output_tex, id.xy, vec4<f32>(color.rgb + flare, color.a));
+}
+"#;
+}
+
+// =============================================================================
+// Unit Tests
+// =============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_config_presets() {
+        let default = LensConfig::default();
+        assert!(default.ca_enabled);
+        assert!(default.flare_enabled);
+
+        let anamorphic = LensConfig::anamorphic_cinema();
+        assert!(anamorphic.anamorphic_enabled);
+        assert_eq!(anamorphic.anamorphic_ratio, 2.0);
+    }
+
+    #[test]
+    fn test_chromatic_aberration_radial() {
+        let mut config = LensConfig::default();
+        config.ca_intensity = 1.0;
+        config.ca_radial = true;
+
+        let ca = ChromaticAberration::new(&config);
+
+        // At center, offset should be minimal
+        let center_offset = ca.offset_for_wavelength(Vec2::new(0.5, 0.5), 0.0);
+        assert!(center_offset.length() < 0.01);
+
+        // At edge, offset should be larger
+        let edge_offset = ca.offset_for_wavelength(Vec2::new(0.0, 0.0), 0.0);
+        assert!(edge_offset.length() > center_offset.length());
+    }
+
+    #[test]
+    fn test_distortion_identity() {
+        let mut config = LensConfig::default();
+        config.distortion_type = DistortionType::None;
+
+        let distortion = LensDistortion::new(&config);
+        let uv = Vec2::new(0.3, 0.7);
+        let distorted = distortion.distort_uv(uv);
+
+        assert!((distorted.x - uv.x).abs() < 0.001);
+        assert!((distorted.y - uv.y).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_distortion_barrel() {
+        let mut config = LensConfig::default();
+        config.distortion_type = DistortionType::Barrel;
+        config.distortion_k1 = -0.2;
+
+        let distortion = LensDistortion::new(&config);
+
+        // Center should be unchanged
+        let center = distortion.distort_uv(Vec2::new(0.5, 0.5));
+        assert!((center.x - 0.5).abs() < 0.001);
+        assert!((center.y - 0.5).abs() < 0.001);
+
+        // Edge should be pushed outward (barrel = negative k1)
+        let edge = distortion.distort_uv(Vec2::new(0.0, 0.5));
+        assert!(edge.x < 0.0); // Pushed further left
+    }
+
+    #[test]
+    fn test_vignette_center() {
+        let config = LensConfig::default();
+        let vignette = OpticalVignette::new(&config);
+
+        // Center should have full brightness
+        let center_factor = vignette.calculate(Vec2::new(0.5, 0.5));
+        assert!((center_factor - 1.0).abs() < 0.1);
+
+        // Corner should be darker
+        let corner_factor = vignette.calculate(Vec2::new(0.0, 0.0));
+        assert!(corner_factor < center_factor);
+    }
+
+    #[test]
+    fn test_lens_flare_ghosts() {
+        let config = LensConfig::default();
+        let flare = LensFlare::new(config);
+
+        assert_eq!(flare.ghosts.len() as u32, flare.config.flare_ghost_count);
+    }
+
+    #[test]
+    fn test_hue_to_rgb() {
+        // Red at 0 degrees
+        let red = LensFlare::hue_to_rgb(0.0);
+        assert!((red.x - 1.0).abs() < 0.01);
+        assert!(red.y < 0.1);
+        assert!(red.z < 0.1);
+
+        // Green at 120 degrees
+        let green = LensFlare::hue_to_rgb(120.0);
+        assert!(green.x < 0.1);
+        assert!((green.y - 1.0).abs() < 0.01);
+        assert!(green.z < 0.1);
+
+        // Blue at 240 degrees
+        let blue = LensFlare::hue_to_rgb(240.0);
+        assert!(blue.x < 0.1);
+        assert!(blue.y < 0.1);
+        assert!((blue.z - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_lens_dirt_pattern() {
+        let config = LensConfig::default();
+        let dirt = LensDirt::new(&config, 64);
+
+        assert_eq!(dirt.pattern.len(), 64 * 64);
+
+        // Pattern should have variety
+        let min = dirt.pattern.iter().cloned().fold(f32::MAX, f32::min);
+        let max = dirt.pattern.iter().cloned().fold(f32::MIN, f32::max);
+        assert!(max - min > 0.3);
+    }
+}

@@ -1,0 +1,843 @@
+// =============================================================================
+// qmd — Markdown-to-HTML converter written in BuildLang
+// =============================================================================
+// Converts Markdown files to valid HTML. Supports headings, paragraphs, code
+// blocks, blockquotes, ordered/unordered lists, horizontal rules, bold, italic,
+// inline code, links, images, line breaks, and HTML passthrough.
+//
+// Usage:
+//   qmd README.md              convert to HTML, output to stdout
+//   qmd README.md -o out.html  write to file
+//   cat doc.md | qmd           read from stdin
+//   qmd -f README.md           fragment mode (no HTML wrapper)
+//   qmd --help                 usage
+// =============================================================================
+
+// --- State struct: all conversion state in one flat struct ---
+struct MD {
+    // Input
+    input: String,
+    ilen: i32,
+
+    // Lines (start/len pairs into input)
+    ln_starts: Vec<i32>,
+    ln_lens: Vec<i32>,
+    ln_n: i32,
+
+    // Output buffer
+    out: String,
+
+    // Block state
+    in_code_block: bool,
+    in_list: bool,
+    list_type: i32,
+    in_paragraph: bool,
+}
+
+fn md_new(input: String) -> MD {
+    MD {
+        input: input,
+        ilen: input.len(),
+        ln_starts: vec![],
+        ln_lens: vec![],
+        ln_n: 0,
+        out: "",
+        in_code_block: false,
+        in_list: false,
+        list_type: 0,
+        in_paragraph: false,
+    }
+}
+
+// --- Split input into lines by scanning for \n ---
+fn find_lines(md: &mut MD) {
+    let mut pos: i64 = 0;
+    let mut line_start: i64 = 0;
+    let mut go = true;
+    while go {
+        if pos >= md.ilen {
+            let ln = pos - line_start;
+            // Always push the last line even if empty
+            let mut final_ln = ln;
+            if final_ln > 0 {
+                let last_pos = line_start + final_ln - 1;
+                let lc = md.input.char_at(last_pos);
+                if lc == "\r" { final_ln = final_ln - 1; }
+            }
+            vec_push(md.ln_starts, line_start);
+            vec_push(md.ln_lens, final_ln);
+            md.ln_n = md.ln_n + 1;
+            go = false;
+        } else {
+            let c = md.input.char_at(pos);
+            if c == "\n" {
+                let mut ln = pos - line_start;
+                if ln > 0 {
+                    let last_pos = line_start + ln - 1;
+                    let lc = md.input.char_at(last_pos);
+                    if lc == "\r" { ln = ln - 1; }
+                }
+                vec_push(md.ln_starts, line_start);
+                vec_push(md.ln_lens, ln);
+                md.ln_n = md.ln_n + 1;
+                line_start = pos + 1;
+                pos = pos + 1;
+            } else {
+                pos = pos + 1;
+            }
+        }
+    }
+}
+
+fn get_line(md: &MD, idx: i32) -> String {
+    let st = vec_get(md.ln_starts, idx);
+    let ln = vec_get(md.ln_lens, idx);
+    md.input.substring(st, ln)
+}
+
+// --- HTML escaping ---
+fn html_escape(text: String) -> String {
+    let slen = text.len();
+    if slen == 0 { return ""; }
+    let mut out = "";
+    let mut i: i64 = 0;
+    while i < slen {
+        let c = text.char_at(i);
+        if c == "&" { out = out + "&amp;"; }
+        else if c == "<" { out = out + "&lt;"; }
+        else if c == ">" { out = out + "&gt;"; }
+        else if c == "\"" { out = out + "&quot;"; }
+        else { out = out + c; }
+        i = i + 1;
+    }
+    out
+}
+
+// --- Inline formatting processor ---
+// Scans left-to-right, handling: images, links, bold, italic, inline code,
+// and trailing double-space line breaks.
+fn process_inline(text: String) -> String {
+    let slen = text.len();
+    if slen == 0 { return ""; }
+    let mut out = "";
+    let mut i: i64 = 0;
+
+    let mut go = true;
+    while go {
+        if i >= slen {
+            go = false;
+        } else {
+            let c = text.char_at(i);
+
+            // --- Backtick inline code ---
+            if c == "`" {
+                i = i + 1;
+                let mut code = "";
+                let mut cgo = true;
+                while cgo {
+                    if i >= slen { cgo = false; }
+                    else {
+                        let cc = text.char_at(i);
+                        if cc == "`" { cgo = false; i = i + 1; }
+                        else { code = code + cc; i = i + 1; }
+                    }
+                }
+                out = out + "<code>" + html_escape(code) + "</code>";
+            }
+            // --- Image: ![alt](src) ---
+            else if c == "!" && i + 1 < slen {
+                let next = text.char_at(i + 1);
+                if next == "[" {
+                    i = i + 2;
+                    let mut alt = "";
+                    let mut ago = true;
+                    while ago {
+                        if i >= slen { ago = false; }
+                        else {
+                            let ac = text.char_at(i);
+                            if ac == "]" { ago = false; i = i + 1; }
+                            else { alt = alt + ac; i = i + 1; }
+                        }
+                    }
+                    // Expect (
+                    let mut src = "";
+                    if i < slen {
+                        let paren = text.char_at(i);
+                        if paren == "(" {
+                            i = i + 1;
+                            let mut sgo = true;
+                            while sgo {
+                                if i >= slen { sgo = false; }
+                                else {
+                                    let sc = text.char_at(i);
+                                    if sc == ")" { sgo = false; i = i + 1; }
+                                    else { src = src + sc; i = i + 1; }
+                                }
+                            }
+                        }
+                    }
+                    out = out + "<img src=\"" + html_escape(src) + "\" alt=\"" + html_escape(alt) + "\">";
+                } else {
+                    out = out + html_escape(c);
+                    i = i + 1;
+                }
+            }
+            // --- Link: [text](url) ---
+            else if c == "[" {
+                let save_i = i;
+                i = i + 1;
+                let mut link_text = "";
+                let mut found_bracket = false;
+                let mut lgo = true;
+                while lgo {
+                    if i >= slen { lgo = false; }
+                    else {
+                        let lc = text.char_at(i);
+                        if lc == "]" { found_bracket = true; lgo = false; i = i + 1; }
+                        else { link_text = link_text + lc; i = i + 1; }
+                    }
+                }
+                // Check for ( immediately after ]
+                let mut found_link = false;
+                let mut url = "";
+                if found_bracket && i < slen {
+                    let paren = text.char_at(i);
+                    if paren == "(" {
+                        i = i + 1;
+                        let mut ugo = true;
+                        while ugo {
+                            if i >= slen { ugo = false; }
+                            else {
+                                let uc = text.char_at(i);
+                                if uc == ")" { ugo = false; i = i + 1; }
+                                else { url = url + uc; i = i + 1; }
+                            }
+                        }
+                        found_link = true;
+                    }
+                }
+                if found_link {
+                    // Recursively process inline formatting in link text
+                    let processed_text = process_inline(link_text);
+                    out = out + "<a href=\"" + html_escape(url) + "\">" + processed_text + "</a>";
+                } else {
+                    // Not a valid link, output the [ literally
+                    out = out + html_escape("[");
+                    // Reset to after the [
+                    i = save_i + 1;
+                }
+            }
+            // --- Bold/Italic with ** or * ---
+            else if c == "*" {
+                if i + 1 < slen {
+                    let next = text.char_at(i + 1);
+                    if next == "*" {
+                        // Bold: **text**
+                        i = i + 2;
+                        let mut bold_text = "";
+                        let mut bfound = false;
+                        let mut bgo = true;
+                        while bgo {
+                            if i >= slen { bgo = false; }
+                            else if i + 1 < slen {
+                                let b1 = text.char_at(i);
+                                let b2 = text.char_at(i + 1);
+                                if b1 == "*" && b2 == "*" {
+                                    bfound = true;
+                                    bgo = false;
+                                    i = i + 2;
+                                } else {
+                                    bold_text = bold_text + b1;
+                                    i = i + 1;
+                                }
+                            } else {
+                                let b1 = text.char_at(i);
+                                bold_text = bold_text + b1;
+                                i = i + 1;
+                            }
+                        }
+                        if bfound {
+                            let inner = process_inline(bold_text);
+                            out = out + "<strong>" + inner + "</strong>";
+                        } else {
+                            out = out + "**" + process_inline(bold_text);
+                        }
+                    } else {
+                        // Italic: *text*
+                        i = i + 1;
+                        let mut ital_text = "";
+                        let mut ifound = false;
+                        let mut igo = true;
+                        while igo {
+                            if i >= slen { igo = false; }
+                            else {
+                                let ic = text.char_at(i);
+                                if ic == "*" {
+                                    ifound = true;
+                                    igo = false;
+                                    i = i + 1;
+                                } else {
+                                    ital_text = ital_text + ic;
+                                    i = i + 1;
+                                }
+                            }
+                        }
+                        if ifound {
+                            let inner = process_inline(ital_text);
+                            out = out + "<em>" + inner + "</em>";
+                        } else {
+                            out = out + "*" + process_inline(ital_text);
+                        }
+                    }
+                } else {
+                    out = out + html_escape(c);
+                    i = i + 1;
+                }
+            }
+            // --- Bold/Italic with __ or _ ---
+            else if c == "_" {
+                if i + 1 < slen {
+                    let next = text.char_at(i + 1);
+                    if next == "_" {
+                        // Bold: __text__
+                        i = i + 2;
+                        let mut bold_text = "";
+                        let mut bfound = false;
+                        let mut bgo = true;
+                        while bgo {
+                            if i >= slen { bgo = false; }
+                            else if i + 1 < slen {
+                                let b1 = text.char_at(i);
+                                let b2 = text.char_at(i + 1);
+                                if b1 == "_" && b2 == "_" {
+                                    bfound = true;
+                                    bgo = false;
+                                    i = i + 2;
+                                } else {
+                                    bold_text = bold_text + b1;
+                                    i = i + 1;
+                                }
+                            } else {
+                                let b1 = text.char_at(i);
+                                bold_text = bold_text + b1;
+                                i = i + 1;
+                            }
+                        }
+                        if bfound {
+                            let inner = process_inline(bold_text);
+                            out = out + "<strong>" + inner + "</strong>";
+                        } else {
+                            out = out + "__" + process_inline(bold_text);
+                        }
+                    } else {
+                        // Italic: _text_
+                        i = i + 1;
+                        let mut ital_text = "";
+                        let mut ifound = false;
+                        let mut igo = true;
+                        while igo {
+                            if i >= slen { igo = false; }
+                            else {
+                                let ic = text.char_at(i);
+                                if ic == "_" {
+                                    ifound = true;
+                                    igo = false;
+                                    i = i + 1;
+                                } else {
+                                    ital_text = ital_text + ic;
+                                    i = i + 1;
+                                }
+                            }
+                        }
+                        if ifound {
+                            let inner = process_inline(ital_text);
+                            out = out + "<em>" + inner + "</em>";
+                        } else {
+                            out = out + "_" + process_inline(ital_text);
+                        }
+                    }
+                } else {
+                    out = out + html_escape(c);
+                    i = i + 1;
+                }
+            }
+            // --- Regular character ---
+            else {
+                out = out + html_escape(c);
+                i = i + 1;
+            }
+        }
+    }
+
+    // Check for trailing line break (two spaces before end of original text)
+    if slen >= 2 {
+        let s1 = text.char_at(slen - 1);
+        let s2 = text.char_at(slen - 2);
+        if s1 == " " && s2 == " " {
+            out = out + "<br>";
+        }
+    }
+
+    out
+}
+
+// --- Check if a line is blank ---
+fn is_blank(line: String) -> bool {
+    let slen = line.len();
+    if slen == 0 { return true; }
+    let mut i: i64 = 0;
+    let mut all_ws = true;
+    while i < slen {
+        let c = line.char_at(i);
+        if c != " " && c != "\t" && c != "\r" {
+            all_ws = false;
+        }
+        i = i + 1;
+    }
+    all_ws
+}
+
+// --- Count leading # characters ---
+fn heading_level(line: String) -> i32 {
+    let slen = line.len();
+    if slen == 0 { return 0; }
+    let mut count: i32 = 0;
+    let mut go = true;
+    while go {
+        if count >= slen { go = false; }
+        else if count >= 6 { go = false; }
+        else {
+            let c = line.char_at(count);
+            if c == "#" { count = count + 1; }
+            else { go = false; }
+        }
+    }
+    // Must be followed by a space (or be the entire line for edge case)
+    if count > 0 && count < slen {
+        let next = line.char_at(count);
+        if next != " " { return 0; }
+    }
+    if count > 6 { return 0; }
+    count
+}
+
+// --- Check if line starts a code fence (```) ---
+fn is_code_fence(line: String) -> bool {
+    let slen = line.len();
+    if slen < 3 { return false; }
+    let c0 = line.char_at(0);
+    let c1 = line.char_at(1);
+    let c2 = line.char_at(2);
+    c0 == "`" && c1 == "`" && c2 == "`"
+}
+
+// --- Check if line is a horizontal rule (--- or ***) ---
+// Scans the original line, skipping leading/trailing whitespace manually.
+fn is_hr(line: String) -> bool {
+    let slen = line.len();
+    if slen < 3 { return false; }
+    // Find first non-space character
+    let mut start: i64 = 0;
+    let mut sgo = true;
+    while sgo {
+        if start >= slen { sgo = false; }
+        else {
+            let sc = line.char_at(start);
+            if sc == " " || sc == "\t" { start = start + 1; }
+            else { sgo = false; }
+        }
+    }
+    if start >= slen { return false; }
+    // Find last non-space character
+    let mut end: i64 = slen - 1;
+    let mut ego = true;
+    while ego {
+        if end < start { ego = false; }
+        else {
+            let ec = line.char_at(end);
+            if ec == " " || ec == "\t" { end = end - 1; }
+            else { ego = false; }
+        }
+    }
+    let tlen = end - start + 1;
+    if tlen < 3 { return false; }
+    let c0 = line.char_at(start);
+    if c0 != "-" && c0 != "*" { return false; }
+    let mut i: i64 = start;
+    let mut all_same = true;
+    while i <= end {
+        let c = line.char_at(i);
+        if c != c0 && c != " " { all_same = false; }
+        i = i + 1;
+    }
+    all_same
+}
+
+// --- Check if line is an unordered list item (- or *) ---
+fn is_ul_item(line: String) -> bool {
+    let slen = line.len();
+    if slen < 2 { return false; }
+    let c0 = line.char_at(0);
+    let c1 = line.char_at(1);
+    if c0 == "-" && c1 == " " { return true; }
+    if c0 == "*" && c1 == " " { return true; }
+    false
+}
+
+// --- Check if line is an ordered list item (1. ) ---
+fn is_ol_item(line: String) -> bool {
+    let slen = line.len();
+    if slen < 3 { return false; }
+    // Find digits then ". "
+    let mut i: i64 = 0;
+    let mut has_digit = false;
+    let mut dgo = true;
+    while dgo {
+        if i >= slen { dgo = false; }
+        else {
+            let c = line.char_at(i);
+            if c == "0" || c == "1" || c == "2" || c == "3" || c == "4" ||
+               c == "5" || c == "6" || c == "7" || c == "8" || c == "9" {
+                has_digit = true;
+                i = i + 1;
+            } else {
+                dgo = false;
+            }
+        }
+    }
+    if !has_digit { return false; }
+    if i + 1 >= slen { return false; }
+    let dot = line.char_at(i);
+    let space = line.char_at(i + 1);
+    dot == "." && space == " "
+}
+
+// --- Extract content from an unordered list item ---
+fn ul_content(line: String) -> String {
+    let slen = line.len();
+    if slen <= 2 { return ""; }
+    line.substring(2, slen - 2)
+}
+
+// --- Extract content from an ordered list item ---
+fn ol_content(line: String) -> String {
+    let slen = line.len();
+    // Find the ". " and return everything after
+    let mut i: i64 = 0;
+    let mut dgo = true;
+    while dgo {
+        if i >= slen { dgo = false; }
+        else {
+            let c = line.char_at(i);
+            if c == "0" || c == "1" || c == "2" || c == "3" || c == "4" ||
+               c == "5" || c == "6" || c == "7" || c == "8" || c == "9" {
+                i = i + 1;
+            } else {
+                dgo = false;
+            }
+        }
+    }
+    // Skip ". "
+    i = i + 2;
+    if i >= slen { return ""; }
+    line.substring(i, slen - i)
+}
+
+// --- Check if line is a blockquote ---
+fn is_blockquote(line: String) -> bool {
+    let slen = line.len();
+    if slen < 1 { return false; }
+    let c0 = line.char_at(0);
+    c0 == ">"
+}
+
+// --- Extract blockquote content ---
+fn bq_content(line: String) -> String {
+    let slen = line.len();
+    if slen <= 1 { return ""; }
+    let c1 = line.char_at(1);
+    if c1 == " " {
+        if slen <= 2 { return ""; }
+        return line.substring(2, slen - 2);
+    }
+    line.substring(1, slen - 1)
+}
+
+// --- Check if line starts with < (HTML passthrough) ---
+fn is_html_line(line: String) -> bool {
+    let slen = line.len();
+    if slen < 1 { return false; }
+    let c0 = line.char_at(0);
+    c0 == "<"
+}
+
+// --- Close any open paragraph ---
+fn close_paragraph(md: &mut MD) {
+    if md.in_paragraph {
+        md.out = md.out + "</p>\n";
+        md.in_paragraph = false;
+    }
+}
+
+// --- Close any open list ---
+fn close_list(md: &mut MD) {
+    if md.in_list {
+        if md.list_type == 0 {
+            md.out = md.out + "</ul>\n";
+        } else {
+            md.out = md.out + "</ol>\n";
+        }
+        md.in_list = false;
+    }
+}
+
+// --- Main conversion function ---
+fn convert(md: &mut MD) {
+    find_lines(md);
+
+    let mut i: i32 = 0;
+    let mut go = true;
+    while go {
+        if i >= md.ln_n {
+            go = false;
+        } else {
+            let line = get_line(md, i);
+
+            // === Code block handling ===
+            if md.in_code_block {
+                if is_code_fence(line) {
+                    md.out = md.out + "</code></pre>\n";
+                    md.in_code_block = false;
+                } else {
+                    md.out = md.out + html_escape(line) + "\n";
+                }
+                i = i + 1;
+            }
+            // === Code fence start ===
+            else if is_code_fence(line) {
+                close_paragraph(md);
+                close_list(md);
+                md.in_code_block = true;
+                // Extract language hint (if any, after ```)
+                let llen = line.len();
+                let lang = line.substring(3, llen - 3);
+                if lang.len() > 0 {
+                    md.out = md.out + "<pre><code class=\"language-" + html_escape(lang) + "\">";
+                } else {
+                    md.out = md.out + "<pre><code>";
+                }
+                i = i + 1;
+            }
+            // === Blank line ===
+            else if is_blank(line) {
+                close_paragraph(md);
+                close_list(md);
+                i = i + 1;
+            }
+            // === Horizontal rule (must check before ul_item since --- starts with -) ===
+            else if is_hr(line) {
+                close_paragraph(md);
+                close_list(md);
+                md.out = md.out + "<hr>\n";
+                i = i + 1;
+            }
+            // === Heading ===
+            else if heading_level(line) > 0 {
+                close_paragraph(md);
+                close_list(md);
+                let level = heading_level(line);
+                let llen = line.len();
+                // Extract heading text (after "# ")
+                let content = line.substring(level + 1, llen - level - 1);
+                let inline = process_inline(content);
+                if level == 1 { md.out = md.out + "<h1>" + inline + "</h1>\n"; }
+                else if level == 2 { md.out = md.out + "<h2>" + inline + "</h2>\n"; }
+                else if level == 3 { md.out = md.out + "<h3>" + inline + "</h3>\n"; }
+                else if level == 4 { md.out = md.out + "<h4>" + inline + "</h4>\n"; }
+                else if level == 5 { md.out = md.out + "<h5>" + inline + "</h5>\n"; }
+                else if level == 6 { md.out = md.out + "<h6>" + inline + "</h6>\n"; }
+                i = i + 1;
+            }
+            // === Blockquote ===
+            else if is_blockquote(line) {
+                close_paragraph(md);
+                close_list(md);
+                // Collect consecutive blockquote lines
+                let mut bq = "";
+                let mut bgo = true;
+                while bgo {
+                    if i >= md.ln_n { bgo = false; }
+                    else {
+                        let bl = get_line(md, i);
+                        if is_blockquote(bl) {
+                            let bc = bq_content(bl);
+                            if bq.len() > 0 { bq = bq + " "; }
+                            bq = bq + bc;
+                            i = i + 1;
+                        } else {
+                            bgo = false;
+                        }
+                    }
+                }
+                let inline = process_inline(bq);
+                md.out = md.out + "<blockquote><p>" + inline + "</p></blockquote>\n";
+            }
+            // === Unordered list ===
+            else if is_ul_item(line) {
+                close_paragraph(md);
+                // If already in an ordered list, close it
+                if md.in_list && md.list_type != 0 {
+                    close_list(md);
+                }
+                if !md.in_list {
+                    md.out = md.out + "<ul>\n";
+                    md.in_list = true;
+                    md.list_type = 0;
+                }
+                let content = ul_content(line);
+                let inline = process_inline(content);
+                md.out = md.out + "<li>" + inline + "</li>\n";
+                i = i + 1;
+            }
+            // === Ordered list ===
+            else if is_ol_item(line) {
+                close_paragraph(md);
+                // If already in an unordered list, close it
+                if md.in_list && md.list_type != 1 {
+                    close_list(md);
+                }
+                if !md.in_list {
+                    md.out = md.out + "<ol>\n";
+                    md.in_list = true;
+                    md.list_type = 1;
+                }
+                let content = ol_content(line);
+                let inline = process_inline(content);
+                md.out = md.out + "<li>" + inline + "</li>\n";
+                i = i + 1;
+            }
+            // === HTML passthrough ===
+            else if is_html_line(line) {
+                close_paragraph(md);
+                close_list(md);
+                md.out = md.out + line + "\n";
+                i = i + 1;
+            }
+            // === Paragraph text ===
+            else {
+                close_list(md);
+                if md.in_paragraph {
+                    // Continue paragraph: add space then this line's content
+                    md.out = md.out + "\n" + process_inline(line);
+                } else {
+                    md.out = md.out + "<p>" + process_inline(line);
+                    md.in_paragraph = true;
+                }
+                i = i + 1;
+            }
+        }
+    }
+
+    // Close any open blocks
+    if md.in_code_block {
+        md.out = md.out + "</code></pre>\n";
+    }
+    close_paragraph(md);
+    close_list(md);
+}
+
+// --- Wrap in HTML document ---
+fn wrap_html(body: String) -> String {
+    "<!DOCTYPE html>\n<html>\n<head><meta charset=\"utf-8\"><title>Document</title></head>\n<body>\n" + body + "</body>\n</html>\n"
+}
+
+// --- Help ---
+fn print_help() ~ Console {
+    println!("qmd - Markdown to HTML converter");
+    println!("");
+    println!("Usage:");
+    println!("  qmd [OPTIONS] [FILE]");
+    println!("  cat doc.md | qmd [OPTIONS]");
+    println!("");
+    println!("Options:");
+    println!("  -o FILE   Write output to FILE instead of stdout");
+    println!("  -f        Fragment mode (body content only, no HTML wrapper)");
+    println!("  --help    Show this help message");
+    println!("");
+    println!("Examples:");
+    println!("  qmd README.md");
+    println!("  qmd README.md -o output.html");
+    println!("  qmd -f README.md");
+    println!("  cat doc.md | qmd -f -o out.html");
+}
+
+// --- Main ---
+fn main() ~ Console + Environment + FileSystem + Process {
+    let nargs = args_count();
+
+    // Parse arguments
+    let mut fragment = false;
+    let mut out_file = "";
+    let mut has_out = false;
+    let mut in_file = "";
+    let mut has_in = false;
+    let mut expect_out = false;
+
+    let mut i: i64 = 1;
+    while i < nargs {
+        let arg = args_get(i);
+
+        if expect_out {
+            out_file = arg;
+            has_out = true;
+            expect_out = false;
+        } else if arg == "--help" || arg == "-h" {
+            print_help();
+            process_exit(0);
+        } else if arg == "-f" {
+            fragment = true;
+        } else if arg == "-o" {
+            expect_out = true;
+        } else if arg.starts_with("-") {
+            println!("qmd: unknown option '{}'", arg);
+            println!("Try 'qmd --help' for usage.");
+            process_exit(1);
+        } else {
+            in_file = arg;
+            has_in = true;
+        }
+
+        i = i + 1;
+    }
+
+    // Read input
+    let mut input = "";
+    if has_in {
+        if !file_exists(in_file) {
+            println!("qmd: file not found: {}", in_file);
+            process_exit(1);
+        }
+        input = read_file(in_file);
+    } else {
+        if stdin_is_pipe() {
+            input = read_all();
+        } else {
+            print_help();
+            process_exit(0);
+        }
+    }
+
+    // Convert
+    let mut md = md_new(input);
+    convert(&mut md);
+
+    // Build final output
+    let result = if fragment { md.out } else { wrap_html(md.out) };
+
+    // Output
+    if has_out {
+        write_file(out_file, result);
+    } else {
+        print!("{}", result);
+    }
+}

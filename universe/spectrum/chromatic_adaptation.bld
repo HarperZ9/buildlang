@@ -1,0 +1,1023 @@
+// ============================================================================
+// SPECTRUM CHROMATIC ADAPTATION TRANSFORMS
+// ============================================================================
+// Complete chromatic adaptation transform library supporting Bradford, Von Kries,
+// CAT02, CAT16, and proprietary Build adaptive transforms.
+// ============================================================================
+// Copyright © 2024-2025 Zain Dana Harper. All Rights Reserved.
+// ============================================================================
+
+module spectrum::chromatic_adaptation
+
+use spectrum::color_spaces::{XYZ, LinearRGB, ColorMatrix3x3}
+use std::math::{pow, exp, sqrt, abs, min, max}
+
+// ============================================================================
+// CHROMATIC ADAPTATION METHODS
+// ============================================================================
+
+/// Chromatic adaptation transform method
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdaptationMethod {
+    /// XYZ scaling (simplest, least accurate)
+    XYZScaling,
+    /// Von Kries (cone response domain)
+    VonKries,
+    /// Bradford (most common for ICC profiles)
+    Bradford,
+    /// Sharp (enhanced Bradford)
+    Sharp,
+    /// CMCCAT2000
+    CMCCAT2000,
+    /// CAT02 (CIECAM02)
+    CAT02,
+    /// CAT16 (CIECAM16 - improved CAT02)
+    CAT16,
+    /// Fairchild
+    Fairchild,
+    /// Bianco-Schettini
+    BiancoSchettini,
+}
+
+// ============================================================================
+// CONE RESPONSE MATRICES
+// ============================================================================
+
+/// Cone response matrices for different adaptation methods
+pub mod cone_matrices {
+    use super::ColorMatrix3x3;
+
+    /// XYZ scaling (identity in cone space)
+    pub const XYZ_SCALING: ColorMatrix3x3 = ColorMatrix3x3 {
+        m: [
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ],
+    };
+
+    /// Von Kries (Hunt-Pointer-Estevez)
+    pub const VON_KRIES: ColorMatrix3x3 = ColorMatrix3x3 {
+        m: [
+            [ 0.4002400,  0.7076000, -0.0808100],
+            [-0.2263000,  1.1653200,  0.0457000],
+            [ 0.0000000,  0.0000000,  0.9182200],
+        ],
+    };
+
+    /// Von Kries inverse
+    pub const VON_KRIES_INV: ColorMatrix3x3 = ColorMatrix3x3 {
+        m: [
+            [1.8599364, -1.1293816,  0.2198974],
+            [0.3611914,  0.6388125, -0.0000064],
+            [0.0000000,  0.0000000,  1.0890636],
+        ],
+    };
+
+    /// Bradford
+    pub const BRADFORD: ColorMatrix3x3 = ColorMatrix3x3 {
+        m: [
+            [ 0.8951000,  0.2664000, -0.1614000],
+            [-0.7502000,  1.7135000,  0.0367000],
+            [ 0.0389000, -0.0685000,  1.0296000],
+        ],
+    };
+
+    /// Bradford inverse
+    pub const BRADFORD_INV: ColorMatrix3x3 = ColorMatrix3x3 {
+        m: [
+            [ 0.9869929, -0.1470543,  0.1599627],
+            [ 0.4323053,  0.5183603,  0.0492912],
+            [-0.0085287,  0.0400428,  0.9684867],
+        ],
+    };
+
+    /// Sharp (enhanced Bradford)
+    pub const SHARP: ColorMatrix3x3 = ColorMatrix3x3 {
+        m: [
+            [ 1.2694000, -0.0988000, -0.1706000],
+            [-0.8364000,  1.8006000,  0.0357000],
+            [ 0.0297000, -0.0315000,  1.0018000],
+        ],
+    };
+
+    /// Sharp inverse
+    pub const SHARP_INV: ColorMatrix3x3 = ColorMatrix3x3 {
+        m: [
+            [ 0.8156462,  0.0472229,  0.1372857],
+            [ 0.3791261,  0.5769962,  0.0438419],
+            [-0.0123570,  0.0167440,  0.9955936],
+        ],
+    };
+
+    /// CMCCAT2000
+    pub const CMCCAT2000: ColorMatrix3x3 = ColorMatrix3x3 {
+        m: [
+            [ 0.7982000,  0.3389000, -0.1371000],
+            [-0.5918000,  1.5512000,  0.0406000],
+            [ 0.0008000,  0.0239000,  0.9753000],
+        ],
+    };
+
+    /// CMCCAT2000 inverse
+    pub const CMCCAT2000_INV: ColorMatrix3x3 = ColorMatrix3x3 {
+        m: [
+            [ 1.0761093, -0.2371676,  0.1610623],
+            [ 0.4109092,  0.5543540,  0.0346368],
+            [-0.0109490, -0.0134295,  1.0243785],
+        ],
+    };
+
+    /// CAT02 (CIECAM02)
+    pub const CAT02: ColorMatrix3x3 = ColorMatrix3x3 {
+        m: [
+            [ 0.7328000,  0.4296000, -0.1624000],
+            [-0.7036000,  1.6975000,  0.0061000],
+            [ 0.0030000,  0.0136000,  0.9834000],
+        ],
+    };
+
+    /// CAT02 inverse
+    pub const CAT02_INV: ColorMatrix3x3 = ColorMatrix3x3 {
+        m: [
+            [ 1.0961238, -0.2788690,  0.1827452],
+            [ 0.4543690,  0.4735332,  0.0720978],
+            [-0.0096276, -0.0056980,  1.0153256],
+        ],
+    };
+
+    /// CAT16 (CIECAM16 - improved)
+    pub const CAT16: ColorMatrix3x3 = ColorMatrix3x3 {
+        m: [
+            [ 0.401288,  0.650173, -0.051461],
+            [-0.250268,  1.204414,  0.045854],
+            [-0.002079,  0.048952,  0.953127],
+        ],
+    };
+
+    /// CAT16 inverse
+    pub const CAT16_INV: ColorMatrix3x3 = ColorMatrix3x3 {
+        m: [
+            [ 1.862068, -1.011255,  0.149187],
+            [ 0.387527,  0.621447, -0.008974],
+            [-0.015841, -0.034122,  1.049964],
+        ],
+    };
+
+    /// Fairchild
+    pub const FAIRCHILD: ColorMatrix3x3 = ColorMatrix3x3 {
+        m: [
+            [ 0.8562000,  0.3372000, -0.1934000],
+            [-0.8360000,  1.8327000,  0.0033000],
+            [ 0.0357000, -0.0469000,  1.0112000],
+        ],
+    };
+
+    /// Fairchild inverse
+    pub const FAIRCHILD_INV: ColorMatrix3x3 = ColorMatrix3x3 {
+        m: [
+            [ 0.9873140, -0.1768440,  0.1895300],
+            [ 0.4504370,  0.4649930,  0.0845610],
+            [-0.0139850,  0.0277990,  0.9861710],
+        ],
+    };
+
+    /// Bianco-Schettini (PC algorithm)
+    pub const BIANCO_SCHETTINI: ColorMatrix3x3 = ColorMatrix3x3 {
+        m: [
+            [ 0.8752,  0.2787, -0.1539],
+            [-0.8904,  1.8709,  0.0195],
+            [-0.0061,  0.0162,  0.9899],
+        ],
+    };
+
+    /// Bianco-Schettini inverse
+    pub const BIANCO_SCHETTINI_INV: ColorMatrix3x3 = ColorMatrix3x3 {
+        m: [
+            [ 0.9869,  -0.1471,  0.1600],
+            [ 0.4698,   0.4893,  0.0409],
+            [ 0.0032,  -0.0093,  1.0061],
+        ],
+    };
+}
+
+// ============================================================================
+// CHROMATIC ADAPTATION TRANSFORM
+// ============================================================================
+
+/// Chromatic adaptation transform
+pub struct ChromaticAdaptation {
+    /// Forward transformation matrix (source white to destination white)
+    pub forward: ColorMatrix3x3,
+    /// Inverse transformation matrix
+    pub inverse: ColorMatrix3x3,
+    /// Method used
+    pub method: AdaptationMethod,
+    /// Source white point
+    pub source_white: XYZ,
+    /// Destination white point
+    pub dest_white: XYZ,
+}
+
+impl ChromaticAdaptation {
+    /// Create a new chromatic adaptation transform
+    pub fn new(source_white: XYZ, dest_white: XYZ, method: AdaptationMethod) -> Self {
+        let (m, m_inv) = get_cone_matrices(method);
+
+        // Convert white points to cone space
+        let source_cone = m.apply_xyz(&source_white);
+        let dest_cone = m.apply_xyz(&dest_white);
+
+        // Create diagonal scaling matrix
+        let scale = ColorMatrix3x3::new([
+            [dest_cone.x / source_cone.x, 0.0, 0.0],
+            [0.0, dest_cone.y / source_cone.y, 0.0],
+            [0.0, 0.0, dest_cone.z / source_cone.z],
+        ]);
+
+        // Full transform: M^-1 * scale * M
+        let forward = m_inv.multiply(&scale).multiply(&m);
+        let inverse = forward.inverse().unwrap_or(ColorMatrix3x3::identity());
+
+        ChromaticAdaptation {
+            forward,
+            inverse,
+            method,
+            source_white,
+            dest_white,
+        }
+    }
+
+    /// Create Bradford adaptation (most common)
+    pub fn bradford(source_white: XYZ, dest_white: XYZ) -> Self {
+        Self::new(source_white, dest_white, AdaptationMethod::Bradford)
+    }
+
+    /// Create CAT16 adaptation (recommended for modern applications)
+    pub fn cat16(source_white: XYZ, dest_white: XYZ) -> Self {
+        Self::new(source_white, dest_white, AdaptationMethod::CAT16)
+    }
+
+    /// Common adaptation: D50 to D65
+    pub fn d50_to_d65() -> Self {
+        Self::bradford(XYZ::D50, XYZ::D65)
+    }
+
+    /// Common adaptation: D65 to D50
+    pub fn d65_to_d50() -> Self {
+        Self::bradford(XYZ::D65, XYZ::D50)
+    }
+
+    /// Adapt XYZ color from source to destination white point
+    pub fn adapt(&self, xyz: &XYZ) -> XYZ {
+        self.forward.apply_xyz(xyz)
+    }
+
+    /// Reverse adaptation (destination to source)
+    pub fn adapt_inverse(&self, xyz: &XYZ) -> XYZ {
+        self.inverse.apply_xyz(xyz)
+    }
+
+    /// Adapt with degree of adaptation (0 = none, 1 = full)
+    pub fn adapt_partial(&self, xyz: &XYZ, degree: f64) -> XYZ {
+        if degree <= 0.0 {
+            return *xyz;
+        }
+        if degree >= 1.0 {
+            return self.adapt(xyz);
+        }
+
+        let adapted = self.adapt(xyz);
+        XYZ::new(
+            xyz.x + (adapted.x - xyz.x) * degree,
+            xyz.y + (adapted.y - xyz.y) * degree,
+            xyz.z + (adapted.z - xyz.z) * degree,
+        )
+    }
+}
+
+/// Get cone response matrices for a method
+fn get_cone_matrices(method: AdaptationMethod) -> (ColorMatrix3x3, ColorMatrix3x3) {
+    use cone_matrices::*;
+
+    match method {
+        AdaptationMethod::XYZScaling => (XYZ_SCALING, XYZ_SCALING),
+        AdaptationMethod::VonKries => (VON_KRIES, VON_KRIES_INV),
+        AdaptationMethod::Bradford => (BRADFORD, BRADFORD_INV),
+        AdaptationMethod::Sharp => (SHARP, SHARP_INV),
+        AdaptationMethod::CMCCAT2000 => (CMCCAT2000, CMCCAT2000_INV),
+        AdaptationMethod::CAT02 => (CAT02, CAT02_INV),
+        AdaptationMethod::CAT16 => (CAT16, CAT16_INV),
+        AdaptationMethod::Fairchild => (FAIRCHILD, FAIRCHILD_INV),
+        AdaptationMethod::BiancoSchettini => (BIANCO_SCHETTINI, BIANCO_SCHETTINI_INV),
+    }
+}
+
+// ============================================================================
+// CORRESPONDING COLORS (FULL CIECAM02 MODEL)
+// ============================================================================
+
+/// CIECAM02 viewing conditions
+#[derive(Debug, Clone, Copy)]
+pub struct ViewingConditions {
+    /// Adapting luminance (cd/m²)
+    pub L_A: f64,
+    /// Background relative luminance (Y_b / Y_w)
+    pub Y_b: f64,
+    /// Surround type
+    pub surround: Surround,
+    /// Degree of adaptation (0-1, or computed if negative)
+    pub D: f64,
+}
+
+/// Surround conditions
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Surround {
+    /// Average (normal viewing)
+    Average,
+    /// Dim (e.g., TV in dim room)
+    Dim,
+    /// Dark (e.g., projector)
+    Dark,
+}
+
+impl ViewingConditions {
+    /// sRGB standard viewing conditions
+    pub fn srgb() -> Self {
+        ViewingConditions {
+            L_A: 64.0,      // ~200 cd/m² display at 20% adapting field
+            Y_b: 0.2,       // 20% background
+            surround: Surround::Average,
+            D: -1.0,        // Auto-compute
+        }
+    }
+
+    /// HDR viewing conditions
+    pub fn hdr() -> Self {
+        ViewingConditions {
+            L_A: 100.0,
+            Y_b: 0.2,
+            surround: Surround::Dim,
+            D: -1.0,
+        }
+    }
+
+    /// Print viewing conditions (D50)
+    pub fn print() -> Self {
+        ViewingConditions {
+            L_A: 31.83,     // 500 lux
+            Y_b: 0.2,
+            surround: Surround::Average,
+            D: -1.0,
+        }
+    }
+
+    /// Get surround parameters (c, N_c, F)
+    pub fn surround_params(&self) -> (f64, f64, f64) {
+        match self.surround {
+            Surround::Average => (0.69, 1.0, 1.0),
+            Surround::Dim => (0.59, 0.9, 0.9),
+            Surround::Dark => (0.525, 0.8, 0.8),
+        }
+    }
+
+    /// Compute degree of adaptation
+    pub fn compute_D(&self, F: f64) -> f64 {
+        if self.D >= 0.0 {
+            return self.D.min(1.0);
+        }
+        // Auto-compute
+        F * (1.0 - (1.0 / 3.6) * (-((self.L_A + 42.0) / 92.0)).exp())
+    }
+}
+
+/// CIECAM02 color appearance model
+pub struct CIECAM02 {
+    /// White point XYZ
+    pub white: XYZ,
+    /// Viewing conditions
+    pub conditions: ViewingConditions,
+    // Pre-computed values
+    k: f64,
+    F_L: f64,
+    n: f64,
+    N_bb: f64,
+    N_cb: f64,
+    z: f64,
+    D_rgb: (f64, f64, f64),
+    A_w: f64,
+}
+
+/// CIECAM02 appearance correlates
+#[derive(Debug, Clone, Copy)]
+pub struct CAM02Correlates {
+    /// Lightness
+    pub J: f64,
+    /// Chroma
+    pub C: f64,
+    /// Hue angle (degrees)
+    pub h: f64,
+    /// Colorfulness
+    pub M: f64,
+    /// Saturation
+    pub s: f64,
+    /// Brightness
+    pub Q: f64,
+    /// Hue composition (quadrature)
+    pub H: f64,
+}
+
+impl CIECAM02 {
+    pub fn new(white: XYZ, conditions: ViewingConditions) -> Self {
+        let (c, N_c, F) = conditions.surround_params();
+        let D = conditions.compute_D(F);
+
+        // Convert white to cone space (CAT02)
+        let rgb_w = cone_matrices::CAT02.apply_xyz(&white);
+
+        // Degree of adaptation for each channel
+        let D_rgb = (
+            D * white.y / rgb_w.x + 1.0 - D,
+            D * white.y / rgb_w.y + 1.0 - D,
+            D * white.y / rgb_w.z + 1.0 - D,
+        );
+
+        // Compute k
+        let k = 1.0 / (5.0 * conditions.L_A + 1.0);
+        let k4 = k * k * k * k;
+        let F_L = 0.2 * k4 * 5.0 * conditions.L_A + 0.1 * (1.0 - k4).powi(2) * (5.0 * conditions.L_A).powf(1.0 / 3.0);
+
+        // Background and chromatic induction factors
+        let n = conditions.Y_b / white.y;
+        let N_bb = 0.725 * (1.0 / n).powf(0.2);
+        let N_cb = N_bb;
+        let z = 1.48 + n.sqrt();
+
+        // Adapted white response
+        let rgb_wc = LinearRGB::new(
+            D_rgb.0 * rgb_w.x,
+            D_rgb.1 * rgb_w.y,
+            D_rgb.2 * rgb_w.z,
+        );
+
+        // Hunt-Pointer-Estevez transform
+        let rgb_w_prime = Self::cat02_to_hpe(&rgb_wc);
+
+        // Post-adaptation response
+        let rgb_aw = Self::nonlinear_response(rgb_w_prime.r, F_L);
+        let rgb_aw_g = Self::nonlinear_response(rgb_w_prime.g, F_L);
+        let rgb_aw_b = Self::nonlinear_response(rgb_w_prime.b, F_L);
+
+        let A_w = (2.0 * rgb_aw + rgb_aw_g + rgb_aw_b / 20.0 - 0.305) * N_bb;
+
+        CIECAM02 {
+            white,
+            conditions,
+            k,
+            F_L,
+            n,
+            N_bb,
+            N_cb,
+            z,
+            D_rgb,
+            A_w,
+        }
+    }
+
+    /// Forward model: XYZ to appearance correlates
+    pub fn forward(&self, xyz: &XYZ) -> CAM02Correlates {
+        let (c, N_c, _) = self.conditions.surround_params();
+
+        // Chromatic adaptation
+        let rgb = cone_matrices::CAT02.apply_xyz(xyz);
+        let rgb_c = LinearRGB::new(
+            self.D_rgb.0 * rgb.x,
+            self.D_rgb.1 * rgb.y,
+            self.D_rgb.2 * rgb.z,
+        );
+
+        // HPE transform
+        let rgb_prime = Self::cat02_to_hpe(&rgb_c);
+
+        // Post-adaptation nonlinear response
+        let r_a = Self::nonlinear_response(rgb_prime.r, self.F_L);
+        let g_a = Self::nonlinear_response(rgb_prime.g, self.F_L);
+        let b_a = Self::nonlinear_response(rgb_prime.b, self.F_L);
+
+        // Opponent signals
+        let a = r_a - 12.0 * g_a / 11.0 + b_a / 11.0;
+        let b = (r_a + g_a - 2.0 * b_a) / 9.0;
+
+        // Hue angle
+        let h = b.atan2(a).to_degrees();
+        let h = if h < 0.0 { h + 360.0 } else { h };
+
+        // Eccentricity and hue quadrature
+        let h_rad = h.to_radians();
+        let e_t = 0.25 * ((h_rad + 2.0).cos() + 3.8);
+
+        // Achromatic response
+        let A = (2.0 * r_a + g_a + b_a / 20.0 - 0.305) * self.N_bb;
+
+        // Lightness
+        let J = 100.0 * (A / self.A_w).powf(c * self.z);
+
+        // Brightness
+        let Q = (4.0 / c) * (J / 100.0).sqrt() * (self.A_w + 4.0) * self.F_L.powf(0.25);
+
+        // Chroma
+        let t = (50000.0 / 13.0 * N_c * self.N_cb * e_t * (a * a + b * b).sqrt()) /
+                (r_a + g_a + 21.0 * b_a / 20.0);
+        let C = t.powf(0.9) * (J / 100.0).powf(0.5) * (1.64 - 0.29_f64.powf(self.n)).powf(0.73);
+
+        // Colorfulness
+        let M = C * self.F_L.powf(0.25);
+
+        // Saturation
+        let s = 100.0 * (M / Q).powf(0.5);
+
+        // Hue quadrature
+        let H = Self::hue_quadrature(h);
+
+        CAM02Correlates { J, C, h, M, s, Q, H }
+    }
+
+    /// Inverse model: appearance correlates to XYZ
+    pub fn inverse(&self, cam: &CAM02Correlates) -> XYZ {
+        let (c, N_c, _) = self.conditions.surround_params();
+
+        let h_rad = cam.h.to_radians();
+
+        // Achromatic response
+        let A = self.A_w * (cam.J / 100.0).powf(1.0 / (c * self.z));
+
+        // Eccentricity
+        let e_t = 0.25 * ((h_rad + 2.0).cos() + 3.8);
+
+        // Compute t from C
+        let t = (cam.C / ((cam.J / 100.0).powf(0.5) * (1.64 - 0.29_f64.powf(self.n)).powf(0.73))).powf(1.0 / 0.9);
+
+        // Compute a and b
+        let p1 = (50000.0 / 13.0) * N_c * self.N_cb * e_t / t;
+        let p2 = A / self.N_bb + 0.305;
+        let p3 = 21.0 / 20.0;
+
+        let sin_h = h_rad.sin();
+        let cos_h = h_rad.cos();
+
+        let (a, b) = if t.abs() < 1e-5 {
+            (0.0, 0.0)
+        } else if cos_h.abs() < sin_h.abs() {
+            let b_sign = if sin_h > 0.0 { 1.0 } else { -1.0 };
+            let p4 = p1 / sin_h;
+            let cb = (p2 * (2.0 + p3) * 460.0 / 1403.0) /
+                     (p4 + (2.0 + p3) * 220.0 / 1403.0 * cos_h / sin_h - 27.0 / 1403.0 + p3 * 6300.0 / 1403.0);
+            let a_val = cb * cos_h / sin_h;
+            (a_val, cb * b_sign)
+        } else {
+            let a_sign = if cos_h > 0.0 { 1.0 } else { -1.0 };
+            let p5 = p1 / cos_h;
+            let ca = (p2 * (2.0 + p3) * 460.0 / 1403.0) /
+                     (p5 + (2.0 + p3) * 220.0 / 1403.0 - (27.0 / 1403.0 - p3 * 6300.0 / 1403.0) * sin_h / cos_h);
+            let b_val = ca * sin_h / cos_h;
+            (ca * a_sign, b_val)
+        };
+
+        // Recover adapted RGB
+        let r_a = (460.0 * p2 + 451.0 * a + 288.0 * b) / 1403.0;
+        let g_a = (460.0 * p2 - 891.0 * a - 261.0 * b) / 1403.0;
+        let b_a = (460.0 * p2 - 220.0 * a - 6300.0 * b) / 1403.0;
+
+        // Inverse nonlinear response
+        let rgb_prime = LinearRGB::new(
+            Self::nonlinear_response_inv(r_a, self.F_L),
+            Self::nonlinear_response_inv(g_a, self.F_L),
+            Self::nonlinear_response_inv(b_a, self.F_L),
+        );
+
+        // Inverse HPE
+        let rgb_c = Self::hpe_to_cat02(&rgb_prime);
+
+        // Inverse chromatic adaptation
+        let rgb = LinearRGB::new(
+            rgb_c.r / self.D_rgb.0,
+            rgb_c.g / self.D_rgb.1,
+            rgb_c.b / self.D_rgb.2,
+        );
+
+        // Inverse CAT02
+        cone_matrices::CAT02_INV.apply_xyz(&XYZ::new(rgb.r, rgb.g, rgb.b))
+    }
+
+    fn cat02_to_hpe(rgb: &LinearRGB) -> LinearRGB {
+        LinearRGB::new(
+             0.7409792 * rgb.r + 0.2180250 * rgb.g + 0.0409958 * rgb.b,
+             0.2853532 * rgb.r + 0.6242014 * rgb.g + 0.0904454 * rgb.b,
+            -0.0096280 * rgb.r - 0.0056980 * rgb.g + 1.0153260 * rgb.b,
+        )
+    }
+
+    fn hpe_to_cat02(rgb: &LinearRGB) -> LinearRGB {
+        LinearRGB::new(
+            1.0961238 * rgb.r - 0.2788690 * rgb.g + 0.1827452 * rgb.b,
+            0.4543690 * rgb.r + 0.4735332 * rgb.g + 0.0720978 * rgb.b,
+           -0.0096276 * rgb.r - 0.0056980 * rgb.g + 1.0153256 * rgb.b,
+        )
+    }
+
+    fn nonlinear_response(x: f64, F_L: f64) -> f64 {
+        let sign = if x < 0.0 { -1.0 } else { 1.0 };
+        let x_abs = x.abs();
+        let x_fl = (F_L * x_abs / 100.0).powf(0.42);
+        sign * 400.0 * x_fl / (x_fl + 27.13) + 0.1
+    }
+
+    fn nonlinear_response_inv(x: f64, F_L: f64) -> f64 {
+        let sign = if x - 0.1 < 0.0 { -1.0 } else { 1.0 };
+        let x_adj = (x - 0.1).abs();
+        let x_p = 27.13 * x_adj / (400.0 - x_adj);
+        sign * 100.0 / F_L * x_p.powf(1.0 / 0.42)
+    }
+
+    fn hue_quadrature(h: f64) -> f64 {
+        // Unique hue data
+        let hue_data = [
+            (20.14, 0.8, 0.0, "Red"),
+            (90.0, 0.7, 100.0, "Yellow"),
+            (164.25, 1.0, 200.0, "Green"),
+            (237.53, 1.2, 300.0, "Blue"),
+            (380.14, 0.8, 400.0, "Red"),  // Wrap
+        ];
+
+        let h_adj = if h < hue_data[0].0 { h + 360.0 } else { h };
+
+        for i in 0..4 {
+            if h_adj >= hue_data[i].0 && h_adj < hue_data[i + 1].0 {
+                let (h_i, e_i, H_i, _) = hue_data[i];
+                let (h_j, e_j, H_j, _) = hue_data[i + 1];
+
+                return H_i + 100.0 * (h_adj - h_i) / e_i /
+                       ((h_adj - h_i) / e_i + (h_j - h_adj) / e_j);
+            }
+        }
+
+        h  // Fallback
+    }
+}
+
+// ============================================================================
+// AUTOMATIC WHITE BALANCE
+// ============================================================================
+
+/// White balance estimation method
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WhiteBalanceMethod {
+    /// Gray world assumption
+    GrayWorld,
+    /// White patch (max RGB)
+    WhitePatch,
+    /// Modified white patch (percentile)
+    ModifiedWhitePatch,
+    /// Gray edge (gradient-based)
+    GrayEdge,
+    /// Shades of gray (Minkowski norm)
+    ShadesOfGray,
+    /// Combined (ensemble)
+    Combined,
+}
+
+/// White balance estimator
+pub struct WhiteBalanceEstimator {
+    pub method: WhiteBalanceMethod,
+    /// Percentile for modified white patch (0-100)
+    pub percentile: f64,
+    /// Minkowski norm for shades of gray
+    pub minkowski_norm: f64,
+    /// Edge order for gray edge
+    pub edge_order: u32,
+}
+
+impl WhiteBalanceEstimator {
+    pub fn new(method: WhiteBalanceMethod) -> Self {
+        WhiteBalanceEstimator {
+            method,
+            percentile: 95.0,
+            minkowski_norm: 6.0,
+            edge_order: 1,
+        }
+    }
+
+    /// Estimate illuminant from image pixels (as LinearRGB values)
+    pub fn estimate(&self, pixels: &[LinearRGB]) -> LinearRGB {
+        match self.method {
+            WhiteBalanceMethod::GrayWorld => self.gray_world(pixels),
+            WhiteBalanceMethod::WhitePatch => self.white_patch(pixels),
+            WhiteBalanceMethod::ModifiedWhitePatch => self.modified_white_patch(pixels),
+            WhiteBalanceMethod::ShadesOfGray => self.shades_of_gray(pixels),
+            WhiteBalanceMethod::GrayEdge => self.gray_world(pixels), // Simplified
+            WhiteBalanceMethod::Combined => self.combined(pixels),
+        }
+    }
+
+    /// Compute correction gains from estimated illuminant
+    pub fn correction_gains(&self, illuminant: &LinearRGB) -> LinearRGB {
+        let max_channel = illuminant.r.max(illuminant.g).max(illuminant.b);
+        if max_channel == 0.0 {
+            return LinearRGB::white();
+        }
+
+        LinearRGB::new(
+            max_channel / illuminant.r,
+            max_channel / illuminant.g,
+            max_channel / illuminant.b,
+        )
+    }
+
+    fn gray_world(&self, pixels: &[LinearRGB]) -> LinearRGB {
+        if pixels.is_empty() {
+            return LinearRGB::white();
+        }
+
+        let mut sum = LinearRGB::black();
+        for p in pixels {
+            sum = sum.add(p);
+        }
+
+        let n = pixels.len() as f64;
+        LinearRGB::new(sum.r / n, sum.g / n, sum.b / n)
+    }
+
+    fn white_patch(&self, pixels: &[LinearRGB]) -> LinearRGB {
+        let mut max = LinearRGB::black();
+        for p in pixels {
+            max.r = max.r.max(p.r);
+            max.g = max.g.max(p.g);
+            max.b = max.b.max(p.b);
+        }
+        max
+    }
+
+    fn modified_white_patch(&self, pixels: &[LinearRGB]) -> LinearRGB {
+        if pixels.is_empty() {
+            return LinearRGB::white();
+        }
+
+        let mut r_vals: Vec<f64> = pixels.iter().map(|p| p.r).collect();
+        let mut g_vals: Vec<f64> = pixels.iter().map(|p| p.g).collect();
+        let mut b_vals: Vec<f64> = pixels.iter().map(|p| p.b).collect();
+
+        r_vals.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        g_vals.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        b_vals.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+        let idx = ((self.percentile / 100.0) * (pixels.len() - 1) as f64) as usize;
+
+        LinearRGB::new(r_vals[idx], g_vals[idx], b_vals[idx])
+    }
+
+    fn shades_of_gray(&self, pixels: &[LinearRGB]) -> LinearRGB {
+        if pixels.is_empty() {
+            return LinearRGB::white();
+        }
+
+        let p = self.minkowski_norm;
+        let mut sum_r = 0.0;
+        let mut sum_g = 0.0;
+        let mut sum_b = 0.0;
+
+        for pixel in pixels {
+            sum_r += pixel.r.abs().powf(p);
+            sum_g += pixel.g.abs().powf(p);
+            sum_b += pixel.b.abs().powf(p);
+        }
+
+        let n = pixels.len() as f64;
+        LinearRGB::new(
+            (sum_r / n).powf(1.0 / p),
+            (sum_g / n).powf(1.0 / p),
+            (sum_b / n).powf(1.0 / p),
+        )
+    }
+
+    fn combined(&self, pixels: &[LinearRGB]) -> LinearRGB {
+        let gw = self.gray_world(pixels);
+        let wp = self.white_patch(pixels);
+        let sg = self.shades_of_gray(pixels);
+
+        // Simple average
+        LinearRGB::new(
+            (gw.r + wp.r + sg.r) / 3.0,
+            (gw.g + wp.g + sg.g) / 3.0,
+            (gw.b + wp.b + sg.b) / 3.0,
+        )
+    }
+}
+
+// ============================================================================
+// CORRELATED COLOR TEMPERATURE
+// ============================================================================
+
+/// Color temperature utilities
+pub struct ColorTemperature;
+
+impl ColorTemperature {
+    /// Convert correlated color temperature to XYZ (Planckian locus approximation)
+    pub fn cct_to_xyz(kelvin: f64) -> XYZ {
+        let xy = Self::cct_to_xy(kelvin);
+        xyY::new(xy.0, xy.1, 1.0).to_xyz()
+    }
+
+    /// Convert CCT to chromaticity coordinates (using Hernandez-Andrés approximation)
+    pub fn cct_to_xy(kelvin: f64) -> (f64, f64) {
+        let t = kelvin;
+
+        // x coordinate
+        let x = if t < 4000.0 {
+            -0.2661239e9 / (t * t * t) - 0.2343589e6 / (t * t) + 0.8776956e3 / t + 0.179910
+        } else {
+            -3.0258469e9 / (t * t * t) + 2.1070379e6 / (t * t) + 0.2226347e3 / t + 0.24039
+        };
+
+        // y coordinate
+        let y = if t < 2222.0 {
+            -1.1063814 * x * x * x - 1.34811020 * x * x + 2.18555832 * x - 0.20219683
+        } else if t < 4000.0 {
+            -0.9549476 * x * x * x - 1.37418593 * x * x + 2.09137015 * x - 0.16748867
+        } else {
+            3.0817580 * x * x * x - 5.87338670 * x * x + 3.75112997 * x - 0.37001483
+        };
+
+        (x, y)
+    }
+
+    /// Estimate CCT from XYZ using McCamy's approximation
+    pub fn xyz_to_cct(xyz: &XYZ) -> f64 {
+        let xyY = xyz.to_xyY();
+        Self::xy_to_cct(xyY.x, xyY.y)
+    }
+
+    /// Estimate CCT from chromaticity using McCamy's formula
+    pub fn xy_to_cct(x: f64, y: f64) -> f64 {
+        let n = (x - 0.3320) / (0.1858 - y);
+        449.0 * n * n * n + 3525.0 * n * n + 6823.3 * n + 5520.33
+    }
+
+    /// Compute Duv (distance from Planckian locus)
+    pub fn duv(xyz: &XYZ) -> f64 {
+        let xyY = xyz.to_xyY();
+        let cct = Self::xy_to_cct(xyY.x, xyY.y);
+        let (x_bb, y_bb) = Self::cct_to_xy(cct);
+
+        // Distance in u'v' space (more perceptually uniform)
+        let (u, v) = Self::xy_to_uv(xyY.x, xyY.y);
+        let (u_bb, v_bb) = Self::xy_to_uv(x_bb, y_bb);
+
+        let du = u - u_bb;
+        let dv = v - v_bb;
+
+        // Sign indicates above/below Planckian locus
+        let sign = if dv > 0.0 { 1.0 } else { -1.0 };
+        sign * (du * du + dv * dv).sqrt()
+    }
+
+    /// Convert xy to u'v' (CIE 1976 UCS)
+    fn xy_to_uv(x: f64, y: f64) -> (f64, f64) {
+        let denom = -2.0 * x + 12.0 * y + 3.0;
+        if denom == 0.0 {
+            (0.0, 0.0)
+        } else {
+            (4.0 * x / denom, 9.0 * y / denom)
+        }
+    }
+
+    /// Standard illuminant CCTs
+    pub const D50_CCT: f64 = 5003.0;
+    pub const D55_CCT: f64 = 5503.0;
+    pub const D65_CCT: f64 = 6504.0;
+    pub const D75_CCT: f64 = 7504.0;
+    pub const A_CCT: f64 = 2856.0;
+}
+
+// ============================================================================
+// UNIT TESTS
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const EPSILON: f64 = 1e-4;
+
+    fn approx_eq(a: f64, b: f64) -> bool {
+        (a - b).abs() < EPSILON
+    }
+
+    #[test]
+    fn test_bradford_roundtrip() {
+        let cat = ChromaticAdaptation::bradford(XYZ::D65, XYZ::D50);
+        let original = XYZ::new(0.4, 0.5, 0.6);
+        let adapted = cat.adapt(&original);
+        let back = cat.adapt_inverse(&adapted);
+
+        assert!(approx_eq(original.x, back.x));
+        assert!(approx_eq(original.y, back.y));
+        assert!(approx_eq(original.z, back.z));
+    }
+
+    #[test]
+    fn test_d65_to_d50() {
+        let cat = ChromaticAdaptation::d65_to_d50();
+        let d65 = XYZ::D65;
+        let result = cat.adapt(&d65);
+
+        // Should produce D50
+        assert!(approx_eq(result.x, XYZ::D50.x));
+        assert!(approx_eq(result.y, XYZ::D50.y));
+        assert!(approx_eq(result.z, XYZ::D50.z));
+    }
+
+    #[test]
+    fn test_cat16() {
+        let cat = ChromaticAdaptation::cat16(XYZ::D65, XYZ::D50);
+        let original = XYZ::new(0.3, 0.4, 0.5);
+        let adapted = cat.adapt(&original);
+        let back = cat.adapt_inverse(&adapted);
+
+        assert!(approx_eq(original.x, back.x));
+        assert!(approx_eq(original.y, back.y));
+        assert!(approx_eq(original.z, back.z));
+    }
+
+    #[test]
+    fn test_partial_adaptation() {
+        let cat = ChromaticAdaptation::bradford(XYZ::D65, XYZ::D50);
+        let original = XYZ::new(0.5, 0.5, 0.5);
+
+        let zero = cat.adapt_partial(&original, 0.0);
+        assert!(approx_eq(original.x, zero.x));
+
+        let full = cat.adapt_partial(&original, 1.0);
+        let expected = cat.adapt(&original);
+        assert!(approx_eq(full.x, expected.x));
+
+        let half = cat.adapt_partial(&original, 0.5);
+        assert!(half.x > original.x.min(expected.x));
+        assert!(half.x < original.x.max(expected.x));
+    }
+
+    #[test]
+    fn test_cct_to_xy() {
+        let (x, y) = ColorTemperature::cct_to_xy(6500.0);
+        // D65 chromaticity
+        assert!((x - 0.3127).abs() < 0.01);
+        assert!((y - 0.3290).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_xy_to_cct() {
+        let cct = ColorTemperature::xy_to_cct(0.3127, 0.3290);
+        assert!((cct - 6500.0).abs() < 100.0);
+    }
+
+    #[test]
+    fn test_white_balance_gray_world() {
+        let estimator = WhiteBalanceEstimator::new(WhiteBalanceMethod::GrayWorld);
+        let pixels = vec![
+            LinearRGB::new(0.5, 0.4, 0.3),
+            LinearRGB::new(0.6, 0.5, 0.4),
+            LinearRGB::new(0.4, 0.3, 0.2),
+        ];
+
+        let illuminant = estimator.estimate(&pixels);
+        assert!(illuminant.r > illuminant.g);
+        assert!(illuminant.g > illuminant.b);
+    }
+
+    #[test]
+    fn test_ciecam02_forward_inverse() {
+        let cam = CIECAM02::new(XYZ::D65, ViewingConditions::srgb());
+        let original = XYZ::new(0.4, 0.5, 0.6);
+
+        let correlates = cam.forward(&original);
+        let back = cam.inverse(&correlates);
+
+        // Allow more tolerance for complex model
+        assert!((original.x - back.x).abs() < 0.01);
+        assert!((original.y - back.y).abs() < 0.01);
+        assert!((original.z - back.z).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_matrix_inverse() {
+        let m = cone_matrices::BRADFORD;
+        let m_inv = cone_matrices::BRADFORD_INV;
+        let identity = m.multiply(&m_inv);
+
+        for i in 0..3 {
+            for j in 0..3 {
+                let expected = if i == j { 1.0 } else { 0.0 };
+                assert!((identity.m[i][j] - expected).abs() < 1e-6);
+            }
+        }
+    }
+}

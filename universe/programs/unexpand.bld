@@ -1,0 +1,172 @@
+// =============================================================================
+// qunexpand — Convert leading spaces to tabs, written in BuildLang
+// =============================================================================
+// Usage:
+//   qunexpand file.txt          convert leading 8-space runs to tabs
+//   qunexpand -t 4 file.txt     4-space tab stops
+//   cat file | qunexpand         from stdin
+//   qunexpand --help             usage
+//
+// Scan leading spaces, replace groups of N with \t.
+// =============================================================================
+
+include!("stdlib/lines.bld");
+
+// --- Strip trailing \r ---
+fn strip_cr(line: String) -> String {
+    let len = line.len();
+    if len == 0 { return ""; }
+    let last = line.char_at(len - 1);
+    if last == "\r" {
+        if len == 1 { return ""; }
+        line.substring(0, len - 1)
+    } else {
+        line
+    }
+}
+
+// --- Count leading spaces ---
+fn count_leading_spaces(line: String) -> i32 {
+    let len = line.len();
+    let mut count: i32 = 0;
+    let mut go = true;
+    while go {
+        if count >= len {
+            go = false;
+        } else {
+            let c = line.char_at(count);
+            if c == " " {
+                count = count + 1;
+            } else {
+                go = false;
+            }
+        }
+    }
+    count
+}
+
+// --- Unexpand a single line: convert leading space groups to tabs ---
+fn unexpand_line(line: String, tab_width: i32) -> String {
+    let len = line.len();
+    if len == 0 { return ""; }
+
+    let leading = count_leading_spaces(line);
+
+    // Grab the non-space tail first (before any branch can consume line)
+    let tail = if leading < len {
+        line.substring(leading, len - leading)
+    } else {
+        ""
+    };
+
+    let num_tabs = leading / tab_width;
+    let remaining_spaces = leading - num_tabs * tab_width;
+
+    // Build prefix: tabs for complete groups, spaces for the remainder
+    let mut out = "";
+    let mut t: i32 = 0;
+    while t < num_tabs {
+        out = out + "\t";
+        t = t + 1;
+    }
+
+    let mut s: i32 = 0;
+    while s < remaining_spaces {
+        out = out + " ";
+        s = s + 1;
+    }
+
+    // Append the rest of the line
+    out = out + tail;
+    out
+}
+
+// --- Process content line by line ---
+fn process(content: String, tab_width: i32) ~ Console {
+    let lr = lr_new(content);
+    let mut i = 0;
+    while i < lr.count {
+        let raw = lr_get(&lr, i);
+        let line = strip_cr(raw);
+        let result = unexpand_line(line, tab_width);
+        println!("{}", result);
+        i = i + 1;
+    }
+}
+
+// --- Help ---
+fn print_help() ~ Console {
+    println!("qunexpand — convert leading spaces to tabs");
+    println!("");
+    println!("Usage:");
+    println!("  qunexpand [OPTIONS] [FILE]");
+    println!("");
+    println!("Options:");
+    println!("  -t N       set tab width to N (default: 8)");
+    println!("  --help     display this help and exit");
+    println!("");
+    println!("If no FILE is given, reads from stdin.");
+    println!("");
+    println!("Examples:");
+    println!("  qunexpand file.txt           8-space runs -> tabs");
+    println!("  qunexpand -t 4 file.txt      4-space runs -> tabs");
+    println!("  cat file | qunexpand -t 2    from stdin, 2 spaces");
+}
+
+// --- Main ---
+fn main() ~ Console + Environment + FileSystem + Process {
+    let nargs = args_count();
+    let mut tab_width: i32 = 8;
+    let mut filename = "";
+    let mut has_file = false;
+
+    let mut i: i32 = 1;
+    while i < nargs {
+        let arg = args_get(i);
+
+        if arg == "--help" || arg == "-h" {
+            print_help();
+            process_exit(0);
+        } else if arg == "-t" {
+            i = i + 1;
+            if i < nargs {
+                let val = args_get(i);
+                tab_width = val.parse_int();
+                if tab_width < 1 {
+                    println!("qunexpand: invalid tab width");
+                    process_exit(2);
+                }
+            }
+        } else if arg.starts_with("-") {
+            println!("qunexpand: unknown option '{}'", arg);
+            process_exit(2);
+        } else {
+            filename = arg;
+            has_file = true;
+        }
+
+        i = i + 1;
+    }
+
+    // Read input
+    let input = if has_file {
+        if !file_exists(filename) {
+            println!("qunexpand: {}: No such file or directory", filename);
+            process_exit(2);
+        }
+        read_file(filename)
+    } else {
+        let piped = stdin_is_pipe();
+        if !piped {
+            print_help();
+            process_exit(0);
+        }
+        read_all()
+    };
+
+    if input.len() == 0 {
+        process_exit(0);
+    }
+
+    process(input, tab_width);
+}

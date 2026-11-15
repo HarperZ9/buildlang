@@ -1,0 +1,718 @@
+// =============================================================================
+// qdiff — Unified diff tool (LCS-based) written in BuildLang
+// =============================================================================
+// The ninth showcase program compiled to a native binary. A real diff algorithm
+// using Longest Common Subsequence (LCS) dynamic programming, producing output
+// in the classic unified diff format everyone knows.
+//
+// Usage:
+//   qdiff file1.txt file2.txt       show differences (unified format)
+//   qdiff -u file1.txt file2.txt    unified diff (default, 3 lines context)
+//   qdiff -c file1.txt file2.txt    context diff format
+//   qdiff --help                    usage info
+//
+// Algorithm: Classic LCS dynamic programming
+//   1. Split both files into lines (string pool)
+//   2. Build LCS table: dp[i][j] = length of LCS of first i lines / first j lines
+//   3. Backtrack through table to classify lines as common/added/removed
+//   4. Output in unified diff format with context lines
+//
+// Design: All state in a flat struct. Lines stored in string pools with
+// parallel start/len vecs. DP table built incrementally — since we fill
+// left-to-right, top-to-bottom, every dp[i][j] depends only on values
+// already pushed, so we use vec_push exclusively (no vec_set needed).
+// =============================================================================
+
+// --- Main state struct ---
+struct Diff {
+    // String pool for file1 lines
+    pool1: String,
+    starts1: Vec<i32>,
+    lens1: Vec<i32>,
+    n1: i32,
+
+    // String pool for file2 lines
+    pool2: String,
+    starts2: Vec<i32>,
+    lens2: Vec<i32>,
+    n2: i32,
+
+    // DP table (flattened 2D): dp[i * (n2+1) + j]
+    dp: Vec<i32>,
+
+    // Edit script: sequence of operations
+    // op_types: 0 = equal, 1 = delete (file1 only), 2 = insert (file2 only)
+    // op_indices: line index in the respective file
+    op_types: Vec<i32>,
+    op_idx1: Vec<i32>,
+    op_idx2: Vec<i32>,
+    op_n: i32,
+
+    // Filenames
+    fname1: String,
+    fname2: String,
+
+    // Context lines for unified diff
+    ctx: i32,
+}
+
+fn diff_new(fname1: String, fname2: String) -> Diff {
+    Diff {
+        pool1: "", starts1: vec![], lens1: vec![], n1: 0,
+        pool2: "", starts2: vec![], lens2: vec![], n2: 0,
+        dp: vec![],
+        op_types: vec![], op_idx1: vec![], op_idx2: vec![], op_n: 0,
+        fname1: fname1, fname2: fname2,
+        ctx: 3,
+    }
+}
+
+// --- String pool ops for file1 ---
+fn sp1_add(d: &mut Diff, text: String) -> i32 {
+    let id = d.n1;
+    let st = d.pool1.len();
+    d.pool1 = d.pool1 + text;
+    let en = d.pool1.len();
+    vec_push(d.starts1, st);
+    vec_push(d.lens1, en - st);
+    d.n1 = d.n1 + 1;
+    id
+}
+
+fn sp1_get(d: &Diff, id: i32) -> String {
+    let st = vec_get(d.starts1, id);
+    let ln = vec_get(d.lens1, id);
+    d.pool1.substring(st, ln)
+}
+
+// --- String pool ops for file2 ---
+fn sp2_add(d: &mut Diff, text: String) -> i32 {
+    let id = d.n2;
+    let st = d.pool2.len();
+    d.pool2 = d.pool2 + text;
+    let en = d.pool2.len();
+    vec_push(d.starts2, st);
+    vec_push(d.lens2, en - st);
+    d.n2 = d.n2 + 1;
+    id
+}
+
+fn sp2_get(d: &Diff, id: i32) -> String {
+    let st = vec_get(d.starts2, id);
+    let ln = vec_get(d.lens2, id);
+    d.pool2.substring(st, ln)
+}
+
+// --- Parse file content into lines ---
+// which: 1 = file1, 2 = file2
+fn parse_lines(d: &mut Diff, content: String, which: i32) {
+    let clen = content.len();
+    let mut pos: i64 = 0;
+    let mut line_start: i64 = 0;
+    let mut go = true;
+    while go {
+        if pos >= clen {
+            // Last line (no trailing newline)
+            let ln = pos - line_start;
+            if ln > 0 {
+                let text = content.substring(line_start, ln);
+                if which == 1 {
+                    sp1_add(d, text);
+                } else {
+                    sp2_add(d, text);
+                }
+            }
+            go = false;
+        } else {
+            let c = content.char_at(pos);
+            if c == "\n" {
+                let mut ln = pos - line_start;
+                // Strip trailing \r
+                if ln > 0 {
+                    let last_pos = line_start + ln - 1;
+                    let lc = content.char_at(last_pos);
+                    if lc == "\r" { ln = ln - 1; }
+                }
+                let text = if ln > 0 {
+                    content.substring(line_start, ln)
+                } else {
+                    ""
+                };
+                if which == 1 {
+                    sp1_add(d, text);
+                } else {
+                    sp2_add(d, text);
+                }
+                line_start = pos + 1;
+                pos = pos + 1;
+            } else {
+                pos = pos + 1;
+            }
+        }
+    }
+}
+
+// --- Build LCS DP table ---
+// dp[i * (n2+1) + j] = length of LCS of first i lines of file1 and first j of file2
+//
+// Key insight: we fill left-to-right, top-to-bottom. Each dp[i][j] depends
+// only on dp[i-1][j-1], dp[i-1][j], and dp[i][j-1] — all already in the vec.
+// So we can build the entire table with vec_push alone, no rebuilds needed.
+fn build_lcs(d: &mut Diff) {
+    let cols = d.n2 + 1;
+
+    // Row 0: all zeros (base case — LCS of 0 lines of file1 with anything)
+    let mut j: i64 = 0;
+    while j < cols {
+        vec_push(d.dp, 0);
+        j = j + 1;
+    }
+
+    // Fill rows 1..n1
+    let mut i: i64 = 1;
+    while i <= d.n1 {
+        // Column 0: always 0 (base case — LCS of anything with 0 lines of file2)
+        vec_push(d.dp, 0);
+
+        // Columns 1..n2
+        let mut j: i64 = 1;
+        while j <= d.n2 {
+            let line1 = sp1_get(d, i - 1);
+            let line2 = sp2_get(d, j - 1);
+            let eq = line1.compare(line2);
+            if eq == 0 {
+                // Lines match: dp[i][j] = dp[i-1][j-1] + 1
+                let diag = vec_get(d.dp, (i - 1) * cols + (j - 1));
+                vec_push(d.dp, diag + 1);
+            } else {
+                // Lines differ: dp[i][j] = max(dp[i-1][j], dp[i][j-1])
+                let up = vec_get(d.dp, (i - 1) * cols + j);
+                let left = vec_get(d.dp, i * cols + (j - 1));
+                let val = if up > left { up } else { left };
+                vec_push(d.dp, val);
+            }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+}
+
+// --- Backtrack through DP table to build edit script ---
+// Produces operations in reverse order, then we reverse them.
+fn backtrack(d: &mut Diff) {
+    let cols = d.n2 + 1;
+    let mut i = d.n1;
+    let mut j = d.n2;
+
+    // Build ops in reverse (we'll reverse at the end)
+    let mut rev_types: Vec<i32> = vec![];
+    let mut rev_idx1: Vec<i32> = vec![];
+    let mut rev_idx2: Vec<i32> = vec![];
+    let mut rev_n: i64 = 0;
+
+    let mut go = true;
+    while go {
+        if i == 0 && j == 0 {
+            go = false;
+        } else if i > 0 && j > 0 {
+            let line1 = sp1_get(d, i - 1);
+            let line2 = sp2_get(d, j - 1);
+            let eq = line1.compare(line2);
+            if eq == 0 {
+                // Equal: both lines match
+                vec_push(rev_types, 0);
+                vec_push(rev_idx1, i - 1);
+                vec_push(rev_idx2, j - 1);
+                rev_n = rev_n + 1;
+                i = i - 1;
+                j = j - 1;
+            } else {
+                let up = vec_get(d.dp, (i - 1) * cols + j);
+                let left = vec_get(d.dp, i * cols + (j - 1));
+                if left >= up {
+                    // Insert from file2 (go left)
+                    vec_push(rev_types, 2);
+                    vec_push(rev_idx1, -1);
+                    vec_push(rev_idx2, j - 1);
+                    rev_n = rev_n + 1;
+                    j = j - 1;
+                } else {
+                    // Delete from file1 (go up)
+                    vec_push(rev_types, 1);
+                    vec_push(rev_idx1, i - 1);
+                    vec_push(rev_idx2, -1);
+                    rev_n = rev_n + 1;
+                    i = i - 1;
+                }
+            }
+        } else if i > 0 {
+            // Remaining lines from file1 are deletions
+            vec_push(rev_types, 1);
+            vec_push(rev_idx1, i - 1);
+            vec_push(rev_idx2, -1);
+            rev_n = rev_n + 1;
+            i = i - 1;
+        } else {
+            // Remaining lines from file2 are insertions
+            vec_push(rev_types, 2);
+            vec_push(rev_idx1, -1);
+            vec_push(rev_idx2, j - 1);
+            rev_n = rev_n + 1;
+            j = j - 1;
+        }
+    }
+
+    // Reverse the operations into the final edit script
+    let mut r = rev_n - 1;
+    while r >= 0 {
+        vec_push(d.op_types, vec_get(rev_types, r));
+        vec_push(d.op_idx1, vec_get(rev_idx1, r));
+        vec_push(d.op_idx2, vec_get(rev_idx2, r));
+        d.op_n = d.op_n + 1;
+        r = r - 1;
+    }
+}
+
+// --- Output unified diff format ---
+fn output_unified(d: &Diff) ~ Console {
+    let n = d.op_n;
+    if n == 0 { return; }
+
+    // Check if there are any differences at all
+    let mut has_diff = false;
+    let mut chk: i64 = 0;
+    while chk < n {
+        let ot = vec_get(d.op_types, chk);
+        if ot != 0 {
+            has_diff = true;
+        }
+        chk = chk + 1;
+    }
+    if !has_diff { return; }
+
+    // Print file headers
+    println!("--- {}", d.fname1);
+    println!("+++ {}", d.fname2);
+
+    // Find hunks: groups of changes with context
+    let ctx = d.ctx;
+    let mut i: i64 = 0;
+    while i < n {
+        // Skip equal lines until we find a change
+        let op = vec_get(d.op_types, i);
+        if op == 0 {
+            i = i + 1;
+        } else {
+            // Found a change; determine hunk boundaries
+            // Start context: go back up to ctx equal lines
+            let mut hunk_start = i;
+            let mut back: i64 = 0;
+            while back < ctx && hunk_start > 0 {
+                let prev_op = vec_get(d.op_types, hunk_start - 1);
+                if prev_op == 0 {
+                    hunk_start = hunk_start - 1;
+                    back = back + 1;
+                } else {
+                    back = ctx;
+                }
+            }
+
+            // Find end of hunk: include trailing context, merging adjacent changes
+            let mut hunk_end = i + 1;
+            let mut done = false;
+            while !done {
+                // Skip over consecutive changes
+                let mut skip_go = true;
+                while skip_go {
+                    if hunk_end < n {
+                        let he_op = vec_get(d.op_types, hunk_end);
+                        if he_op != 0 {
+                            hunk_end = hunk_end + 1;
+                        } else {
+                            skip_go = false;
+                        }
+                    } else {
+                        skip_go = false;
+                    }
+                }
+
+                // Count equal lines after the change
+                let mut eq_count: i64 = 0;
+                let mut probe = hunk_end;
+                let mut probe_go = true;
+                while probe_go {
+                    if probe < n {
+                        let p_op = vec_get(d.op_types, probe);
+                        if p_op == 0 {
+                            eq_count = eq_count + 1;
+                            probe = probe + 1;
+                        } else {
+                            probe_go = false;
+                        }
+                    } else {
+                        probe_go = false;
+                    }
+                }
+
+                if probe < n && eq_count <= ctx * 2 {
+                    // Another change within merge distance — extend hunk
+                    hunk_end = probe + 1;
+                } else {
+                    // Add trailing context (up to ctx lines)
+                    let mut trail: i64 = 0;
+                    while trail < ctx && hunk_end < n {
+                        let t_op = vec_get(d.op_types, hunk_end);
+                        if t_op == 0 {
+                            hunk_end = hunk_end + 1;
+                            trail = trail + 1;
+                        } else {
+                            trail = ctx;
+                        }
+                    }
+                    done = true;
+                }
+            }
+
+            // Calculate line numbers for hunk header
+            // Count file1 lines and file2 lines in the hunk
+            let mut f1_start = 0;
+            let mut f1_count: i64 = 0;
+            let mut f2_start = 0;
+            let mut f2_count: i64 = 0;
+            let mut first1 = true;
+            let mut first2 = true;
+            let mut h: i64 = hunk_start;
+            while h < hunk_end {
+                let h_op = vec_get(d.op_types, h);
+                if h_op == 0 {
+                    // Equal: contributes to both files
+                    let li1 = vec_get(d.op_idx1, h);
+                    let li2 = vec_get(d.op_idx2, h);
+                    if first1 {
+                        f1_start = li1 + 1;
+                        first1 = false;
+                    }
+                    if first2 {
+                        f2_start = li2 + 1;
+                        first2 = false;
+                    }
+                    f1_count = f1_count + 1;
+                    f2_count = f2_count + 1;
+                } else if h_op == 1 {
+                    // Delete: file1 only
+                    let li1 = vec_get(d.op_idx1, h);
+                    if first1 {
+                        f1_start = li1 + 1;
+                        first1 = false;
+                    }
+                    f1_count = f1_count + 1;
+                } else {
+                    // Insert: file2 only
+                    let li2 = vec_get(d.op_idx2, h);
+                    if first2 {
+                        f2_start = li2 + 1;
+                        first2 = false;
+                    }
+                    f2_count = f2_count + 1;
+                }
+                h = h + 1;
+            }
+
+            // Handle edge case: if no lines from a file, start is 0
+            if first1 { f1_start = 1; }
+            if first2 { f2_start = 1; }
+
+            // Print hunk header
+            println!("@@ -{},{} +{},{} @@", f1_start, f1_count, f2_start, f2_count);
+
+            // Print hunk content
+            let mut p: i64 = hunk_start;
+            while p < hunk_end {
+                let p_op = vec_get(d.op_types, p);
+                if p_op == 0 {
+                    let line = sp1_get(d, vec_get(d.op_idx1, p));
+                    println!(" {}", line);
+                } else if p_op == 1 {
+                    let line = sp1_get(d, vec_get(d.op_idx1, p));
+                    println!("-{}", line);
+                } else {
+                    let line = sp2_get(d, vec_get(d.op_idx2, p));
+                    println!("+{}", line);
+                }
+                p = p + 1;
+            }
+
+            // Advance past this hunk
+            i = hunk_end;
+        }
+    }
+}
+
+// --- Output context diff format ---
+fn output_context(d: &Diff) ~ Console {
+    let n = d.op_n;
+    if n == 0 { return; }
+
+    // Check if there are any differences
+    let mut has_diff = false;
+    let mut chk: i64 = 0;
+    while chk < n {
+        let ot = vec_get(d.op_types, chk);
+        if ot != 0 {
+            has_diff = true;
+        }
+        chk = chk + 1;
+    }
+    if !has_diff { return; }
+
+    // Print file headers (context format)
+    println!("*** {}", d.fname1);
+    println!("--- {}", d.fname2);
+
+    // Find hunks and output in context format
+    let ctx = d.ctx;
+    let mut i: i64 = 0;
+    while i < n {
+        let op = vec_get(d.op_types, i);
+        if op == 0 {
+            i = i + 1;
+        } else {
+            // Determine hunk boundaries (same as unified)
+            let mut hunk_start = i;
+            let mut back: i64 = 0;
+            while back < ctx && hunk_start > 0 {
+                let prev_op = vec_get(d.op_types, hunk_start - 1);
+                if prev_op == 0 {
+                    hunk_start = hunk_start - 1;
+                    back = back + 1;
+                } else {
+                    back = ctx;
+                }
+            }
+
+            let mut hunk_end = i + 1;
+            let mut done = false;
+            while !done {
+                let mut skip_go = true;
+                while skip_go {
+                    if hunk_end < n {
+                        let he_op = vec_get(d.op_types, hunk_end);
+                        if he_op != 0 {
+                            hunk_end = hunk_end + 1;
+                        } else {
+                            skip_go = false;
+                        }
+                    } else {
+                        skip_go = false;
+                    }
+                }
+
+                let mut eq_count: i64 = 0;
+                let mut probe = hunk_end;
+                let mut probe_go = true;
+                while probe_go {
+                    if probe < n {
+                        let p_op = vec_get(d.op_types, probe);
+                        if p_op == 0 {
+                            eq_count = eq_count + 1;
+                            probe = probe + 1;
+                        } else {
+                            probe_go = false;
+                        }
+                    } else {
+                        probe_go = false;
+                    }
+                }
+
+                if probe < n && eq_count <= ctx * 2 {
+                    hunk_end = probe + 1;
+                } else {
+                    let mut trail: i64 = 0;
+                    while trail < ctx && hunk_end < n {
+                        let t_op = vec_get(d.op_types, hunk_end);
+                        if t_op == 0 {
+                            hunk_end = hunk_end + 1;
+                            trail = trail + 1;
+                        } else {
+                            trail = ctx;
+                        }
+                    }
+                    done = true;
+                }
+            }
+
+            // Calculate line ranges for file1 and file2
+            let mut f1_lo = 0;
+            let mut f1_hi = 0;
+            let mut f2_lo = 0;
+            let mut f2_hi = 0;
+            let mut first1 = true;
+            let mut first2 = true;
+            let mut h: i64 = hunk_start;
+            while h < hunk_end {
+                let h_op = vec_get(d.op_types, h);
+                if h_op == 0 {
+                    let li1 = vec_get(d.op_idx1, h) + 1;
+                    let li2 = vec_get(d.op_idx2, h) + 1;
+                    if first1 { f1_lo = li1; first1 = false; }
+                    f1_hi = li1;
+                    if first2 { f2_lo = li2; first2 = false; }
+                    f2_hi = li2;
+                } else if h_op == 1 {
+                    let li1 = vec_get(d.op_idx1, h) + 1;
+                    if first1 { f1_lo = li1; first1 = false; }
+                    f1_hi = li1;
+                } else {
+                    let li2 = vec_get(d.op_idx2, h) + 1;
+                    if first2 { f2_lo = li2; first2 = false; }
+                    f2_hi = li2;
+                }
+                h = h + 1;
+            }
+
+            if first1 { f1_lo = 1; f1_hi = 0; }
+            if first2 { f2_lo = 1; f2_hi = 0; }
+
+            // Print file1 section
+            println!("***************");
+            println!("*** {},{} ****", f1_lo, f1_hi);
+            let mut p: i64 = hunk_start;
+            while p < hunk_end {
+                let p_op = vec_get(d.op_types, p);
+                if p_op == 0 {
+                    let line = sp1_get(d, vec_get(d.op_idx1, p));
+                    println!("  {}", line);
+                } else if p_op == 1 {
+                    let line = sp1_get(d, vec_get(d.op_idx1, p));
+                    println!("- {}", line);
+                } else {
+                    // Insert: skip in file1 section
+                }
+                p = p + 1;
+            }
+
+            // Print file2 section
+            println!("--- {},{} ----", f2_lo, f2_hi);
+            p = hunk_start;
+            while p < hunk_end {
+                let p_op = vec_get(d.op_types, p);
+                if p_op == 0 {
+                    let line = sp2_get(d, vec_get(d.op_idx2, p));
+                    println!("  {}", line);
+                } else if p_op == 2 {
+                    let line = sp2_get(d, vec_get(d.op_idx2, p));
+                    println!("+ {}", line);
+                } else {
+                    // Delete: skip in file2 section
+                }
+                p = p + 1;
+            }
+
+            i = hunk_end;
+        }
+    }
+}
+
+// --- Help ---
+fn print_help() ~ Console {
+    println!("qdiff — compare files line by line");
+    println!("");
+    println!("Usage:");
+    println!("  qdiff [OPTION] FILE1 FILE2");
+    println!("");
+    println!("Options:");
+    println!("  -u        unified diff format (default)");
+    println!("  -c        context diff format");
+    println!("  --help    display this help and exit");
+    println!("");
+    println!("Output: Shows differences between FILE1 and FILE2.");
+    println!("Lines prefixed with '-' exist only in FILE1 (removed).");
+    println!("Lines prefixed with '+' exist only in FILE2 (added).");
+    println!("Lines prefixed with ' ' are common to both files.");
+}
+
+// --- Main ---
+fn main() ~ Console + Environment + FileSystem + Process {
+    let nargs = args_count();
+
+    if nargs < 2 {
+        print_help();
+        process_exit(0);
+    }
+
+    // Parse arguments
+    let mut use_context = false;
+    let mut file1 = "";
+    let mut file2 = "";
+    let mut file_count: i64 = 0;
+
+    let mut i: i64 = 1;
+    while i < nargs {
+        let arg = args_get(i);
+
+        if arg == "--help" || arg == "-h" {
+            print_help();
+            process_exit(0);
+        } else if arg == "-c" {
+            use_context = true;
+        } else if arg == "-u" {
+            // Unified is default, explicit flag is fine
+        } else if arg.starts_with("-") {
+            println!("qdiff: unknown option '{}'", arg);
+            println!("Try 'qdiff --help' for usage.");
+            process_exit(2);
+        } else {
+            if file_count == 0 {
+                file1 = arg;
+                file_count = 1;
+            } else if file_count == 1 {
+                file2 = arg;
+                file_count = 2;
+            } else {
+                println!("qdiff: too many file arguments");
+                println!("Try 'qdiff --help' for usage.");
+                process_exit(2);
+            }
+        }
+
+        i = i + 1;
+    }
+
+    if file_count < 2 {
+        println!("qdiff: missing file operand");
+        println!("Try 'qdiff --help' for usage.");
+        process_exit(2);
+    }
+
+    // Check files exist
+    if !file_exists(file1) {
+        println!("qdiff: {}: No such file or directory", file1);
+        process_exit(2);
+    }
+    if !file_exists(file2) {
+        println!("qdiff: {}: No such file or directory", file2);
+        process_exit(2);
+    }
+
+    // Read files
+    let content1 = read_file(file1);
+    let content2 = read_file(file2);
+
+    // Create diff state
+    let mut d = diff_new(file1, file2);
+
+    // Parse lines
+    parse_lines(&mut d, content1, 1);
+    parse_lines(&mut d, content2, 2);
+
+    // Build LCS and backtrack
+    build_lcs(&mut d);
+    backtrack(&mut d);
+
+    // Output
+    if use_context {
+        output_context(&d);
+    } else {
+        output_unified(&d);
+    }
+}

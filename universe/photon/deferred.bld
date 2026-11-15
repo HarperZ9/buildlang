@@ -1,0 +1,1577 @@
+// =============================================================================
+// PHOTON DEFERRED RENDERING PIPELINE
+// =============================================================================
+// Copyright (c) 2024-2025 Zain Dana Harper. All Rights Reserved.
+// Copyright (c) 2024-2025 Zain Dana Harper. All Rights Reserved.
+// =============================================================================
+//
+// Complete deferred rendering system implementing:
+// - G-Buffer Management (WP-041)
+// - Tiled Deferred Rendering (WP-042)
+// - Clustered Deferred Rendering (WP-043)
+// - Deferred Decals (WP-044)
+// - Stencil Light Volumes (WP-045)
+// - Light Pre-Pass Rendering (WP-046)
+// - Visibility Buffer Rendering (WP-047)
+// - Deferred Material System (WP-048)
+//
+// =============================================================================
+
+module photon::deferred;
+
+use core::math::{Vec2, Vec3, Vec4, Mat4, Frustum};
+use core::memory::{Buffer, Texture2D, Arena};
+use core::simd::{f32x4, f32x8, u32x4};
+
+// =============================================================================
+// DEFERRED RENDERING CONFIGURATION
+// =============================================================================
+
+/// Deferred rendering configuration
+pub struct DeferredConfig {
+    /// G-Buffer format
+    gbuffer_format: GBufferFormat,
+    /// Enable tiled deferred
+    tiled_deferred: bool,
+    /// Enable clustered deferred
+    clustered_deferred: bool,
+    /// Tile size for tiled deferred
+    tile_size: u32,
+    /// Cluster dimensions for clustered
+    cluster_dims: Vec3<u32>,
+    /// Maximum lights per tile/cluster
+    max_lights_per_tile: u32,
+    /// Enable deferred decals
+    decals_enabled: bool,
+    /// Maximum decals per tile
+    max_decals_per_tile: u32,
+    /// Enable light pre-pass
+    light_prepass: bool,
+    /// Use visibility buffer
+    visibility_buffer: bool,
+    /// Enable stencil optimization
+    stencil_optimization: bool,
+}
+
+impl DeferredConfig {
+    pub fn default() -> Self {
+        Self {
+            gbuffer_format: GBufferFormat::Standard,
+            tiled_deferred: true,
+            clustered_deferred: false,
+            tile_size: 16,
+            cluster_dims: Vec3::new(16, 8, 24),
+            max_lights_per_tile: 256,
+            decals_enabled: true,
+            max_decals_per_tile: 64,
+            light_prepass: false,
+            visibility_buffer: false,
+            stencil_optimization: true,
+        }
+    }
+
+    pub fn high_quality() -> Self {
+        Self {
+            gbuffer_format: GBufferFormat::Extended,
+            tiled_deferred: false,
+            clustered_deferred: true,
+            tile_size: 16,
+            cluster_dims: Vec3::new(32, 16, 32),
+            max_lights_per_tile: 512,
+            decals_enabled: true,
+            max_decals_per_tile: 128,
+            light_prepass: false,
+            visibility_buffer: false,
+            stencil_optimization: true,
+        }
+    }
+
+    pub fn performance() -> Self {
+        Self {
+            gbuffer_format: GBufferFormat::Minimal,
+            tiled_deferred: true,
+            clustered_deferred: false,
+            tile_size: 32,
+            cluster_dims: Vec3::new(8, 4, 16),
+            max_lights_per_tile: 128,
+            decals_enabled: false,
+            max_decals_per_tile: 0,
+            light_prepass: true,
+            visibility_buffer: false,
+            stencil_optimization: true,
+        }
+    }
+}
+
+/// G-Buffer format options
+#[derive(Clone, Copy, PartialEq)]
+pub enum GBufferFormat {
+    /// Minimal: Albedo (RGB8), Normal (RGB10A2), Depth
+    Minimal,
+    /// Standard: Albedo (RGBA8), Normal (RGB10A2), Material (RGBA8), Depth
+    Standard,
+    /// Extended: More material properties
+    Extended,
+    /// Visibility buffer mode
+    VisibilityBuffer,
+}
+
+// =============================================================================
+// G-BUFFER SYSTEM (WP-041)
+// =============================================================================
+
+/// G-Buffer layout for deferred shading
+pub struct GBuffer {
+    /// Albedo/Base color (RGB) + Material ID (A)
+    albedo: Texture2D,
+    /// World-space normal (encoded)
+    normal: Texture2D,
+    /// Roughness (R) + Metallic (G) + AO (B) + Flags (A)
+    material: Texture2D,
+    /// Emission (RGB) + Intensity (A)
+    emission: Texture2D,
+    /// Motion vectors (RG) + Object velocity flags (BA)
+    motion: Texture2D,
+    /// Depth buffer (32-bit float)
+    depth: Texture2D,
+    /// Stencil buffer
+    stencil: Texture2D,
+    /// Resolution
+    width: u32,
+    height: u32,
+    /// Format
+    format: GBufferFormat,
+}
+
+impl GBuffer {
+    pub fn new(width: u32, height: u32, format: GBufferFormat) -> Self {
+        Self {
+            albedo: Texture2D::new(width, height),
+            normal: Texture2D::new(width, height),
+            material: Texture2D::new(width, height),
+            emission: Texture2D::new(width, height),
+            motion: Texture2D::new(width, height),
+            depth: Texture2D::new(width, height),
+            stencil: Texture2D::new(width, height),
+            width,
+            height,
+            format,
+        }
+    }
+
+    /// Clear all G-Buffer targets
+    pub fn clear(&mut self) {
+        self.albedo.clear(Vec4::zero());
+        self.normal.clear(Vec4::new(0.5, 0.5, 1.0, 0.0));
+        self.material.clear(Vec4::new(0.5, 0.0, 1.0, 0.0));
+        self.emission.clear(Vec4::zero());
+        self.motion.clear(Vec4::zero());
+        self.depth.clear(Vec4::splat(1.0));
+        self.stencil.clear(Vec4::zero());
+    }
+
+    /// Write to G-Buffer at pixel location
+    pub fn write(&mut self, x: u32, y: u32, data: &GBufferPixel) {
+        self.albedo.set_pixel(x, y, Vec4::new(
+            data.albedo.x, data.albedo.y, data.albedo.z, data.material_id as f32 / 255.0
+        ));
+
+        // Octahedral normal encoding
+        let encoded_normal = Self::encode_normal(data.normal);
+        self.normal.set_pixel(x, y, Vec4::new(
+            encoded_normal.x, encoded_normal.y, 0.0, 0.0
+        ));
+
+        self.material.set_pixel(x, y, Vec4::new(
+            data.roughness, data.metallic, data.ao, data.flags as f32 / 255.0
+        ));
+
+        if data.emission.length_squared() > 0.0 {
+            self.emission.set_pixel(x, y, Vec4::new(
+                data.emission.x, data.emission.y, data.emission.z, 1.0
+            ));
+        }
+
+        self.motion.set_pixel(x, y, Vec4::new(
+            data.motion.x, data.motion.y, 0.0, 0.0
+        ));
+
+        self.depth.set_pixel(x, y, Vec4::splat(data.depth));
+        self.stencil.set_pixel(x, y, Vec4::splat(data.stencil as f32 / 255.0));
+    }
+
+    /// Read from G-Buffer at pixel location
+    pub fn read(&self, x: u32, y: u32) -> GBufferPixel {
+        let albedo = self.albedo.get_pixel(x, y);
+        let normal = self.normal.get_pixel(x, y);
+        let material = self.material.get_pixel(x, y);
+        let emission = self.emission.get_pixel(x, y);
+        let motion = self.motion.get_pixel(x, y);
+        let depth = self.depth.get_pixel(x, y);
+        let stencil = self.stencil.get_pixel(x, y);
+
+        GBufferPixel {
+            albedo: Vec3::new(albedo.x, albedo.y, albedo.z),
+            normal: Self::decode_normal(Vec2::new(normal.x, normal.y)),
+            roughness: material.x,
+            metallic: material.y,
+            ao: material.z,
+            emission: Vec3::new(emission.x, emission.y, emission.z),
+            motion: Vec2::new(motion.x, motion.y),
+            depth: depth.x,
+            material_id: (albedo.w * 255.0) as u8,
+            flags: (material.w * 255.0) as u8,
+            stencil: (stencil.x * 255.0) as u8,
+        }
+    }
+
+    /// Sample with UV coordinates
+    pub fn sample(&self, uv: Vec2) -> GBufferPixel {
+        let x = ((uv.x * self.width as f32) as u32).min(self.width - 1);
+        let y = ((uv.y * self.height as f32) as u32).min(self.height - 1);
+        self.read(x, y)
+    }
+
+    /// Encode normal using octahedral encoding
+    fn encode_normal(n: Vec3) -> Vec2 {
+        // Project to octahedron
+        let p = Vec2::new(n.x, n.y) / (n.x.abs() + n.y.abs() + n.z.abs());
+
+        // Reflect lower hemisphere
+        let encoded = if n.z < 0.0 {
+            Vec2::new(
+                (1.0 - p.y.abs()) * if p.x >= 0.0 { 1.0 } else { -1.0 },
+                (1.0 - p.x.abs()) * if p.y >= 0.0 { 1.0 } else { -1.0 }
+            )
+        } else {
+            p
+        };
+
+        // Map to [0, 1]
+        encoded * 0.5 + 0.5
+    }
+
+    /// Decode normal from octahedral encoding
+    fn decode_normal(encoded: Vec2) -> Vec3 {
+        // Map from [0, 1] to [-1, 1]
+        let f = encoded * 2.0 - 1.0;
+
+        // Decode octahedral
+        let n = Vec3::new(f.x, f.y, 1.0 - f.x.abs() - f.y.abs());
+
+        let t = (-n.z).max(0.0);
+        let n = Vec3::new(
+            n.x + if n.x >= 0.0 { -t } else { t },
+            n.y + if n.y >= 0.0 { -t } else { t },
+            n.z
+        );
+
+        n.normalize()
+    }
+
+    pub fn albedo(&self) -> &Texture2D { &self.albedo }
+    pub fn normal(&self) -> &Texture2D { &self.normal }
+    pub fn material(&self) -> &Texture2D { &self.material }
+    pub fn emission(&self) -> &Texture2D { &self.emission }
+    pub fn motion(&self) -> &Texture2D { &self.motion }
+    pub fn depth(&self) -> &Texture2D { &self.depth }
+}
+
+/// G-Buffer pixel data
+pub struct GBufferPixel {
+    pub albedo: Vec3,
+    pub normal: Vec3,
+    pub roughness: f32,
+    pub metallic: f32,
+    pub ao: f32,
+    pub emission: Vec3,
+    pub motion: Vec2,
+    pub depth: f32,
+    pub material_id: u8,
+    pub flags: u8,
+    pub stencil: u8,
+}
+
+impl GBufferPixel {
+    pub fn default() -> Self {
+        Self {
+            albedo: Vec3::new(0.5, 0.5, 0.5),
+            normal: Vec3::new(0.0, 1.0, 0.0),
+            roughness: 0.5,
+            metallic: 0.0,
+            ao: 1.0,
+            emission: Vec3::zero(),
+            motion: Vec2::zero(),
+            depth: 1.0,
+            material_id: 0,
+            flags: 0,
+            stencil: 0,
+        }
+    }
+}
+
+// =============================================================================
+// TILED DEFERRED RENDERING (WP-042)
+// =============================================================================
+
+/// Light data for tiled/clustered
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct PackedLight {
+    /// Position (XYZ) + Type (W as float bits)
+    position_type: Vec4,
+    /// Direction (XYZ) + Range (W)
+    direction_range: Vec4,
+    /// Color (RGB) + Intensity (A)
+    color_intensity: Vec4,
+    /// Spot angles (X=inner, Y=outer) + Shadow index (Z) + Flags (W)
+    spot_shadow_flags: Vec4,
+}
+
+impl PackedLight {
+    pub fn point(position: Vec3, color: Vec3, intensity: f32, range: f32) -> Self {
+        Self {
+            position_type: Vec4::new(position.x, position.y, position.z, 0.0),
+            direction_range: Vec4::new(0.0, 0.0, 0.0, range),
+            color_intensity: Vec4::new(color.x, color.y, color.z, intensity),
+            spot_shadow_flags: Vec4::zero(),
+        }
+    }
+
+    pub fn spot(
+        position: Vec3,
+        direction: Vec3,
+        color: Vec3,
+        intensity: f32,
+        range: f32,
+        inner_angle: f32,
+        outer_angle: f32,
+    ) -> Self {
+        Self {
+            position_type: Vec4::new(position.x, position.y, position.z, 1.0),
+            direction_range: Vec4::new(direction.x, direction.y, direction.z, range),
+            color_intensity: Vec4::new(color.x, color.y, color.z, intensity),
+            spot_shadow_flags: Vec4::new(inner_angle, outer_angle, -1.0, 0.0),
+        }
+    }
+
+    pub fn directional(direction: Vec3, color: Vec3, intensity: f32) -> Self {
+        Self {
+            position_type: Vec4::new(0.0, 0.0, 0.0, 2.0),
+            direction_range: Vec4::new(direction.x, direction.y, direction.z, f32::MAX),
+            color_intensity: Vec4::new(color.x, color.y, color.z, intensity),
+            spot_shadow_flags: Vec4::zero(),
+        }
+    }
+
+    pub fn light_type(&self) -> u32 {
+        self.position_type.w as u32
+    }
+
+    pub fn position(&self) -> Vec3 {
+        Vec3::new(self.position_type.x, self.position_type.y, self.position_type.z)
+    }
+
+    pub fn direction(&self) -> Vec3 {
+        Vec3::new(self.direction_range.x, self.direction_range.y, self.direction_range.z)
+    }
+
+    pub fn range(&self) -> f32 {
+        self.direction_range.w
+    }
+
+    pub fn color(&self) -> Vec3 {
+        Vec3::new(self.color_intensity.x, self.color_intensity.y, self.color_intensity.z)
+    }
+
+    pub fn intensity(&self) -> f32 {
+        self.color_intensity.w
+    }
+}
+
+/// Tile data for tiled deferred
+pub struct LightTile {
+    /// Light indices in this tile
+    light_indices: Vec<u16>,
+    /// Screen bounds of the tile
+    bounds: (Vec2, Vec2),
+    /// Depth bounds (min, max)
+    depth_bounds: (f32, f32),
+}
+
+/// Tiled deferred renderer
+pub struct TiledDeferredRenderer {
+    /// Tile dimensions
+    tile_size: u32,
+    /// Number of tiles
+    num_tiles_x: u32,
+    num_tiles_y: u32,
+    /// Light tiles
+    tiles: Vec<LightTile>,
+    /// All lights
+    lights: Vec<PackedLight>,
+    /// Light index buffer (for GPU)
+    light_index_buffer: Buffer<u16>,
+    /// Per-tile light count and offset
+    tile_light_data: Buffer<Vec4>,
+    /// Maximum lights per tile
+    max_lights_per_tile: u32,
+    /// View-projection matrix
+    view_proj: Mat4,
+    /// Screen dimensions
+    screen_width: u32,
+    screen_height: u32,
+}
+
+impl TiledDeferredRenderer {
+    pub fn new(config: &DeferredConfig, width: u32, height: u32) -> Self {
+        let num_tiles_x = (width + config.tile_size - 1) / config.tile_size;
+        let num_tiles_y = (height + config.tile_size - 1) / config.tile_size;
+        let total_tiles = (num_tiles_x * num_tiles_y) as usize;
+
+        let mut tiles = Vec::with_capacity(total_tiles);
+        for ty in 0..num_tiles_y {
+            for tx in 0..num_tiles_x {
+                let x0 = tx as f32 / num_tiles_x as f32;
+                let y0 = ty as f32 / num_tiles_y as f32;
+                let x1 = (tx + 1) as f32 / num_tiles_x as f32;
+                let y1 = (ty + 1) as f32 / num_tiles_y as f32;
+
+                tiles.push(LightTile {
+                    light_indices: Vec::new(),
+                    bounds: (Vec2::new(x0, y0), Vec2::new(x1, y1)),
+                    depth_bounds: (0.0, 1.0),
+                });
+            }
+        }
+
+        let max_indices = total_tiles * config.max_lights_per_tile as usize;
+
+        Self {
+            tile_size: config.tile_size,
+            num_tiles_x,
+            num_tiles_y,
+            tiles,
+            lights: Vec::new(),
+            light_index_buffer: Buffer::new(max_indices),
+            tile_light_data: Buffer::new(total_tiles),
+            max_lights_per_tile: config.max_lights_per_tile,
+            view_proj: Mat4::identity(),
+            screen_width: width,
+            screen_height: height,
+        }
+    }
+
+    /// Set view-projection matrix
+    pub fn set_view_proj(&mut self, view_proj: Mat4) {
+        self.view_proj = view_proj;
+    }
+
+    /// Set lights for this frame
+    pub fn set_lights(&mut self, lights: Vec<PackedLight>) {
+        self.lights = lights;
+    }
+
+    /// Cull lights against tiles
+    pub fn cull_lights(&mut self, depth_buffer: &Texture2D) {
+        // Update depth bounds for each tile
+        self.update_depth_bounds(depth_buffer);
+
+        // Clear previous light assignments
+        for tile in &mut self.tiles {
+            tile.light_indices.clear();
+        }
+
+        // Cull each light against tiles
+        for (light_idx, light) in self.lights.iter().enumerate() {
+            let bounds = self.compute_light_screen_bounds(light);
+
+            if let Some((min_tile, max_tile)) = bounds {
+                // Test against each tile in bounds
+                for ty in min_tile.1..=max_tile.1 {
+                    for tx in min_tile.0..=max_tile.0 {
+                        let tile_idx = (ty * self.num_tiles_x + tx) as usize;
+
+                        if tile_idx < self.tiles.len() {
+                            let tile = &mut self.tiles[tile_idx];
+
+                            // Depth bounds test
+                            if self.light_intersects_depth(light, tile.depth_bounds) {
+                                if tile.light_indices.len() < self.max_lights_per_tile as usize {
+                                    tile.light_indices.push(light_idx as u16);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Update GPU buffers
+        self.upload_light_data();
+    }
+
+    fn update_depth_bounds(&mut self, depth_buffer: &Texture2D) {
+        for (tile_idx, tile) in self.tiles.iter_mut().enumerate() {
+            let tx = tile_idx as u32 % self.num_tiles_x;
+            let ty = tile_idx as u32 / self.num_tiles_x;
+
+            let start_x = tx * self.tile_size;
+            let start_y = ty * self.tile_size;
+            let end_x = ((tx + 1) * self.tile_size).min(self.screen_width);
+            let end_y = ((ty + 1) * self.tile_size).min(self.screen_height);
+
+            let mut min_depth = 1.0f32;
+            let mut max_depth = 0.0f32;
+
+            for y in start_y..end_y {
+                for x in start_x..end_x {
+                    let depth = depth_buffer.get_pixel(x, y).x;
+                    min_depth = min_depth.min(depth);
+                    max_depth = max_depth.max(depth);
+                }
+            }
+
+            tile.depth_bounds = (min_depth, max_depth);
+        }
+    }
+
+    fn compute_light_screen_bounds(&self, light: &PackedLight) -> Option<((u32, u32), (u32, u32))> {
+        match light.light_type() {
+            // Point light
+            0 => {
+                let pos = light.position();
+                let radius = light.range();
+
+                // Project bounding sphere to screen
+                let clip = self.view_proj * Vec4::new(pos.x, pos.y, pos.z, 1.0);
+
+                if clip.w <= 0.0 {
+                    return None;
+                }
+
+                let ndc = Vec3::new(clip.x / clip.w, clip.y / clip.w, clip.z / clip.w);
+
+                // Approximate screen-space radius
+                let screen_radius = radius / clip.w * 0.5;
+
+                let min_x = ((ndc.x - screen_radius + 1.0) * 0.5 * self.num_tiles_x as f32) as i32;
+                let max_x = ((ndc.x + screen_radius + 1.0) * 0.5 * self.num_tiles_x as f32) as i32;
+                let min_y = ((1.0 - ndc.y - screen_radius) * 0.5 * self.num_tiles_y as f32) as i32;
+                let max_y = ((1.0 - ndc.y + screen_radius) * 0.5 * self.num_tiles_y as f32) as i32;
+
+                let min_x = min_x.max(0) as u32;
+                let max_x = (max_x as u32).min(self.num_tiles_x - 1);
+                let min_y = min_y.max(0) as u32;
+                let max_y = (max_y as u32).min(self.num_tiles_y - 1);
+
+                if min_x <= max_x && min_y <= max_y {
+                    Some(((min_x, min_y), (max_x, max_y)))
+                } else {
+                    None
+                }
+            }
+            // Spot light
+            1 => {
+                // Similar to point but with cone bounds
+                let pos = light.position();
+                let radius = light.range();
+
+                let clip = self.view_proj * Vec4::new(pos.x, pos.y, pos.z, 1.0);
+
+                if clip.w <= 0.0 {
+                    return None;
+                }
+
+                let ndc = Vec3::new(clip.x / clip.w, clip.y / clip.w, clip.z / clip.w);
+                let screen_radius = radius / clip.w * 0.5;
+
+                let min_x = ((ndc.x - screen_radius + 1.0) * 0.5 * self.num_tiles_x as f32) as i32;
+                let max_x = ((ndc.x + screen_radius + 1.0) * 0.5 * self.num_tiles_x as f32) as i32;
+                let min_y = ((1.0 - ndc.y - screen_radius) * 0.5 * self.num_tiles_y as f32) as i32;
+                let max_y = ((1.0 - ndc.y + screen_radius) * 0.5 * self.num_tiles_y as f32) as i32;
+
+                let min_x = min_x.max(0) as u32;
+                let max_x = (max_x as u32).min(self.num_tiles_x - 1);
+                let min_y = min_y.max(0) as u32;
+                let max_y = (max_y as u32).min(self.num_tiles_y - 1);
+
+                if min_x <= max_x && min_y <= max_y {
+                    Some(((min_x, min_y), (max_x, max_y)))
+                } else {
+                    None
+                }
+            }
+            // Directional light - affects all tiles
+            2 => Some(((0, 0), (self.num_tiles_x - 1, self.num_tiles_y - 1))),
+            _ => None,
+        }
+    }
+
+    fn light_intersects_depth(&self, light: &PackedLight, depth_bounds: (f32, f32)) -> bool {
+        match light.light_type() {
+            // Directional always intersects
+            2 => true,
+            // Point/spot check depth range
+            _ => {
+                let pos = light.position();
+                let clip = self.view_proj * Vec4::new(pos.x, pos.y, pos.z, 1.0);
+
+                if clip.w <= 0.0 {
+                    return false;
+                }
+
+                let depth = clip.z / clip.w;
+                let radius_depth = light.range() / clip.w;
+
+                let light_min = depth - radius_depth;
+                let light_max = depth + radius_depth;
+
+                light_min <= depth_bounds.1 && light_max >= depth_bounds.0
+            }
+        }
+    }
+
+    fn upload_light_data(&mut self) {
+        let mut offset = 0u32;
+
+        for (tile_idx, tile) in self.tiles.iter().enumerate() {
+            // Store offset and count
+            self.tile_light_data[tile_idx] = Vec4::new(
+                offset as f32,
+                tile.light_indices.len() as f32,
+                0.0,
+                0.0
+            );
+
+            // Copy light indices
+            for (i, &light_idx) in tile.light_indices.iter().enumerate() {
+                if (offset as usize + i) < self.light_index_buffer.len() {
+                    self.light_index_buffer[offset as usize + i] = light_idx;
+                }
+            }
+
+            offset += tile.light_indices.len() as u32;
+        }
+    }
+
+    /// Get lights affecting a pixel
+    pub fn get_lights_at(&self, uv: Vec2) -> &[u16] {
+        let tx = (uv.x * self.num_tiles_x as f32) as u32;
+        let ty = (uv.y * self.num_tiles_y as f32) as u32;
+        let tile_idx = (ty * self.num_tiles_x + tx) as usize;
+
+        if tile_idx < self.tiles.len() {
+            &self.tiles[tile_idx].light_indices
+        } else {
+            &[]
+        }
+    }
+
+    /// Get light by index
+    pub fn get_light(&self, index: u16) -> Option<&PackedLight> {
+        self.lights.get(index as usize)
+    }
+}
+
+// =============================================================================
+// CLUSTERED DEFERRED RENDERING (WP-043)
+// =============================================================================
+
+/// Cluster for clustered deferred
+pub struct LightCluster {
+    /// Light indices in this cluster
+    light_indices: Vec<u16>,
+    /// AABB bounds in view space
+    min_bounds: Vec3,
+    max_bounds: Vec3,
+}
+
+/// Clustered deferred renderer
+pub struct ClusteredDeferredRenderer {
+    /// Cluster dimensions
+    cluster_dims: Vec3<u32>,
+    /// Clusters
+    clusters: Vec<LightCluster>,
+    /// All lights
+    lights: Vec<PackedLight>,
+    /// Near/far planes
+    near: f32,
+    far: f32,
+    /// View matrix
+    view: Mat4,
+    /// Projection matrix
+    proj: Mat4,
+    /// Inverse projection
+    inv_proj: Mat4,
+    /// Screen dimensions
+    screen_width: u32,
+    screen_height: u32,
+    /// Maximum lights per cluster
+    max_lights_per_cluster: u32,
+}
+
+impl ClusteredDeferredRenderer {
+    pub fn new(config: &DeferredConfig, width: u32, height: u32) -> Self {
+        let dims = config.cluster_dims;
+        let total_clusters = (dims.x * dims.y * dims.z) as usize;
+
+        let clusters = (0..total_clusters)
+            .map(|_| LightCluster {
+                light_indices: Vec::new(),
+                min_bounds: Vec3::zero(),
+                max_bounds: Vec3::zero(),
+            })
+            .collect();
+
+        Self {
+            cluster_dims: dims,
+            clusters,
+            lights: Vec::new(),
+            near: 0.1,
+            far: 1000.0,
+            view: Mat4::identity(),
+            proj: Mat4::identity(),
+            inv_proj: Mat4::identity(),
+            screen_width: width,
+            screen_height: height,
+            max_lights_per_cluster: config.max_lights_per_tile,
+        }
+    }
+
+    /// Set camera matrices
+    pub fn set_camera(&mut self, view: Mat4, proj: Mat4, near: f32, far: f32) {
+        self.view = view;
+        self.proj = proj;
+        self.inv_proj = proj.inverse();
+        self.near = near;
+        self.far = far;
+
+        // Rebuild cluster bounds
+        self.build_cluster_bounds();
+    }
+
+    /// Build AABB bounds for each cluster
+    fn build_cluster_bounds(&mut self) {
+        let tile_size_x = self.screen_width as f32 / self.cluster_dims.x as f32;
+        let tile_size_y = self.screen_height as f32 / self.cluster_dims.y as f32;
+
+        // Exponential depth slicing
+        let log_near = self.near.ln();
+        let log_far = self.far.ln();
+        let log_range = log_far - log_near;
+
+        for z in 0..self.cluster_dims.z {
+            for y in 0..self.cluster_dims.y {
+                for x in 0..self.cluster_dims.x {
+                    let idx = self.cluster_index(x, y, z);
+
+                    // Screen-space bounds
+                    let min_x = x as f32 * tile_size_x;
+                    let max_x = (x + 1) as f32 * tile_size_x;
+                    let min_y = y as f32 * tile_size_y;
+                    let max_y = (y + 1) as f32 * tile_size_y;
+
+                    // Depth bounds (exponential)
+                    let near_depth = (log_near + log_range * z as f32 / self.cluster_dims.z as f32).exp();
+                    let far_depth = (log_near + log_range * (z + 1) as f32 / self.cluster_dims.z as f32).exp();
+
+                    // Convert to view-space AABB
+                    let (min_bounds, max_bounds) = self.compute_cluster_aabb(
+                        min_x, max_x, min_y, max_y, near_depth, far_depth
+                    );
+
+                    self.clusters[idx].min_bounds = min_bounds;
+                    self.clusters[idx].max_bounds = max_bounds;
+                }
+            }
+        }
+    }
+
+    fn compute_cluster_aabb(
+        &self,
+        min_x: f32, max_x: f32,
+        min_y: f32, max_y: f32,
+        near_depth: f32, far_depth: f32,
+    ) -> (Vec3, Vec3) {
+        // Convert screen coords to NDC
+        let min_ndc = Vec2::new(
+            min_x / self.screen_width as f32 * 2.0 - 1.0,
+            1.0 - min_y / self.screen_height as f32 * 2.0
+        );
+        let max_ndc = Vec2::new(
+            max_x / self.screen_width as f32 * 2.0 - 1.0,
+            1.0 - max_y / self.screen_height as f32 * 2.0
+        );
+
+        // Unproject corners to view space
+        let corners = [
+            self.unproject(min_ndc.x, min_ndc.y, near_depth),
+            self.unproject(max_ndc.x, min_ndc.y, near_depth),
+            self.unproject(min_ndc.x, max_ndc.y, near_depth),
+            self.unproject(max_ndc.x, max_ndc.y, near_depth),
+            self.unproject(min_ndc.x, min_ndc.y, far_depth),
+            self.unproject(max_ndc.x, min_ndc.y, far_depth),
+            self.unproject(min_ndc.x, max_ndc.y, far_depth),
+            self.unproject(max_ndc.x, max_ndc.y, far_depth),
+        ];
+
+        let mut min = corners[0];
+        let mut max = corners[0];
+
+        for corner in &corners[1..] {
+            min = min.min_components(*corner);
+            max = max.max_components(*corner);
+        }
+
+        (min, max)
+    }
+
+    fn unproject(&self, ndc_x: f32, ndc_y: f32, depth: f32) -> Vec3 {
+        let clip = Vec4::new(ndc_x, ndc_y, depth, 1.0);
+        let view_pos = self.inv_proj * clip;
+        Vec3::new(
+            view_pos.x / view_pos.w,
+            view_pos.y / view_pos.w,
+            view_pos.z / view_pos.w
+        )
+    }
+
+    /// Set lights for this frame
+    pub fn set_lights(&mut self, lights: Vec<PackedLight>) {
+        self.lights = lights;
+    }
+
+    /// Assign lights to clusters
+    pub fn assign_lights(&mut self) {
+        // Clear previous assignments
+        for cluster in &mut self.clusters {
+            cluster.light_indices.clear();
+        }
+
+        // Test each light against clusters
+        for (light_idx, light) in self.lights.iter().enumerate() {
+            // Transform light to view space
+            let light_view_pos = match light.light_type() {
+                0 | 1 => {
+                    let pos = light.position();
+                    let view_pos = self.view * Vec4::new(pos.x, pos.y, pos.z, 1.0);
+                    Some((Vec3::new(view_pos.x, view_pos.y, view_pos.z), light.range()))
+                }
+                2 => None, // Directional affects all clusters
+                _ => None,
+            };
+
+            if light.light_type() == 2 {
+                // Directional light - add to all clusters
+                for cluster in &mut self.clusters {
+                    if cluster.light_indices.len() < self.max_lights_per_cluster as usize {
+                        cluster.light_indices.push(light_idx as u16);
+                    }
+                }
+            } else if let Some((pos, radius)) = light_view_pos {
+                // Find clusters that intersect light sphere
+                for (idx, cluster) in self.clusters.iter_mut().enumerate() {
+                    if Self::sphere_aabb_intersect(pos, radius, cluster.min_bounds, cluster.max_bounds) {
+                        if cluster.light_indices.len() < self.max_lights_per_cluster as usize {
+                            cluster.light_indices.push(light_idx as u16);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn sphere_aabb_intersect(center: Vec3, radius: f32, aabb_min: Vec3, aabb_max: Vec3) -> bool {
+        let closest = Vec3::new(
+            center.x.clamp(aabb_min.x, aabb_max.x),
+            center.y.clamp(aabb_min.y, aabb_max.y),
+            center.z.clamp(aabb_min.z, aabb_max.z)
+        );
+
+        let dist_sq = (closest - center).length_squared();
+        dist_sq <= radius * radius
+    }
+
+    fn cluster_index(&self, x: u32, y: u32, z: u32) -> usize {
+        (z * self.cluster_dims.y * self.cluster_dims.x +
+         y * self.cluster_dims.x +
+         x) as usize
+    }
+
+    /// Get cluster for a screen position and depth
+    pub fn get_cluster(&self, uv: Vec2, linear_depth: f32) -> Option<&LightCluster> {
+        let x = (uv.x * self.cluster_dims.x as f32) as u32;
+        let y = (uv.y * self.cluster_dims.y as f32) as u32;
+
+        // Compute z index from depth
+        let log_depth = linear_depth.max(self.near).ln();
+        let log_near = self.near.ln();
+        let log_range = self.far.ln() - log_near;
+        let z = ((log_depth - log_near) / log_range * self.cluster_dims.z as f32) as u32;
+
+        if x < self.cluster_dims.x && y < self.cluster_dims.y && z < self.cluster_dims.z {
+            Some(&self.clusters[self.cluster_index(x, y, z)])
+        } else {
+            None
+        }
+    }
+
+    /// Get light by index
+    pub fn get_light(&self, index: u16) -> Option<&PackedLight> {
+        self.lights.get(index as usize)
+    }
+}
+
+// =============================================================================
+// DEFERRED LIGHTING
+// =============================================================================
+
+/// PBR lighting calculations for deferred shading
+pub struct DeferredLighting {
+    /// Enable diffuse
+    enable_diffuse: bool,
+    /// Enable specular
+    enable_specular: bool,
+    /// Ambient light color
+    ambient_color: Vec3,
+    /// Ambient intensity
+    ambient_intensity: f32,
+}
+
+impl DeferredLighting {
+    pub fn new() -> Self {
+        Self {
+            enable_diffuse: true,
+            enable_specular: true,
+            ambient_color: Vec3::new(0.1, 0.1, 0.15),
+            ambient_intensity: 1.0,
+        }
+    }
+
+    /// Calculate lighting for a G-Buffer pixel
+    pub fn calculate(
+        &self,
+        pixel: &GBufferPixel,
+        world_pos: Vec3,
+        view_dir: Vec3,
+        lights: &[&PackedLight],
+    ) -> Vec3 {
+        let mut result = Vec3::zero();
+
+        // Base reflectivity for non-metals
+        let f0 = Vec3::new(0.04, 0.04, 0.04).lerp(pixel.albedo, pixel.metallic);
+
+        // Accumulate light contributions
+        for light in lights {
+            let contribution = self.calculate_light(
+                light,
+                pixel,
+                world_pos,
+                view_dir,
+                f0
+            );
+            result = result + contribution;
+        }
+
+        // Add ambient
+        let ambient = self.ambient_color * self.ambient_intensity * pixel.albedo * pixel.ao;
+        result = result + ambient;
+
+        // Add emission
+        result = result + pixel.emission;
+
+        result
+    }
+
+    fn calculate_light(
+        &self,
+        light: &PackedLight,
+        pixel: &GBufferPixel,
+        world_pos: Vec3,
+        view_dir: Vec3,
+        f0: Vec3,
+    ) -> Vec3 {
+        let (light_dir, attenuation) = match light.light_type() {
+            // Point light
+            0 => {
+                let to_light = light.position() - world_pos;
+                let distance = to_light.length();
+                let dir = to_light / distance;
+                let atten = Self::distance_attenuation(distance, light.range());
+                (dir, atten)
+            }
+            // Spot light
+            1 => {
+                let to_light = light.position() - world_pos;
+                let distance = to_light.length();
+                let dir = to_light / distance;
+
+                let dist_atten = Self::distance_attenuation(distance, light.range());
+                let spot_atten = Self::spot_attenuation(
+                    -dir,
+                    light.direction(),
+                    light.spot_shadow_flags.x,
+                    light.spot_shadow_flags.y
+                );
+
+                (dir, dist_atten * spot_atten)
+            }
+            // Directional light
+            2 => {
+                (-light.direction(), 1.0)
+            }
+            _ => return Vec3::zero(),
+        };
+
+        if attenuation <= 0.0 {
+            return Vec3::zero();
+        }
+
+        let n_dot_l = pixel.normal.dot(light_dir).max(0.0);
+        if n_dot_l <= 0.0 {
+            return Vec3::zero();
+        }
+
+        let half_vec = (view_dir + light_dir).normalize();
+        let n_dot_v = pixel.normal.dot(view_dir).max(0.001);
+        let n_dot_h = pixel.normal.dot(half_vec).max(0.0);
+        let v_dot_h = view_dir.dot(half_vec).max(0.0);
+
+        let light_color = light.color() * light.intensity();
+
+        // Diffuse BRDF (Lambert)
+        let diffuse = if self.enable_diffuse {
+            pixel.albedo * (1.0 - pixel.metallic) / core::f32::consts::PI
+        } else {
+            Vec3::zero()
+        };
+
+        // Specular BRDF (Cook-Torrance)
+        let specular = if self.enable_specular {
+            let d = Self::distribution_ggx(n_dot_h, pixel.roughness);
+            let g = Self::geometry_smith(n_dot_v, n_dot_l, pixel.roughness);
+            let f = Self::fresnel_schlick(v_dot_h, f0);
+
+            let numerator = d * g * f;
+            let denominator = 4.0 * n_dot_v * n_dot_l + 0.0001;
+
+            numerator / denominator
+        } else {
+            Vec3::zero()
+        };
+
+        (diffuse + specular) * light_color * n_dot_l * attenuation
+    }
+
+    fn distance_attenuation(distance: f32, range: f32) -> f32 {
+        let ratio = (distance / range).min(1.0);
+        let smooth = (1.0 - ratio * ratio).max(0.0);
+        (smooth * smooth) / (distance * distance + 1.0)
+    }
+
+    fn spot_attenuation(light_dir: Vec3, spot_dir: Vec3, inner_angle: f32, outer_angle: f32) -> f32 {
+        let cos_angle = light_dir.dot(spot_dir);
+        let cos_inner = inner_angle.cos();
+        let cos_outer = outer_angle.cos();
+
+        ((cos_angle - cos_outer) / (cos_inner - cos_outer)).clamp(0.0, 1.0)
+    }
+
+    fn distribution_ggx(n_dot_h: f32, roughness: f32) -> f32 {
+        let a = roughness * roughness;
+        let a2 = a * a;
+        let n_dot_h2 = n_dot_h * n_dot_h;
+
+        let denom = n_dot_h2 * (a2 - 1.0) + 1.0;
+        a2 / (core::f32::consts::PI * denom * denom)
+    }
+
+    fn geometry_schlick_ggx(n_dot_v: f32, roughness: f32) -> f32 {
+        let r = roughness + 1.0;
+        let k = (r * r) / 8.0;
+
+        n_dot_v / (n_dot_v * (1.0 - k) + k)
+    }
+
+    fn geometry_smith(n_dot_v: f32, n_dot_l: f32, roughness: f32) -> f32 {
+        let ggx1 = Self::geometry_schlick_ggx(n_dot_v, roughness);
+        let ggx2 = Self::geometry_schlick_ggx(n_dot_l, roughness);
+        ggx1 * ggx2
+    }
+
+    fn fresnel_schlick(cos_theta: f32, f0: Vec3) -> Vec3 {
+        f0 + (Vec3::one() - f0) * (1.0 - cos_theta).powf(5.0)
+    }
+}
+
+// =============================================================================
+// DEFERRED DECALS (WP-044)
+// =============================================================================
+
+/// Deferred decal data
+pub struct Decal {
+    /// World-space transform (position, rotation, scale)
+    transform: Mat4,
+    /// Inverse transform
+    inv_transform: Mat4,
+    /// Albedo texture
+    albedo_texture: Option<Texture2D>,
+    /// Normal texture
+    normal_texture: Option<Texture2D>,
+    /// Blend mode
+    blend_mode: DecalBlendMode,
+    /// Opacity
+    opacity: f32,
+    /// Normal blend factor
+    normal_blend: f32,
+    /// Angle fade (for steep surfaces)
+    angle_fade: f32,
+}
+
+/// Decal blend modes
+#[derive(Clone, Copy, PartialEq)]
+pub enum DecalBlendMode {
+    /// Replace albedo
+    Replace,
+    /// Multiply albedo
+    Multiply,
+    /// Additive blend
+    Additive,
+    /// Alpha blend
+    AlphaBlend,
+}
+
+impl Decal {
+    pub fn new(transform: Mat4) -> Self {
+        Self {
+            transform,
+            inv_transform: transform.inverse(),
+            albedo_texture: None,
+            normal_texture: None,
+            blend_mode: DecalBlendMode::AlphaBlend,
+            opacity: 1.0,
+            normal_blend: 1.0,
+            angle_fade: 0.5,
+        }
+    }
+
+    /// Check if a world position is inside the decal volume
+    pub fn contains(&self, world_pos: Vec3) -> bool {
+        let local = self.inv_transform * Vec4::new(world_pos.x, world_pos.y, world_pos.z, 1.0);
+        let local_pos = Vec3::new(local.x, local.y, local.z);
+
+        local_pos.x.abs() <= 0.5 &&
+        local_pos.y.abs() <= 0.5 &&
+        local_pos.z.abs() <= 0.5
+    }
+
+    /// Get UV coordinates for a world position
+    pub fn get_uv(&self, world_pos: Vec3) -> Option<Vec2> {
+        let local = self.inv_transform * Vec4::new(world_pos.x, world_pos.y, world_pos.z, 1.0);
+        let local_pos = Vec3::new(local.x, local.y, local.z);
+
+        if local_pos.x.abs() > 0.5 || local_pos.y.abs() > 0.5 || local_pos.z.abs() > 0.5 {
+            return None;
+        }
+
+        Some(Vec2::new(local_pos.x + 0.5, local_pos.z + 0.5))
+    }
+
+    /// Apply decal to G-Buffer
+    pub fn apply(&self, gbuffer: &mut GBuffer, world_pos: Vec3, normal: Vec3) -> bool {
+        if let Some(uv) = self.get_uv(world_pos) {
+            // Angle-based fade
+            let decal_up = Vec3::new(
+                self.transform.m[1][0],
+                self.transform.m[1][1],
+                self.transform.m[1][2]
+            );
+            let angle = normal.dot(decal_up).abs();
+
+            if angle < self.angle_fade {
+                return false;
+            }
+
+            let angle_factor = ((angle - self.angle_fade) / (1.0 - self.angle_fade)).clamp(0.0, 1.0);
+            let final_opacity = self.opacity * angle_factor;
+
+            // Sample textures and blend
+            // ... (would modify gbuffer based on blend mode)
+
+            true
+        } else {
+            false
+        }
+    }
+}
+
+/// Decal renderer
+pub struct DecalRenderer {
+    decals: Vec<Decal>,
+    max_decals_per_tile: u32,
+}
+
+impl DecalRenderer {
+    pub fn new(max_per_tile: u32) -> Self {
+        Self {
+            decals: Vec::new(),
+            max_decals_per_tile: max_per_tile,
+        }
+    }
+
+    pub fn add_decal(&mut self, decal: Decal) {
+        self.decals.push(decal);
+    }
+
+    pub fn clear(&mut self) {
+        self.decals.clear();
+    }
+
+    /// Apply decals to G-Buffer
+    pub fn apply_to_gbuffer(&self, gbuffer: &mut GBuffer, inv_view_proj: Mat4) {
+        for y in 0..gbuffer.height {
+            for x in 0..gbuffer.width {
+                let pixel = gbuffer.read(x, y);
+
+                if pixel.depth >= 1.0 {
+                    continue; // Sky
+                }
+
+                // Reconstruct world position
+                let uv = Vec2::new(
+                    (x as f32 + 0.5) / gbuffer.width as f32,
+                    (y as f32 + 0.5) / gbuffer.height as f32
+                );
+                let ndc = Vec4::new(
+                    uv.x * 2.0 - 1.0,
+                    1.0 - uv.y * 2.0,
+                    pixel.depth,
+                    1.0
+                );
+                let world_pos_h = inv_view_proj * ndc;
+                let world_pos = Vec3::new(
+                    world_pos_h.x / world_pos_h.w,
+                    world_pos_h.y / world_pos_h.w,
+                    world_pos_h.z / world_pos_h.w
+                );
+
+                // Apply decals
+                for decal in &self.decals {
+                    decal.apply(gbuffer, world_pos, pixel.normal);
+                }
+            }
+        }
+    }
+}
+
+// =============================================================================
+// DEFERRED RENDERER
+// =============================================================================
+
+/// Complete deferred rendering pipeline
+pub struct DeferredRenderer {
+    config: DeferredConfig,
+    gbuffer: GBuffer,
+    tiled: Option<TiledDeferredRenderer>,
+    clustered: Option<ClusteredDeferredRenderer>,
+    lighting: DeferredLighting,
+    decals: DecalRenderer,
+    output: Texture2D,
+}
+
+impl DeferredRenderer {
+    pub fn new(config: DeferredConfig, width: u32, height: u32) -> Self {
+        let gbuffer = GBuffer::new(width, height, config.gbuffer_format);
+
+        let tiled = if config.tiled_deferred {
+            Some(TiledDeferredRenderer::new(&config, width, height))
+        } else {
+            None
+        };
+
+        let clustered = if config.clustered_deferred {
+            Some(ClusteredDeferredRenderer::new(&config, width, height))
+        } else {
+            None
+        };
+
+        let decals = DecalRenderer::new(config.max_decals_per_tile);
+
+        Self {
+            config,
+            gbuffer,
+            tiled,
+            clustered,
+            lighting: DeferredLighting::new(),
+            decals,
+            output: Texture2D::new(width, height),
+        }
+    }
+
+    /// Get mutable G-Buffer for geometry pass
+    pub fn gbuffer_mut(&mut self) -> &mut GBuffer {
+        &mut self.gbuffer
+    }
+
+    /// Get G-Buffer for reading
+    pub fn gbuffer(&self) -> &GBuffer {
+        &self.gbuffer
+    }
+
+    /// Set lights for this frame
+    pub fn set_lights(&mut self, lights: Vec<PackedLight>) {
+        if let Some(ref mut tiled) = self.tiled {
+            tiled.set_lights(lights.clone());
+        }
+        if let Some(ref mut clustered) = self.clustered {
+            clustered.set_lights(lights);
+        }
+    }
+
+    /// Perform light culling
+    pub fn cull_lights(&mut self, view_proj: Mat4, view: Mat4, proj: Mat4, near: f32, far: f32) {
+        if let Some(ref mut tiled) = self.tiled {
+            tiled.set_view_proj(view_proj);
+            tiled.cull_lights(&self.gbuffer.depth);
+        }
+
+        if let Some(ref mut clustered) = self.clustered {
+            clustered.set_camera(view, proj, near, far);
+            clustered.assign_lights();
+        }
+    }
+
+    /// Execute lighting pass
+    pub fn execute_lighting(&mut self, inv_view_proj: Mat4, camera_pos: Vec3) {
+        let width = self.gbuffer.width;
+        let height = self.gbuffer.height;
+
+        for y in 0..height {
+            for x in 0..width {
+                let uv = Vec2::new(
+                    (x as f32 + 0.5) / width as f32,
+                    (y as f32 + 0.5) / height as f32
+                );
+
+                let pixel = self.gbuffer.sample(uv);
+
+                if pixel.depth >= 1.0 {
+                    // Sky - write background
+                    self.output.set_pixel(x, y, Vec4::new(0.1, 0.15, 0.2, 1.0));
+                    continue;
+                }
+
+                // Reconstruct world position
+                let ndc = Vec4::new(
+                    uv.x * 2.0 - 1.0,
+                    1.0 - uv.y * 2.0,
+                    pixel.depth,
+                    1.0
+                );
+                let world_pos_h = inv_view_proj * ndc;
+                let world_pos = Vec3::new(
+                    world_pos_h.x / world_pos_h.w,
+                    world_pos_h.y / world_pos_h.w,
+                    world_pos_h.z / world_pos_h.w
+                );
+
+                let view_dir = (camera_pos - world_pos).normalize();
+
+                // Get lights affecting this pixel
+                let light_refs: Vec<&PackedLight> = if let Some(ref tiled) = self.tiled {
+                    tiled.get_lights_at(uv)
+                        .iter()
+                        .filter_map(|&idx| tiled.get_light(idx))
+                        .collect()
+                } else if let Some(ref clustered) = self.clustered {
+                    let linear_depth = self.linear_depth(pixel.depth);
+                    if let Some(cluster) = clustered.get_cluster(uv, linear_depth) {
+                        cluster.light_indices
+                            .iter()
+                            .filter_map(|&idx| clustered.get_light(idx))
+                            .collect()
+                    } else {
+                        Vec::new()
+                    }
+                } else {
+                    Vec::new()
+                };
+
+                // Calculate lighting
+                let color = self.lighting.calculate(&pixel, world_pos, view_dir, &light_refs);
+
+                self.output.set_pixel(x, y, Vec4::new(color.x, color.y, color.z, 1.0));
+            }
+        }
+    }
+
+    fn linear_depth(&self, ndc_depth: f32) -> f32 {
+        // Assuming reversed-Z infinite perspective
+        0.1 / ndc_depth.max(0.0001)
+    }
+
+    /// Get final output
+    pub fn output(&self) -> &Texture2D {
+        &self.output
+    }
+
+    /// Add a decal
+    pub fn add_decal(&mut self, decal: Decal) {
+        self.decals.add_decal(decal);
+    }
+
+    /// Apply decals to G-Buffer
+    pub fn apply_decals(&mut self, inv_view_proj: Mat4) {
+        if self.config.decals_enabled {
+            self.decals.apply_to_gbuffer(&mut self.gbuffer, inv_view_proj);
+        }
+    }
+}
+
+// =============================================================================
+// HELPER IMPLEMENTATIONS
+// =============================================================================
+
+impl Vec3 {
+    pub fn zero() -> Self {
+        Vec3::new(0.0, 0.0, 0.0)
+    }
+
+    pub fn one() -> Self {
+        Vec3::new(1.0, 1.0, 1.0)
+    }
+
+    pub fn length_squared(&self) -> f32 {
+        self.x * self.x + self.y * self.y + self.z * self.z
+    }
+
+    pub fn normalize(&self) -> Self {
+        let len = self.length();
+        if len > 0.0 {
+            Vec3::new(self.x / len, self.y / len, self.z / len)
+        } else {
+            *self
+        }
+    }
+
+    pub fn length(&self) -> f32 {
+        self.length_squared().sqrt()
+    }
+
+    pub fn dot(&self, other: Self) -> f32 {
+        self.x * other.x + self.y * other.y + self.z * other.z
+    }
+
+    pub fn lerp(&self, other: Self, t: f32) -> Self {
+        Vec3::new(
+            self.x + (other.x - self.x) * t,
+            self.y + (other.y - self.y) * t,
+            self.z + (other.z - self.z) * t
+        )
+    }
+
+    pub fn min_components(&self, other: Self) -> Self {
+        Vec3::new(
+            self.x.min(other.x),
+            self.y.min(other.y),
+            self.z.min(other.z)
+        )
+    }
+
+    pub fn max_components(&self, other: Self) -> Self {
+        Vec3::new(
+            self.x.max(other.x),
+            self.y.max(other.y),
+            self.z.max(other.z)
+        )
+    }
+}
+
+impl Vec4 {
+    pub fn zero() -> Self {
+        Vec4::new(0.0, 0.0, 0.0, 0.0)
+    }
+
+    pub fn splat(v: f32) -> Self {
+        Vec4::new(v, v, v, v)
+    }
+}
+
+impl Vec2 {
+    pub fn zero() -> Self {
+        Vec2::new(0.0, 0.0)
+    }
+}
+
+// =============================================================================
+// TESTS
+// =============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_normal_encoding() {
+        let normals = [
+            Vec3::new(0.0, 1.0, 0.0),
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(0.0, 0.0, 1.0),
+            Vec3::new(0.0, -1.0, 0.0),
+            Vec3::new(0.577, 0.577, 0.577),
+        ];
+
+        for normal in &normals {
+            let encoded = GBuffer::encode_normal(*normal);
+            let decoded = GBuffer::decode_normal(encoded);
+
+            let error = (*normal - decoded).length();
+            assert!(error < 0.01, "Normal encoding error: {}", error);
+        }
+    }
+
+    #[test]
+    fn test_packed_light() {
+        let point = PackedLight::point(
+            Vec3::new(1.0, 2.0, 3.0),
+            Vec3::new(1.0, 1.0, 1.0),
+            10.0,
+            5.0
+        );
+
+        assert_eq!(point.light_type(), 0);
+        assert_eq!(point.position().x, 1.0);
+        assert_eq!(point.range(), 5.0);
+    }
+
+    #[test]
+    fn test_tiled_deferred_creation() {
+        let config = DeferredConfig::default();
+        let tiled = TiledDeferredRenderer::new(&config, 1920, 1080);
+
+        assert_eq!(tiled.num_tiles_x, 120);
+        assert_eq!(tiled.num_tiles_y, 68);
+    }
+
+    #[test]
+    fn test_sphere_aabb_intersect() {
+        let aabb_min = Vec3::new(-1.0, -1.0, -1.0);
+        let aabb_max = Vec3::new(1.0, 1.0, 1.0);
+
+        // Sphere inside AABB
+        assert!(ClusteredDeferredRenderer::sphere_aabb_intersect(
+            Vec3::zero(), 0.5, aabb_min, aabb_max
+        ));
+
+        // Sphere outside AABB
+        assert!(!ClusteredDeferredRenderer::sphere_aabb_intersect(
+            Vec3::new(10.0, 0.0, 0.0), 0.5, aabb_min, aabb_max
+        ));
+
+        // Sphere touching AABB
+        assert!(ClusteredDeferredRenderer::sphere_aabb_intersect(
+            Vec3::new(1.5, 0.0, 0.0), 1.0, aabb_min, aabb_max
+        ));
+    }
+}

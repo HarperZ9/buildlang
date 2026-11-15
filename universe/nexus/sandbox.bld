@@ -1,0 +1,1159 @@
+// ============================================================================
+// NEXUS - Security Sandbox
+// ============================================================================
+// Comprehensive sandboxing system for mod execution
+// Provides permission-based security, resource limits, and isolation
+// ============================================================================
+
+module nexus::sandbox;
+
+use core::sync::{Mutex, RwLock, Arc};
+use core::collections::{HashMap, HashSet, Vec};
+
+// ============================================================================
+// Permissions
+// ============================================================================
+
+/// Permission types for mod capabilities
+@derive(Clone, PartialEq, Eq, Hash)]
+pub enum Permission {
+    // File system permissions
+    FileRead(PathPattern),
+    FileWrite(PathPattern),
+    FileDelete(PathPattern),
+    DirectoryCreate(PathPattern),
+    DirectoryList(PathPattern),
+
+    // Network permissions
+    NetworkConnect(HostPattern),
+    NetworkListen(u16),
+    NetworkHttp(HostPattern),
+    NetworkWebSocket(HostPattern),
+
+    // Process permissions
+    ProcessSpawn(String),
+    ProcessKill,
+    ProcessSignal,
+
+    // Memory permissions
+    MemoryAllocate(usize),
+    MemoryMap(usize),
+    MemoryProtect,
+
+    // System permissions
+    SystemInfo,
+    EnvironmentRead,
+    EnvironmentWrite,
+    RegistryRead(String),
+    RegistryWrite(String),
+
+    // Graphics permissions
+    GraphicsHook,
+    ShaderCompile,
+    TextureCreate,
+    RenderTargetCreate,
+
+    // Game permissions
+    GameMemoryRead,
+    GameMemoryWrite,
+    GameFunctionHook,
+    GameAssetOverride,
+
+    // UI permissions
+    UiOverlay,
+    UiInput,
+    UiClipboard,
+
+    // Inter-mod permissions
+    ModCommunicate(String),
+    ServiceRegister(String),
+    ServiceCall(String),
+
+    // Miscellaneous
+    Timer,
+    Random,
+    Crypto,
+    Compress,
+
+    // Wildcard
+    All
+}
+
+impl Permission {
+    pub fn category(&self) -> PermissionCategory {
+        match self {
+            Self::FileRead(_) | Self::FileWrite(_) | Self::FileDelete(_) |
+            Self::DirectoryCreate(_) | Self::DirectoryList(_) => PermissionCategory::FileSystem,
+
+            Self::NetworkConnect(_) | Self::NetworkListen(_) |
+            Self::NetworkHttp(_) | Self::NetworkWebSocket(_) => PermissionCategory::Network,
+
+            Self::ProcessSpawn(_) | Self::ProcessKill | Self::ProcessSignal => PermissionCategory::Process,
+
+            Self::MemoryAllocate(_) | Self::MemoryMap(_) | Self::MemoryProtect => PermissionCategory::Memory,
+
+            Self::SystemInfo | Self::EnvironmentRead | Self::EnvironmentWrite |
+            Self::RegistryRead(_) | Self::RegistryWrite(_) => PermissionCategory::System,
+
+            Self::GraphicsHook | Self::ShaderCompile | Self::TextureCreate |
+            Self::RenderTargetCreate => PermissionCategory::Graphics,
+
+            Self::GameMemoryRead | Self::GameMemoryWrite | Self::GameFunctionHook |
+            Self::GameAssetOverride => PermissionCategory::Game,
+
+            Self::UiOverlay | Self::UiInput | Self::UiClipboard => PermissionCategory::Ui,
+
+            Self::ModCommunicate(_) | Self::ServiceRegister(_) |
+            Self::ServiceCall(_) => PermissionCategory::InterMod,
+
+            Self::Timer | Self::Random | Self::Crypto | Self::Compress => PermissionCategory::Utility,
+
+            Self::All => PermissionCategory::All
+        }
+    }
+
+    pub fn risk_level(&self) -> RiskLevel {
+        match self {
+            Self::FileWrite(_) | Self::FileDelete(_) => RiskLevel::High,
+            Self::NetworkConnect(_) | Self::NetworkHttp(_) => RiskLevel::Medium,
+            Self::GameMemoryWrite | Self::GameFunctionHook => RiskLevel::High,
+            Self::ProcessSpawn(_) | Self::ProcessKill => RiskLevel::Critical,
+            Self::RegistryWrite(_) => RiskLevel::Critical,
+            Self::MemoryProtect => RiskLevel::High,
+            Self::All => RiskLevel::Critical,
+            Self::FileRead(_) | Self::DirectoryList(_) => RiskLevel::Low,
+            Self::Timer | Self::Random => RiskLevel::Minimal,
+            _ => RiskLevel::Medium
+        }
+    }
+
+    pub fn description(&self) -> String {
+        match self {
+            Self::FileRead(p) => format!("Read files matching: {}", p.pattern),
+            Self::FileWrite(p) => format!("Write files matching: {}", p.pattern),
+            Self::FileDelete(p) => format!("Delete files matching: {}", p.pattern),
+            Self::DirectoryCreate(p) => format!("Create directories matching: {}", p.pattern),
+            Self::DirectoryList(p) => format!("List directories matching: {}", p.pattern),
+            Self::NetworkConnect(h) => format!("Connect to hosts: {}", h.pattern),
+            Self::NetworkListen(port) => format!("Listen on port: {}", port),
+            Self::NetworkHttp(h) => format!("HTTP requests to: {}", h.pattern),
+            Self::NetworkWebSocket(h) => format!("WebSocket connections to: {}", h.pattern),
+            Self::ProcessSpawn(cmd) => format!("Spawn process: {}", cmd),
+            Self::ProcessKill => "Kill processes".to_string(),
+            Self::ProcessSignal => "Send process signals".to_string(),
+            Self::MemoryAllocate(size) => format!("Allocate up to {} bytes", size),
+            Self::MemoryMap(size) => format!("Memory map up to {} bytes", size),
+            Self::MemoryProtect => "Change memory protection".to_string(),
+            Self::SystemInfo => "Access system information".to_string(),
+            Self::EnvironmentRead => "Read environment variables".to_string(),
+            Self::EnvironmentWrite => "Write environment variables".to_string(),
+            Self::RegistryRead(key) => format!("Read registry: {}", key),
+            Self::RegistryWrite(key) => format!("Write registry: {}", key),
+            Self::GraphicsHook => "Hook graphics API".to_string(),
+            Self::ShaderCompile => "Compile shaders".to_string(),
+            Self::TextureCreate => "Create textures".to_string(),
+            Self::RenderTargetCreate => "Create render targets".to_string(),
+            Self::GameMemoryRead => "Read game memory".to_string(),
+            Self::GameMemoryWrite => "Write game memory".to_string(),
+            Self::GameFunctionHook => "Hook game functions".to_string(),
+            Self::GameAssetOverride => "Override game assets".to_string(),
+            Self::UiOverlay => "Show UI overlay".to_string(),
+            Self::UiInput => "Handle user input".to_string(),
+            Self::UiClipboard => "Access clipboard".to_string(),
+            Self::ModCommunicate(mod_id) => format!("Communicate with mod: {}", mod_id),
+            Self::ServiceRegister(name) => format!("Register service: {}", name),
+            Self::ServiceCall(name) => format!("Call service: {}", name),
+            Self::Timer => "Use timers".to_string(),
+            Self::Random => "Generate random numbers".to_string(),
+            Self::Crypto => "Use cryptography".to_string(),
+            Self::Compress => "Compress/decompress data".to_string(),
+            Self::All => "All permissions".to_string()
+        }
+    }
+
+    pub fn implies(&self, other: &Permission) -> bool {
+        if *self == Permission::All {
+            return true;
+        }
+
+        if self == other {
+            return true;
+        }
+
+        match (self, other) {
+            (Permission::FileRead(a), Permission::FileRead(b)) => a.matches(&b.pattern),
+            (Permission::FileWrite(a), Permission::FileWrite(b)) => a.matches(&b.pattern),
+            (Permission::NetworkConnect(a), Permission::NetworkConnect(b)) => a.matches(&b.pattern),
+            (Permission::NetworkHttp(a), Permission::NetworkHttp(b)) => a.matches(&b.pattern),
+            _ => false
+        }
+    }
+}
+
+/// Permission categories
+@derive(Clone, Copy, PartialEq, Eq)]
+pub enum PermissionCategory {
+    FileSystem,
+    Network,
+    Process,
+    Memory,
+    System,
+    Graphics,
+    Game,
+    Ui,
+    InterMod,
+    Utility,
+    All
+}
+
+/// Risk levels for permissions
+@derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RiskLevel {
+    Minimal = 0,
+    Low = 1,
+    Medium = 2,
+    High = 3,
+    Critical = 4
+}
+
+/// Path pattern for file system permissions
+@derive(Clone, PartialEq, Eq, Hash)]
+pub struct PathPattern {
+    pattern: String,
+    recursive: bool
+}
+
+impl PathPattern {
+    pub fn new(pattern: &str) -> Self {
+        let recursive = pattern.ends_with("/**");
+        Self {
+            pattern: pattern.to_string(),
+            recursive
+        }
+    }
+
+    pub fn exact(path: &str) -> Self {
+        Self {
+            pattern: path.to_string(),
+            recursive: false
+        }
+    }
+
+    pub fn matches(&self, path: &str) -> bool {
+        if self.pattern == "*" || self.pattern == "**" {
+            return true;
+        }
+
+        let pattern = self.pattern.trim_end_matches("/**");
+
+        if self.recursive {
+            path.starts_with(pattern) || path == pattern
+        } else if self.pattern.contains('*') {
+            self.glob_match(path)
+        } else {
+            path == self.pattern
+        }
+    }
+
+    fn glob_match(&self, path: &str) -> bool {
+        let parts: Vec<&str> = self.pattern.split('*').collect();
+        if parts.is_empty() {
+            return true;
+        }
+
+        let mut pos = 0;
+        for (i, part) in parts.iter().enumerate() {
+            if part.is_empty() {
+                continue;
+            }
+
+            match path[pos..].find(part) {
+                Some(idx) => {
+                    if i == 0 && idx != 0 {
+                        return false;
+                    }
+                    pos += idx + part.len();
+                }
+                None => return false
+            }
+        }
+
+        true
+    }
+}
+
+/// Host pattern for network permissions
+@derive(Clone, PartialEq, Eq, Hash)]
+pub struct HostPattern {
+    pattern: String
+}
+
+impl HostPattern {
+    pub fn new(pattern: &str) -> Self {
+        Self { pattern: pattern.to_string() }
+    }
+
+    pub fn any() -> Self {
+        Self { pattern: "*".to_string() }
+    }
+
+    pub fn localhost() -> Self {
+        Self { pattern: "localhost".to_string() }
+    }
+
+    pub fn matches(&self, host: &str) -> bool {
+        if self.pattern == "*" {
+            return true;
+        }
+
+        if self.pattern.starts_with("*.") {
+            let suffix = &self.pattern[2..];
+            return host.ends_with(suffix) || host == &suffix[1..];
+        }
+
+        host == self.pattern
+    }
+}
+
+// ============================================================================
+// Sandbox Policy
+// ============================================================================
+
+/// Policy defining what a sandbox allows
+pub struct SandboxPolicy {
+    name: String,
+    permissions: HashSet<Permission>,
+    denied_permissions: HashSet<Permission>,
+    resource_limits: ResourceLimits,
+    isolation_level: IsolationLevel,
+    allowed_apis: HashSet<String>,
+    blocked_apis: HashSet<String>,
+    trust_level: TrustLevel
+}
+
+impl SandboxPolicy {
+    pub fn new(name: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            permissions: HashSet::new(),
+            denied_permissions: HashSet::new(),
+            resource_limits: ResourceLimits::default(),
+            isolation_level: IsolationLevel::Standard,
+            allowed_apis: HashSet::new(),
+            blocked_apis: HashSet::new(),
+            trust_level: TrustLevel::Untrusted
+        }
+    }
+
+    pub fn with_permission(mut self, permission: Permission) -> Self {
+        self.permissions.insert(permission);
+        self
+    }
+
+    pub fn with_permissions(mut self, permissions: Vec<Permission>) -> Self {
+        for p in permissions {
+            self.permissions.insert(p);
+        }
+        self
+    }
+
+    pub fn deny_permission(mut self, permission: Permission) -> Self {
+        self.denied_permissions.insert(permission);
+        self
+    }
+
+    pub fn with_resource_limits(mut self, limits: ResourceLimits) -> Self {
+        self.resource_limits = limits;
+        self
+    }
+
+    pub fn with_isolation(mut self, level: IsolationLevel) -> Self {
+        self.isolation_level = level;
+        self
+    }
+
+    pub fn with_trust_level(mut self, level: TrustLevel) -> Self {
+        self.trust_level = level;
+        self
+    }
+
+    pub fn allow_api(mut self, api: &str) -> Self {
+        self.allowed_apis.insert(api.to_string());
+        self
+    }
+
+    pub fn block_api(mut self, api: &str) -> Self {
+        self.blocked_apis.insert(api.to_string());
+        self
+    }
+
+    pub fn has_permission(&self, permission: &Permission) -> bool {
+        if self.denied_permissions.iter().any(|p| p.implies(permission)) {
+            return false;
+        }
+
+        self.permissions.iter().any(|p| p.implies(permission))
+    }
+
+    pub fn is_api_allowed(&self, api: &str) -> bool {
+        if self.blocked_apis.contains(api) {
+            return false;
+        }
+
+        if self.allowed_apis.is_empty() {
+            return true;
+        }
+
+        self.allowed_apis.contains(api)
+    }
+
+    pub fn name(&self) -> &str { &self.name }
+    pub fn resource_limits(&self) -> &ResourceLimits { &self.resource_limits }
+    pub fn isolation_level(&self) -> IsolationLevel { self.isolation_level }
+    pub fn trust_level(&self) -> TrustLevel { self.trust_level }
+
+    /// Predefined minimal policy
+    pub fn minimal() -> Self {
+        Self::new("minimal")
+            .with_permission(Permission::Timer)
+            .with_permission(Permission::Random)
+            .with_resource_limits(ResourceLimits::strict())
+            .with_isolation(IsolationLevel::Maximum)
+            .with_trust_level(TrustLevel::Untrusted)
+    }
+
+    /// Predefined standard policy
+    pub fn standard() -> Self {
+        Self::new("standard")
+            .with_permissions(vec![
+                Permission::Timer,
+                Permission::Random,
+                Permission::FileRead(PathPattern::new("mods/**")),
+                Permission::GameAssetOverride,
+                Permission::UiOverlay,
+            ])
+            .with_resource_limits(ResourceLimits::default())
+            .with_isolation(IsolationLevel::Standard)
+            .with_trust_level(TrustLevel::Limited)
+    }
+
+    /// Predefined trusted policy
+    pub fn trusted() -> Self {
+        Self::new("trusted")
+            .with_permissions(vec![
+                Permission::Timer,
+                Permission::Random,
+                Permission::Crypto,
+                Permission::Compress,
+                Permission::FileRead(PathPattern::new("**")),
+                Permission::FileWrite(PathPattern::new("mods/**")),
+                Permission::NetworkHttp(HostPattern::any()),
+                Permission::GameMemoryRead,
+                Permission::GameMemoryWrite,
+                Permission::GameFunctionHook,
+                Permission::GameAssetOverride,
+                Permission::UiOverlay,
+                Permission::UiInput,
+                Permission::ShaderCompile,
+                Permission::TextureCreate,
+            ])
+            .with_resource_limits(ResourceLimits::relaxed())
+            .with_isolation(IsolationLevel::Light)
+            .with_trust_level(TrustLevel::Trusted)
+    }
+
+    /// Predefined unrestricted policy (dangerous)
+    pub fn unrestricted() -> Self {
+        Self::new("unrestricted")
+            .with_permission(Permission::All)
+            .with_resource_limits(ResourceLimits::unlimited())
+            .with_isolation(IsolationLevel::None)
+            .with_trust_level(TrustLevel::FullyTrusted)
+    }
+}
+
+/// Resource limits for sandbox
+@derive(Clone)]
+pub struct ResourceLimits {
+    pub max_memory: usize,
+    pub max_cpu_time_ms: u64,
+    pub max_file_handles: u32,
+    pub max_threads: u32,
+    pub max_network_connections: u32,
+    pub max_file_size: usize,
+    pub max_api_calls_per_second: u32,
+    pub max_allocations: u64
+}
+
+impl ResourceLimits {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn strict() -> Self {
+        Self {
+            max_memory: 64 * 1024 * 1024,        // 64 MB
+            max_cpu_time_ms: 1000,               // 1 second
+            max_file_handles: 8,
+            max_threads: 2,
+            max_network_connections: 0,
+            max_file_size: 1024 * 1024,          // 1 MB
+            max_api_calls_per_second: 100,
+            max_allocations: 10000
+        }
+    }
+
+    pub fn relaxed() -> Self {
+        Self {
+            max_memory: 512 * 1024 * 1024,       // 512 MB
+            max_cpu_time_ms: 30000,              // 30 seconds
+            max_file_handles: 64,
+            max_threads: 8,
+            max_network_connections: 16,
+            max_file_size: 100 * 1024 * 1024,    // 100 MB
+            max_api_calls_per_second: 10000,
+            max_allocations: 1000000
+        }
+    }
+
+    pub fn unlimited() -> Self {
+        Self {
+            max_memory: usize::MAX,
+            max_cpu_time_ms: u64::MAX,
+            max_file_handles: u32::MAX,
+            max_threads: u32::MAX,
+            max_network_connections: u32::MAX,
+            max_file_size: usize::MAX,
+            max_api_calls_per_second: u32::MAX,
+            max_allocations: u64::MAX
+        }
+    }
+}
+
+impl Default for ResourceLimits {
+    fn default() -> Self {
+        Self {
+            max_memory: 256 * 1024 * 1024,       // 256 MB
+            max_cpu_time_ms: 10000,              // 10 seconds
+            max_file_handles: 32,
+            max_threads: 4,
+            max_network_connections: 8,
+            max_file_size: 50 * 1024 * 1024,     // 50 MB
+            max_api_calls_per_second: 1000,
+            max_allocations: 100000
+        }
+    }
+}
+
+/// Isolation level for sandbox
+@derive(Clone, Copy, PartialEq, Eq)]
+pub enum IsolationLevel {
+    None,       // No isolation
+    Light,      // Basic namespace isolation
+    Standard,   // Full namespace isolation
+    Maximum     // Complete isolation with virtualization
+}
+
+/// Trust level for mods
+@derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum TrustLevel {
+    Untrusted = 0,
+    Limited = 1,
+    Trusted = 2,
+    FullyTrusted = 3
+}
+
+// ============================================================================
+// Security Context
+// ============================================================================
+
+/// Runtime security context for a sandbox
+pub struct SecurityContext {
+    mod_id: String,
+    policy: SandboxPolicy,
+    resource_usage: ResourceUsage,
+    permission_cache: HashMap<String, bool>,
+    violations: Vec<SecurityViolation>,
+    start_time: u64,
+    api_call_count: u64,
+    last_api_reset: u64
+}
+
+impl SecurityContext {
+    pub fn new(mod_id: &str, policy: SandboxPolicy) -> Self {
+        Self {
+            mod_id: mod_id.to_string(),
+            policy,
+            resource_usage: ResourceUsage::new(),
+            permission_cache: HashMap::new(),
+            violations: Vec::new(),
+            start_time: 0,
+            api_call_count: 0,
+            last_api_reset: 0
+        }
+    }
+
+    pub fn mod_id(&self) -> &str { &self.mod_id }
+    pub fn policy(&self) -> &SandboxPolicy { &self.policy }
+    pub fn resource_usage(&self) -> &ResourceUsage { &self.resource_usage }
+    pub fn violations(&self) -> &[SecurityViolation] { &self.violations }
+
+    /// Check if a permission is granted
+    pub fn check_permission(&mut self, permission: &Permission) -> Result<(), SecurityError> {
+        // Check cache
+        let cache_key = format!("{:?}", permission);
+        if let Some(&allowed) = self.permission_cache.get(&cache_key) {
+            if !allowed {
+                return Err(SecurityError::PermissionDenied(permission.clone()));
+            }
+            return Ok(());
+        }
+
+        let allowed = self.policy.has_permission(permission);
+        self.permission_cache.insert(cache_key, allowed);
+
+        if allowed {
+            Ok(())
+        } else {
+            self.record_violation(SecurityViolation {
+                mod_id: self.mod_id.clone(),
+                violation_type: ViolationType::PermissionDenied(permission.clone()),
+                timestamp: self.get_timestamp(),
+                details: permission.description()
+            });
+            Err(SecurityError::PermissionDenied(permission.clone()))
+        }
+    }
+
+    /// Check resource limits
+    pub fn check_resource(&mut self, resource: ResourceType, amount: usize) -> Result<(), SecurityError> {
+        let limits = self.policy.resource_limits();
+
+        let (current, limit) = match resource {
+            ResourceType::Memory => (self.resource_usage.memory_used, limits.max_memory),
+            ResourceType::FileHandles => (self.resource_usage.file_handles as usize, limits.max_file_handles as usize),
+            ResourceType::Threads => (self.resource_usage.threads as usize, limits.max_threads as usize),
+            ResourceType::NetworkConnections => (self.resource_usage.network_connections as usize, limits.max_network_connections as usize),
+            ResourceType::Allocations => (self.resource_usage.allocations as usize, limits.max_allocations as usize)
+        };
+
+        if current + amount > limit {
+            self.record_violation(SecurityViolation {
+                mod_id: self.mod_id.clone(),
+                violation_type: ViolationType::ResourceLimitExceeded(resource),
+                timestamp: self.get_timestamp(),
+                details: format!("Requested: {}, Current: {}, Limit: {}", amount, current, limit)
+            });
+            return Err(SecurityError::ResourceLimitExceeded(resource));
+        }
+
+        Ok(())
+    }
+
+    /// Check API rate limit
+    pub fn check_api_rate(&mut self) -> Result<(), SecurityError> {
+        let now = self.get_timestamp();
+        let limit = self.policy.resource_limits().max_api_calls_per_second;
+
+        // Reset counter every second
+        if now - self.last_api_reset >= 1000 {
+            self.api_call_count = 0;
+            self.last_api_reset = now;
+        }
+
+        self.api_call_count += 1;
+
+        if self.api_call_count > limit as u64 {
+            self.record_violation(SecurityViolation {
+                mod_id: self.mod_id.clone(),
+                violation_type: ViolationType::RateLimitExceeded,
+                timestamp: now,
+                details: format!("API calls: {}/s, Limit: {}/s", self.api_call_count, limit)
+            });
+            return Err(SecurityError::RateLimitExceeded);
+        }
+
+        Ok(())
+    }
+
+    /// Allocate a resource
+    pub fn allocate_resource(&mut self, resource: ResourceType, amount: usize) {
+        match resource {
+            ResourceType::Memory => self.resource_usage.memory_used += amount,
+            ResourceType::FileHandles => self.resource_usage.file_handles += amount as u32,
+            ResourceType::Threads => self.resource_usage.threads += amount as u32,
+            ResourceType::NetworkConnections => self.resource_usage.network_connections += amount as u32,
+            ResourceType::Allocations => self.resource_usage.allocations += amount as u64
+        }
+    }
+
+    /// Release a resource
+    pub fn release_resource(&mut self, resource: ResourceType, amount: usize) {
+        match resource {
+            ResourceType::Memory => self.resource_usage.memory_used = self.resource_usage.memory_used.saturating_sub(amount),
+            ResourceType::FileHandles => self.resource_usage.file_handles = self.resource_usage.file_handles.saturating_sub(amount as u32),
+            ResourceType::Threads => self.resource_usage.threads = self.resource_usage.threads.saturating_sub(amount as u32),
+            ResourceType::NetworkConnections => self.resource_usage.network_connections = self.resource_usage.network_connections.saturating_sub(amount as u32),
+            ResourceType::Allocations => {}
+        }
+    }
+
+    fn record_violation(&mut self, violation: SecurityViolation) {
+        self.violations.push(violation);
+    }
+
+    fn get_timestamp(&self) -> u64 {
+        // Would return actual timestamp
+        0
+    }
+}
+
+/// Resource usage tracking
+pub struct ResourceUsage {
+    pub memory_used: usize,
+    pub file_handles: u32,
+    pub threads: u32,
+    pub network_connections: u32,
+    pub allocations: u64,
+    pub cpu_time_ms: u64
+}
+
+impl ResourceUsage {
+    pub fn new() -> Self {
+        Self {
+            memory_used: 0,
+            file_handles: 0,
+            threads: 0,
+            network_connections: 0,
+            allocations: 0,
+            cpu_time_ms: 0
+        }
+    }
+}
+
+/// Resource types for tracking
+@derive(Clone, Copy, PartialEq, Eq)]
+pub enum ResourceType {
+    Memory,
+    FileHandles,
+    Threads,
+    NetworkConnections,
+    Allocations
+}
+
+// ============================================================================
+// Security Violations
+// ============================================================================
+
+/// Security violation record
+@derive(Clone)]
+pub struct SecurityViolation {
+    pub mod_id: String,
+    pub violation_type: ViolationType,
+    pub timestamp: u64,
+    pub details: String
+}
+
+/// Types of security violations
+@derive(Clone)]
+pub enum ViolationType {
+    PermissionDenied(Permission),
+    ResourceLimitExceeded(ResourceType),
+    RateLimitExceeded,
+    UnauthorizedApi(String),
+    SuspiciousBehavior(String),
+    IntegrityViolation(String)
+}
+
+// ============================================================================
+// Sandbox
+// ============================================================================
+
+/// Main sandbox for mod execution
+pub struct Sandbox {
+    id: String,
+    mod_id: String,
+    context: SecurityContext,
+    state: SandboxState,
+    created_at: u64,
+    file_handles: HashMap<u64, FileHandle>,
+    network_connections: HashMap<u64, NetworkHandle>,
+    allocated_memory: HashMap<usize, MemoryBlock>,
+    hooks_installed: Vec<String>,
+    next_handle_id: u64
+}
+
+impl Sandbox {
+    pub fn new(mod_id: &str, policy: SandboxPolicy) -> Self {
+        let id = format!("sandbox_{}_{}", mod_id, rand_id());
+
+        Self {
+            id: id.clone(),
+            mod_id: mod_id.to_string(),
+            context: SecurityContext::new(mod_id, policy),
+            state: SandboxState::Created,
+            created_at: 0,
+            file_handles: HashMap::new(),
+            network_connections: HashMap::new(),
+            allocated_memory: HashMap::new(),
+            hooks_installed: Vec::new(),
+            next_handle_id: 1
+        }
+    }
+
+    pub fn id(&self) -> &str { &self.id }
+    pub fn mod_id(&self) -> &str { &self.mod_id }
+    pub fn state(&self) -> SandboxState { self.state }
+    pub fn context(&self) -> &SecurityContext { &self.context }
+    pub fn context_mut(&mut self) -> &mut SecurityContext { &mut self.context }
+
+    /// Initialize the sandbox
+    pub fn initialize(&mut self) -> Result<(), SecurityError> {
+        if self.state != SandboxState::Created {
+            return Err(SecurityError::InvalidState);
+        }
+
+        self.state = SandboxState::Initializing;
+
+        // Platform-specific initialization
+        self.setup_isolation()?;
+        self.setup_resource_tracking()?;
+
+        self.state = SandboxState::Ready;
+        Ok(())
+    }
+
+    /// Start sandbox execution
+    pub fn start(&mut self) -> Result<(), SecurityError> {
+        if self.state != SandboxState::Ready {
+            return Err(SecurityError::InvalidState);
+        }
+
+        self.state = SandboxState::Running;
+        Ok(())
+    }
+
+    /// Pause sandbox execution
+    pub fn pause(&mut self) -> Result<(), SecurityError> {
+        if self.state != SandboxState::Running {
+            return Err(SecurityError::InvalidState);
+        }
+
+        self.state = SandboxState::Paused;
+        Ok(())
+    }
+
+    /// Resume sandbox execution
+    pub fn resume(&mut self) -> Result<(), SecurityError> {
+        if self.state != SandboxState::Paused {
+            return Err(SecurityError::InvalidState);
+        }
+
+        self.state = SandboxState::Running;
+        Ok(())
+    }
+
+    /// Terminate the sandbox
+    pub fn terminate(&mut self) {
+        self.state = SandboxState::Terminating;
+
+        // Clean up resources
+        self.cleanup_file_handles();
+        self.cleanup_network();
+        self.cleanup_memory();
+        self.cleanup_hooks();
+
+        self.state = SandboxState::Terminated;
+    }
+
+    // Resource management
+    pub fn open_file(&mut self, path: &str, write: bool) -> Result<u64, SecurityError> {
+        let permission = if write {
+            Permission::FileWrite(PathPattern::new(path))
+        } else {
+            Permission::FileRead(PathPattern::new(path))
+        };
+
+        self.context.check_permission(&permission)?;
+        self.context.check_resource(ResourceType::FileHandles, 1)?;
+
+        let handle_id = self.next_handle_id;
+        self.next_handle_id += 1;
+
+        self.file_handles.insert(handle_id, FileHandle {
+            id: handle_id,
+            path: path.to_string(),
+            write
+        });
+
+        self.context.allocate_resource(ResourceType::FileHandles, 1);
+
+        Ok(handle_id)
+    }
+
+    pub fn close_file(&mut self, handle_id: u64) -> bool {
+        if self.file_handles.remove(&handle_id).is_some() {
+            self.context.release_resource(ResourceType::FileHandles, 1);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn connect(&mut self, host: &str, port: u16) -> Result<u64, SecurityError> {
+        let pattern = format!("{}:{}", host, port);
+        self.context.check_permission(&Permission::NetworkConnect(HostPattern::new(&pattern)))?;
+        self.context.check_resource(ResourceType::NetworkConnections, 1)?;
+
+        let handle_id = self.next_handle_id;
+        self.next_handle_id += 1;
+
+        self.network_connections.insert(handle_id, NetworkHandle {
+            id: handle_id,
+            host: host.to_string(),
+            port
+        });
+
+        self.context.allocate_resource(ResourceType::NetworkConnections, 1);
+
+        Ok(handle_id)
+    }
+
+    pub fn disconnect(&mut self, handle_id: u64) -> bool {
+        if self.network_connections.remove(&handle_id).is_some() {
+            self.context.release_resource(ResourceType::NetworkConnections, 1);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn allocate(&mut self, size: usize) -> Result<usize, SecurityError> {
+        self.context.check_permission(&Permission::MemoryAllocate(size))?;
+        self.context.check_resource(ResourceType::Memory, size)?;
+        self.context.check_resource(ResourceType::Allocations, 1)?;
+
+        // Would actually allocate memory here
+        let addr = 0x1000 + self.allocated_memory.len() * 0x1000;
+
+        self.allocated_memory.insert(addr, MemoryBlock { address: addr, size });
+        self.context.allocate_resource(ResourceType::Memory, size);
+        self.context.allocate_resource(ResourceType::Allocations, 1);
+
+        Ok(addr)
+    }
+
+    pub fn free(&mut self, addr: usize) -> bool {
+        if let Some(block) = self.allocated_memory.remove(&addr) {
+            self.context.release_resource(ResourceType::Memory, block.size);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn setup_isolation(&mut self) -> Result<(), SecurityError> {
+        // Platform-specific isolation setup
+        Ok(())
+    }
+
+    fn setup_resource_tracking(&mut self) -> Result<(), SecurityError> {
+        // Setup resource tracking hooks
+        Ok(())
+    }
+
+    fn cleanup_file_handles(&mut self) {
+        self.file_handles.clear();
+    }
+
+    fn cleanup_network(&mut self) {
+        self.network_connections.clear();
+    }
+
+    fn cleanup_memory(&mut self) {
+        self.allocated_memory.clear();
+    }
+
+    fn cleanup_hooks(&mut self) {
+        self.hooks_installed.clear();
+    }
+}
+
+/// Sandbox state
+@derive(Clone, Copy, PartialEq, Eq)]
+pub enum SandboxState {
+    Created,
+    Initializing,
+    Ready,
+    Running,
+    Paused,
+    Terminating,
+    Terminated,
+    Error
+}
+
+/// File handle in sandbox
+struct FileHandle {
+    id: u64,
+    path: String,
+    write: bool
+}
+
+/// Network handle in sandbox
+struct NetworkHandle {
+    id: u64,
+    host: String,
+    port: u16
+}
+
+/// Memory block in sandbox
+struct MemoryBlock {
+    address: usize,
+    size: usize
+}
+
+fn rand_id() -> u64 {
+    // Would generate actual random ID
+    12345
+}
+
+// ============================================================================
+// Errors
+// ============================================================================
+
+@derive(Clone)]
+pub enum SecurityError {
+    PermissionDenied(Permission),
+    ResourceLimitExceeded(ResourceType),
+    RateLimitExceeded,
+    InvalidState,
+    IsolationFailed(String),
+    IntegrityViolation(String)
+}
+
+impl SecurityError {
+    pub fn message(&self) -> String {
+        match self {
+            Self::PermissionDenied(p) => format!("Permission denied: {}", p.description()),
+            Self::ResourceLimitExceeded(r) => format!("Resource limit exceeded: {:?}", r),
+            Self::RateLimitExceeded => "API rate limit exceeded".to_string(),
+            Self::InvalidState => "Invalid sandbox state".to_string(),
+            Self::IsolationFailed(e) => format!("Isolation failed: {}", e),
+            Self::IntegrityViolation(e) => format!("Integrity violation: {}", e)
+        }
+    }
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_path_pattern_matching() {
+        let pattern = PathPattern::new("mods/**");
+        assert!(pattern.matches("mods/test.txt"));
+        assert!(pattern.matches("mods/subdir/file.txt"));
+        assert!(!pattern.matches("other/file.txt"));
+
+        let exact = PathPattern::exact("config.toml");
+        assert!(exact.matches("config.toml"));
+        assert!(!exact.matches("other.toml"));
+    }
+
+    #[test]
+    fn test_host_pattern_matching() {
+        let any = HostPattern::any();
+        assert!(any.matches("example.com"));
+        assert!(any.matches("localhost"));
+
+        let wildcard = HostPattern::new("*.example.com");
+        assert!(wildcard.matches("api.example.com"));
+        assert!(wildcard.matches("www.example.com"));
+        assert!(!wildcard.matches("other.com"));
+    }
+
+    #[test]
+    fn test_permission_risk_levels() {
+        assert!(Permission::Timer.risk_level() < Permission::FileWrite(PathPattern::new("**")).risk_level());
+        assert!(Permission::FileRead(PathPattern::new("**")).risk_level() < Permission::ProcessKill.risk_level());
+    }
+
+    #[test]
+    fn test_policy_permission_check() {
+        let policy = SandboxPolicy::new("test")
+            .with_permission(Permission::FileRead(PathPattern::new("mods/**")));
+
+        assert!(policy.has_permission(&Permission::FileRead(PathPattern::new("mods/test.txt"))));
+        assert!(!policy.has_permission(&Permission::FileWrite(PathPattern::new("mods/test.txt"))));
+    }
+
+    #[test]
+    fn test_policy_denied_permission() {
+        let policy = SandboxPolicy::new("test")
+            .with_permission(Permission::All)
+            .deny_permission(Permission::ProcessSpawn("*".to_string()));
+
+        assert!(policy.has_permission(&Permission::FileRead(PathPattern::new("**"))));
+        assert!(!policy.has_permission(&Permission::ProcessSpawn("cmd.exe".to_string())));
+    }
+
+    #[test]
+    fn test_resource_limits() {
+        let strict = ResourceLimits::strict();
+        let relaxed = ResourceLimits::relaxed();
+
+        assert!(strict.max_memory < relaxed.max_memory);
+        assert!(strict.max_threads < relaxed.max_threads);
+    }
+
+    #[test]
+    fn test_security_context_permission_check() {
+        let policy = SandboxPolicy::new("test")
+            .with_permission(Permission::Timer);
+
+        let mut context = SecurityContext::new("test_mod", policy);
+
+        assert!(context.check_permission(&Permission::Timer).is_ok());
+        assert!(context.check_permission(&Permission::NetworkConnect(HostPattern::any())).is_err());
+    }
+
+    #[test]
+    fn test_sandbox_lifecycle() {
+        let policy = SandboxPolicy::standard();
+        let mut sandbox = Sandbox::new("test_mod", policy);
+
+        assert_eq!(sandbox.state(), SandboxState::Created);
+
+        sandbox.initialize().unwrap();
+        assert_eq!(sandbox.state(), SandboxState::Ready);
+
+        sandbox.start().unwrap();
+        assert_eq!(sandbox.state(), SandboxState::Running);
+
+        sandbox.pause().unwrap();
+        assert_eq!(sandbox.state(), SandboxState::Paused);
+
+        sandbox.resume().unwrap();
+        assert_eq!(sandbox.state(), SandboxState::Running);
+
+        sandbox.terminate();
+        assert_eq!(sandbox.state(), SandboxState::Terminated);
+    }
+
+    #[test]
+    fn test_predefined_policies() {
+        let minimal = SandboxPolicy::minimal();
+        assert!(minimal.has_permission(&Permission::Timer));
+        assert!(!minimal.has_permission(&Permission::NetworkConnect(HostPattern::any())));
+
+        let trusted = SandboxPolicy::trusted();
+        assert!(trusted.has_permission(&Permission::GameMemoryWrite));
+
+        let unrestricted = SandboxPolicy::unrestricted();
+        assert!(unrestricted.has_permission(&Permission::All));
+    }
+}

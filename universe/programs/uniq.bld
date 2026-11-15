@@ -1,0 +1,259 @@
+// =============================================================================
+// quniq — Remove consecutive duplicate lines (GNU uniq clone) in BuildLang
+// =============================================================================
+// Pairs with qsort for the classic `sort | uniq` pipeline.
+//
+// Usage:
+//   quniq file.txt             deduplicate consecutive lines
+//   cat file.txt | quniq       deduplicate from stdin
+//   quniq -c file.txt          prefix lines with occurrence count
+//   quniq -d file.txt          only print duplicate lines
+//   quniq -u file.txt          only print unique lines
+//   quniq -i file.txt          case-insensitive comparison
+//   quniq -ci file.txt         combined: count + case-insensitive
+//   quniq --help               usage info
+//
+// Design: String pool with parallel start/len vecs. Walk lines tracking
+// consecutive groups, output based on flags after each group boundary.
+// =============================================================================
+
+// --- Flat state struct ---
+struct Uniq {
+    input: String,
+    ilen: i32,
+    // String pool
+    sp_buf: String,
+    sp_n: i32,
+    sp_starts: Vec<i32>,
+    sp_lens: Vec<i32>,
+    // Line IDs (indices into string pool)
+    line_ids: Vec<i32>,
+    line_n: i32,
+}
+
+fn uniq_new(input: String) -> Uniq {
+    let ilen = input.len();
+    Uniq {
+        input: input, ilen: ilen,
+        sp_buf: "", sp_n: 0, sp_starts: vec![], sp_lens: vec![],
+        line_ids: vec![], line_n: 0,
+    }
+}
+
+// --- String pool ops ---
+fn sp_add(s: &mut Uniq, text: String) -> i32 {
+    let id = s.sp_n;
+    let st = s.sp_buf.len();
+    s.sp_buf = s.sp_buf + text;
+    let en = s.sp_buf.len();
+    vec_push(s.sp_starts, st);
+    vec_push(s.sp_lens, en - st);
+    s.sp_n = s.sp_n + 1;
+    id
+}
+
+fn sp_get(s: &Uniq, id: i32) -> String {
+    let st = vec_get(s.sp_starts, id);
+    let ln = vec_get(s.sp_lens, id);
+    s.sp_buf.substring(st, ln)
+}
+
+// --- Parse input into lines ---
+fn parse_lines(s: &mut Uniq) {
+    let mut pos = 0;
+    let mut line_start = 0;
+    let mut go = true;
+    while go {
+        if pos >= s.ilen {
+            // Last line (no trailing newline)
+            let ln = pos - line_start;
+            if ln > 0 {
+                let text = s.input.substring(line_start, ln);
+                let id = sp_add(s, text);
+                vec_push(s.line_ids, id);
+                s.line_n = s.line_n + 1;
+            }
+            go = false;
+        } else {
+            let c = s.input.char_at(pos);
+            if c == "\n" {
+                let mut ln = pos - line_start;
+                // Strip trailing \r
+                if ln > 0 {
+                    let last_pos = line_start + ln - 1;
+                    let lc = s.input.char_at(last_pos);
+                    if lc == "\r" { ln = ln - 1; }
+                }
+                let text = if ln > 0 {
+                    s.input.substring(line_start, ln)
+                } else {
+                    ""
+                };
+                let id = sp_add(s, text);
+                vec_push(s.line_ids, id);
+                s.line_n = s.line_n + 1;
+                line_start = pos + 1;
+                pos = pos + 1;
+            } else {
+                pos = pos + 1;
+            }
+        }
+    }
+}
+
+// --- Emit one group based on flags ---
+fn emit_group(line: String, count: i64, flag_c: bool, flag_d: bool,
+              flag_u: bool) ~ Console {
+    // -d: only duplicated lines (count > 1)
+    if flag_d {
+        if count <= 1 { return; }
+    }
+    // -u: only unique lines (count == 1)
+    if flag_u {
+        if count != 1 { return; }
+    }
+    // -c: prefix with count
+    if flag_c {
+        println!("  {} {}", count, line);
+    } else {
+        println!("{}", line);
+    }
+}
+
+// --- Check if two lines match (respecting -i flag) ---
+fn lines_equal(s: &Uniq, id_a: i32, id_b: i32, flag_i: bool) -> bool {
+    let sa = sp_get(s, id_a);
+    let sb = sp_get(s, id_b);
+    if flag_i {
+        let la = sa.to_lowercase();
+        let lb = sb.to_lowercase();
+        la == lb
+    } else {
+        sa.compare(sb) == 0
+    }
+}
+
+// --- Process lines: walk consecutive groups ---
+fn process_lines(s: &Uniq, flag_c: bool, flag_d: bool, flag_u: bool,
+                 flag_i: bool) ~ Console {
+    if s.line_n == 0 { return; }
+
+    let mut group_start = vec_get(s.line_ids, 0);
+    let mut count: i64 = 1;
+
+    let mut idx: i64 = 1;
+    while idx < s.line_n {
+        let cur_id = vec_get(s.line_ids, idx);
+
+        if lines_equal(s, cur_id, group_start, flag_i) {
+            // Same group — increment count
+            count = count + 1;
+        } else {
+            // New group — emit the previous group
+            let group_line = sp_get(s, group_start);
+            emit_group(group_line, count, flag_c, flag_d, flag_u);
+            group_start = cur_id;
+            count = 1;
+        }
+        idx = idx + 1;
+    }
+
+    // Emit the last group
+    let last_line = sp_get(s, group_start);
+    emit_group(last_line, count, flag_c, flag_d, flag_u);
+}
+
+// --- Help ---
+fn print_help() ~ Console {
+    println!("quniq — filter adjacent matching lines");
+    println!("");
+    println!("Usage:");
+    println!("  quniq [OPTION]... [FILE]");
+    println!("");
+    println!("Options:");
+    println!("  -c      prefix lines by the number of occurrences");
+    println!("  -d      only print duplicate lines (count > 1)");
+    println!("  -u      only print unique lines (count == 1)");
+    println!("  -i      case-insensitive comparison");
+    println!("  --help  display this help and exit");
+    println!("");
+    println!("With no FILE, read standard input.");
+    println!("Flags can be combined: -ci, -di, etc.");
+    println!("Pairs with qsort: qsort file.txt | quniq -c");
+}
+
+// --- Main ---
+fn main() ~ Console + Environment + FileSystem + Process {
+    let nargs = args_count();
+
+    // Parse flags
+    let mut flag_c = false;
+    let mut flag_d = false;
+    let mut flag_u = false;
+    let mut flag_i = false;
+    let mut filename = "";
+    let mut has_file = false;
+
+    let mut i: i64 = 1;
+    while i < nargs {
+        let arg = args_get(i);
+
+        if arg.starts_with("--") {
+            if arg.contains("help") {
+                print_help();
+                process_exit(0);
+            }
+        } else if arg.starts_with("-") {
+            // Short flags: could be -c, -d, -u, -i, or combined like -ci
+            if arg.contains("c") {
+                flag_c = true;
+            }
+            if arg.contains("d") {
+                flag_d = true;
+            }
+            if arg.contains("u") {
+                flag_u = true;
+            }
+            if arg.contains("i") {
+                flag_i = true;
+            }
+        } else {
+            filename = arg;
+            has_file = true;
+        }
+
+        i = i + 1;
+    }
+
+    // Read input
+    let input = if has_file {
+        let exists = file_exists(filename);
+        if !exists {
+            println!("quniq: {}: No such file or directory", filename);
+            process_exit(2);
+        }
+        read_file(filename)
+    } else {
+        let piped = stdin_is_pipe();
+        if !piped {
+            print_help();
+            process_exit(0);
+        }
+        read_all()
+    };
+
+    // Handle empty input
+    if input.len() == 0 {
+        process_exit(0);
+    }
+
+    // Parse and process
+    let mut s = uniq_new(input);
+    parse_lines(&mut s);
+
+    if s.line_n == 0 {
+        process_exit(0);
+    }
+
+    process_lines(&s, flag_c, flag_d, flag_u, flag_i);
+}

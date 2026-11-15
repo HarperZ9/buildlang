@@ -1,0 +1,1809 @@
+// ═══════════════════════════════════════════════════════════════════════════════
+// PHOTON ENGINE - PATH TRACING MODULE
+// ═══════════════════════════════════════════════════════════════════════════════
+// Copyright © 2024-2025 Zain Dana Harper. All Rights Reserved.
+// Copyright (c) 2024-2025 Zain Dana Harper. All Rights Reserved.
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// Comprehensive real-time path tracing implementation featuring:
+// - ReSTIR Direct Illumination (WP-011)
+// - ReSTIR GI for indirect lighting
+// - Stochastic Surfel Hierarchy (WP-001)
+// - Variance-guided temporal accumulation
+// - Monte Carlo integration with importance sampling
+// - BVH construction and traversal
+//
+// ═══════════════════════════════════════════════════════════════════════════════
+
+module photon::path_tracing
+
+use std::collections::{HashMap, BTreeMap, VecDeque}
+use std::sync::{Arc, Mutex, RwLock, Atomic}
+use std::math::{Vec2, Vec3, Vec4, Mat3, Mat4, Quat}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// RAY STRUCTURES
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Ray representation for tracing
+#[derive(Debug, Clone, Copy)]
+pub struct Ray {
+    pub origin: Vec3,
+    pub direction: Vec3,
+    pub t_min: f32,
+    pub t_max: f32,
+    pub time: f32,          // For motion blur
+    pub wavelength: f32,    // For spectral rendering
+}
+
+impl Ray {
+    pub fn new(origin: Vec3, direction: Vec3) -> Self {
+        Ray {
+            origin,
+            direction: direction.normalize(),
+            t_min: 0.001,
+            t_max: f32::INFINITY,
+            time: 0.0,
+            wavelength: 550.0, // Green light default
+        }
+    }
+
+    pub fn with_range(origin: Vec3, direction: Vec3, t_min: f32, t_max: f32) -> Self {
+        Ray {
+            origin,
+            direction: direction.normalize(),
+            t_min,
+            t_max,
+            time: 0.0,
+            wavelength: 550.0,
+        }
+    }
+
+    /// Get point along ray at parameter t
+    #[inline]
+    pub fn at(&self, t: f32) -> Vec3 {
+        self.origin + self.direction * t
+    }
+
+    /// Transform ray by matrix
+    pub fn transform(&self, matrix: &Mat4) -> Ray {
+        let origin = matrix.transform_point(self.origin);
+        let direction = matrix.transform_vector(self.direction);
+        Ray {
+            origin,
+            direction: direction.normalize(),
+            t_min: self.t_min,
+            t_max: self.t_max,
+            time: self.time,
+            wavelength: self.wavelength,
+        }
+    }
+}
+
+/// Ray differential for texture filtering
+#[derive(Debug, Clone, Copy)]
+pub struct RayDifferential {
+    pub ray: Ray,
+    pub rx_origin: Vec3,
+    pub rx_direction: Vec3,
+    pub ry_origin: Vec3,
+    pub ry_direction: Vec3,
+    pub has_differentials: bool,
+}
+
+impl RayDifferential {
+    pub fn from_ray(ray: Ray) -> Self {
+        RayDifferential {
+            ray,
+            rx_origin: Vec3::ZERO,
+            rx_direction: Vec3::ZERO,
+            ry_origin: Vec3::ZERO,
+            ry_direction: Vec3::ZERO,
+            has_differentials: false,
+        }
+    }
+
+    /// Scale differentials for bounces
+    pub fn scale_differentials(&mut self, scale: f32) {
+        if self.has_differentials {
+            self.rx_origin = self.ray.origin + (self.rx_origin - self.ray.origin) * scale;
+            self.ry_origin = self.ray.origin + (self.ry_origin - self.ray.origin) * scale;
+            self.rx_direction = self.ray.direction + (self.rx_direction - self.ray.direction) * scale;
+            self.ry_direction = self.ray.direction + (self.ry_direction - self.ray.direction) * scale;
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// HIT INFORMATION
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Hit record containing intersection information
+#[derive(Debug, Clone)]
+pub struct HitRecord {
+    pub t: f32,
+    pub position: Vec3,
+    pub normal: Vec3,
+    pub geometric_normal: Vec3,
+    pub tangent: Vec3,
+    pub bitangent: Vec3,
+    pub uv: Vec2,
+    pub front_face: bool,
+    pub material_id: u32,
+    pub instance_id: u32,
+    pub primitive_id: u32,
+    pub barycentric: Vec2,
+}
+
+impl HitRecord {
+    pub fn new() -> Self {
+        HitRecord {
+            t: f32::INFINITY,
+            position: Vec3::ZERO,
+            normal: Vec3::Z,
+            geometric_normal: Vec3::Z,
+            tangent: Vec3::X,
+            bitangent: Vec3::Y,
+            uv: Vec2::ZERO,
+            front_face: true,
+            material_id: 0,
+            instance_id: 0,
+            primitive_id: 0,
+            barycentric: Vec2::ZERO,
+        }
+    }
+
+    /// Set face normal based on ray direction
+    pub fn set_face_normal(&mut self, ray: &Ray, outward_normal: Vec3) {
+        self.front_face = ray.direction.dot(outward_normal) < 0.0;
+        self.normal = if self.front_face { outward_normal } else { -outward_normal };
+    }
+
+    /// Compute tangent frame from normal
+    pub fn compute_tangent_frame(&mut self) {
+        let up = if self.normal.y.abs() < 0.999 {
+            Vec3::Y
+        } else {
+            Vec3::X
+        };
+        self.tangent = up.cross(self.normal).normalize();
+        self.bitangent = self.normal.cross(self.tangent);
+    }
+
+    /// Transform direction to local tangent space
+    pub fn world_to_local(&self, v: Vec3) -> Vec3 {
+        Vec3::new(
+            v.dot(self.tangent),
+            v.dot(self.bitangent),
+            v.dot(self.normal),
+        )
+    }
+
+    /// Transform direction from local tangent space
+    pub fn local_to_world(&self, v: Vec3) -> Vec3 {
+        self.tangent * v.x + self.bitangent * v.y + self.normal * v.z
+    }
+}
+
+/// Shadow ray result
+#[derive(Debug, Clone, Copy)]
+pub struct ShadowResult {
+    pub visibility: f32,
+    pub distance: f32,
+    pub hit_position: Vec3,
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// BOUNDING VOLUME HIERARCHY
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Axis-aligned bounding box
+#[derive(Debug, Clone, Copy)]
+pub struct AABB {
+    pub min: Vec3,
+    pub max: Vec3,
+}
+
+impl AABB {
+    pub fn new() -> Self {
+        AABB {
+            min: Vec3::splat(f32::INFINITY),
+            max: Vec3::splat(f32::NEG_INFINITY),
+        }
+    }
+
+    pub fn from_points(min: Vec3, max: Vec3) -> Self {
+        AABB { min, max }
+    }
+
+    /// Expand to include point
+    pub fn expand_point(&mut self, point: Vec3) {
+        self.min = self.min.min(point);
+        self.max = self.max.max(point);
+    }
+
+    /// Expand to include another AABB
+    pub fn expand_aabb(&mut self, other: &AABB) {
+        self.min = self.min.min(other.min);
+        self.max = self.max.max(other.max);
+    }
+
+    /// Get centroid
+    pub fn centroid(&self) -> Vec3 {
+        (self.min + self.max) * 0.5
+    }
+
+    /// Get diagonal
+    pub fn diagonal(&self) -> Vec3 {
+        self.max - self.min
+    }
+
+    /// Get surface area
+    pub fn surface_area(&self) -> f32 {
+        let d = self.diagonal();
+        2.0 * (d.x * d.y + d.y * d.z + d.z * d.x)
+    }
+
+    /// Get volume
+    pub fn volume(&self) -> f32 {
+        let d = self.diagonal();
+        d.x * d.y * d.z
+    }
+
+    /// Get maximum extent axis
+    pub fn maximum_extent(&self) -> usize {
+        let d = self.diagonal();
+        if d.x > d.y && d.x > d.z { 0 }
+        else if d.y > d.z { 1 }
+        else { 2 }
+    }
+
+    /// Ray-AABB intersection (slab method)
+    pub fn intersect(&self, ray: &Ray) -> Option<(f32, f32)> {
+        let inv_dir = Vec3::new(
+            1.0 / ray.direction.x,
+            1.0 / ray.direction.y,
+            1.0 / ray.direction.z,
+        );
+
+        let t0s = (self.min - ray.origin) * inv_dir;
+        let t1s = (self.max - ray.origin) * inv_dir;
+
+        let t_min_v = t0s.min(t1s);
+        let t_max_v = t0s.max(t1s);
+
+        let t_near = t_min_v.x.max(t_min_v.y).max(t_min_v.z).max(ray.t_min);
+        let t_far = t_max_v.x.min(t_max_v.y).min(t_max_v.z).min(ray.t_max);
+
+        if t_near <= t_far {
+            Some((t_near, t_far))
+        } else {
+            None
+        }
+    }
+
+    /// Optimized ray-AABB intersection using precomputed inverse direction
+    #[inline]
+    pub fn intersect_fast(&self, ray_origin: Vec3, inv_dir: Vec3, t_min: f32, t_max: f32) -> bool {
+        let t0s = (self.min - ray_origin) * inv_dir;
+        let t1s = (self.max - ray_origin) * inv_dir;
+
+        let t_min_v = t0s.min(t1s);
+        let t_max_v = t0s.max(t1s);
+
+        let t_near = t_min_v.x.max(t_min_v.y).max(t_min_v.z).max(t_min);
+        let t_far = t_max_v.x.min(t_max_v.y).min(t_max_v.z).min(t_max);
+
+        t_near <= t_far
+    }
+}
+
+/// BVH node (32 bytes for cache alignment)
+#[repr(C, align(32))]
+#[derive(Debug, Clone, Copy)]
+pub struct BVHNode {
+    pub bounds: AABB,           // 24 bytes
+    pub left_first: u32,        // 4 bytes - left child or first primitive
+    pub primitive_count: u32,   // 4 bytes - 0 for internal nodes
+}
+
+impl BVHNode {
+    pub fn is_leaf(&self) -> bool {
+        self.primitive_count > 0
+    }
+}
+
+/// Surface Area Heuristic (SAH) cost constants
+pub struct SAHCost {
+    pub traversal_cost: f32,
+    pub intersection_cost: f32,
+}
+
+impl Default for SAHCost {
+    fn default() -> Self {
+        SAHCost {
+            traversal_cost: 1.0,
+            intersection_cost: 1.0,
+        }
+    }
+}
+
+/// BVH builder using SAH
+pub struct BVHBuilder {
+    nodes: Vec<BVHNode>,
+    primitive_indices: Vec<u32>,
+    primitive_bounds: Vec<AABB>,
+    primitive_centroids: Vec<Vec3>,
+    sah_cost: SAHCost,
+    max_prims_per_leaf: usize,
+}
+
+impl BVHBuilder {
+    pub fn new() -> Self {
+        BVHBuilder {
+            nodes: Vec::new(),
+            primitive_indices: Vec::new(),
+            primitive_bounds: Vec::new(),
+            primitive_centroids: Vec::new(),
+            sah_cost: SAHCost::default(),
+            max_prims_per_leaf: 4,
+        }
+    }
+
+    /// Build BVH from primitives
+    pub fn build(&mut self, bounds: &[AABB]) -> Vec<BVHNode> {
+        let n = bounds.len();
+        if n == 0 {
+            return Vec::new();
+        }
+
+        // Initialize primitive data
+        self.primitive_bounds = bounds.to_vec();
+        self.primitive_indices = (0..n as u32).collect();
+        self.primitive_centroids = bounds.iter().map(|b| b.centroid()).collect();
+
+        // Reserve nodes (at most 2*n - 1 nodes)
+        self.nodes.clear();
+        self.nodes.reserve(2 * n);
+
+        // Build recursively
+        self.build_recursive(0, n);
+
+        std::mem::take(&mut self.nodes)
+    }
+
+    fn build_recursive(&mut self, start: usize, end: usize) -> usize {
+        let node_idx = self.nodes.len();
+        self.nodes.push(BVHNode {
+            bounds: AABB::new(),
+            left_first: 0,
+            primitive_count: 0,
+        });
+
+        // Compute bounds for all primitives in range
+        let mut bounds = AABB::new();
+        for i in start..end {
+            bounds.expand_aabb(&self.primitive_bounds[self.primitive_indices[i] as usize]);
+        }
+        self.nodes[node_idx].bounds = bounds;
+
+        let prim_count = end - start;
+
+        // Make leaf if few primitives
+        if prim_count <= self.max_prims_per_leaf {
+            self.nodes[node_idx].left_first = start as u32;
+            self.nodes[node_idx].primitive_count = prim_count as u32;
+            return node_idx;
+        }
+
+        // Find best split using SAH
+        let (axis, split_pos, split_cost) = self.find_best_split(start, end, &bounds);
+
+        // Check if split is worthwhile
+        let leaf_cost = self.sah_cost.intersection_cost * prim_count as f32;
+        if split_cost >= leaf_cost {
+            self.nodes[node_idx].left_first = start as u32;
+            self.nodes[node_idx].primitive_count = prim_count as u32;
+            return node_idx;
+        }
+
+        // Partition primitives
+        let mid = self.partition(start, end, axis, split_pos);
+
+        // Ensure at least one primitive on each side
+        let mid = if mid == start { start + 1 } else if mid == end { end - 1 } else { mid };
+
+        // Build children
+        let left_idx = self.build_recursive(start, mid);
+        let right_idx = self.build_recursive(mid, end);
+
+        self.nodes[node_idx].left_first = left_idx as u32;
+        self.nodes[node_idx].primitive_count = 0; // Internal node
+
+        node_idx
+    }
+
+    fn find_best_split(&self, start: usize, end: usize, bounds: &AABB) -> (usize, f32, f32) {
+        const NUM_BINS: usize = 12;
+
+        let mut best_axis = 0;
+        let mut best_pos = 0.0f32;
+        let mut best_cost = f32::INFINITY;
+
+        let extent = bounds.diagonal();
+
+        for axis in 0..3 {
+            let axis_extent = match axis {
+                0 => extent.x,
+                1 => extent.y,
+                _ => extent.z,
+            };
+
+            if axis_extent < 1e-6 {
+                continue;
+            }
+
+            // Initialize bins
+            struct Bin {
+                bounds: AABB,
+                count: usize,
+            }
+
+            let mut bins: Vec<Bin> = (0..NUM_BINS).map(|_| Bin {
+                bounds: AABB::new(),
+                count: 0,
+            }).collect();
+
+            let axis_min = match axis {
+                0 => bounds.min.x,
+                1 => bounds.min.y,
+                _ => bounds.min.z,
+            };
+
+            // Populate bins
+            for i in start..end {
+                let idx = self.primitive_indices[i] as usize;
+                let centroid = match axis {
+                    0 => self.primitive_centroids[idx].x,
+                    1 => self.primitive_centroids[idx].y,
+                    _ => self.primitive_centroids[idx].z,
+                };
+
+                let bin_idx = ((centroid - axis_min) / axis_extent * NUM_BINS as f32) as usize;
+                let bin_idx = bin_idx.min(NUM_BINS - 1);
+
+                bins[bin_idx].count += 1;
+                bins[bin_idx].bounds.expand_aabb(&self.primitive_bounds[idx]);
+            }
+
+            // Compute prefix sums for left-to-right sweep
+            let mut left_count = vec![0usize; NUM_BINS - 1];
+            let mut left_bounds = vec![AABB::new(); NUM_BINS - 1];
+            let mut left_area = vec![0.0f32; NUM_BINS - 1];
+
+            left_count[0] = bins[0].count;
+            left_bounds[0] = bins[0].bounds;
+            left_area[0] = bins[0].bounds.surface_area();
+
+            for i in 1..(NUM_BINS - 1) {
+                left_count[i] = left_count[i - 1] + bins[i].count;
+                left_bounds[i] = left_bounds[i - 1];
+                left_bounds[i].expand_aabb(&bins[i].bounds);
+                left_area[i] = left_bounds[i].surface_area();
+            }
+
+            // Compute suffix sums for right-to-left sweep
+            let mut right_count = vec![0usize; NUM_BINS - 1];
+            let mut right_area = vec![0.0f32; NUM_BINS - 1];
+
+            let mut right_bounds_acc = AABB::new();
+            for i in (0..(NUM_BINS - 1)).rev() {
+                right_bounds_acc.expand_aabb(&bins[i + 1].bounds);
+                right_count[i] = if i == NUM_BINS - 2 {
+                    bins[NUM_BINS - 1].count
+                } else {
+                    right_count[i + 1] + bins[i + 1].count
+                };
+                right_area[i] = right_bounds_acc.surface_area();
+            }
+
+            // Find best split position
+            let parent_area = bounds.surface_area();
+            for i in 0..(NUM_BINS - 1) {
+                if left_count[i] == 0 || right_count[i] == 0 {
+                    continue;
+                }
+
+                let cost = self.sah_cost.traversal_cost +
+                    (left_area[i] * left_count[i] as f32 +
+                     right_area[i] * right_count[i] as f32) *
+                    self.sah_cost.intersection_cost / parent_area;
+
+                if cost < best_cost {
+                    best_cost = cost;
+                    best_axis = axis;
+                    best_pos = axis_min + axis_extent * (i + 1) as f32 / NUM_BINS as f32;
+                }
+            }
+        }
+
+        (best_axis, best_pos, best_cost)
+    }
+
+    fn partition(&mut self, start: usize, end: usize, axis: usize, split_pos: f32) -> usize {
+        let mut i = start;
+        let mut j = end - 1;
+
+        while i <= j {
+            let centroid = match axis {
+                0 => self.primitive_centroids[self.primitive_indices[i] as usize].x,
+                1 => self.primitive_centroids[self.primitive_indices[i] as usize].y,
+                _ => self.primitive_centroids[self.primitive_indices[i] as usize].z,
+            };
+
+            if centroid < split_pos {
+                i += 1;
+            } else {
+                self.primitive_indices.swap(i, j);
+                if j == 0 { break; }
+                j -= 1;
+            }
+        }
+
+        i
+    }
+}
+
+/// BVH traversal for ray intersection
+pub struct BVHTraverser {
+    stack: Vec<u32>,
+}
+
+impl BVHTraverser {
+    pub fn new() -> Self {
+        BVHTraverser {
+            stack: Vec::with_capacity(64),
+        }
+    }
+
+    /// Traverse BVH and find closest intersection
+    pub fn trace<F>(&mut self, nodes: &[BVHNode], ray: &Ray, mut intersect_prim: F) -> Option<HitRecord>
+    where
+        F: FnMut(u32, &Ray) -> Option<HitRecord>,
+    {
+        if nodes.is_empty() {
+            return None;
+        }
+
+        let inv_dir = Vec3::new(
+            1.0 / ray.direction.x,
+            1.0 / ray.direction.y,
+            1.0 / ray.direction.z,
+        );
+
+        self.stack.clear();
+        self.stack.push(0);
+
+        let mut closest_hit: Option<HitRecord> = None;
+        let mut t_max = ray.t_max;
+
+        while let Some(node_idx) = self.stack.pop() {
+            let node = &nodes[node_idx as usize];
+
+            if !node.bounds.intersect_fast(ray.origin, inv_dir, ray.t_min, t_max) {
+                continue;
+            }
+
+            if node.is_leaf() {
+                // Test primitives
+                for i in 0..node.primitive_count {
+                    let prim_idx = node.left_first + i;
+                    if let Some(hit) = intersect_prim(prim_idx, ray) {
+                        if hit.t < t_max {
+                            t_max = hit.t;
+                            closest_hit = Some(hit);
+                        }
+                    }
+                }
+            } else {
+                // Push children (order by distance for efficiency)
+                let left_idx = node.left_first;
+                let right_idx = node.left_first + 1;
+
+                let left_dist = nodes[left_idx as usize].bounds.intersect(ray)
+                    .map(|(t, _)| t)
+                    .unwrap_or(f32::INFINITY);
+                let right_dist = nodes[right_idx as usize].bounds.intersect(ray)
+                    .map(|(t, _)| t)
+                    .unwrap_or(f32::INFINITY);
+
+                if left_dist < right_dist {
+                    if right_dist < t_max { self.stack.push(right_idx); }
+                    if left_dist < t_max { self.stack.push(left_idx); }
+                } else {
+                    if left_dist < t_max { self.stack.push(left_idx); }
+                    if right_dist < t_max { self.stack.push(right_idx); }
+                }
+            }
+        }
+
+        closest_hit
+    }
+
+    /// Shadow ray test (any hit)
+    pub fn trace_shadow<F>(&mut self, nodes: &[BVHNode], ray: &Ray, mut intersect_prim: F) -> bool
+    where
+        F: FnMut(u32, &Ray) -> bool,
+    {
+        if nodes.is_empty() {
+            return false;
+        }
+
+        let inv_dir = Vec3::new(
+            1.0 / ray.direction.x,
+            1.0 / ray.direction.y,
+            1.0 / ray.direction.z,
+        );
+
+        self.stack.clear();
+        self.stack.push(0);
+
+        while let Some(node_idx) = self.stack.pop() {
+            let node = &nodes[node_idx as usize];
+
+            if !node.bounds.intersect_fast(ray.origin, inv_dir, ray.t_min, ray.t_max) {
+                continue;
+            }
+
+            if node.is_leaf() {
+                for i in 0..node.primitive_count {
+                    let prim_idx = node.left_first + i;
+                    if intersect_prim(prim_idx, ray) {
+                        return true; // Any hit is sufficient for shadows
+                    }
+                }
+            } else {
+                self.stack.push(node.left_first);
+                self.stack.push(node.left_first + 1);
+            }
+        }
+
+        false
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MONTE CARLO SAMPLING
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Random number generator (PCG)
+#[derive(Clone)]
+pub struct RNG {
+    state: u64,
+    inc: u64,
+}
+
+impl RNG {
+    pub fn new(seed: u64) -> Self {
+        let mut rng = RNG {
+            state: 0,
+            inc: (seed << 1) | 1,
+        };
+        rng.next_u32();
+        rng.state = rng.state.wrapping_add(seed);
+        rng.next_u32();
+        rng
+    }
+
+    pub fn next_u32(&mut self) -> u32 {
+        let old_state = self.state;
+        self.state = old_state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(self.inc);
+
+        let xor_shifted = ((old_state >> 18) ^ old_state) >> 27;
+        let rot = (old_state >> 59) as u32;
+        ((xor_shifted >> rot as u64) | (xor_shifted << ((-(rot as i32)) as u32 & 31))) as u32
+    }
+
+    #[inline]
+    pub fn next_f32(&mut self) -> f32 {
+        (self.next_u32() as f32) * (1.0 / 4294967296.0)
+    }
+
+    pub fn next_vec2(&mut self) -> Vec2 {
+        Vec2::new(self.next_f32(), self.next_f32())
+    }
+
+    pub fn next_vec3(&mut self) -> Vec3 {
+        Vec3::new(self.next_f32(), self.next_f32(), self.next_f32())
+    }
+}
+
+/// Blue noise sampler for temporal stability (WP-006)
+pub struct BlueNoiseSampler {
+    blue_noise_texture: Vec<Vec2>,
+    texture_size: u32,
+    frame_index: u32,
+    golden_ratio: f32,
+}
+
+impl BlueNoiseSampler {
+    pub fn new(texture_size: u32) -> Self {
+        // Generate blue noise texture using void-and-cluster
+        let size = (texture_size * texture_size) as usize;
+        let mut blue_noise_texture = vec![Vec2::ZERO; size];
+
+        // Simplified generation (would use proper void-and-cluster)
+        let mut rng = RNG::new(42);
+        for sample in blue_noise_texture.iter_mut() {
+            *sample = Vec2::new(rng.next_f32(), rng.next_f32());
+        }
+
+        BlueNoiseSampler {
+            blue_noise_texture,
+            texture_size,
+            frame_index: 0,
+            golden_ratio: (5.0_f32.sqrt() - 1.0) / 2.0,
+        }
+    }
+
+    pub fn advance_frame(&mut self) {
+        self.frame_index = self.frame_index.wrapping_add(1);
+    }
+
+    /// Get sample for pixel with temporal offset
+    pub fn sample(&self, pixel: Vec2) -> Vec2 {
+        let idx = ((pixel.x as u32 % self.texture_size) +
+                   (pixel.y as u32 % self.texture_size) * self.texture_size) as usize;
+        let base = self.blue_noise_texture[idx];
+
+        // Add golden ratio offset for temporal distribution
+        let temporal_offset = self.frame_index as f32 * self.golden_ratio;
+        Vec2::new(
+            (base.x + temporal_offset).fract(),
+            (base.y + temporal_offset * self.golden_ratio).fract(),
+        )
+    }
+
+    /// Stratified sample with blue noise jitter
+    pub fn stratified_sample(&self, pixel: Vec2, sample_idx: u32, total_samples: u32) -> Vec2 {
+        let strata_size = (total_samples as f32).sqrt().ceil() as u32;
+        let strata_x = sample_idx % strata_size;
+        let strata_y = sample_idx / strata_size;
+
+        let blue_noise = self.sample(pixel + Vec2::new(sample_idx as f32, 0.0));
+
+        Vec2::new(
+            (strata_x as f32 + blue_noise.x) / strata_size as f32,
+            (strata_y as f32 + blue_noise.y) / strata_size as f32,
+        )
+    }
+}
+
+/// Importance sampling functions
+pub mod sampling {
+    use super::*;
+
+    /// Cosine-weighted hemisphere sampling
+    pub fn cosine_hemisphere(u: Vec2) -> Vec3 {
+        let r = u.x.sqrt();
+        let phi = 2.0 * std::f32::consts::PI * u.y;
+        let x = r * phi.cos();
+        let y = r * phi.sin();
+        let z = (1.0 - u.x).sqrt();
+        Vec3::new(x, y, z)
+    }
+
+    /// PDF for cosine-weighted hemisphere sampling
+    pub fn cosine_hemisphere_pdf(cos_theta: f32) -> f32 {
+        cos_theta / std::f32::consts::PI
+    }
+
+    /// Uniform hemisphere sampling
+    pub fn uniform_hemisphere(u: Vec2) -> Vec3 {
+        let z = u.x;
+        let r = (1.0 - z * z).sqrt();
+        let phi = 2.0 * std::f32::consts::PI * u.y;
+        Vec3::new(r * phi.cos(), r * phi.sin(), z)
+    }
+
+    /// PDF for uniform hemisphere sampling
+    pub fn uniform_hemisphere_pdf() -> f32 {
+        1.0 / (2.0 * std::f32::consts::PI)
+    }
+
+    /// Uniform sphere sampling
+    pub fn uniform_sphere(u: Vec2) -> Vec3 {
+        let z = 1.0 - 2.0 * u.x;
+        let r = (1.0 - z * z).sqrt();
+        let phi = 2.0 * std::f32::consts::PI * u.y;
+        Vec3::new(r * phi.cos(), r * phi.sin(), z)
+    }
+
+    /// PDF for uniform sphere sampling
+    pub fn uniform_sphere_pdf() -> f32 {
+        1.0 / (4.0 * std::f32::consts::PI)
+    }
+
+    /// Concentric disk sampling
+    pub fn concentric_disk(u: Vec2) -> Vec2 {
+        let offset = 2.0 * u - Vec2::ONE;
+        if offset.x == 0.0 && offset.y == 0.0 {
+            return Vec2::ZERO;
+        }
+
+        let (r, theta) = if offset.x.abs() > offset.y.abs() {
+            (offset.x, std::f32::consts::FRAC_PI_4 * (offset.y / offset.x))
+        } else {
+            (offset.y, std::f32::consts::FRAC_PI_2 - std::f32::consts::FRAC_PI_4 * (offset.x / offset.y))
+        };
+
+        r * Vec2::new(theta.cos(), theta.sin())
+    }
+
+    /// GGX importance sampling (WP-012)
+    pub fn ggx_vndf(u: Vec2, v: Vec3, roughness: f32) -> Vec3 {
+        // Stretch view vector
+        let v_stretched = Vec3::new(roughness * v.x, roughness * v.y, v.z).normalize();
+
+        // Orthonormal basis
+        let len_sq = v_stretched.x * v_stretched.x + v_stretched.y * v_stretched.y;
+        let t1 = if len_sq > 0.0 {
+            Vec3::new(-v_stretched.y, v_stretched.x, 0.0) / len_sq.sqrt()
+        } else {
+            Vec3::X
+        };
+        let t2 = v_stretched.cross(t1);
+
+        // Sample disk
+        let r = u.x.sqrt();
+        let phi = 2.0 * std::f32::consts::PI * u.y;
+        let t1_coef = r * phi.cos();
+        let t2_coef = r * phi.sin();
+
+        // Compute normal in hemisphere
+        let s = 0.5 * (1.0 + v_stretched.z);
+        let t2_coef = (1.0 - s) * (1.0 - t1_coef * t1_coef).sqrt() + s * t2_coef;
+
+        let n_stretched = t1 * t1_coef + t2 * t2_coef + v_stretched * (1.0 - t1_coef * t1_coef - t2_coef * t2_coef).max(0.0).sqrt();
+
+        // Unstretch
+        Vec3::new(roughness * n_stretched.x, roughness * n_stretched.y, n_stretched.z.max(0.0)).normalize()
+    }
+
+    /// Power heuristic for MIS
+    pub fn power_heuristic(nf: f32, pdf_f: f32, ng: f32, pdf_g: f32) -> f32 {
+        let f = nf * pdf_f;
+        let g = ng * pdf_g;
+        (f * f) / (f * f + g * g)
+    }
+
+    /// Balance heuristic for MIS
+    pub fn balance_heuristic(nf: f32, pdf_f: f32, ng: f32, pdf_g: f32) -> f32 {
+        let f = nf * pdf_f;
+        let g = ng * pdf_g;
+        f / (f + g)
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// RESTIR DIRECT ILLUMINATION (WP-011)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Light sample for ReSTIR
+#[derive(Debug, Clone, Copy)]
+pub struct LightSample {
+    pub position: Vec3,
+    pub normal: Vec3,
+    pub emission: Vec3,
+    pub pdf: f32,
+    pub light_id: u32,
+}
+
+/// Reservoir for temporal resampling
+#[derive(Debug, Clone, Copy)]
+pub struct Reservoir {
+    pub sample: LightSample,
+    pub weight_sum: f32,
+    pub m: f32,           // Number of candidates seen
+    pub w: f32,           // Unbiased contribution weight
+    pub selected: bool,
+}
+
+impl Reservoir {
+    pub fn new() -> Self {
+        Reservoir {
+            sample: LightSample {
+                position: Vec3::ZERO,
+                normal: Vec3::Z,
+                emission: Vec3::ZERO,
+                pdf: 0.0,
+                light_id: 0,
+            },
+            weight_sum: 0.0,
+            m: 0.0,
+            w: 0.0,
+            selected: false,
+        }
+    }
+
+    /// Update reservoir with new sample
+    pub fn update(&mut self, sample: LightSample, weight: f32, rng: &mut RNG) -> bool {
+        self.weight_sum += weight;
+        self.m += 1.0;
+
+        if rng.next_f32() * self.weight_sum < weight {
+            self.sample = sample;
+            self.selected = true;
+            return true;
+        }
+        false
+    }
+
+    /// Merge another reservoir into this one
+    pub fn merge(&mut self, other: &Reservoir, p_hat_at_q: f32, rng: &mut RNG) {
+        let weight = p_hat_at_q * other.w * other.m;
+        if self.update(other.sample, weight, rng) {
+            // Sample came from other reservoir
+        }
+    }
+
+    /// Compute unbiased weight
+    pub fn compute_w(&mut self, p_hat: f32) {
+        if self.weight_sum > 0.0 && p_hat > 0.0 {
+            self.w = self.weight_sum / (self.m * p_hat);
+        } else {
+            self.w = 0.0;
+        }
+    }
+}
+
+/// ReSTIR Direct Illumination system
+pub struct ReSTIR {
+    reservoirs: Vec<Reservoir>,
+    prev_reservoirs: Vec<Reservoir>,
+    width: u32,
+    height: u32,
+    m_cap: f32,                    // Maximum M value to prevent bias
+    spatial_reuse_radius: f32,
+    spatial_reuse_count: u32,
+    temporal_reuse: bool,
+    spatial_reuse: bool,
+}
+
+impl ReSTIR {
+    pub fn new(width: u32, height: u32) -> Self {
+        let size = (width * height) as usize;
+        ReSTIR {
+            reservoirs: vec![Reservoir::new(); size],
+            prev_reservoirs: vec![Reservoir::new(); size],
+            width,
+            height,
+            m_cap: 20.0,
+            spatial_reuse_radius: 30.0,
+            spatial_reuse_count: 5,
+            temporal_reuse: true,
+            spatial_reuse: true,
+        }
+    }
+
+    /// Initial candidate generation (RIS pass)
+    pub fn initial_sampling<F>(
+        &mut self,
+        pixel: (u32, u32),
+        shading_point: Vec3,
+        shading_normal: Vec3,
+        num_candidates: u32,
+        mut sample_light: F,
+        rng: &mut RNG,
+    )
+    where
+        F: FnMut(&mut RNG) -> LightSample,
+    {
+        let idx = (pixel.1 * self.width + pixel.0) as usize;
+        let mut reservoir = Reservoir::new();
+
+        for _ in 0..num_candidates {
+            let light_sample = sample_light(rng);
+
+            // Compute target function (p_hat)
+            let light_dir = (light_sample.position - shading_point).normalize();
+            let cos_theta = shading_normal.dot(light_dir).max(0.0);
+            let light_cos = (-light_dir).dot(light_sample.normal).max(0.0);
+            let dist_sq = (light_sample.position - shading_point).length_squared();
+
+            let p_hat = light_sample.emission.length() * cos_theta * light_cos / dist_sq;
+            let weight = p_hat / light_sample.pdf;
+
+            reservoir.update(light_sample, weight, rng);
+        }
+
+        // Compute final weight
+        let light_dir = (reservoir.sample.position - shading_point).normalize();
+        let cos_theta = shading_normal.dot(light_dir).max(0.0);
+        let light_cos = (-light_dir).dot(reservoir.sample.normal).max(0.0);
+        let dist_sq = (reservoir.sample.position - shading_point).length_squared();
+        let p_hat = reservoir.sample.emission.length() * cos_theta * light_cos / dist_sq;
+
+        reservoir.compute_w(p_hat);
+        self.reservoirs[idx] = reservoir;
+    }
+
+    /// Temporal reuse pass
+    pub fn temporal_reuse(
+        &mut self,
+        pixel: (u32, u32),
+        shading_point: Vec3,
+        shading_normal: Vec3,
+        motion_vector: Vec2,
+        depth: f32,
+        prev_depth: f32,
+        rng: &mut RNG,
+    ) {
+        if !self.temporal_reuse {
+            return;
+        }
+
+        let idx = (pixel.1 * self.width + pixel.0) as usize;
+
+        // Reproject to previous frame
+        let prev_pixel_x = (pixel.0 as f32 + motion_vector.x) as i32;
+        let prev_pixel_y = (pixel.1 as f32 + motion_vector.y) as i32;
+
+        if prev_pixel_x < 0 || prev_pixel_x >= self.width as i32 ||
+           prev_pixel_y < 0 || prev_pixel_y >= self.height as i32 {
+            return;
+        }
+
+        // Check depth consistency
+        let depth_threshold = depth * 0.1;
+        if (prev_depth - depth).abs() > depth_threshold {
+            return;
+        }
+
+        let prev_idx = (prev_pixel_y as u32 * self.width + prev_pixel_x as u32) as usize;
+        let prev_reservoir = &self.prev_reservoirs[prev_idx];
+
+        // Cap M to prevent bias accumulation
+        let mut reservoir = self.reservoirs[idx].clone();
+        let mut capped_prev = prev_reservoir.clone();
+        capped_prev.m = capped_prev.m.min(self.m_cap);
+
+        // Compute p_hat at current shading point
+        let light_dir = (prev_reservoir.sample.position - shading_point).normalize();
+        let cos_theta = shading_normal.dot(light_dir).max(0.0);
+        let light_cos = (-light_dir).dot(prev_reservoir.sample.normal).max(0.0);
+        let dist_sq = (prev_reservoir.sample.position - shading_point).length_squared();
+        let p_hat = prev_reservoir.sample.emission.length() * cos_theta * light_cos / dist_sq;
+
+        reservoir.merge(&capped_prev, p_hat, rng);
+
+        // Recompute weight
+        let light_dir = (reservoir.sample.position - shading_point).normalize();
+        let cos_theta = shading_normal.dot(light_dir).max(0.0);
+        let light_cos = (-light_dir).dot(reservoir.sample.normal).max(0.0);
+        let dist_sq = (reservoir.sample.position - shading_point).length_squared();
+        let p_hat = reservoir.sample.emission.length() * cos_theta * light_cos / dist_sq;
+
+        reservoir.compute_w(p_hat);
+        self.reservoirs[idx] = reservoir;
+    }
+
+    /// Spatial reuse pass
+    pub fn spatial_reuse(
+        &mut self,
+        pixel: (u32, u32),
+        shading_point: Vec3,
+        shading_normal: Vec3,
+        depth: f32,
+        depth_buffer: &[f32],
+        normal_buffer: &[Vec3],
+        rng: &mut RNG,
+    ) {
+        if !self.spatial_reuse {
+            return;
+        }
+
+        let idx = (pixel.1 * self.width + pixel.0) as usize;
+        let mut reservoir = self.reservoirs[idx].clone();
+
+        for _ in 0..self.spatial_reuse_count {
+            // Random neighbor within radius
+            let offset = sampling::concentric_disk(rng.next_vec2()) * self.spatial_reuse_radius;
+            let neighbor_x = (pixel.0 as f32 + offset.x) as i32;
+            let neighbor_y = (pixel.1 as f32 + offset.y) as i32;
+
+            if neighbor_x < 0 || neighbor_x >= self.width as i32 ||
+               neighbor_y < 0 || neighbor_y >= self.height as i32 {
+                continue;
+            }
+
+            let neighbor_idx = (neighbor_y as u32 * self.width + neighbor_x as u32) as usize;
+
+            // Check geometric similarity
+            let neighbor_depth = depth_buffer[neighbor_idx];
+            let neighbor_normal = normal_buffer[neighbor_idx];
+
+            let depth_threshold = depth * 0.1;
+            if (neighbor_depth - depth).abs() > depth_threshold {
+                continue;
+            }
+
+            if shading_normal.dot(neighbor_normal) < 0.9 {
+                continue;
+            }
+
+            let neighbor_reservoir = &self.reservoirs[neighbor_idx];
+
+            // Compute p_hat at current shading point
+            let light_dir = (neighbor_reservoir.sample.position - shading_point).normalize();
+            let cos_theta = shading_normal.dot(light_dir).max(0.0);
+            let light_cos = (-light_dir).dot(neighbor_reservoir.sample.normal).max(0.0);
+            let dist_sq = (neighbor_reservoir.sample.position - shading_point).length_squared();
+            let p_hat = neighbor_reservoir.sample.emission.length() * cos_theta * light_cos / dist_sq;
+
+            reservoir.merge(neighbor_reservoir, p_hat, rng);
+        }
+
+        // Recompute weight
+        let light_dir = (reservoir.sample.position - shading_point).normalize();
+        let cos_theta = shading_normal.dot(light_dir).max(0.0);
+        let light_cos = (-light_dir).dot(reservoir.sample.normal).max(0.0);
+        let dist_sq = (reservoir.sample.position - shading_point).length_squared();
+        let p_hat = reservoir.sample.emission.length() * cos_theta * light_cos / dist_sq;
+
+        reservoir.compute_w(p_hat);
+        self.reservoirs[idx] = reservoir;
+    }
+
+    /// End of frame - swap buffers
+    pub fn end_frame(&mut self) {
+        std::mem::swap(&mut self.reservoirs, &mut self.prev_reservoirs);
+    }
+
+    /// Get final sample for shading
+    pub fn get_sample(&self, pixel: (u32, u32)) -> (LightSample, f32) {
+        let idx = (pixel.1 * self.width + pixel.0) as usize;
+        let reservoir = &self.reservoirs[idx];
+        (reservoir.sample, reservoir.w)
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// STOCHASTIC SURFEL HIERARCHY (WP-001)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Spherical harmonics coefficients (L2 - 9 coefficients per channel)
+#[derive(Debug, Clone, Copy)]
+pub struct SphericalHarmonics {
+    pub coeffs: [[f32; 9]; 3],  // RGB channels
+}
+
+impl SphericalHarmonics {
+    pub fn new() -> Self {
+        SphericalHarmonics {
+            coeffs: [[0.0; 9]; 3],
+        }
+    }
+
+    /// Evaluate SH in direction
+    pub fn evaluate(&self, direction: Vec3) -> Vec3 {
+        let d = direction.normalize();
+
+        // SH basis functions
+        let y0 = 0.282095;                                              // Y_0^0
+        let y1 = 0.488603 * d.y;                                       // Y_1^-1
+        let y2 = 0.488603 * d.z;                                       // Y_1^0
+        let y3 = 0.488603 * d.x;                                       // Y_1^1
+        let y4 = 1.092548 * d.x * d.y;                                 // Y_2^-2
+        let y5 = 1.092548 * d.y * d.z;                                 // Y_2^-1
+        let y6 = 0.315392 * (3.0 * d.z * d.z - 1.0);                  // Y_2^0
+        let y7 = 1.092548 * d.x * d.z;                                 // Y_2^1
+        let y8 = 0.546274 * (d.x * d.x - d.y * d.y);                  // Y_2^2
+
+        let basis = [y0, y1, y2, y3, y4, y5, y6, y7, y8];
+
+        let mut result = Vec3::ZERO;
+        for i in 0..9 {
+            result.x += self.coeffs[0][i] * basis[i];
+            result.y += self.coeffs[1][i] * basis[i];
+            result.z += self.coeffs[2][i] * basis[i];
+        }
+
+        result.max(Vec3::ZERO)
+    }
+
+    /// Add sample to SH
+    pub fn add_sample(&mut self, direction: Vec3, radiance: Vec3, weight: f32) {
+        let d = direction.normalize();
+
+        // SH basis functions
+        let y0 = 0.282095;
+        let y1 = 0.488603 * d.y;
+        let y2 = 0.488603 * d.z;
+        let y3 = 0.488603 * d.x;
+        let y4 = 1.092548 * d.x * d.y;
+        let y5 = 1.092548 * d.y * d.z;
+        let y6 = 0.315392 * (3.0 * d.z * d.z - 1.0);
+        let y7 = 1.092548 * d.x * d.z;
+        let y8 = 0.546274 * (d.x * d.x - d.y * d.y);
+
+        let basis = [y0, y1, y2, y3, y4, y5, y6, y7, y8];
+
+        for i in 0..9 {
+            self.coeffs[0][i] += radiance.x * basis[i] * weight;
+            self.coeffs[1][i] += radiance.y * basis[i] * weight;
+            self.coeffs[2][i] += radiance.z * basis[i] * weight;
+        }
+    }
+
+    /// Blend with another SH
+    pub fn blend(&mut self, other: &SphericalHarmonics, t: f32) {
+        for c in 0..3 {
+            for i in 0..9 {
+                self.coeffs[c][i] = self.coeffs[c][i] * (1.0 - t) + other.coeffs[c][i] * t;
+            }
+        }
+    }
+}
+
+/// Surfel representation for global illumination
+#[derive(Debug, Clone)]
+pub struct Surfel {
+    pub position: Vec3,
+    pub normal: Vec3,
+    pub radius: f32,
+    pub irradiance: SphericalHarmonics,
+    pub variance: f32,
+    pub sample_count: u32,
+    pub last_update_frame: u32,
+    pub id: u32,
+}
+
+impl Surfel {
+    pub fn new(position: Vec3, normal: Vec3, radius: f32, id: u32) -> Self {
+        Surfel {
+            position,
+            normal,
+            radius,
+            irradiance: SphericalHarmonics::new(),
+            variance: 1.0,  // Start with high variance
+            sample_count: 0,
+            last_update_frame: 0,
+            id,
+        }
+    }
+
+    /// Compute weight for this surfel at query point
+    pub fn weight(&self, query_pos: Vec3, query_normal: Vec3) -> f32 {
+        let dist_sq = (query_pos - self.position).length_squared();
+        let distance_weight = (-dist_sq / (2.0 * self.radius * self.radius)).exp();
+        let normal_weight = self.normal.dot(query_normal).max(0.0).powi(2);
+        distance_weight * normal_weight
+    }
+
+    /// Update irradiance with new sample using Welford's algorithm
+    pub fn update(&mut self, direction: Vec3, radiance: Vec3, frame: u32) {
+        self.sample_count += 1;
+        let n = self.sample_count as f32;
+
+        // Running mean update
+        let old_mean = self.irradiance.evaluate(direction);
+        self.irradiance.add_sample(direction, radiance, 1.0 / n);
+
+        // Variance update (online Welford)
+        let new_mean = self.irradiance.evaluate(direction);
+        let delta1 = radiance - old_mean;
+        let delta2 = radiance - new_mean;
+        let variance_contribution = delta1.dot(delta2);
+
+        if n > 1.0 {
+            self.variance = (self.variance * (n - 1.0) + variance_contribution) / n;
+        }
+
+        self.last_update_frame = frame;
+    }
+
+    /// Apply temporal decay to sample count
+    pub fn apply_decay(&mut self, decay_rate: f32, delta_time: f32) {
+        let decay = (-decay_rate * delta_time).exp();
+        self.sample_count = (self.sample_count as f32 * decay) as u32;
+    }
+}
+
+/// Surfel hierarchy for efficient queries
+pub struct SurfelHierarchy {
+    surfels: Vec<Surfel>,
+    bvh_nodes: Vec<BVHNode>,
+    surfel_bounds: Vec<AABB>,
+    max_surfels: usize,
+    spawn_rate: u32,
+    merge_threshold: f32,
+    frame_counter: u32,
+    variance_threshold: f32,
+}
+
+impl SurfelHierarchy {
+    pub fn new(max_surfels: usize) -> Self {
+        SurfelHierarchy {
+            surfels: Vec::with_capacity(max_surfels),
+            bvh_nodes: Vec::new(),
+            surfel_bounds: Vec::new(),
+            max_surfels,
+            spawn_rate: 1024,
+            merge_threshold: 0.1,
+            frame_counter: 0,
+            variance_threshold: 0.01,
+        }
+    }
+
+    /// Spawn new surfel at position
+    pub fn spawn(&mut self, position: Vec3, normal: Vec3, radius: f32) -> Option<u32> {
+        if self.surfels.len() >= self.max_surfels {
+            self.evict_low_priority();
+        }
+
+        if self.surfels.len() >= self.max_surfels {
+            return None;
+        }
+
+        let id = self.surfels.len() as u32;
+        self.surfels.push(Surfel::new(position, normal, radius, id));
+
+        // Update bounds
+        let bounds = AABB::from_points(
+            position - Vec3::splat(radius),
+            position + Vec3::splat(radius),
+        );
+        self.surfel_bounds.push(bounds);
+
+        Some(id)
+    }
+
+    /// Find nearby surfels for irradiance query
+    pub fn query(&self, position: Vec3, normal: Vec3, max_results: usize) -> Vec<(u32, f32)> {
+        let mut results: Vec<(u32, f32)> = Vec::with_capacity(max_results);
+
+        // Simple linear search (BVH would be used in production)
+        for (i, surfel) in self.surfels.iter().enumerate() {
+            let weight = surfel.weight(position, normal);
+            if weight > 0.001 {
+                results.push((i as u32, weight));
+            }
+        }
+
+        // Sort by weight
+        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        results.truncate(max_results);
+
+        results
+    }
+
+    /// Evaluate irradiance at position
+    pub fn evaluate_irradiance(&self, position: Vec3, normal: Vec3) -> Vec3 {
+        let nearby = self.query(position, normal, 4);
+
+        let mut total_irradiance = Vec3::ZERO;
+        let mut total_weight = 0.0f32;
+
+        for (surfel_id, weight) in nearby {
+            let surfel = &self.surfels[surfel_id as usize];
+            let irradiance = surfel.irradiance.evaluate(normal);
+            total_irradiance += irradiance * weight;
+            total_weight += weight;
+        }
+
+        if total_weight > 0.0 {
+            total_irradiance / total_weight
+        } else {
+            Vec3::ZERO
+        }
+    }
+
+    /// Allocate rays based on variance
+    pub fn allocate_rays(&self, total_rays: u32) -> Vec<(u32, u32)> {
+        if self.surfels.is_empty() {
+            return Vec::new();
+        }
+
+        // Compute total variance
+        let total_variance: f32 = self.surfels.iter()
+            .map(|s| s.variance.sqrt())
+            .sum();
+
+        if total_variance <= 0.0 {
+            // Uniform allocation
+            let rays_per_surfel = total_rays / self.surfels.len() as u32;
+            return (0..self.surfels.len() as u32)
+                .map(|id| (id, rays_per_surfel.max(1)))
+                .collect();
+        }
+
+        // Variance-weighted allocation
+        self.surfels.iter().enumerate().map(|(i, surfel)| {
+            let probability = surfel.variance.sqrt() / total_variance;
+            let ray_count = (total_rays as f32 * probability).round() as u32;
+            (i as u32, ray_count.max(1))
+        }).collect()
+    }
+
+    /// Update surfel with ray result
+    pub fn update_surfel(&mut self, surfel_id: u32, direction: Vec3, radiance: Vec3) {
+        if let Some(surfel) = self.surfels.get_mut(surfel_id as usize) {
+            surfel.update(direction, radiance, self.frame_counter);
+        }
+    }
+
+    /// Try to merge similar surfels
+    pub fn merge_pass(&mut self) {
+        let mut to_remove: Vec<usize> = Vec::new();
+
+        for i in 0..self.surfels.len() {
+            if to_remove.contains(&i) {
+                continue;
+            }
+
+            for j in (i + 1)..self.surfels.len() {
+                if to_remove.contains(&j) {
+                    continue;
+                }
+
+                let s1 = &self.surfels[i];
+                let s2 = &self.surfels[j];
+
+                // Check merge criteria
+                let dist = (s1.position - s2.position).length();
+                let normal_diff = s1.normal.dot(s2.normal);
+
+                if dist < (s1.radius + s2.radius) * 0.5 && normal_diff > 0.95 {
+                    // Merge s2 into s1
+                    let s1_var = s1.variance.max(0.001);
+                    let s2_var = s2.variance.max(0.001);
+                    let w1 = 1.0 / s1_var;
+                    let w2 = 1.0 / s2_var;
+                    let total_w = w1 + w2;
+
+                    // Weighted average position
+                    self.surfels[i].position = (s1.position * w1 + s2.position * w2) / total_w;
+
+                    // Area-preserving radius
+                    self.surfels[i].radius = (s1.radius.powi(2) + s2.radius.powi(2)).sqrt();
+
+                    // Blend irradiance
+                    self.surfels[i].irradiance.blend(&s2.irradiance, w2 / total_w);
+
+                    // Combined variance (conservative)
+                    self.surfels[i].variance = (s1_var * s2_var) / (s1_var + s2_var);
+
+                    to_remove.push(j);
+                }
+            }
+        }
+
+        // Remove merged surfels
+        for &idx in to_remove.iter().rev() {
+            self.surfels.swap_remove(idx);
+            self.surfel_bounds.swap_remove(idx);
+        }
+    }
+
+    /// Evict low-priority surfels
+    fn evict_low_priority(&mut self) {
+        if self.surfels.is_empty() {
+            return;
+        }
+
+        // Score based on age, variance, and visibility
+        let mut scores: Vec<(usize, f32)> = self.surfels.iter().enumerate().map(|(i, s)| {
+            let age = (self.frame_counter - s.last_update_frame) as f32;
+            let variance_score = if s.variance < self.variance_threshold { 0.5 } else { 1.0 };
+            let score = age * variance_score;
+            (i, score)
+        }).collect();
+
+        // Remove highest scoring (oldest/lowest variance)
+        scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        let to_remove = scores.len() / 10; // Remove 10%
+        for (idx, _) in scores.into_iter().take(to_remove).rev().collect::<Vec<_>>() {
+            self.surfels.swap_remove(idx);
+            self.surfel_bounds.swap_remove(idx);
+        }
+    }
+
+    /// Rebuild BVH for queries
+    pub fn rebuild_bvh(&mut self) {
+        let mut builder = BVHBuilder::new();
+        self.bvh_nodes = builder.build(&self.surfel_bounds);
+    }
+
+    /// Advance to next frame
+    pub fn next_frame(&mut self, decay_rate: f32, delta_time: f32) {
+        self.frame_counter += 1;
+
+        // Apply temporal decay
+        for surfel in &mut self.surfels {
+            surfel.apply_decay(decay_rate, delta_time);
+        }
+
+        // Periodic merge pass
+        if self.frame_counter % 60 == 0 {
+            self.merge_pass();
+        }
+
+        // Periodic BVH rebuild
+        if self.frame_counter % 10 == 0 {
+            self.rebuild_bvh();
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PATH TRACER
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Path tracing configuration
+#[derive(Debug, Clone)]
+pub struct PathTracerConfig {
+    pub max_bounces: u32,
+    pub samples_per_pixel: u32,
+    pub russian_roulette_depth: u32,
+    pub use_nee: bool,               // Next Event Estimation
+    pub use_mis: bool,               // Multiple Importance Sampling
+    pub clamp_value: f32,
+    pub use_restir: bool,
+    pub use_surfel_gi: bool,
+}
+
+impl Default for PathTracerConfig {
+    fn default() -> Self {
+        PathTracerConfig {
+            max_bounces: 8,
+            samples_per_pixel: 1,
+            russian_roulette_depth: 3,
+            use_nee: true,
+            use_mis: true,
+            clamp_value: 100.0,
+            use_restir: true,
+            use_surfel_gi: true,
+        }
+    }
+}
+
+/// Path state for tracking bounces
+pub struct PathState {
+    pub throughput: Vec3,
+    pub radiance: Vec3,
+    pub depth: u32,
+    pub specular_bounce: bool,
+    pub eta: f32,
+}
+
+impl PathState {
+    pub fn new() -> Self {
+        PathState {
+            throughput: Vec3::ONE,
+            radiance: Vec3::ZERO,
+            depth: 0,
+            specular_bounce: false,
+            eta: 1.0,
+        }
+    }
+
+    /// Apply Russian roulette
+    pub fn russian_roulette(&mut self, rng: &mut RNG, min_depth: u32) -> bool {
+        if self.depth < min_depth {
+            return true;
+        }
+
+        let max_component = self.throughput.x.max(self.throughput.y).max(self.throughput.z);
+        let survival_prob = max_component.min(0.95);
+
+        if rng.next_f32() > survival_prob {
+            return false;
+        }
+
+        self.throughput /= survival_prob;
+        true
+    }
+}
+
+/// Real-time path tracer
+pub struct PathTracer {
+    pub config: PathTracerConfig,
+    blue_noise: BlueNoiseSampler,
+    restir: Option<ReSTIR>,
+    surfel_hierarchy: Option<SurfelHierarchy>,
+    frame_index: u32,
+}
+
+impl PathTracer {
+    pub fn new(width: u32, height: u32, config: PathTracerConfig) -> Self {
+        let restir = if config.use_restir {
+            Some(ReSTIR::new(width, height))
+        } else {
+            None
+        };
+
+        let surfel_hierarchy = if config.use_surfel_gi {
+            Some(SurfelHierarchy::new(1000000))
+        } else {
+            None
+        };
+
+        PathTracer {
+            config,
+            blue_noise: BlueNoiseSampler::new(128),
+            restir,
+            surfel_hierarchy,
+            frame_index: 0,
+        }
+    }
+
+    /// Trace single path and return radiance
+    pub fn trace_path<F, G, H>(
+        &self,
+        ray: Ray,
+        scene_intersect: &F,
+        evaluate_material: &G,
+        sample_material: &H,
+        rng: &mut RNG,
+    ) -> Vec3
+    where
+        F: Fn(&Ray) -> Option<HitRecord>,
+        G: Fn(&HitRecord, Vec3, Vec3) -> (Vec3, f32),  // (brdf, pdf)
+        H: Fn(&HitRecord, Vec3, &mut RNG) -> (Vec3, Vec3, f32),  // (direction, brdf, pdf)
+    {
+        let mut state = PathState::new();
+        let mut current_ray = ray;
+
+        for _ in 0..self.config.max_bounces {
+            state.depth += 1;
+
+            // Intersect scene
+            let hit = match scene_intersect(&current_ray) {
+                Some(h) => h,
+                None => {
+                    // Environment lighting would be added here
+                    break;
+                }
+            };
+
+            // Russian roulette
+            if !state.russian_roulette(rng, self.config.russian_roulette_depth) {
+                break;
+            }
+
+            // Sample next direction
+            let view_dir = -current_ray.direction;
+            let (sample_dir, brdf, pdf) = sample_material(&hit, view_dir, rng);
+
+            if pdf <= 0.0 || brdf.x + brdf.y + brdf.z <= 0.0 {
+                break;
+            }
+
+            // Update throughput
+            let cos_theta = sample_dir.dot(hit.normal).abs();
+            state.throughput *= brdf * cos_theta / pdf;
+
+            // Clamp to prevent fireflies
+            let max_throughput = state.throughput.x.max(state.throughput.y).max(state.throughput.z);
+            if max_throughput > self.config.clamp_value {
+                state.throughput *= self.config.clamp_value / max_throughput;
+            }
+
+            // Setup next ray
+            current_ray = Ray::new(
+                hit.position + hit.normal * 0.001,
+                sample_dir,
+            );
+        }
+
+        state.radiance
+    }
+
+    /// End of frame processing
+    pub fn end_frame(&mut self, delta_time: f32) {
+        self.frame_index += 1;
+        self.blue_noise.advance_frame();
+
+        if let Some(ref mut restir) = self.restir {
+            restir.end_frame();
+        }
+
+        if let Some(ref mut surfel_hierarchy) = self.surfel_hierarchy {
+            surfel_hierarchy.next_frame(0.3, delta_time);
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// TESTS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_ray_creation() {
+        let ray = Ray::new(Vec3::ZERO, Vec3::Z);
+        assert!(ray.direction.length() - 1.0 < 0.0001);
+    }
+
+    #[test]
+    fn test_aabb_intersection() {
+        let aabb = AABB::from_points(Vec3::new(-1.0, -1.0, -1.0), Vec3::new(1.0, 1.0, 1.0));
+        let ray = Ray::new(Vec3::new(0.0, 0.0, -5.0), Vec3::Z);
+
+        let result = aabb.intersect(&ray);
+        assert!(result.is_some());
+
+        let (t_near, t_far) = result.unwrap();
+        assert!(t_near > 0.0);
+        assert!(t_far > t_near);
+    }
+
+    #[test]
+    fn test_bvh_build() {
+        let bounds: Vec<AABB> = (0..10).map(|i| {
+            let offset = i as f32;
+            AABB::from_points(
+                Vec3::new(offset, 0.0, 0.0),
+                Vec3::new(offset + 1.0, 1.0, 1.0),
+            )
+        }).collect();
+
+        let mut builder = BVHBuilder::new();
+        let nodes = builder.build(&bounds);
+
+        assert!(!nodes.is_empty());
+    }
+
+    #[test]
+    fn test_cosine_sampling() {
+        let mut rng = RNG::new(42);
+        let samples: Vec<Vec3> = (0..1000).map(|_| {
+            sampling::cosine_hemisphere(rng.next_vec2())
+        }).collect();
+
+        // All samples should be in upper hemisphere
+        for s in &samples {
+            assert!(s.z >= 0.0);
+        }
+    }
+
+    #[test]
+    fn test_reservoir_update() {
+        let mut rng = RNG::new(42);
+        let mut reservoir = Reservoir::new();
+
+        let sample = LightSample {
+            position: Vec3::new(1.0, 2.0, 3.0),
+            normal: Vec3::Z,
+            emission: Vec3::ONE,
+            pdf: 1.0,
+            light_id: 0,
+        };
+
+        reservoir.update(sample, 1.0, &mut rng);
+        assert_eq!(reservoir.m, 1.0);
+    }
+
+    #[test]
+    fn test_spherical_harmonics() {
+        let mut sh = SphericalHarmonics::new();
+        sh.add_sample(Vec3::Z, Vec3::ONE, 1.0);
+
+        let result = sh.evaluate(Vec3::Z);
+        assert!(result.length() > 0.0);
+    }
+
+    #[test]
+    fn test_surfel_weight() {
+        let surfel = Surfel::new(Vec3::ZERO, Vec3::Z, 1.0, 0);
+        let weight = surfel.weight(Vec3::new(0.0, 0.0, 0.1), Vec3::Z);
+        assert!(weight > 0.0);
+    }
+}

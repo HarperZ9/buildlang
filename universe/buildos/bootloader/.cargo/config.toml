@@ -1,0 +1,15 @@
+# ===============================================================================
+# BUILDOS BOOTLOADER - CARGO CONFIGURATION
+# ===============================================================================
+# Copyright (c) 2024-2025 Zain Dana Harper. All Rights Reserved.
+# ===============================================================================
+
+[build]
+target = "x86_64-unknown-uefi"
+
+[unstable]
+build-std = ["core", "alloc"]
+build-std-features = ["compiler-builtins-mem"]
+
+[target.x86_64-unknown-uefi]
+runner = "uefi-run"

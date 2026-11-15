@@ -1,0 +1,1328 @@
+// ═══════════════════════════════════════════════════════════════════════════════
+// HARPER BACKTESTING ENGINE v1.0.0
+// "Test Before You Trade"
+// ═══════════════════════════════════════════════════════════════════════════════
+// Copyright © 2024-2025 Zain Dana Harper. All Rights Reserved.
+// Copyright (c) 2024-2025 Zain Dana Harper. All Rights Reserved.
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// Comprehensive backtesting framework featuring:
+// - Event-driven simulation engine
+// - Realistic slippage and commission modeling
+// - Multi-asset, multi-strategy support
+// - Walk-forward optimization
+// - Monte Carlo simulation for robustness testing
+// - Performance analytics and reporting
+//
+// DEPENDENCIES: build-lang, zeus-trading
+// ═══════════════════════════════════════════════════════════════════════════════
+
+module harper_backtest
+
+use std::collections::{HashMap, VecDeque, BTreeMap}
+use std::math::{sqrt, exp, log, abs, min, max, pow}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MARKET DATA STRUCTURES
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// OHLCV bar data
+#[derive(Debug, Clone, Copy)]
+pub struct Bar {
+    pub timestamp: u64,
+    pub open: f64,
+    pub high: f64,
+    pub low: f64,
+    pub close: f64,
+    pub volume: f64,
+}
+
+impl Bar {
+    pub fn new(timestamp: u64, open: f64, high: f64, low: f64, close: f64, volume: f64) -> Self {
+        Bar { timestamp, open, high, low, close, volume }
+    }
+
+    pub fn typical_price(&self) -> f64 {
+        (self.high + self.low + self.close) / 3.0
+    }
+
+    pub fn vwap(&self) -> f64 {
+        self.typical_price()
+    }
+
+    pub fn range(&self) -> f64 {
+        self.high - self.low
+    }
+}
+
+/// Market data feed for backtesting
+pub struct DataFeed {
+    pub symbol: String,
+    pub bars: Vec<Bar>,
+    pub current_index: usize,
+}
+
+impl DataFeed {
+    pub fn new(symbol: &str, bars: Vec<Bar>) -> Self {
+        DataFeed {
+            symbol: symbol.to_string(),
+            bars,
+            current_index: 0,
+        }
+    }
+
+    pub fn reset(&mut self) {
+        self.current_index = 0;
+    }
+
+    pub fn current_bar(&self) -> Option<&Bar> {
+        self.bars.get(self.current_index)
+    }
+
+    pub fn advance(&mut self) -> bool {
+        if self.current_index < self.bars.len() - 1 {
+            self.current_index += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn lookback(&self, n: usize) -> &[Bar] {
+        let start = self.current_index.saturating_sub(n);
+        &self.bars[start..=self.current_index]
+    }
+
+    pub fn len(&self) -> usize {
+        self.bars.len()
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ORDER AND POSITION MANAGEMENT
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum OrderSide {
+    Buy,
+    Sell,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum OrderType {
+    Market,
+    Limit,
+    Stop,
+    StopLimit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum OrderStatus {
+    Pending,
+    Filled,
+    PartiallyFilled,
+    Cancelled,
+    Rejected,
+}
+
+/// Trading order
+#[derive(Debug, Clone)]
+pub struct Order {
+    pub id: u64,
+    pub symbol: String,
+    pub side: OrderSide,
+    pub order_type: OrderType,
+    pub quantity: f64,
+    pub limit_price: Option<f64>,
+    pub stop_price: Option<f64>,
+    pub status: OrderStatus,
+    pub filled_quantity: f64,
+    pub fill_price: f64,
+    pub created_at: u64,
+    pub filled_at: Option<u64>,
+}
+
+impl Order {
+    pub fn market(id: u64, symbol: &str, side: OrderSide, quantity: f64, timestamp: u64) -> Self {
+        Order {
+            id,
+            symbol: symbol.to_string(),
+            side,
+            order_type: OrderType::Market,
+            quantity,
+            limit_price: None,
+            stop_price: None,
+            status: OrderStatus::Pending,
+            filled_quantity: 0.0,
+            fill_price: 0.0,
+            created_at: timestamp,
+            filled_at: None,
+        }
+    }
+
+    pub fn limit(id: u64, symbol: &str, side: OrderSide, quantity: f64, price: f64, timestamp: u64) -> Self {
+        Order {
+            id,
+            symbol: symbol.to_string(),
+            side,
+            order_type: OrderType::Limit,
+            quantity,
+            limit_price: Some(price),
+            stop_price: None,
+            status: OrderStatus::Pending,
+            filled_quantity: 0.0,
+            fill_price: 0.0,
+            created_at: timestamp,
+            filled_at: None,
+        }
+    }
+
+    pub fn stop(id: u64, symbol: &str, side: OrderSide, quantity: f64, stop: f64, timestamp: u64) -> Self {
+        Order {
+            id,
+            symbol: symbol.to_string(),
+            side,
+            order_type: OrderType::Stop,
+            quantity,
+            limit_price: None,
+            stop_price: Some(stop),
+            status: OrderStatus::Pending,
+            filled_quantity: 0.0,
+            fill_price: 0.0,
+            created_at: timestamp,
+            filled_at: None,
+        }
+    }
+}
+
+/// Position in a symbol
+#[derive(Debug, Clone)]
+pub struct Position {
+    pub symbol: String,
+    pub quantity: f64,
+    pub average_cost: f64,
+    pub realized_pnl: f64,
+}
+
+impl Position {
+    pub fn new(symbol: &str) -> Self {
+        Position {
+            symbol: symbol.to_string(),
+            quantity: 0.0,
+            average_cost: 0.0,
+            realized_pnl: 0.0,
+        }
+    }
+
+    pub fn market_value(&self, price: f64) -> f64 {
+        self.quantity * price
+    }
+
+    pub fn unrealized_pnl(&self, price: f64) -> f64 {
+        self.quantity * (price - self.average_cost)
+    }
+
+    pub fn update(&mut self, quantity: f64, price: f64) {
+        if quantity > 0.0 && self.quantity >= 0.0 {
+            // Adding to long or opening long
+            let total_cost = self.quantity * self.average_cost + quantity * price;
+            self.quantity += quantity;
+            self.average_cost = total_cost / self.quantity;
+        } else if quantity < 0.0 && self.quantity <= 0.0 {
+            // Adding to short or opening short
+            let total_cost = self.quantity.abs() * self.average_cost + quantity.abs() * price;
+            self.quantity += quantity;
+            self.average_cost = total_cost / self.quantity.abs();
+        } else {
+            // Closing or reversing
+            let closing_qty = quantity.abs().min(self.quantity.abs());
+            self.realized_pnl += closing_qty * (price - self.average_cost) * self.quantity.signum();
+            self.quantity += quantity;
+
+            if self.quantity.abs() > 0.0001 && self.quantity.signum() != (self.quantity - quantity).signum() {
+                // Position reversed
+                self.average_cost = price;
+            }
+        }
+
+        if self.quantity.abs() < 0.0001 {
+            self.quantity = 0.0;
+            self.average_cost = 0.0;
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// EXECUTION SIMULATION
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Execution configuration
+#[derive(Debug, Clone)]
+pub struct ExecutionConfig {
+    pub slippage_bps: f64,           // Slippage in basis points
+    pub commission_per_share: f64,   // Commission per share
+    pub commission_min: f64,         // Minimum commission
+    pub commission_max: f64,         // Maximum commission
+    pub market_impact_factor: f64,   // Price impact for large orders
+    pub latency_ms: u64,             // Order latency simulation
+    pub partial_fills: bool,         // Enable partial fills
+}
+
+impl Default for ExecutionConfig {
+    fn default() -> Self {
+        ExecutionConfig {
+            slippage_bps: 5.0,
+            commission_per_share: 0.005,
+            commission_min: 1.0,
+            commission_max: 10.0,
+            market_impact_factor: 0.0001,
+            latency_ms: 0,
+            partial_fills: false,
+        }
+    }
+}
+
+/// Execution simulator
+pub struct ExecutionSimulator {
+    config: ExecutionConfig,
+}
+
+impl ExecutionSimulator {
+    pub fn new(config: ExecutionConfig) -> Self {
+        ExecutionSimulator { config }
+    }
+
+    /// Calculate fill price with slippage and market impact
+    pub fn calculate_fill_price(&self, order: &Order, bar: &Bar) -> f64 {
+        let base_price = match order.order_type {
+            OrderType::Market => bar.open,
+            OrderType::Limit => order.limit_price.unwrap_or(bar.open),
+            OrderType::Stop => order.stop_price.unwrap_or(bar.open),
+            OrderType::StopLimit => order.limit_price.unwrap_or(bar.open),
+        };
+
+        // Apply slippage
+        let slippage = base_price * self.config.slippage_bps / 10000.0;
+        let slippage_adjusted = match order.side {
+            OrderSide::Buy => base_price + slippage,
+            OrderSide::Sell => base_price - slippage,
+        };
+
+        // Apply market impact for larger orders
+        let impact = order.quantity * self.config.market_impact_factor;
+        let impact_adjusted = match order.side {
+            OrderSide::Buy => slippage_adjusted * (1.0 + impact),
+            OrderSide::Sell => slippage_adjusted * (1.0 - impact),
+        };
+
+        impact_adjusted
+    }
+
+    /// Calculate commission
+    pub fn calculate_commission(&self, quantity: f64, price: f64) -> f64 {
+        let commission = quantity.abs() * self.config.commission_per_share;
+        commission.max(self.config.commission_min).min(self.config.commission_max)
+    }
+
+    /// Check if order can be filled
+    pub fn can_fill(&self, order: &Order, bar: &Bar) -> bool {
+        match order.order_type {
+            OrderType::Market => true,
+            OrderType::Limit => {
+                let limit = order.limit_price.unwrap();
+                match order.side {
+                    OrderSide::Buy => bar.low <= limit,
+                    OrderSide::Sell => bar.high >= limit,
+                }
+            }
+            OrderType::Stop => {
+                let stop = order.stop_price.unwrap();
+                match order.side {
+                    OrderSide::Buy => bar.high >= stop,
+                    OrderSide::Sell => bar.low <= stop,
+                }
+            }
+            OrderType::StopLimit => {
+                let stop = order.stop_price.unwrap();
+                let limit = order.limit_price.unwrap();
+                match order.side {
+                    OrderSide::Buy => bar.high >= stop && bar.low <= limit,
+                    OrderSide::Sell => bar.low <= stop && bar.high >= limit,
+                }
+            }
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PORTFOLIO TRACKER
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Portfolio state
+#[derive(Debug, Clone)]
+pub struct Portfolio {
+    pub cash: f64,
+    pub positions: HashMap<String, Position>,
+    pub orders: Vec<Order>,
+    pub trades: Vec<Trade>,
+    pub equity_curve: Vec<(u64, f64)>,
+}
+
+/// Trade record
+#[derive(Debug, Clone)]
+pub struct Trade {
+    pub timestamp: u64,
+    pub symbol: String,
+    pub side: OrderSide,
+    pub quantity: f64,
+    pub price: f64,
+    pub commission: f64,
+    pub pnl: f64,
+}
+
+impl Portfolio {
+    pub fn new(initial_capital: f64) -> Self {
+        Portfolio {
+            cash: initial_capital,
+            positions: HashMap::new(),
+            orders: Vec::new(),
+            trades: Vec::new(),
+            equity_curve: Vec::new(),
+        }
+    }
+
+    pub fn equity(&self, prices: &HashMap<String, f64>) -> f64 {
+        let positions_value: f64 = self.positions.iter()
+            .map(|(sym, pos)| {
+                let price = prices.get(sym).unwrap_or(&0.0);
+                pos.market_value(*price)
+            })
+            .sum();
+
+        self.cash + positions_value
+    }
+
+    pub fn record_equity(&mut self, timestamp: u64, prices: &HashMap<String, f64>) {
+        let equity = self.equity(prices);
+        self.equity_curve.push((timestamp, equity));
+    }
+
+    pub fn position(&self, symbol: &str) -> f64 {
+        self.positions.get(symbol).map(|p| p.quantity).unwrap_or(0.0)
+    }
+
+    pub fn execute_fill(&mut self, order: &Order, fill_price: f64, commission: f64, timestamp: u64) {
+        let quantity = match order.side {
+            OrderSide::Buy => order.quantity,
+            OrderSide::Sell => -order.quantity,
+        };
+
+        // Update position
+        let position = self.positions
+            .entry(order.symbol.clone())
+            .or_insert_with(|| Position::new(&order.symbol));
+
+        let pnl_before = position.realized_pnl;
+        position.update(quantity, fill_price);
+        let realized_pnl = position.realized_pnl - pnl_before;
+
+        // Update cash
+        self.cash -= quantity * fill_price + commission;
+
+        // Record trade
+        self.trades.push(Trade {
+            timestamp,
+            symbol: order.symbol.clone(),
+            side: order.side,
+            quantity: order.quantity,
+            price: fill_price,
+            commission,
+            pnl: realized_pnl - commission,
+        });
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// STRATEGY INTERFACE
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Strategy context provided to strategies
+pub struct StrategyContext<'a> {
+    pub timestamp: u64,
+    pub bars: &'a HashMap<String, Vec<Bar>>,
+    pub current_bars: &'a HashMap<String, Bar>,
+    pub portfolio: &'a Portfolio,
+    pub pending_orders: &'a [Order],
+}
+
+impl<'a> StrategyContext<'a> {
+    /// Get current price for a symbol
+    pub fn price(&self, symbol: &str) -> Option<f64> {
+        self.current_bars.get(symbol).map(|b| b.close)
+    }
+
+    /// Get lookback bars for a symbol
+    pub fn lookback(&self, symbol: &str, n: usize) -> Option<&[Bar]> {
+        self.bars.get(symbol).map(|bars| {
+            let end = bars.len();
+            let start = end.saturating_sub(n);
+            &bars[start..end]
+        })
+    }
+
+    /// Get current position in a symbol
+    pub fn position(&self, symbol: &str) -> f64 {
+        self.portfolio.position(symbol)
+    }
+
+    /// Get available cash
+    pub fn cash(&self) -> f64 {
+        self.portfolio.cash
+    }
+
+    /// Get total equity
+    pub fn equity(&self) -> f64 {
+        let prices: HashMap<String, f64> = self.current_bars.iter()
+            .map(|(k, v)| (k.clone(), v.close))
+            .collect();
+        self.portfolio.equity(&prices)
+    }
+}
+
+/// Strategy signals
+#[derive(Debug, Clone)]
+pub enum Signal {
+    Buy { symbol: String, quantity: f64 },
+    Sell { symbol: String, quantity: f64 },
+    Close { symbol: String },
+    CloseAll,
+    SetStopLoss { symbol: String, price: f64 },
+    SetTakeProfit { symbol: String, price: f64 },
+}
+
+/// Strategy trait that users implement
+pub trait Strategy: Send + Sync {
+    /// Called at the start of backtest
+    fn on_start(&mut self, context: &StrategyContext) {}
+
+    /// Called on each bar
+    fn on_bar(&mut self, context: &StrategyContext) -> Vec<Signal>;
+
+    /// Called when an order is filled
+    fn on_fill(&mut self, trade: &Trade) {}
+
+    /// Called at the end of backtest
+    fn on_end(&mut self, context: &StrategyContext) {}
+
+    /// Strategy name
+    fn name(&self) -> &str;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// BACKTEST ENGINE
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Backtest configuration
+#[derive(Debug, Clone)]
+pub struct BacktestConfig {
+    pub initial_capital: f64,
+    pub execution: ExecutionConfig,
+    pub risk_free_rate: f64,
+    pub benchmark_symbol: Option<String>,
+}
+
+impl Default for BacktestConfig {
+    fn default() -> Self {
+        BacktestConfig {
+            initial_capital: 100000.0,
+            execution: ExecutionConfig::default(),
+            risk_free_rate: 0.02,
+            benchmark_symbol: None,
+        }
+    }
+}
+
+/// Main backtest engine
+pub struct BacktestEngine {
+    config: BacktestConfig,
+    data_feeds: HashMap<String, DataFeed>,
+    executor: ExecutionSimulator,
+    next_order_id: u64,
+}
+
+impl BacktestEngine {
+    pub fn new(config: BacktestConfig) -> Self {
+        let executor = ExecutionSimulator::new(config.execution.clone());
+        BacktestEngine {
+            config,
+            data_feeds: HashMap::new(),
+            executor,
+            next_order_id: 1,
+        }
+    }
+
+    /// Add data feed
+    pub fn add_data(&mut self, symbol: &str, bars: Vec<Bar>) {
+        self.data_feeds.insert(symbol.to_string(), DataFeed::new(symbol, bars));
+    }
+
+    /// Run backtest
+    pub fn run(&mut self, strategy: &mut dyn Strategy) -> BacktestResult {
+        let mut portfolio = Portfolio::new(self.config.initial_capital);
+        let mut pending_orders: Vec<Order> = Vec::new();
+
+        // Reset all feeds
+        for feed in self.data_feeds.values_mut() {
+            feed.reset();
+        }
+
+        // Get all timestamps
+        let timestamps: Vec<u64> = self.collect_timestamps();
+
+        // Initialize bars storage
+        let mut all_bars: HashMap<String, Vec<Bar>> = HashMap::new();
+        for symbol in self.data_feeds.keys() {
+            all_bars.insert(symbol.clone(), Vec::new());
+        }
+
+        // Main simulation loop
+        for timestamp in &timestamps {
+            // Update current bars
+            let mut current_bars: HashMap<String, Bar> = HashMap::new();
+
+            for (symbol, feed) in &mut self.data_feeds {
+                if let Some(bar) = feed.current_bar() {
+                    if bar.timestamp == *timestamp {
+                        current_bars.insert(symbol.clone(), *bar);
+                        all_bars.get_mut(symbol).unwrap().push(*bar);
+                        feed.advance();
+                    }
+                }
+            }
+
+            if current_bars.is_empty() {
+                continue;
+            }
+
+            // Process pending orders
+            let mut filled_orders = Vec::new();
+            for order in &mut pending_orders {
+                if let Some(bar) = current_bars.get(&order.symbol) {
+                    if self.executor.can_fill(order, bar) {
+                        let fill_price = self.executor.calculate_fill_price(order, bar);
+                        let commission = self.executor.calculate_commission(order.quantity, fill_price);
+
+                        order.status = OrderStatus::Filled;
+                        order.fill_price = fill_price;
+                        order.filled_quantity = order.quantity;
+                        order.filled_at = Some(*timestamp);
+
+                        portfolio.execute_fill(order, fill_price, commission, *timestamp);
+                        filled_orders.push(order.clone());
+                    }
+                }
+            }
+
+            // Notify strategy of fills
+            for order in &filled_orders {
+                if let Some(trade) = portfolio.trades.last() {
+                    strategy.on_fill(trade);
+                }
+            }
+
+            // Remove filled orders
+            pending_orders.retain(|o| o.status == OrderStatus::Pending);
+
+            // Create strategy context
+            let context = StrategyContext {
+                timestamp: *timestamp,
+                bars: &all_bars,
+                current_bars: &current_bars,
+                portfolio: &portfolio,
+                pending_orders: &pending_orders,
+            };
+
+            // Get strategy signals
+            let signals = strategy.on_bar(&context);
+
+            // Process signals
+            for signal in signals {
+                match signal {
+                    Signal::Buy { symbol, quantity } => {
+                        let order = Order::market(
+                            self.next_order_id,
+                            &symbol,
+                            OrderSide::Buy,
+                            quantity,
+                            *timestamp
+                        );
+                        self.next_order_id += 1;
+                        pending_orders.push(order);
+                    }
+                    Signal::Sell { symbol, quantity } => {
+                        let order = Order::market(
+                            self.next_order_id,
+                            &symbol,
+                            OrderSide::Sell,
+                            quantity,
+                            *timestamp
+                        );
+                        self.next_order_id += 1;
+                        pending_orders.push(order);
+                    }
+                    Signal::Close { symbol } => {
+                        let pos = portfolio.position(&symbol);
+                        if pos.abs() > 0.0001 {
+                            let side = if pos > 0.0 { OrderSide::Sell } else { OrderSide::Buy };
+                            let order = Order::market(
+                                self.next_order_id,
+                                &symbol,
+                                side,
+                                pos.abs(),
+                                *timestamp
+                            );
+                            self.next_order_id += 1;
+                            pending_orders.push(order);
+                        }
+                    }
+                    Signal::CloseAll => {
+                        for (symbol, position) in &portfolio.positions {
+                            if position.quantity.abs() > 0.0001 {
+                                let side = if position.quantity > 0.0 { OrderSide::Sell } else { OrderSide::Buy };
+                                let order = Order::market(
+                                    self.next_order_id,
+                                    symbol,
+                                    side,
+                                    position.quantity.abs(),
+                                    *timestamp
+                                );
+                                self.next_order_id += 1;
+                                pending_orders.push(order);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            // Record equity
+            let prices: HashMap<String, f64> = current_bars.iter()
+                .map(|(k, v)| (k.clone(), v.close))
+                .collect();
+            portfolio.record_equity(*timestamp, &prices);
+        }
+
+        // Calculate results
+        self.calculate_results(portfolio)
+    }
+
+    fn collect_timestamps(&self) -> Vec<u64> {
+        let mut timestamps: Vec<u64> = self.data_feeds.values()
+            .flat_map(|feed| feed.bars.iter().map(|b| b.timestamp))
+            .collect();
+        timestamps.sort();
+        timestamps.dedup();
+        timestamps
+    }
+
+    fn calculate_results(&self, portfolio: Portfolio) -> BacktestResult {
+        let returns = self.calculate_returns(&portfolio.equity_curve);
+        let trades = &portfolio.trades;
+
+        let total_return = if !portfolio.equity_curve.is_empty() {
+            let first = portfolio.equity_curve.first().unwrap().1;
+            let last = portfolio.equity_curve.last().unwrap().1;
+            (last - first) / first
+        } else {
+            0.0
+        };
+
+        let sharpe = Self::sharpe_ratio(&returns, self.config.risk_free_rate);
+        let sortino = Self::sortino_ratio(&returns, self.config.risk_free_rate);
+        let max_dd = Self::max_drawdown(&portfolio.equity_curve);
+        let calmar = if max_dd > 0.0 { total_return * 252.0 / max_dd } else { 0.0 };
+
+        let winning_trades: Vec<&Trade> = trades.iter().filter(|t| t.pnl > 0.0).collect();
+        let losing_trades: Vec<&Trade> = trades.iter().filter(|t| t.pnl <= 0.0).collect();
+
+        let win_rate = if !trades.is_empty() {
+            winning_trades.len() as f64 / trades.len() as f64
+        } else {
+            0.0
+        };
+
+        let avg_win = if !winning_trades.is_empty() {
+            winning_trades.iter().map(|t| t.pnl).sum::<f64>() / winning_trades.len() as f64
+        } else {
+            0.0
+        };
+
+        let avg_loss = if !losing_trades.is_empty() {
+            losing_trades.iter().map(|t| t.pnl).sum::<f64>() / losing_trades.len() as f64
+        } else {
+            0.0
+        };
+
+        let profit_factor = if avg_loss.abs() > 0.0 {
+            winning_trades.iter().map(|t| t.pnl).sum::<f64>() / losing_trades.iter().map(|t| t.pnl.abs()).sum::<f64>()
+        } else {
+            f64::INFINITY
+        };
+
+        let total_commission: f64 = trades.iter().map(|t| t.commission).sum();
+
+        BacktestResult {
+            initial_capital: self.config.initial_capital,
+            final_capital: portfolio.equity_curve.last().map(|e| e.1).unwrap_or(self.config.initial_capital),
+            total_return,
+            annualized_return: total_return * 252.0 / returns.len().max(1) as f64,
+            sharpe_ratio: sharpe,
+            sortino_ratio: sortino,
+            calmar_ratio: calmar,
+            max_drawdown: max_dd,
+            total_trades: trades.len(),
+            winning_trades: winning_trades.len(),
+            losing_trades: losing_trades.len(),
+            win_rate,
+            avg_win,
+            avg_loss,
+            profit_factor,
+            total_commission,
+            equity_curve: portfolio.equity_curve,
+            trades: trades.clone(),
+        }
+    }
+
+    fn calculate_returns(&self, equity_curve: &[(u64, f64)]) -> Vec<f64> {
+        if equity_curve.len() < 2 {
+            return Vec::new();
+        }
+
+        equity_curve.windows(2)
+            .map(|w| (w[1].1 - w[0].1) / w[0].1)
+            .collect()
+    }
+
+    fn sharpe_ratio(returns: &[f64], risk_free_rate: f64) -> f64 {
+        if returns.is_empty() {
+            return 0.0;
+        }
+
+        let mean = returns.iter().sum::<f64>() / returns.len() as f64;
+        let variance = returns.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / returns.len() as f64;
+        let std = sqrt(variance);
+
+        if std < 1e-10 {
+            return 0.0;
+        }
+
+        let daily_rf = risk_free_rate / 252.0;
+        (mean - daily_rf) / std * sqrt(252.0)
+    }
+
+    fn sortino_ratio(returns: &[f64], risk_free_rate: f64) -> f64 {
+        if returns.is_empty() {
+            return 0.0;
+        }
+
+        let mean = returns.iter().sum::<f64>() / returns.len() as f64;
+        let daily_rf = risk_free_rate / 252.0;
+
+        let downside_sq: f64 = returns.iter()
+            .filter(|&&r| r < daily_rf)
+            .map(|&r| (r - daily_rf).powi(2))
+            .sum();
+        let downside_dev = sqrt(downside_sq / returns.len() as f64);
+
+        if downside_dev < 1e-10 {
+            return 0.0;
+        }
+
+        (mean - daily_rf) / downside_dev * sqrt(252.0)
+    }
+
+    fn max_drawdown(equity_curve: &[(u64, f64)]) -> f64 {
+        if equity_curve.is_empty() {
+            return 0.0;
+        }
+
+        let mut peak = equity_curve[0].1;
+        let mut max_dd = 0.0;
+
+        for (_, equity) in equity_curve {
+            peak = peak.max(*equity);
+            let dd = (peak - equity) / peak;
+            max_dd = max_dd.max(dd);
+        }
+
+        max_dd
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// BACKTEST RESULTS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Comprehensive backtest results
+#[derive(Debug, Clone)]
+pub struct BacktestResult {
+    pub initial_capital: f64,
+    pub final_capital: f64,
+    pub total_return: f64,
+    pub annualized_return: f64,
+    pub sharpe_ratio: f64,
+    pub sortino_ratio: f64,
+    pub calmar_ratio: f64,
+    pub max_drawdown: f64,
+    pub total_trades: usize,
+    pub winning_trades: usize,
+    pub losing_trades: usize,
+    pub win_rate: f64,
+    pub avg_win: f64,
+    pub avg_loss: f64,
+    pub profit_factor: f64,
+    pub total_commission: f64,
+    pub equity_curve: Vec<(u64, f64)>,
+    pub trades: Vec<Trade>,
+}
+
+impl BacktestResult {
+    /// Generate text report
+    pub fn report(&self) -> String {
+        format!(r#"
+═══════════════════════════════════════════════════════════════
+                    BACKTEST RESULTS
+═══════════════════════════════════════════════════════════════
+
+  PERFORMANCE METRICS
+  ───────────────────────────────────────────────────────────
+  Initial Capital:     ${:.2}
+  Final Capital:       ${:.2}
+  Total Return:        {:.2}%
+  Annualized Return:   {:.2}%
+  Sharpe Ratio:        {:.2}
+  Sortino Ratio:       {:.2}
+  Calmar Ratio:        {:.2}
+  Max Drawdown:        {:.2}%
+
+  TRADING STATISTICS
+  ───────────────────────────────────────────────────────────
+  Total Trades:        {}
+  Winning Trades:      {}
+  Losing Trades:       {}
+  Win Rate:            {:.2}%
+  Avg Win:             ${:.2}
+  Avg Loss:            ${:.2}
+  Profit Factor:       {:.2}
+  Total Commission:    ${:.2}
+
+═══════════════════════════════════════════════════════════════
+"#,
+            self.initial_capital,
+            self.final_capital,
+            self.total_return * 100.0,
+            self.annualized_return * 100.0,
+            self.sharpe_ratio,
+            self.sortino_ratio,
+            self.calmar_ratio,
+            self.max_drawdown * 100.0,
+            self.total_trades,
+            self.winning_trades,
+            self.losing_trades,
+            self.win_rate * 100.0,
+            self.avg_win,
+            self.avg_loss,
+            self.profit_factor,
+            self.total_commission
+        )
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// WALK-FORWARD OPTIMIZATION
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Walk-forward optimization configuration
+pub struct WalkForwardConfig {
+    pub in_sample_bars: usize,
+    pub out_of_sample_bars: usize,
+    pub step_bars: usize,
+}
+
+/// Walk-forward optimizer
+pub struct WalkForwardOptimizer {
+    config: WalkForwardConfig,
+}
+
+impl WalkForwardOptimizer {
+    pub fn new(config: WalkForwardConfig) -> Self {
+        WalkForwardOptimizer { config }
+    }
+
+    /// Generate train/test splits
+    pub fn splits(&self, total_bars: usize) -> Vec<(std::ops::Range<usize>, std::ops::Range<usize>)> {
+        let mut splits = Vec::new();
+        let mut start = 0;
+
+        while start + self.config.in_sample_bars + self.config.out_of_sample_bars <= total_bars {
+            let train_end = start + self.config.in_sample_bars;
+            let test_end = train_end + self.config.out_of_sample_bars;
+
+            splits.push((start..train_end, train_end..test_end));
+            start += self.config.step_bars;
+        }
+
+        splits
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MONTE CARLO SIMULATION
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Monte Carlo result
+#[derive(Debug)]
+pub struct MonteCarloResult {
+    pub simulations: usize,
+    pub mean_return: f64,
+    pub std_return: f64,
+    pub var_95: f64,
+    pub var_99: f64,
+    pub max_drawdown_95: f64,
+    pub probability_profit: f64,
+}
+
+/// Monte Carlo simulator for strategy robustness testing
+pub struct MonteCarloSimulator {
+    simulations: usize,
+}
+
+impl MonteCarloSimulator {
+    pub fn new(simulations: usize) -> Self {
+        MonteCarloSimulator { simulations }
+    }
+
+    /// Run Monte Carlo simulation by shuffling trades
+    pub fn simulate_shuffled_trades(&self, trades: &[Trade]) -> MonteCarloResult {
+        if trades.is_empty() {
+            return MonteCarloResult {
+                simulations: 0,
+                mean_return: 0.0,
+                std_return: 0.0,
+                var_95: 0.0,
+                var_99: 0.0,
+                max_drawdown_95: 0.0,
+                probability_profit: 0.0,
+            };
+        }
+
+        let mut rng = std::random::Random::new();
+        let mut final_returns = Vec::with_capacity(self.simulations);
+        let mut max_drawdowns = Vec::with_capacity(self.simulations);
+
+        for _ in 0..self.simulations {
+            // Shuffle trade order
+            let mut shuffled = trades.to_vec();
+            for i in (1..shuffled.len()).rev() {
+                let j = (rng.uniform(0.0, 1.0) * (i + 1) as f64) as usize;
+                shuffled.swap(i, j);
+            }
+
+            // Calculate equity curve
+            let mut equity = 100000.0;
+            let mut peak = equity;
+            let mut max_dd = 0.0;
+
+            for trade in &shuffled {
+                equity += trade.pnl;
+                peak = peak.max(equity);
+                let dd = (peak - equity) / peak;
+                max_dd = max_dd.max(dd);
+            }
+
+            final_returns.push((equity - 100000.0) / 100000.0);
+            max_drawdowns.push(max_dd);
+        }
+
+        // Sort for VaR calculation
+        final_returns.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        max_drawdowns.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+        let mean_return = final_returns.iter().sum::<f64>() / self.simulations as f64;
+        let variance = final_returns.iter().map(|r| (r - mean_return).powi(2)).sum::<f64>() / self.simulations as f64;
+
+        let var_95_idx = (0.05 * self.simulations as f64) as usize;
+        let var_99_idx = (0.01 * self.simulations as f64) as usize;
+        let dd_95_idx = (0.95 * self.simulations as f64) as usize;
+
+        let probability_profit = final_returns.iter().filter(|&&r| r > 0.0).count() as f64 / self.simulations as f64;
+
+        MonteCarloResult {
+            simulations: self.simulations,
+            mean_return,
+            std_return: sqrt(variance),
+            var_95: final_returns[var_95_idx],
+            var_99: final_returns[var_99_idx],
+            max_drawdown_95: max_drawdowns[dd_95_idx.min(max_drawdowns.len() - 1)],
+            probability_profit,
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// EXAMPLE STRATEGIES
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Simple Moving Average Crossover Strategy
+pub struct SMACrossover {
+    symbol: String,
+    fast_period: usize,
+    slow_period: usize,
+    position_size: f64,
+    prev_fast: Option<f64>,
+    prev_slow: Option<f64>,
+}
+
+impl SMACrossover {
+    pub fn new(symbol: &str, fast_period: usize, slow_period: usize, position_size: f64) -> Self {
+        SMACrossover {
+            symbol: symbol.to_string(),
+            fast_period,
+            slow_period,
+            position_size,
+            prev_fast: None,
+            prev_slow: None,
+        }
+    }
+
+    fn sma(bars: &[Bar], period: usize) -> Option<f64> {
+        if bars.len() < period {
+            return None;
+        }
+        let sum: f64 = bars[bars.len() - period..].iter().map(|b| b.close).sum();
+        Some(sum / period as f64)
+    }
+}
+
+impl Strategy for SMACrossover {
+    fn name(&self) -> &str {
+        "SMA Crossover"
+    }
+
+    fn on_bar(&mut self, context: &StrategyContext) -> Vec<Signal> {
+        let mut signals = Vec::new();
+
+        if let Some(bars) = context.lookback(&self.symbol, self.slow_period + 1) {
+            let fast_sma = Self::sma(bars, self.fast_period);
+            let slow_sma = Self::sma(bars, self.slow_period);
+
+            if let (Some(fast), Some(slow), Some(prev_fast), Some(prev_slow)) =
+                (fast_sma, slow_sma, self.prev_fast, self.prev_slow) {
+
+                let current_position = context.position(&self.symbol);
+
+                // Bullish crossover
+                if prev_fast <= prev_slow && fast > slow && current_position <= 0.0 {
+                    if current_position < 0.0 {
+                        signals.push(Signal::Close { symbol: self.symbol.clone() });
+                    }
+                    signals.push(Signal::Buy {
+                        symbol: self.symbol.clone(),
+                        quantity: self.position_size,
+                    });
+                }
+                // Bearish crossover
+                else if prev_fast >= prev_slow && fast < slow && current_position >= 0.0 {
+                    if current_position > 0.0 {
+                        signals.push(Signal::Close { symbol: self.symbol.clone() });
+                    }
+                    signals.push(Signal::Sell {
+                        symbol: self.symbol.clone(),
+                        quantity: self.position_size,
+                    });
+                }
+            }
+
+            self.prev_fast = fast_sma;
+            self.prev_slow = slow_sma;
+        }
+
+        signals
+    }
+}
+
+/// Mean Reversion Strategy (RSI-based)
+pub struct RSIMeanReversion {
+    symbol: String,
+    rsi_period: usize,
+    oversold: f64,
+    overbought: f64,
+    position_size: f64,
+}
+
+impl RSIMeanReversion {
+    pub fn new(symbol: &str, rsi_period: usize, oversold: f64, overbought: f64, position_size: f64) -> Self {
+        RSIMeanReversion {
+            symbol: symbol.to_string(),
+            rsi_period,
+            oversold,
+            overbought,
+            position_size,
+        }
+    }
+
+    fn rsi(bars: &[Bar], period: usize) -> Option<f64> {
+        if bars.len() < period + 1 {
+            return None;
+        }
+
+        let mut gains = 0.0;
+        let mut losses = 0.0;
+
+        for i in (bars.len() - period)..bars.len() {
+            let change = bars[i].close - bars[i - 1].close;
+            if change > 0.0 {
+                gains += change;
+            } else {
+                losses -= change;
+            }
+        }
+
+        let avg_gain = gains / period as f64;
+        let avg_loss = losses / period as f64;
+
+        if avg_loss < 1e-10 {
+            return Some(100.0);
+        }
+
+        let rs = avg_gain / avg_loss;
+        Some(100.0 - 100.0 / (1.0 + rs))
+    }
+}
+
+impl Strategy for RSIMeanReversion {
+    fn name(&self) -> &str {
+        "RSI Mean Reversion"
+    }
+
+    fn on_bar(&mut self, context: &StrategyContext) -> Vec<Signal> {
+        let mut signals = Vec::new();
+
+        if let Some(bars) = context.lookback(&self.symbol, self.rsi_period + 2) {
+            if let Some(rsi) = Self::rsi(bars, self.rsi_period) {
+                let current_position = context.position(&self.symbol);
+
+                if rsi < self.oversold && current_position <= 0.0 {
+                    if current_position < 0.0 {
+                        signals.push(Signal::Close { symbol: self.symbol.clone() });
+                    }
+                    signals.push(Signal::Buy {
+                        symbol: self.symbol.clone(),
+                        quantity: self.position_size,
+                    });
+                } else if rsi > self.overbought && current_position >= 0.0 {
+                    if current_position > 0.0 {
+                        signals.push(Signal::Close { symbol: self.symbol.clone() });
+                    }
+                    signals.push(Signal::Sell {
+                        symbol: self.symbol.clone(),
+                        quantity: self.position_size,
+                    });
+                }
+            }
+        }
+
+        signals
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// TESTS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn generate_test_data(n: usize) -> Vec<Bar> {
+        let mut bars = Vec::with_capacity(n);
+        let mut price = 100.0;
+
+        for i in 0..n {
+            let change = (i as f64 * 0.1).sin() * 2.0;
+            price += change;
+
+            bars.push(Bar::new(
+                i as u64 * 86400,
+                price,
+                price + 1.0,
+                price - 1.0,
+                price + change * 0.1,
+                1000000.0,
+            ));
+        }
+
+        bars
+    }
+
+    #[test]
+    fn test_backtest_engine() {
+        let mut engine = BacktestEngine::new(BacktestConfig::default());
+        engine.add_data("TEST", generate_test_data(100));
+
+        let mut strategy = SMACrossover::new("TEST", 5, 20, 100.0);
+        let result = engine.run(&mut strategy);
+
+        assert!(result.total_trades > 0);
+        assert!(!result.equity_curve.is_empty());
+    }
+
+    #[test]
+    fn test_position_update() {
+        let mut position = Position::new("TEST");
+
+        // Buy 100 shares at $50
+        position.update(100.0, 50.0);
+        assert!((position.quantity - 100.0).abs() < 0.001);
+        assert!((position.average_cost - 50.0).abs() < 0.001);
+
+        // Buy 50 more at $60
+        position.update(50.0, 60.0);
+        assert!((position.quantity - 150.0).abs() < 0.001);
+        assert!((position.average_cost - 53.33).abs() < 0.1);
+
+        // Sell 100 at $70
+        position.update(-100.0, 70.0);
+        assert!((position.quantity - 50.0).abs() < 0.001);
+        assert!(position.realized_pnl > 0.0);
+    }
+
+    #[test]
+    fn test_walk_forward() {
+        let wf = WalkForwardOptimizer::new(WalkForwardConfig {
+            in_sample_bars: 100,
+            out_of_sample_bars: 20,
+            step_bars: 20,
+        });
+
+        let splits = wf.splits(200);
+        assert!(!splits.is_empty());
+        assert_eq!(splits[0].0, 0..100);
+        assert_eq!(splits[0].1, 100..120);
+    }
+
+    #[test]
+    fn test_monte_carlo() {
+        let trades = vec![
+            Trade { timestamp: 0, symbol: "TEST".to_string(), side: OrderSide::Buy, quantity: 100.0, price: 50.0, commission: 1.0, pnl: 500.0 },
+            Trade { timestamp: 1, symbol: "TEST".to_string(), side: OrderSide::Sell, quantity: 100.0, price: 45.0, commission: 1.0, pnl: -200.0 },
+            Trade { timestamp: 2, symbol: "TEST".to_string(), side: OrderSide::Buy, quantity: 100.0, price: 48.0, commission: 1.0, pnl: 300.0 },
+        ];
+
+        let mc = MonteCarloSimulator::new(1000);
+        let result = mc.simulate_shuffled_trades(&trades);
+
+        assert_eq!(result.simulations, 1000);
+        assert!(result.probability_profit > 0.0);
+    }
+}

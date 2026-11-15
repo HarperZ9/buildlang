@@ -1,0 +1,621 @@
+// ═══════════════════════════════════════════════════════════════════════════════
+// BUILD-UNIVERSE BENCHMARK SUITE v1.0.0
+// "Measuring Performance with Precision"
+// ═══════════════════════════════════════════════════════════════════════════════
+// Copyright © 2024-2025 Zain Dana Harper. All Rights Reserved.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+module benchmarks
+
+use std::time::{Duration, Instant}
+use std::collections::HashMap
+
+use foundation::*
+use field_tensor::{MarketTensor4D, Matrix, PortfolioOptimizer}
+use axiom::{NeuralNetwork, Dense, Activation, LSTM}
+use oracle::{TimeSeriesPredictor, ProphetModel}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// BENCHMARK INFRASTRUCTURE
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Benchmark result
+pub struct BenchmarkResult {
+    pub name: String,
+    pub iterations: usize,
+    pub total_time: Duration,
+    pub mean_time: Duration,
+    pub min_time: Duration,
+    pub max_time: Duration,
+    pub std_dev: Duration,
+    pub throughput: Option<f64>,
+}
+
+impl BenchmarkResult {
+    pub fn print(&self) {
+        println!("  {}: {:.2?} ± {:.2?} (min: {:.2?}, max: {:.2?})",
+            self.name, self.mean_time, self.std_dev, self.min_time, self.max_time);
+        if let Some(tp) = self.throughput {
+            println!("    Throughput: {:.2} ops/sec", tp);
+        }
+    }
+}
+
+/// Run a benchmark with warmup and multiple iterations
+pub fn benchmark<F: FnMut()>(name: &str, warmup: usize, iterations: usize, mut f: F) -> BenchmarkResult {
+    // Warmup
+    for _ in 0..warmup {
+        f();
+    }
+
+    // Actual benchmark
+    let mut times = Vec::with_capacity(iterations);
+    let total_start = Instant::now();
+
+    for _ in 0..iterations {
+        let start = Instant::now();
+        f();
+        times.push(start.elapsed());
+    }
+
+    let total_time = total_start.elapsed();
+
+    // Compute statistics
+    let total_nanos: u128 = times.iter().map(|d| d.as_nanos()).sum();
+    let mean_nanos = total_nanos / iterations as u128;
+    let mean_time = Duration::from_nanos(mean_nanos as u64);
+
+    let min_time = times.iter().min().copied().unwrap_or(Duration::ZERO);
+    let max_time = times.iter().max().copied().unwrap_or(Duration::ZERO);
+
+    let variance: f64 = times.iter()
+        .map(|d| {
+            let diff = d.as_nanos() as f64 - mean_nanos as f64;
+            diff * diff
+        })
+        .sum::<f64>() / iterations as f64;
+    let std_dev = Duration::from_nanos(variance.sqrt() as u64);
+
+    let throughput = Some(iterations as f64 / total_time.as_secs_f64());
+
+    BenchmarkResult {
+        name: name.to_string(),
+        iterations,
+        total_time,
+        mean_time,
+        min_time,
+        max_time,
+        std_dev,
+        throughput,
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SERIALIZATION BENCHMARKS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+pub fn bench_json_small() -> BenchmarkResult {
+    let data = HashMap::from([
+        ("name", "test"),
+        ("value", "12345"),
+        ("active", "true"),
+    ]);
+
+    benchmark("JSON small object", 100, 10000, || {
+        let json = serialization::json::to_string(&data).unwrap();
+        let _: HashMap<&str, &str> = serialization::json::from_str(&json).unwrap();
+    })
+}
+
+pub fn bench_json_medium() -> BenchmarkResult {
+    let data: Vec<HashMap<String, i32>> = (0..100)
+        .map(|i| {
+            let mut map = HashMap::new();
+            for j in 0..10 {
+                map.insert(format!("key_{}", j), i * 10 + j);
+            }
+            map
+        })
+        .collect();
+
+    benchmark("JSON medium array", 10, 1000, || {
+        let json = serialization::json::to_string(&data).unwrap();
+        let _: Vec<HashMap<String, i32>> = serialization::json::from_str(&json).unwrap();
+    })
+}
+
+pub fn bench_json_large() -> BenchmarkResult {
+    let data: Vec<i64> = (0..100_000).collect();
+
+    benchmark("JSON large array (100k)", 5, 100, || {
+        let json = serialization::json::to_string(&data).unwrap();
+        let _: Vec<i64> = serialization::json::from_str(&json).unwrap();
+    })
+}
+
+pub fn bench_msgpack_small() -> BenchmarkResult {
+    let data = (42i32, "hello", true, 3.14f64);
+
+    benchmark("MessagePack small tuple", 100, 10000, || {
+        let bytes = serialization::msgpack::to_vec(&data).unwrap();
+        let _: (i32, String, bool, f64) = serialization::msgpack::from_slice(&bytes).unwrap();
+    })
+}
+
+pub fn bench_msgpack_large() -> BenchmarkResult {
+    let data: Vec<i64> = (0..100_000).collect();
+
+    benchmark("MessagePack large array (100k)", 5, 100, || {
+        let bytes = serialization::msgpack::to_vec(&data).unwrap();
+        let _: Vec<i64> = serialization::msgpack::from_slice(&bytes).unwrap();
+    })
+}
+
+pub fn bench_protobuf_encode() -> BenchmarkResult {
+    let msg = TestMessage {
+        id: 12345,
+        name: "Benchmark Test Message".to_string(),
+        values: (0..100).collect(),
+        nested: Some(NestedMessage { value: 42 }),
+    };
+
+    benchmark("Protobuf encode", 100, 10000, || {
+        let _ = serialization::protobuf::encode(&msg).unwrap();
+    })
+}
+
+pub fn bench_protobuf_decode() -> BenchmarkResult {
+    let msg = TestMessage {
+        id: 12345,
+        name: "Benchmark Test Message".to_string(),
+        values: (0..100).collect(),
+        nested: Some(NestedMessage { value: 42 }),
+    };
+    let bytes = serialization::protobuf::encode(&msg).unwrap();
+
+    benchmark("Protobuf decode", 100, 10000, || {
+        let _: TestMessage = serialization::protobuf::decode(&bytes).unwrap();
+    })
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// TENSOR BENCHMARKS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+pub fn bench_tensor_create() -> BenchmarkResult {
+    benchmark("Tensor create (252x100x16x4)", 5, 100, || {
+        let _ = MarketTensor4D::new(252, 100, 16, 4);
+    })
+}
+
+pub fn bench_tensor_fill() -> BenchmarkResult {
+    let mut tensor = MarketTensor4D::new(252, 50, 16, 4);
+
+    benchmark("Tensor fill (252x50x16x4)", 5, 50, || {
+        for t in 0..252 {
+            for a in 0..50 {
+                for f in 0..16 {
+                    for d in 0..4 {
+                        tensor.set(t, a, f, d, (t * a + f * d) as f64 * 0.001);
+                    }
+                }
+            }
+        }
+    })
+}
+
+pub fn bench_tensor_covariance() -> BenchmarkResult {
+    let mut tensor = MarketTensor4D::new(252, 50, 16, 4);
+    for t in 0..252 {
+        for a in 0..50 {
+            tensor.set(t, a, 0, 0, ((t * a) as f64).sin() * 0.02);
+        }
+    }
+
+    benchmark("Tensor covariance (50 assets)", 5, 50, || {
+        let _ = tensor.asset_covariance();
+    })
+}
+
+pub fn bench_tensor_ewm_covariance() -> BenchmarkResult {
+    let mut tensor = MarketTensor4D::new(252, 30, 16, 4);
+    for t in 0..252 {
+        for a in 0..30 {
+            tensor.set(t, a, 0, 0, ((t * a) as f64).sin() * 0.02);
+        }
+    }
+
+    benchmark("Tensor EWM covariance (30 assets, span=60)", 5, 50, || {
+        let _ = tensor.ewm_covariance(60.0);
+    })
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MATRIX BENCHMARKS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+pub fn bench_matrix_multiply_small() -> BenchmarkResult {
+    let a = Matrix::random(10, 10);
+    let b = Matrix::random(10, 10);
+
+    benchmark("Matrix multiply 10x10", 100, 10000, || {
+        let _ = a.mul(&b);
+    })
+}
+
+pub fn bench_matrix_multiply_medium() -> BenchmarkResult {
+    let a = Matrix::random(100, 100);
+    let b = Matrix::random(100, 100);
+
+    benchmark("Matrix multiply 100x100", 10, 100, || {
+        let _ = a.mul(&b);
+    })
+}
+
+pub fn bench_matrix_multiply_large() -> BenchmarkResult {
+    let a = Matrix::random(500, 500);
+    let b = Matrix::random(500, 500);
+
+    benchmark("Matrix multiply 500x500", 3, 10, || {
+        let _ = a.mul(&b);
+    })
+}
+
+pub fn bench_matrix_inverse_small() -> BenchmarkResult {
+    let m = Matrix::random(10, 10);
+
+    benchmark("Matrix inverse 10x10", 100, 1000, || {
+        let _ = m.inverse();
+    })
+}
+
+pub fn bench_matrix_inverse_medium() -> BenchmarkResult {
+    let m = Matrix::random(50, 50);
+
+    benchmark("Matrix inverse 50x50", 10, 100, || {
+        let _ = m.inverse();
+    })
+}
+
+pub fn bench_matrix_cholesky() -> BenchmarkResult {
+    // Create positive definite matrix
+    let r = Matrix::random(50, 50);
+    let m = r.transpose().mul(&r);
+
+    benchmark("Cholesky decomposition 50x50", 10, 100, || {
+        let _ = m.cholesky();
+    })
+}
+
+pub fn bench_matrix_svd() -> BenchmarkResult {
+    let m = Matrix::random(50, 50);
+
+    benchmark("SVD 50x50", 5, 20, || {
+        let _ = m.svd();
+    })
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PORTFOLIO OPTIMIZATION BENCHMARKS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+pub fn bench_portfolio_mean_variance() -> BenchmarkResult {
+    let n = 50;
+    let returns: Vec<f64> = (0..n).map(|i| 0.05 + 0.01 * (i as f64) / n as f64).collect();
+    let cov = Matrix::random_positive_definite(n);
+    let optimizer = PortfolioOptimizer::new(returns, cov);
+
+    benchmark("Mean-variance optimization (50 assets)", 10, 100, || {
+        let _ = optimizer.mean_variance(3.0);
+    })
+}
+
+pub fn bench_portfolio_risk_parity() -> BenchmarkResult {
+    let n = 50;
+    let returns: Vec<f64> = (0..n).map(|i| 0.05 + 0.01 * (i as f64) / n as f64).collect();
+    let cov = Matrix::random_positive_definite(n);
+    let optimizer = PortfolioOptimizer::new(returns, cov);
+
+    benchmark("Risk parity optimization (50 assets)", 5, 50, || {
+        let _ = optimizer.risk_parity(100);
+    })
+}
+
+pub fn bench_portfolio_max_sharpe() -> BenchmarkResult {
+    let n = 30;
+    let returns: Vec<f64> = (0..n).map(|i| 0.05 + 0.01 * (i as f64) / n as f64).collect();
+    let cov = Matrix::random_positive_definite(n);
+    let optimizer = PortfolioOptimizer::new(returns, cov);
+
+    benchmark("Maximum Sharpe optimization (30 assets)", 5, 50, || {
+        let _ = optimizer.maximum_sharpe(0.02);
+    })
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// NEURAL NETWORK BENCHMARKS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+pub fn bench_nn_forward_small() -> BenchmarkResult {
+    let nn = NeuralNetwork::new()
+        .add(Dense::new(10, 32))
+        .add(Activation::ReLU)
+        .add(Dense::new(32, 10))
+        .build();
+
+    let input: Vec<f64> = (0..10).map(|i| i as f64 * 0.1).collect();
+
+    benchmark("NN forward small (10->32->10)", 100, 10000, || {
+        let _ = nn.forward(&input);
+    })
+}
+
+pub fn bench_nn_forward_medium() -> BenchmarkResult {
+    let nn = NeuralNetwork::new()
+        .add(Dense::new(100, 256))
+        .add(Activation::ReLU)
+        .add(Dense::new(256, 128))
+        .add(Activation::ReLU)
+        .add(Dense::new(128, 64))
+        .add(Activation::ReLU)
+        .add(Dense::new(64, 10))
+        .build();
+
+    let input: Vec<f64> = (0..100).map(|i| i as f64 * 0.01).collect();
+
+    benchmark("NN forward medium (100->256->128->64->10)", 50, 1000, || {
+        let _ = nn.forward(&input);
+    })
+}
+
+pub fn bench_nn_forward_large() -> BenchmarkResult {
+    let nn = NeuralNetwork::new()
+        .add(Dense::new(1000, 512))
+        .add(Activation::ReLU)
+        .add(Dense::new(512, 256))
+        .add(Activation::ReLU)
+        .add(Dense::new(256, 128))
+        .add(Activation::ReLU)
+        .add(Dense::new(128, 64))
+        .add(Activation::ReLU)
+        .add(Dense::new(64, 10))
+        .build();
+
+    let input: Vec<f64> = (0..1000).map(|i| i as f64 * 0.001).collect();
+
+    benchmark("NN forward large (1000->512->256->128->64->10)", 10, 100, || {
+        let _ = nn.forward(&input);
+    })
+}
+
+pub fn bench_lstm_forward() -> BenchmarkResult {
+    let lstm = LSTM::new(10, 64, 2);
+    let sequence: Vec<Vec<f64>> = (0..20)
+        .map(|t| (0..10).map(|f| (t * f) as f64 * 0.01).collect())
+        .collect();
+
+    benchmark("LSTM forward (seq=20, in=10, hidden=64)", 10, 100, || {
+        let _ = lstm.forward(&sequence);
+    })
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CRYPTO BENCHMARKS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+pub fn bench_aes_encrypt_1kb() -> BenchmarkResult {
+    let data = vec![0u8; 1024];
+    let key = crypto::generate_key(crypto::Algorithm::AES256);
+
+    benchmark("AES-256 encrypt 1KB", 100, 10000, || {
+        let _ = crypto::encrypt(&data, &key, crypto::Algorithm::AES256).unwrap();
+    })
+}
+
+pub fn bench_aes_encrypt_1mb() -> BenchmarkResult {
+    let data = vec![0u8; 1_000_000];
+    let key = crypto::generate_key(crypto::Algorithm::AES256);
+
+    benchmark("AES-256 encrypt 1MB", 10, 100, || {
+        let _ = crypto::encrypt(&data, &key, crypto::Algorithm::AES256).unwrap();
+    })
+}
+
+pub fn bench_sha256_1kb() -> BenchmarkResult {
+    let data = vec![0u8; 1024];
+
+    benchmark("SHA-256 hash 1KB", 100, 10000, || {
+        let _ = crypto::hash(&data, crypto::HashAlgorithm::SHA256);
+    })
+}
+
+pub fn bench_sha256_1mb() -> BenchmarkResult {
+    let data = vec![0u8; 1_000_000];
+
+    benchmark("SHA-256 hash 1MB", 10, 100, || {
+        let _ = crypto::hash(&data, crypto::HashAlgorithm::SHA256);
+    })
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// COLLECTION BENCHMARKS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+pub fn bench_hashmap_insert() -> BenchmarkResult {
+    benchmark("HashMap insert 10k entries", 5, 100, || {
+        let mut map = HashMap::with_capacity(10000);
+        for i in 0..10000 {
+            map.insert(format!("key_{}", i), i);
+        }
+    })
+}
+
+pub fn bench_hashmap_lookup() -> BenchmarkResult {
+    let mut map = HashMap::new();
+    for i in 0..10000 {
+        map.insert(format!("key_{}", i), i);
+    }
+
+    benchmark("HashMap lookup 10k entries", 10, 1000, || {
+        for i in 0..10000 {
+            let _ = map.get(&format!("key_{}", i));
+        }
+    })
+}
+
+pub fn bench_vec_sort() -> BenchmarkResult {
+    let original: Vec<i64> = (0..100_000).rev().collect();
+
+    benchmark("Vec sort 100k elements", 5, 50, || {
+        let mut v = original.clone();
+        v.sort_unstable();
+    })
+}
+
+pub fn bench_vec_binary_search() -> BenchmarkResult {
+    let v: Vec<i64> = (0..100_000).collect();
+
+    benchmark("Vec binary search 100k", 10, 1000, || {
+        for i in (0..100_000).step_by(100) {
+            let _ = v.binary_search(&i);
+        }
+    })
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// HELPER TYPES
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[derive(Serialize, Deserialize)]
+struct TestMessage {
+    id: i32,
+    name: String,
+    values: Vec<i32>,
+    nested: Option<NestedMessage>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct NestedMessage {
+    value: i32,
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// BENCHMARK RUNNER
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Run all benchmarks
+pub fn run_all_benchmarks() -> Vec<BenchmarkResult> {
+    let mut results = Vec::new();
+
+    println!("\n{}", "═".repeat(70));
+    println!("BUILD-UNIVERSE Benchmark Suite");
+    println!("{}", "═".repeat(70));
+
+    // Serialization
+    println!("\n[Serialization]");
+    for bench in [
+        bench_json_small,
+        bench_json_medium,
+        bench_json_large,
+        bench_msgpack_small,
+        bench_msgpack_large,
+        bench_protobuf_encode,
+        bench_protobuf_decode,
+    ] {
+        let result = bench();
+        result.print();
+        results.push(result);
+    }
+
+    // Tensor operations
+    println!("\n[Tensor Operations]");
+    for bench in [
+        bench_tensor_create,
+        bench_tensor_fill,
+        bench_tensor_covariance,
+        bench_tensor_ewm_covariance,
+    ] {
+        let result = bench();
+        result.print();
+        results.push(result);
+    }
+
+    // Matrix operations
+    println!("\n[Matrix Operations]");
+    for bench in [
+        bench_matrix_multiply_small,
+        bench_matrix_multiply_medium,
+        bench_matrix_multiply_large,
+        bench_matrix_inverse_small,
+        bench_matrix_inverse_medium,
+        bench_matrix_cholesky,
+        bench_matrix_svd,
+    ] {
+        let result = bench();
+        result.print();
+        results.push(result);
+    }
+
+    // Portfolio optimization
+    println!("\n[Portfolio Optimization]");
+    for bench in [
+        bench_portfolio_mean_variance,
+        bench_portfolio_risk_parity,
+        bench_portfolio_max_sharpe,
+    ] {
+        let result = bench();
+        result.print();
+        results.push(result);
+    }
+
+    // Neural networks
+    println!("\n[Neural Networks]");
+    for bench in [
+        bench_nn_forward_small,
+        bench_nn_forward_medium,
+        bench_nn_forward_large,
+        bench_lstm_forward,
+    ] {
+        let result = bench();
+        result.print();
+        results.push(result);
+    }
+
+    // Cryptography
+    println!("\n[Cryptography]");
+    for bench in [
+        bench_aes_encrypt_1kb,
+        bench_aes_encrypt_1mb,
+        bench_sha256_1kb,
+        bench_sha256_1mb,
+    ] {
+        let result = bench();
+        result.print();
+        results.push(result);
+    }
+
+    // Collections
+    println!("\n[Collections]");
+    for bench in [
+        bench_hashmap_insert,
+        bench_hashmap_lookup,
+        bench_vec_sort,
+        bench_vec_binary_search,
+    ] {
+        let result = bench();
+        result.print();
+        results.push(result);
+    }
+
+    println!("\n{}", "═".repeat(70));
+    println!("Completed {} benchmarks", results.len());
+    println!("{}", "═".repeat(70));
+
+    results
+}
+
+/// Main entry point
+pub fn main() -> i32 {
+    let _ = run_all_benchmarks();
+    0
+}

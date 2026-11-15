@@ -1,0 +1,733 @@
+// =============================================================================
+// qmake — Make-lite build tool written in BuildLang
+// =============================================================================
+// A simplified make clone with dependency resolution, variable expansion,
+// and dry-run support. Parses a Makefile-like format and executes (or prints)
+// commands in correct dependency order.
+//
+// Usage:
+//   qmake                    — build default target
+//   qmake clean              — build specific target
+//   qmake -f build.qmk       — use custom makefile
+//   qmake -n                 — dry run (show commands without executing)
+//   qmake --help             — usage
+//
+// Makefile format (Qmakefile):
+//   # Comments start with #
+//   VAR = value
+//   target: dep1 dep2
+//       command to run
+//
+// Since BuildLang has no system() builtin, commands are always printed
+// (permanent dry-run). The value is in dependency resolution and build graph.
+// =============================================================================
+
+// --- State struct ---
+struct Make {
+    // Variables: name -> value in string pools
+    v_names: String,
+    v_name_starts: Vec<i32>,
+    v_name_lens: Vec<i32>,
+    v_vals: String,
+    v_val_starts: Vec<i32>,
+    v_val_lens: Vec<i32>,
+    v_n: i32,
+
+    // Targets
+    t_names: String,
+    t_name_starts: Vec<i32>,
+    t_name_lens: Vec<i32>,
+
+    // Dependencies: individual dep names stored in a pool
+    dep_items: String,
+    dep_item_starts: Vec<i32>,
+    dep_item_lens: Vec<i32>,
+    dep_item_n: i32,
+    // Per-target dep_item range
+    t_di_start: Vec<i32>,
+    t_di_len: Vec<i32>,
+
+    // Commands stored in a string pool, per-target range
+    cmd_buf: String,
+    cmd_starts: Vec<i32>,
+    cmd_lens: Vec<i32>,
+    cmd_n: i32,
+    t_cmd_start: Vec<i32>,
+    t_cmd_len: Vec<i32>,
+
+    // Build state: which targets have been built (0=no, 1=yes)
+    built: Vec<i32>,
+
+    t_n: i32,
+
+    // Options
+    dry_run: bool,
+    makefile: String,
+    target_name: String,
+    has_target: bool,
+}
+
+fn make_new() -> Make {
+    Make {
+        v_names: "", v_name_starts: vec![], v_name_lens: vec![],
+        v_vals: "", v_val_starts: vec![], v_val_lens: vec![],
+        v_n: 0,
+        t_names: "", t_name_starts: vec![], t_name_lens: vec![],
+        dep_items: "", dep_item_starts: vec![], dep_item_lens: vec![],
+        dep_item_n: 0,
+        t_di_start: vec![], t_di_len: vec![],
+        cmd_buf: "", cmd_starts: vec![], cmd_lens: vec![],
+        cmd_n: 0,
+        t_cmd_start: vec![], t_cmd_len: vec![],
+        built: vec![],
+        t_n: 0,
+        dry_run: false,
+        makefile: "Qmakefile",
+        target_name: "",
+        has_target: false,
+    }
+}
+
+// --- Helpers ---
+fn skip_ws(s: String, pos: i32) -> i32 {
+    let slen = s.len();
+    let mut p = pos;
+    let mut go = true;
+    while go {
+        if p >= slen {
+            go = false;
+        } else {
+            let c = s.char_at(p);
+            if c == " " || c == "\t" {
+                p = p + 1;
+            } else {
+                go = false;
+            }
+        }
+    }
+    p
+}
+
+fn trim_trailing(s: String) -> String {
+    let slen = s.len();
+    if slen == 0 { return ""; }
+    let mut end = slen - 1;
+    let mut go = true;
+    while go {
+        if end < 0 {
+            go = false;
+        } else {
+            let c = s.char_at(end);
+            if c == " " || c == "\t" || c == "\r" {
+                end = end - 1;
+            } else {
+                go = false;
+            }
+        }
+    }
+    if end < 0 { return ""; }
+    s.substring(0, end + 1)
+}
+
+fn trim_leading(s: String) -> String {
+    let slen = s.len();
+    let sp = skip_ws(s, 0);
+    if sp >= slen { return ""; }
+    s.substring(sp, slen - sp)
+}
+
+fn trim_both(s: String) -> String {
+    let t1 = trim_leading(s);
+    trim_trailing(t1)
+}
+
+// Strip leading tab from a command line
+fn strip_leading_indent(s: String) -> String {
+    let slen = s.len();
+    if slen == 0 { return ""; }
+    let first = s.char_at(0);
+    if first == "\t" {
+        if slen == 1 { return ""; }
+        return s.substring(1, slen - 1);
+    }
+    // Strip leading spaces
+    let sp = skip_ws(s, 0);
+    if sp >= slen { return ""; }
+    s.substring(sp, slen - sp)
+}
+
+// Extract substring before a given index
+fn str_before(s: String, idx: i32) -> String {
+    if idx <= 0 { return ""; }
+    s.substring(0, idx)
+}
+
+// Extract substring after a given index (exclusive)
+fn str_after(s: String, idx: i32) -> String {
+    let slen = s.len();
+    let start = idx + 1;
+    if start >= slen { return ""; }
+    s.substring(start, slen - start)
+}
+
+// --- Variable operations ---
+fn var_find(m: &Make, name: String) -> i32 {
+    let mut i: i32 = 0;
+    let mut result: i32 = -1;
+    let mut go = true;
+    while go {
+        if i >= m.v_n {
+            go = false;
+        } else {
+            let st = vec_get(m.v_name_starts, i);
+            let ln = vec_get(m.v_name_lens, i);
+            let vn = m.v_names.substring(st, ln);
+            if vn == name {
+                result = i;
+                go = false;
+            } else {
+                i = i + 1;
+            }
+        }
+    }
+    result
+}
+
+fn var_get(m: &Make, name: String) -> String {
+    let idx = var_find(m, name);
+    if idx < 0 { return ""; }
+    let st = vec_get(m.v_val_starts, idx);
+    let ln = vec_get(m.v_val_lens, idx);
+    if ln == 0 { return ""; }
+    m.v_vals.substring(st, ln)
+}
+
+fn var_set(m: &mut Make, name: String, val: String) {
+    let idx = var_find(m, name);
+    if idx < 0 {
+        let ns = m.v_names.len();
+        m.v_names = m.v_names + name;
+        let ne = m.v_names.len();
+        vec_push(m.v_name_starts, ns);
+        vec_push(m.v_name_lens, ne - ns);
+        let vs = m.v_vals.len();
+        m.v_vals = m.v_vals + val;
+        let ve = m.v_vals.len();
+        vec_push(m.v_val_starts, vs);
+        vec_push(m.v_val_lens, ve - vs);
+        m.v_n = m.v_n + 1;
+    } else {
+        let vs = m.v_vals.len();
+        m.v_vals = m.v_vals + val;
+        let ve = m.v_vals.len();
+        let mut ns: Vec<i32> = vec![];
+        let mut nl: Vec<i32> = vec![];
+        let mut i: i32 = 0;
+        while i < m.v_n {
+            if i == idx {
+                vec_push(ns, vs);
+                vec_push(nl, ve - vs);
+            } else {
+                vec_push(ns, vec_get(m.v_val_starts, i));
+                vec_push(nl, vec_get(m.v_val_lens, i));
+            }
+            i = i + 1;
+        }
+        m.v_val_starts = ns;
+        m.v_val_lens = nl;
+    }
+}
+
+// --- Expand variables: replace $(VAR) with its value ---
+fn expand_vars(m: &Make, s: String) -> String {
+    let slen = s.len();
+    let mut result = "";
+    let mut pos: i32 = 0;
+    let mut go = true;
+    while go {
+        if pos >= slen {
+            go = false;
+        } else {
+            if pos + 1 < slen && s.char_at(pos) == "$" && s.char_at(pos + 1) == "(" {
+                pos = pos + 2;
+                let mut vname = "";
+                let mut vgo = true;
+                while vgo {
+                    if pos >= slen {
+                        vgo = false;
+                    } else {
+                        let c = s.char_at(pos);
+                        if c == ")" {
+                            pos = pos + 1;
+                            vgo = false;
+                        } else {
+                            vname = vname + c;
+                            pos = pos + 1;
+                        }
+                    }
+                }
+                let val = var_get(m, vname);
+                result = result + val;
+            } else {
+                result = result + s.char_at(pos);
+                pos = pos + 1;
+            }
+        }
+    }
+    result
+}
+
+// --- Target operations ---
+fn target_find(m: &Make, name: String) -> i32 {
+    let mut i: i32 = 0;
+    let mut result: i32 = -1;
+    let mut go = true;
+    while go {
+        if i >= m.t_n {
+            go = false;
+        } else {
+            let st = vec_get(m.t_name_starts, i);
+            let ln = vec_get(m.t_name_lens, i);
+            let tn = m.t_names.substring(st, ln);
+            if tn == name {
+                result = i;
+                go = false;
+            } else {
+                i = i + 1;
+            }
+        }
+    }
+    result
+}
+
+fn target_name(m: &Make, idx: i32) -> String {
+    let st = vec_get(m.t_name_starts, idx);
+    let ln = vec_get(m.t_name_lens, idx);
+    if ln == 0 { return ""; }
+    m.t_names.substring(st, ln)
+}
+
+// --- Add a command to the current target ---
+fn add_command(m: &mut Make, cmd: String, tidx: i32) {
+    if cmd.len() == 0 { return; }
+    let cs = m.cmd_buf.len();
+    m.cmd_buf = m.cmd_buf + cmd;
+    let ce = m.cmd_buf.len();
+    vec_push(m.cmd_starts, cs);
+    vec_push(m.cmd_lens, ce - cs);
+    m.cmd_n = m.cmd_n + 1;
+
+    // Update target's command count
+    let old_len = vec_get(m.t_cmd_len, tidx);
+    let mut new_cl: Vec<i32> = vec![];
+    let mut ci: i32 = 0;
+    while ci < m.t_n {
+        if ci == tidx {
+            vec_push(new_cl, old_len + 1);
+        } else {
+            vec_push(new_cl, vec_get(m.t_cmd_len, ci));
+        }
+        ci = ci + 1;
+    }
+    m.t_cmd_len = new_cl;
+}
+
+// --- Parse a variable assignment line (VAR = VALUE) ---
+// Returns true if parsed successfully.
+fn try_parse_var(m: &mut Make, line: String) -> bool {
+    let llen = line.len();
+    let eq_idx = line.index_of("=");
+    if eq_idx < 0 { return false; }
+
+    let colon_idx = line.index_of(":");
+
+    // Check if = comes before : (or there's no :), meaning this is likely VAR = VAL
+    if colon_idx >= 0 && colon_idx < eq_idx && colon_idx != eq_idx - 1 {
+        return false;
+    }
+
+    // Get the name part (before =, handling :=)
+    let name_end = if eq_idx > 0 && line.char_at(eq_idx - 1) == ":" {
+        eq_idx - 1
+    } else {
+        eq_idx
+    };
+
+    let name_raw = str_before(line, name_end);
+    let name = trim_both(name_raw);
+    if name.len() == 0 { return false; }
+
+    // Make sure name has no spaces (valid identifier)
+    if name.contains(" ") { return false; }
+
+    // Get the value part (after =)
+    let val_raw = str_after(line, eq_idx);
+    let val = trim_both(val_raw);
+
+    var_set(m, name, val);
+    true
+}
+
+// --- Split a dep string by whitespace and add each to dep_items ---
+fn parse_deps(m: &mut Make, deps: String) -> i32 {
+    let dlen = deps.len();
+    let mut count: i32 = 0;
+    let mut pos: i32 = 0;
+    let mut go = true;
+    while go {
+        pos = skip_ws(deps, pos);
+        if pos >= dlen {
+            go = false;
+        } else {
+            let dep_s = pos;
+            let mut dgo = true;
+            while dgo {
+                if pos >= dlen {
+                    dgo = false;
+                } else {
+                    let c = deps.char_at(pos);
+                    if c == " " || c == "\t" {
+                        dgo = false;
+                    } else {
+                        pos = pos + 1;
+                    }
+                }
+            }
+            let dep_name = deps.substring(dep_s, pos - dep_s);
+            if dep_name.len() > 0 {
+                let dis = m.dep_items.len();
+                m.dep_items = m.dep_items + dep_name;
+                let die = m.dep_items.len();
+                vec_push(m.dep_item_starts, dis);
+                vec_push(m.dep_item_lens, die - dis);
+                m.dep_item_n = m.dep_item_n + 1;
+                count = count + 1;
+            }
+        }
+    }
+    count
+}
+
+// --- Parse a target definition line (target: deps) ---
+// Returns true if parsed; sets current_target.
+fn try_parse_target(m: &mut Make, line: String) -> bool {
+    let colon_idx = line.index_of(":");
+    if colon_idx < 0 { return false; }
+
+    // Check for := (variable assignment handled separately)
+    let llen = line.len();
+    if colon_idx + 1 < llen && line.char_at(colon_idx + 1) == "=" {
+        return false;
+    }
+
+    let name_raw = str_before(line, colon_idx);
+    let name = trim_both(name_raw);
+    if name.len() == 0 { return false; }
+
+    // Add target name
+    let ns = m.t_names.len();
+    m.t_names = m.t_names + name;
+    let ne = m.t_names.len();
+    vec_push(m.t_name_starts, ns);
+    vec_push(m.t_name_lens, ne - ns);
+
+    // Parse dependencies
+    let deps_raw = str_after(line, colon_idx);
+    let deps = trim_both(deps_raw);
+
+    let di_start = m.dep_item_n;
+    let di_count = parse_deps(m, deps);
+    vec_push(m.t_di_start, di_start);
+    vec_push(m.t_di_len, di_count);
+
+    // Initialize command range
+    vec_push(m.t_cmd_start, m.cmd_n);
+    vec_push(m.t_cmd_len, 0);
+
+    // Initialize built flag
+    vec_push(m.built, 0);
+
+    m.t_n = m.t_n + 1;
+    true
+}
+
+// --- Process a single line from the makefile ---
+// Returns updated current_target index.
+fn process_mk_line(m: &mut Make, line: String, current_target: i32) -> i32 {
+    let trimmed = trim_trailing(line);
+    let tlen = trimmed.len();
+
+    if tlen == 0 {
+        return current_target;
+    }
+
+    // Comment
+    if trimmed.char_at(0) == "#" {
+        return current_target;
+    }
+
+    // Command line (starts with tab or leading spaces inside a target)
+    if trimmed.char_at(0) == "\t" || (trimmed.char_at(0) == " " && current_target >= 0) {
+        if current_target >= 0 {
+            let cmd_raw = strip_leading_indent(trimmed);
+            let cmd = trim_trailing(cmd_raw);
+            add_command(m, cmd, current_target);
+        }
+        return current_target;
+    }
+
+    // Try variable assignment first
+    let is_var = try_parse_var(m, trimmed);
+    if is_var {
+        return -1;
+    }
+
+    // Try target definition
+    let is_target = try_parse_target(m, trimmed);
+    if is_target {
+        return m.t_n - 1;
+    }
+
+    current_target
+}
+
+// --- Parse makefile content ---
+fn parse_makefile(m: &mut Make, content: String) {
+    let clen = content.len();
+    let mut pos: i32 = 0;
+    let mut current_target: i32 = -1;
+
+    let mut go = true;
+    while go {
+        if pos >= clen {
+            go = false;
+        } else {
+            let rest = content.substring(pos, clen - pos);
+            let nl_idx = rest.index_of("\n");
+            let raw_line = if nl_idx < 0 { rest } else { rest.substring(0, nl_idx) };
+            if nl_idx < 0 {
+                pos = clen;
+            } else {
+                pos = pos + nl_idx + 1;
+            }
+
+            // Strip trailing \r
+            let llen = raw_line.len();
+            let clean = if llen > 0 {
+                let last = raw_line.char_at(llen - 1);
+                if last == "\r" {
+                    if llen == 1 { "" } else { raw_line.substring(0, llen - 1) }
+                } else {
+                    raw_line
+                }
+            } else {
+                raw_line
+            };
+
+            current_target = process_mk_line(m, clean, current_target);
+        }
+    }
+}
+
+// --- Get dependency name at index ---
+fn get_dep_item(m: &Make, idx: i32) -> String {
+    if idx < 0 || idx >= m.dep_item_n { return ""; }
+    let st = vec_get(m.dep_item_starts, idx);
+    let ln = vec_get(m.dep_item_lens, idx);
+    if ln == 0 { return ""; }
+    m.dep_items.substring(st, ln)
+}
+
+// --- Get command at index ---
+fn get_cmd(m: &Make, idx: i32) -> String {
+    if idx < 0 || idx >= m.cmd_n { return ""; }
+    let st = vec_get(m.cmd_starts, idx);
+    let ln = vec_get(m.cmd_lens, idx);
+    if ln == 0 { return ""; }
+    m.cmd_buf.substring(st, ln)
+}
+
+// --- Mark target as built ---
+fn mark_built(m: &mut Make, tidx: i32) {
+    let mut new_built: Vec<i32> = vec![];
+    let mut i: i32 = 0;
+    while i < m.t_n {
+        if i == tidx {
+            vec_push(new_built, 1);
+        } else {
+            vec_push(new_built, vec_get(m.built, i));
+        }
+        i = i + 1;
+    }
+    m.built = new_built;
+}
+
+// --- Build a target (recursive dependency resolution) ---
+fn build_target(m: &mut Make, tidx: i32, depth: i32) -> bool ~ Console + FileSystem {
+    if tidx < 0 || tidx >= m.t_n { return false; }
+
+    // Already built?
+    if vec_get(m.built, tidx) == 1 { return true; }
+
+    // Cycle detection
+    if depth > m.t_n {
+        let tname = target_name(m, tidx);
+        println!("qmake: circular dependency detected for '{}'", tname);
+        return false;
+    }
+
+    // Build dependencies first
+    let di_start = vec_get(m.t_di_start, tidx);
+    let di_len = vec_get(m.t_di_len, tidx);
+    let mut di: i32 = 0;
+    let mut deps_ok = true;
+    while di < di_len {
+        let dep_name_raw = get_dep_item(m, di_start + di);
+        let dep_name = expand_vars(m, dep_name_raw);
+
+        let dep_tidx = target_find(m, dep_name);
+        if dep_tidx >= 0 {
+            let ok = build_target(m, dep_tidx, depth + 1);
+            if !ok {
+                deps_ok = false;
+            }
+        } else {
+            let exists = file_exists(dep_name);
+            if !exists {
+                println!("qmake: warning: '{}' not found (not a target or file)", dep_name);
+            }
+        }
+        di = di + 1;
+    }
+
+    if !deps_ok {
+        return false;
+    }
+
+    // Execute (print) commands for this target
+    let cmd_start = vec_get(m.t_cmd_start, tidx);
+    let cmd_len = vec_get(m.t_cmd_len, tidx);
+
+    if cmd_len > 0 {
+        let mut ci: i32 = 0;
+        while ci < cmd_len {
+            let cmd_raw = get_cmd(m, cmd_start + ci);
+            let cmd = expand_vars(m, cmd_raw);
+            println!("{}", cmd);
+            ci = ci + 1;
+        }
+    }
+
+    mark_built(m, tidx);
+    true
+}
+
+// --- Help ---
+fn print_help() ~ Console {
+    println!("qmake -- lightweight build tool");
+    println!("");
+    println!("Usage:");
+    println!("  qmake [OPTIONS] [TARGET]");
+    println!("");
+    println!("Options:");
+    println!("  -f FILE   use FILE as the makefile (default: Qmakefile)");
+    println!("  -n        dry run (show commands without executing)");
+    println!("  --help    display this help and exit");
+    println!("");
+    println!("Makefile format:");
+    println!("  # Comment");
+    println!("  VAR = value");
+    println!("  target: dep1 dep2");
+    println!("      command using $(VAR)");
+    println!("");
+    println!("Features:");
+    println!("  - Dependency resolution with cycle detection");
+    println!("  - Variable expansion: $(VAR) in commands");
+    println!("  - Multiple targets and phony targets");
+    println!("  - Default target is the first one defined");
+    println!("");
+    println!("Note: Commands are printed but not executed (no shell).");
+    println!("Use -n flag for explicit dry-run output format.");
+    println!("");
+    println!("Examples:");
+    println!("  qmake                  build default target");
+    println!("  qmake clean            build 'clean' target");
+    println!("  qmake -f build.qmk     use custom makefile");
+    println!("  qmake -n all           dry run 'all' target");
+}
+
+// --- Main ---
+fn main() ~ Console + Environment + FileSystem + Process {
+    let nargs = args_count();
+
+    let mut m = make_new();
+
+    let mut i: i64 = 1;
+    while i < nargs {
+        let arg = args_get(i);
+
+        if arg == "--help" || arg == "-h" {
+            print_help();
+            process_exit(0);
+        } else if arg == "-f" {
+            i = i + 1;
+            if i < nargs {
+                let f = args_get(i);
+                m.makefile = f;
+            }
+        } else if arg == "-n" {
+            m.dry_run = true;
+        } else if arg.starts_with("-") {
+            println!("qmake: unknown option '{}'", arg);
+            process_exit(2);
+        } else {
+            m.target_name = arg;
+            m.has_target = true;
+        }
+
+        i = i + 1;
+    }
+
+    // Read makefile
+    let mk_exists = file_exists(m.makefile);
+    if !mk_exists {
+        println!("qmake: '{}': No such file or directory", m.makefile);
+        if m.makefile == "Qmakefile" {
+            println!("qmake: no Qmakefile found. Try 'qmake -f FILE' or 'qmake --help'.");
+        }
+        process_exit(2);
+    }
+
+    let content = read_file(m.makefile);
+    if content.len() == 0 {
+        println!("qmake: '{}' is empty", m.makefile);
+        process_exit(0);
+    }
+
+    // Parse
+    parse_makefile(&mut m, content);
+
+    if m.t_n == 0 {
+        println!("qmake: no targets found in '{}'", m.makefile);
+        process_exit(2);
+    }
+
+    // Determine which target to build
+    let build_tidx = if m.has_target {
+        let tidx = target_find(&m, m.target_name);
+        if tidx < 0 {
+            println!("qmake: target '{}' not found", m.target_name);
+            process_exit(2);
+        }
+        tidx
+    } else {
+        0
+    };
+
+    // Build
+    let ok = build_target(&mut m, build_tidx, 0);
+    if !ok {
+        println!("qmake: build failed");
+        process_exit(1);
+    }
+}

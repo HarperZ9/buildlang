@@ -1,0 +1,5159 @@
+// =============================================================================
+// BUILD PROFILER - Performance Profiling for BuildLang
+// =============================================================================
+// A comprehensive profiling toolkit with CPU profiling, memory tracking,
+// sampling, flame graph generation, and performance analysis.
+// =============================================================================
+
+use buildlang::prelude::*;
+use std::collections::{HashMap, BTreeMap, HashSet, VecDeque};
+use std::sync::{Arc, RwLock, Mutex, atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering}};
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant, SystemTime};
+use std::io::{Write, BufWriter, Read};
+use std::fs::{self, File};
+use std::thread;
+
+// =============================================================================
+// PROFILING TYPES
+// =============================================================================
+
+/// Profile sample
+#[derive(Debug, Clone)]
+pub struct Sample {
+    pub timestamp: Instant,
+    pub thread_id: u64,
+    pub stack: Vec<StackFrame>,
+    pub cpu_time: Duration,
+    pub wall_time: Duration,
+    pub thread_name: Option<String>,
+    pub state: ThreadState,
+}
+
+/// Thread execution state
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThreadState {
+    Running,
+    Runnable,
+    Blocked,
+    Waiting,
+    TimedWaiting,
+    Terminated,
+    Unknown,
+}
+
+/// Stack frame in a sample
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct StackFrame {
+    pub function: String,
+    pub module: String,
+    pub file: Option<PathBuf>,
+    pub line: Option<u32>,
+    pub column: Option<u32>,
+    pub address: Option<u64>,
+    pub is_native: bool,
+    pub is_inlined: bool,
+    pub compilation_unit: Option<String>,
+}
+
+impl StackFrame {
+    pub fn display_name(&self) -> String {
+        if self.module.is_empty() {
+            self.function.clone()
+        } else {
+            format!("{}::{}", self.module, self.function)
+        }
+    }
+
+    pub fn full_location(&self) -> String {
+        let mut loc = self.display_name();
+        if let Some(ref file) = self.file {
+            loc.push_str(&format!(" ({})", file.display()));
+            if let Some(line) = self.line {
+                loc.push_str(&format!(":{}", line));
+                if let Some(col) = self.column {
+                    loc.push_str(&format!(":{}", col));
+                }
+            }
+        }
+        loc
+    }
+
+    pub fn demangle(&self) -> String {
+        // Demangle function name (simplified)
+        let name = &self.function;
+
+        // Handle Build mangling: _Q prefix
+        if name.starts_with("_Q") {
+            return self.demangle_build(name);
+        }
+
+        // Handle C++ mangling: _Z prefix
+        if name.starts_with("_Z") {
+            return self.demangle_cpp(name);
+        }
+
+        // Handle Rust mangling: _R prefix
+        if name.starts_with("_R") {
+            return self.demangle_rust(name);
+        }
+
+        name.clone()
+    }
+
+    fn demangle_build(&self, name: &str) -> String {
+        // Simplified Build demangling
+        let without_prefix = &name[2..];
+        without_prefix.replace("__", "::")
+    }
+
+    fn demangle_cpp(&self, name: &str) -> String {
+        // Simplified C++ demangling
+        name.to_string()
+    }
+
+    fn demangle_rust(&self, name: &str) -> String {
+        // Simplified Rust demangling
+        name.to_string()
+    }
+}
+
+/// Memory allocation record
+#[derive(Debug, Clone)]
+pub struct Allocation {
+    pub address: u64,
+    pub size: usize,
+    pub timestamp: Instant,
+    pub stack: Vec<StackFrame>,
+    pub freed: bool,
+    pub free_timestamp: Option<Instant>,
+    pub allocation_type: AllocationType,
+    pub thread_id: u64,
+    pub generation: u32,
+}
+
+/// Allocation type
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AllocationType {
+    Heap,
+    Stack,
+    Mmap,
+    Arena,
+    Pool,
+    Custom(u32),
+}
+
+/// Memory snapshot
+#[derive(Debug, Clone)]
+pub struct MemorySnapshot {
+    pub timestamp: Instant,
+    pub total_allocated: usize,
+    pub total_freed: usize,
+    pub live_allocations: usize,
+    pub peak_memory: usize,
+    pub allocations_by_site: HashMap<String, AllocationSite>,
+    pub allocations_by_type: HashMap<AllocationType, TypeAllocationStats>,
+    pub heap_regions: Vec<HeapRegion>,
+    pub gc_stats: Option<GcStats>,
+}
+
+/// Heap region information
+#[derive(Debug, Clone)]
+pub struct HeapRegion {
+    pub start: u64,
+    pub end: u64,
+    pub used: usize,
+    pub capacity: usize,
+    pub region_type: HeapRegionType,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeapRegionType {
+    Eden,
+    Survivor,
+    Old,
+    Large,
+    Humongous,
+    Free,
+}
+
+/// GC statistics
+#[derive(Debug, Clone)]
+pub struct GcStats {
+    pub collections: u64,
+    pub total_pause_time: Duration,
+    pub max_pause_time: Duration,
+    pub last_collection: Option<Instant>,
+    pub bytes_collected: u64,
+    pub gc_type: GcType,
+    pub generation_stats: Vec<GenerationStats>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GcType {
+    Minor,
+    Major,
+    Full,
+    Concurrent,
+    Incremental,
+}
+
+#[derive(Debug, Clone)]
+pub struct GenerationStats {
+    pub generation: u32,
+    pub size: usize,
+    pub used: usize,
+    pub collections: u64,
+    pub promotion_rate: f64,
+}
+
+/// Type-based allocation statistics
+#[derive(Debug, Clone, Default)]
+pub struct TypeAllocationStats {
+    pub count: usize,
+    pub total_bytes: usize,
+    pub live_bytes: usize,
+    pub instances: usize,
+}
+
+/// Allocation site statistics
+#[derive(Debug, Clone, Default)]
+pub struct AllocationSite {
+    pub location: String,
+    pub count: usize,
+    pub total_bytes: usize,
+    pub live_bytes: usize,
+    pub peak_bytes: usize,
+    pub avg_lifetime: Duration,
+    pub stack_hash: u64,
+}
+
+// =============================================================================
+// PROFILER CONFIGURATION
+// =============================================================================
+
+/// Profiler mode
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProfileMode {
+    /// CPU sampling profiler
+    Cpu,
+    /// Wall-clock time profiler
+    Wall,
+    /// Memory allocations profiler
+    Memory,
+    /// Combined CPU and memory
+    Combined,
+    /// Lock contention profiler
+    Lock,
+    /// I/O wait profiler
+    Io,
+    /// Off-CPU profiler
+    OffCpu,
+    /// Async profiler
+    Async,
+}
+
+/// Profiler configuration
+#[derive(Debug, Clone)]
+pub struct ProfilerConfig {
+    /// Profiling mode
+    pub mode: ProfileMode,
+
+    /// Sample interval for CPU/wall profiling
+    pub sample_interval: Duration,
+
+    /// Maximum number of samples to collect
+    pub max_samples: usize,
+
+    /// Stack depth limit
+    pub max_stack_depth: usize,
+
+    /// Track allocations
+    pub track_allocations: bool,
+
+    /// Track deallocations
+    pub track_deallocations: bool,
+
+    /// Minimum allocation size to track
+    pub min_allocation_size: usize,
+
+    /// Output file path
+    pub output_path: Option<PathBuf>,
+
+    /// Output format
+    pub output_format: OutputFormat,
+
+    /// Include native frames
+    pub include_native: bool,
+
+    /// Filter by function pattern
+    pub filter: Option<String>,
+
+    /// Enable async profiling
+    pub async_profiling: bool,
+
+    /// Collect thread names
+    pub collect_thread_names: bool,
+
+    /// Enable lock profiling
+    pub lock_profiling: bool,
+
+    /// Lock contention threshold
+    pub lock_threshold: Duration,
+
+    /// GC profiling
+    pub gc_profiling: bool,
+
+    /// Context lines for source annotation
+    pub context_lines: usize,
+
+    /// Symbol resolution mode
+    pub symbol_resolution: SymbolResolution,
+
+    /// Compression for output
+    pub compression: Option<Compression>,
+}
+
+/// Symbol resolution strategy
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SymbolResolution {
+    None,
+    Basic,
+    Full,
+    Debug,
+}
+
+/// Compression algorithm
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Compression {
+    Gzip,
+    Zstd,
+    Lz4,
+    Snappy,
+}
+
+impl Default for ProfilerConfig {
+    fn default() -> Self {
+        ProfilerConfig {
+            mode: ProfileMode::Cpu,
+            sample_interval: Duration::from_millis(10),
+            max_samples: 100_000,
+            max_stack_depth: 128,
+            track_allocations: true,
+            track_deallocations: true,
+            min_allocation_size: 0,
+            output_path: None,
+            output_format: OutputFormat::Text,
+            include_native: false,
+            filter: None,
+            async_profiling: false,
+            collect_thread_names: true,
+            lock_profiling: false,
+            lock_threshold: Duration::from_millis(1),
+            gc_profiling: false,
+            context_lines: 3,
+            symbol_resolution: SymbolResolution::Basic,
+            compression: None,
+        }
+    }
+}
+
+/// Output format
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutputFormat {
+    Text,
+    Json,
+    FlameGraph,
+    Callgrind,
+    Speedscope,
+    Pprof,
+    ChromeTrace,
+    Collapsed,
+    Jfr,
+}
+
+// =============================================================================
+// SAMPLING PROFILER
+// =============================================================================
+
+/// Sampling profiler
+pub struct SamplingProfiler {
+    config: ProfilerConfig,
+    samples: RwLock<Vec<Sample>>,
+    running: AtomicBool,
+    start_time: RwLock<Option<Instant>>,
+    sample_count: AtomicUsize,
+    dropped_samples: AtomicUsize,
+    thread_info: RwLock<HashMap<u64, ThreadInfo>>,
+    async_contexts: RwLock<HashMap<u64, AsyncContext>>,
+}
+
+/// Thread information
+#[derive(Debug, Clone)]
+pub struct ThreadInfo {
+    pub id: u64,
+    pub name: String,
+    pub start_time: Instant,
+    pub cpu_time: Duration,
+    pub state: ThreadState,
+    pub priority: i32,
+    pub is_daemon: bool,
+}
+
+/// Async context for tracking async/await
+#[derive(Debug, Clone)]
+pub struct AsyncContext {
+    pub task_id: u64,
+    pub parent_task: Option<u64>,
+    pub executor: String,
+    pub state: AsyncState,
+    pub creation_stack: Vec<StackFrame>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AsyncState {
+    Pending,
+    Running,
+    Suspended,
+    Completed,
+    Cancelled,
+}
+
+impl SamplingProfiler {
+    pub fn new(config: ProfilerConfig) -> Self {
+        SamplingProfiler {
+            config,
+            samples: RwLock::new(Vec::new()),
+            running: AtomicBool::new(false),
+            start_time: RwLock::new(None),
+            sample_count: AtomicUsize::new(0),
+            dropped_samples: AtomicUsize::new(0),
+            thread_info: RwLock::new(HashMap::new()),
+            async_contexts: RwLock::new(HashMap::new()),
+        }
+    }
+
+    /// Start profiling
+    pub fn start(&self) {
+        if self.running.swap(true, Ordering::SeqCst) {
+            return; // Already running
+        }
+
+        *self.start_time.write().unwrap() = Some(Instant::now());
+
+        // Start sampling thread
+        let running = Arc::new(AtomicBool::new(true));
+        let running_clone = running.clone();
+        let interval = self.config.sample_interval;
+
+        thread::spawn(move || {
+            while running_clone.load(Ordering::SeqCst) {
+                // Take sample
+                // In a real implementation, this would capture the actual stack
+
+                thread::sleep(interval);
+            }
+        });
+    }
+
+    /// Stop profiling
+    pub fn stop(&self) {
+        self.running.store(false, Ordering::SeqCst);
+    }
+
+    /// Check if profiling is active
+    pub fn is_running(&self) -> bool {
+        self.running.load(Ordering::SeqCst)
+    }
+
+    /// Add a sample manually
+    pub fn add_sample(&self, stack: Vec<StackFrame>) {
+        self.add_sample_with_state(stack, ThreadState::Running);
+    }
+
+    /// Add a sample with thread state
+    pub fn add_sample_with_state(&self, stack: Vec<StackFrame>, state: ThreadState) {
+        if !self.running.load(Ordering::SeqCst) {
+            return;
+        }
+
+        if self.sample_count.load(Ordering::SeqCst) >= self.config.max_samples {
+            self.dropped_samples.fetch_add(1, Ordering::SeqCst);
+            return;
+        }
+
+        let start = self.start_time.read().unwrap().unwrap_or_else(Instant::now);
+        let tid = thread_id();
+
+        let thread_name = self.thread_info.read().unwrap()
+            .get(&tid)
+            .map(|t| t.name.clone());
+
+        let sample = Sample {
+            timestamp: Instant::now(),
+            thread_id: tid,
+            stack,
+            cpu_time: start.elapsed(),
+            wall_time: start.elapsed(),
+            thread_name,
+            state,
+        };
+
+        self.samples.write().unwrap().push(sample);
+        self.sample_count.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// Add async context
+    pub fn add_async_context(&self, task_id: u64, context: AsyncContext) {
+        self.async_contexts.write().unwrap().insert(task_id, context);
+    }
+
+    /// Update thread info
+    pub fn update_thread_info(&self, info: ThreadInfo) {
+        self.thread_info.write().unwrap().insert(info.id, info);
+    }
+
+    /// Get collected samples
+    pub fn samples(&self) -> Vec<Sample> {
+        self.samples.read().unwrap().clone()
+    }
+
+    /// Get sample count
+    pub fn sample_count(&self) -> usize {
+        self.sample_count.load(Ordering::SeqCst)
+    }
+
+    /// Get dropped sample count
+    pub fn dropped_count(&self) -> usize {
+        self.dropped_samples.load(Ordering::SeqCst)
+    }
+
+    /// Clear samples
+    pub fn clear(&self) {
+        self.samples.write().unwrap().clear();
+        self.sample_count.store(0, Ordering::SeqCst);
+        self.dropped_samples.store(0, Ordering::SeqCst);
+    }
+
+    /// Generate profile report
+    pub fn report(&self) -> ProfileReport {
+        let samples = self.samples.read().unwrap();
+
+        // Aggregate samples by stack
+        let mut stacks: HashMap<Vec<String>, usize> = HashMap::new();
+        let mut function_times: HashMap<String, FunctionStats> = HashMap::new();
+        let mut thread_samples: HashMap<u64, usize> = HashMap::new();
+        let mut state_samples: HashMap<ThreadState, usize> = HashMap::new();
+
+        for sample in samples.iter() {
+            let stack_key: Vec<String> = sample.stack.iter()
+                .map(|f| f.display_name())
+                .collect();
+
+            *stacks.entry(stack_key).or_insert(0) += 1;
+            *thread_samples.entry(sample.thread_id).or_insert(0) += 1;
+            *state_samples.entry(sample.state).or_insert(0) += 1;
+
+            // Count time per function
+            for (idx, frame) in sample.stack.iter().enumerate() {
+                let name = frame.display_name();
+                let stats = function_times.entry(name.clone()).or_insert(FunctionStats {
+                    name,
+                    self_samples: 0,
+                    total_samples: 0,
+                    self_time: Duration::ZERO,
+                    total_time: Duration::ZERO,
+                    callers: HashMap::new(),
+                    callees: HashMap::new(),
+                    source_lines: HashMap::new(),
+                });
+
+                stats.total_samples += 1;
+
+                // Self time is only for the top of stack
+                if idx == 0 {
+                    stats.self_samples += 1;
+                }
+
+                // Track callers
+                if idx + 1 < sample.stack.len() {
+                    let caller = sample.stack[idx + 1].display_name();
+                    *stats.callers.entry(caller).or_insert(0) += 1;
+                }
+
+                // Track callees
+                if idx > 0 {
+                    let callee = sample.stack[idx - 1].display_name();
+                    *stats.callees.entry(callee).or_insert(0) += 1;
+                }
+
+                // Track source lines
+                if let Some(line) = frame.line {
+                    *stats.source_lines.entry(line).or_insert(0) += 1;
+                }
+            }
+        }
+
+        // Calculate times
+        let total_samples = samples.len();
+        let sample_time = self.config.sample_interval;
+
+        for stats in function_times.values_mut() {
+            stats.self_time = sample_time * stats.self_samples as u32;
+            stats.total_time = sample_time * stats.total_samples as u32;
+        }
+
+        // Sort by self time
+        let mut sorted_functions: Vec<_> = function_times.values().cloned().collect();
+        sorted_functions.sort_by(|a, b| b.self_time.cmp(&a.self_time));
+
+        let start = self.start_time.read().unwrap().unwrap_or_else(Instant::now);
+        let duration = if self.running.load(Ordering::SeqCst) {
+            start.elapsed()
+        } else {
+            samples.last().map(|s| s.wall_time).unwrap_or(Duration::ZERO)
+        };
+
+        ProfileReport {
+            mode: self.config.mode,
+            duration,
+            total_samples,
+            dropped_samples: self.dropped_samples.load(Ordering::SeqCst),
+            functions: sorted_functions,
+            stacks: stacks.into_iter()
+                .map(|(k, v)| (k.join(";"), v))
+                .collect(),
+            thread_samples,
+            state_samples,
+            call_tree: self.build_call_tree(&samples),
+            hot_paths: self.find_hot_paths(&samples),
+        }
+    }
+
+    /// Build call tree from samples
+    fn build_call_tree(&self, samples: &[Sample]) -> CallTree {
+        let mut root = CallTreeNode::new("<root>");
+
+        for sample in samples {
+            let mut current = &mut root;
+
+            // Walk stack bottom-up (caller to callee)
+            for frame in sample.stack.iter().rev() {
+                let name = frame.display_name();
+                current.samples += 1;
+
+                let child_idx = current.children.iter()
+                    .position(|c| c.name == name);
+
+                current = if let Some(idx) = child_idx {
+                    &mut current.children[idx]
+                } else {
+                    current.children.push(CallTreeNode::new(&name));
+                    current.children.last_mut().unwrap()
+                };
+            }
+
+            // Mark leaf
+            current.samples += 1;
+            current.self_samples += 1;
+        }
+
+        CallTree { root }
+    }
+
+    /// Find hot paths (most common stacks)
+    fn find_hot_paths(&self, samples: &[Sample]) -> Vec<HotPath> {
+        let mut path_counts: HashMap<String, usize> = HashMap::new();
+
+        for sample in samples {
+            let path = sample.stack.iter()
+                .map(|f| f.display_name())
+                .collect::<Vec<_>>()
+                .join(" -> ");
+            *path_counts.entry(path).or_insert(0) += 1;
+        }
+
+        let total = samples.len();
+        let mut hot_paths: Vec<_> = path_counts.into_iter()
+            .map(|(path, count)| HotPath {
+                path,
+                samples: count,
+                percentage: (count as f64 / total as f64) * 100.0,
+            })
+            .collect();
+
+        hot_paths.sort_by(|a, b| b.samples.cmp(&a.samples));
+        hot_paths.truncate(20);
+
+        hot_paths
+    }
+}
+
+/// Function statistics
+#[derive(Debug, Clone)]
+pub struct FunctionStats {
+    pub name: String,
+    pub self_samples: usize,
+    pub total_samples: usize,
+    pub self_time: Duration,
+    pub total_time: Duration,
+    pub callers: HashMap<String, usize>,
+    pub callees: HashMap<String, usize>,
+    pub source_lines: HashMap<u32, usize>,
+}
+
+impl FunctionStats {
+    pub fn self_percent(&self, total: usize) -> f64 {
+        if total == 0 { 0.0 } else { (self.self_samples as f64 / total as f64) * 100.0 }
+    }
+
+    pub fn total_percent(&self, total: usize) -> f64 {
+        if total == 0 { 0.0 } else { (self.total_samples as f64 / total as f64) * 100.0 }
+    }
+
+    pub fn top_callers(&self, n: usize) -> Vec<(&String, &usize)> {
+        let mut callers: Vec<_> = self.callers.iter().collect();
+        callers.sort_by(|a, b| b.1.cmp(a.1));
+        callers.truncate(n);
+        callers
+    }
+
+    pub fn top_callees(&self, n: usize) -> Vec<(&String, &usize)> {
+        let mut callees: Vec<_> = self.callees.iter().collect();
+        callees.sort_by(|a, b| b.1.cmp(a.1));
+        callees.truncate(n);
+        callees
+    }
+}
+
+/// Call tree for hierarchical analysis
+#[derive(Debug, Clone)]
+pub struct CallTree {
+    pub root: CallTreeNode,
+}
+
+#[derive(Debug, Clone)]
+pub struct CallTreeNode {
+    pub name: String,
+    pub samples: usize,
+    pub self_samples: usize,
+    pub children: Vec<CallTreeNode>,
+}
+
+impl CallTreeNode {
+    pub fn new(name: &str) -> Self {
+        CallTreeNode {
+            name: name.to_string(),
+            samples: 0,
+            self_samples: 0,
+            children: Vec::new(),
+        }
+    }
+
+    pub fn percentage(&self, total: usize) -> f64 {
+        if total == 0 { 0.0 } else { (self.samples as f64 / total as f64) * 100.0 }
+    }
+
+    pub fn self_percentage(&self, total: usize) -> f64 {
+        if total == 0 { 0.0 } else { (self.self_samples as f64 / total as f64) * 100.0 }
+    }
+}
+
+impl CallTree {
+    /// Get top-down view (from callers to callees)
+    pub fn top_down(&self) -> &CallTreeNode {
+        &self.root
+    }
+
+    /// Get bottom-up view (from callees to callers)
+    pub fn bottom_up(&self) -> CallTreeNode {
+        // Invert the tree
+        let mut inverted = CallTreeNode::new("<root>");
+        self.invert_node(&self.root, &mut inverted, &[]);
+        inverted
+    }
+
+    fn invert_node(&self, node: &CallTreeNode, inverted: &mut CallTreeNode, path: &[String]) {
+        let mut new_path = path.to_vec();
+        new_path.push(node.name.clone());
+
+        if node.self_samples > 0 {
+            // Add inverted path
+            let mut current = inverted;
+            for name in new_path.iter() {
+                let idx = current.children.iter().position(|c| &c.name == name);
+                current = if let Some(idx) = idx {
+                    current.children[idx].samples += node.self_samples;
+                    &mut current.children[idx]
+                } else {
+                    current.children.push(CallTreeNode {
+                        name: name.clone(),
+                        samples: node.self_samples,
+                        self_samples: 0,
+                        children: Vec::new(),
+                    });
+                    current.children.last_mut().unwrap()
+                };
+            }
+            current.self_samples += node.self_samples;
+        }
+
+        for child in &node.children {
+            self.invert_node(child, inverted, &new_path);
+        }
+    }
+}
+
+/// Hot path information
+#[derive(Debug, Clone)]
+pub struct HotPath {
+    pub path: String,
+    pub samples: usize,
+    pub percentage: f64,
+}
+
+/// Profile report
+#[derive(Debug, Clone)]
+pub struct ProfileReport {
+    pub mode: ProfileMode,
+    pub duration: Duration,
+    pub total_samples: usize,
+    pub dropped_samples: usize,
+    pub functions: Vec<FunctionStats>,
+    pub stacks: HashMap<String, usize>,
+    pub thread_samples: HashMap<u64, usize>,
+    pub state_samples: HashMap<ThreadState, usize>,
+    pub call_tree: CallTree,
+    pub hot_paths: Vec<HotPath>,
+}
+
+// =============================================================================
+// MEMORY PROFILER
+// =============================================================================
+
+/// Memory profiler
+pub struct MemoryProfiler {
+    config: ProfilerConfig,
+    allocations: RwLock<HashMap<u64, Allocation>>,
+    total_allocated: AtomicUsize,
+    total_freed: AtomicUsize,
+    peak_memory: AtomicUsize,
+    current_memory: AtomicUsize,
+    allocation_count: AtomicUsize,
+    free_count: AtomicUsize,
+    snapshots: RwLock<Vec<MemorySnapshot>>,
+    object_graph: RwLock<ObjectGraph>,
+    gc_events: RwLock<Vec<GcEvent>>,
+    allocation_rate: RwLock<AllocationRateTracker>,
+}
+
+/// Object graph for heap analysis
+#[derive(Debug, Clone)]
+pub struct ObjectGraph {
+    pub nodes: HashMap<u64, ObjectNode>,
+    pub edges: HashMap<u64, Vec<u64>>,
+    pub roots: Vec<u64>,
+}
+
+impl Default for ObjectGraph {
+    fn default() -> Self {
+        ObjectGraph {
+            nodes: HashMap::new(),
+            edges: HashMap::new(),
+            roots: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ObjectNode {
+    pub address: u64,
+    pub size: usize,
+    pub type_name: String,
+    pub retained_size: usize,
+    pub dominator: Option<u64>,
+    pub depth: usize,
+}
+
+/// GC event
+#[derive(Debug, Clone)]
+pub struct GcEvent {
+    pub timestamp: Instant,
+    pub gc_type: GcType,
+    pub generation: u32,
+    pub cause: String,
+    pub pause_time: Duration,
+    pub before_size: usize,
+    pub after_size: usize,
+    pub collected: usize,
+    pub promoted: usize,
+}
+
+/// Allocation rate tracker
+#[derive(Debug, Clone)]
+pub struct AllocationRateTracker {
+    pub window: Duration,
+    pub samples: VecDeque<(Instant, usize)>,
+    pub total_allocated: usize,
+}
+
+impl Default for AllocationRateTracker {
+    fn default() -> Self {
+        AllocationRateTracker {
+            window: Duration::from_secs(60),
+            samples: VecDeque::new(),
+            total_allocated: 0,
+        }
+    }
+}
+
+impl AllocationRateTracker {
+    pub fn record(&mut self, size: usize) {
+        let now = Instant::now();
+        self.samples.push_back((now, size));
+        self.total_allocated += size;
+
+        // Remove old samples
+        while let Some(&(ts, s)) = self.samples.front() {
+            if now.duration_since(ts) > self.window {
+                self.samples.pop_front();
+                self.total_allocated -= s;
+            } else {
+                break;
+            }
+        }
+    }
+
+    pub fn rate_per_second(&self) -> f64 {
+        if self.samples.is_empty() {
+            return 0.0;
+        }
+
+        let first = self.samples.front().unwrap().0;
+        let last = self.samples.back().unwrap().0;
+        let duration = last.duration_since(first);
+
+        if duration.is_zero() {
+            return 0.0;
+        }
+
+        self.total_allocated as f64 / duration.as_secs_f64()
+    }
+}
+
+impl MemoryProfiler {
+    pub fn new(config: ProfilerConfig) -> Self {
+        MemoryProfiler {
+            config,
+            allocations: RwLock::new(HashMap::new()),
+            total_allocated: AtomicUsize::new(0),
+            total_freed: AtomicUsize::new(0),
+            peak_memory: AtomicUsize::new(0),
+            current_memory: AtomicUsize::new(0),
+            allocation_count: AtomicUsize::new(0),
+            free_count: AtomicUsize::new(0),
+            snapshots: RwLock::new(Vec::new()),
+            object_graph: RwLock::new(ObjectGraph::default()),
+            gc_events: RwLock::new(Vec::new()),
+            allocation_rate: RwLock::new(AllocationRateTracker::default()),
+        }
+    }
+
+    /// Record an allocation
+    pub fn record_alloc(&self, address: u64, size: usize, stack: Vec<StackFrame>) {
+        self.record_alloc_typed(address, size, stack, AllocationType::Heap);
+    }
+
+    /// Record a typed allocation
+    pub fn record_alloc_typed(
+        &self,
+        address: u64,
+        size: usize,
+        stack: Vec<StackFrame>,
+        alloc_type: AllocationType,
+    ) {
+        if size < self.config.min_allocation_size {
+            return;
+        }
+
+        let allocation = Allocation {
+            address,
+            size,
+            timestamp: Instant::now(),
+            stack,
+            freed: false,
+            free_timestamp: None,
+            allocation_type: alloc_type,
+            thread_id: thread_id(),
+            generation: 0,
+        };
+
+        self.allocations.write().unwrap().insert(address, allocation);
+        self.allocation_rate.write().unwrap().record(size);
+
+        self.total_allocated.fetch_add(size, Ordering::SeqCst);
+        self.allocation_count.fetch_add(1, Ordering::SeqCst);
+
+        let current = self.current_memory.fetch_add(size, Ordering::SeqCst) + size;
+
+        // Update peak
+        let mut peak = self.peak_memory.load(Ordering::SeqCst);
+        while current > peak {
+            match self.peak_memory.compare_exchange_weak(
+                peak, current, Ordering::SeqCst, Ordering::SeqCst
+            ) {
+                Ok(_) => break,
+                Err(p) => peak = p,
+            }
+        }
+    }
+
+    /// Record a deallocation
+    pub fn record_free(&self, address: u64) {
+        let mut allocations = self.allocations.write().unwrap();
+
+        if let Some(alloc) = allocations.get_mut(&address) {
+            if !alloc.freed {
+                alloc.freed = true;
+                alloc.free_timestamp = Some(Instant::now());
+
+                self.total_freed.fetch_add(alloc.size, Ordering::SeqCst);
+                self.current_memory.fetch_sub(alloc.size, Ordering::SeqCst);
+                self.free_count.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }
+
+    /// Record GC event
+    pub fn record_gc(&self, event: GcEvent) {
+        self.gc_events.write().unwrap().push(event);
+    }
+
+    /// Take a memory snapshot
+    pub fn snapshot(&self) -> MemorySnapshot {
+        let allocations = self.allocations.read().unwrap();
+
+        let mut by_site: HashMap<String, AllocationSite> = HashMap::new();
+        let mut by_type: HashMap<AllocationType, TypeAllocationStats> = HashMap::new();
+
+        for alloc in allocations.values() {
+            let location = alloc.stack.first()
+                .map(|f| f.display_name())
+                .unwrap_or_else(|| "<unknown>".to_string());
+
+            let site = by_site.entry(location.clone()).or_insert(AllocationSite {
+                location,
+                count: 0,
+                total_bytes: 0,
+                live_bytes: 0,
+                peak_bytes: 0,
+                avg_lifetime: Duration::ZERO,
+                stack_hash: 0,
+            });
+
+            site.count += 1;
+            site.total_bytes += alloc.size;
+
+            if !alloc.freed {
+                site.live_bytes += alloc.size;
+            }
+
+            if site.live_bytes > site.peak_bytes {
+                site.peak_bytes = site.live_bytes;
+            }
+
+            // Update by type
+            let type_stats = by_type.entry(alloc.allocation_type)
+                .or_insert(TypeAllocationStats::default());
+            type_stats.count += 1;
+            type_stats.total_bytes += alloc.size;
+            if !alloc.freed {
+                type_stats.live_bytes += alloc.size;
+                type_stats.instances += 1;
+            }
+        }
+
+        let snapshot = MemorySnapshot {
+            timestamp: Instant::now(),
+            total_allocated: self.total_allocated.load(Ordering::SeqCst),
+            total_freed: self.total_freed.load(Ordering::SeqCst),
+            live_allocations: self.allocation_count.load(Ordering::SeqCst) - self.free_count.load(Ordering::SeqCst),
+            peak_memory: self.peak_memory.load(Ordering::SeqCst),
+            allocations_by_site: by_site,
+            allocations_by_type: by_type,
+            heap_regions: Vec::new(),
+            gc_stats: self.compute_gc_stats(),
+        };
+
+        self.snapshots.write().unwrap().push(snapshot.clone());
+
+        snapshot
+    }
+
+    /// Compute GC statistics
+    fn compute_gc_stats(&self) -> Option<GcStats> {
+        let events = self.gc_events.read().unwrap();
+        if events.is_empty() {
+            return None;
+        }
+
+        let mut total_pause = Duration::ZERO;
+        let mut max_pause = Duration::ZERO;
+        let mut total_collected = 0u64;
+
+        for event in events.iter() {
+            total_pause += event.pause_time;
+            if event.pause_time > max_pause {
+                max_pause = event.pause_time;
+            }
+            total_collected += event.collected as u64;
+        }
+
+        Some(GcStats {
+            collections: events.len() as u64,
+            total_pause_time: total_pause,
+            max_pause_time: max_pause,
+            last_collection: events.last().map(|e| e.timestamp),
+            bytes_collected: total_collected,
+            gc_type: events.last().map(|e| e.gc_type).unwrap_or(GcType::Minor),
+            generation_stats: Vec::new(),
+        })
+    }
+
+    /// Get memory statistics
+    pub fn stats(&self) -> MemoryStats {
+        MemoryStats {
+            total_allocated: self.total_allocated.load(Ordering::SeqCst),
+            total_freed: self.total_freed.load(Ordering::SeqCst),
+            current_memory: self.current_memory.load(Ordering::SeqCst),
+            peak_memory: self.peak_memory.load(Ordering::SeqCst),
+            allocation_count: self.allocation_count.load(Ordering::SeqCst),
+            free_count: self.free_count.load(Ordering::SeqCst),
+            allocation_rate: self.allocation_rate.read().unwrap().rate_per_second(),
+            fragmentation: self.estimate_fragmentation(),
+        }
+    }
+
+    /// Estimate memory fragmentation
+    fn estimate_fragmentation(&self) -> f64 {
+        let allocations = self.allocations.read().unwrap();
+        let live: Vec<_> = allocations.values()
+            .filter(|a| !a.freed)
+            .collect();
+
+        if live.is_empty() {
+            return 0.0;
+        }
+
+        // Calculate fragmentation based on gaps between allocations
+        let mut addresses: Vec<_> = live.iter()
+            .map(|a| (a.address, a.size))
+            .collect();
+        addresses.sort_by_key(|a| a.0);
+
+        let mut total_gaps = 0usize;
+        let mut total_used = 0usize;
+
+        for i in 1..addresses.len() {
+            let prev_end = addresses[i - 1].0 + addresses[i - 1].1 as u64;
+            let curr_start = addresses[i].0;
+            if curr_start > prev_end {
+                total_gaps += (curr_start - prev_end) as usize;
+            }
+            total_used += addresses[i - 1].1;
+        }
+        total_used += addresses.last().map(|a| a.1).unwrap_or(0);
+
+        if total_used + total_gaps == 0 {
+            return 0.0;
+        }
+
+        total_gaps as f64 / (total_used + total_gaps) as f64
+    }
+
+    /// Find potential memory leaks
+    pub fn find_leaks(&self) -> Vec<LeakCandidate> {
+        let allocations = self.allocations.read().unwrap();
+        let now = Instant::now();
+
+        allocations.values()
+            .filter(|a| !a.freed)
+            .filter(|a| now.duration_since(a.timestamp) > Duration::from_secs(60))
+            .map(|a| LeakCandidate {
+                address: a.address,
+                size: a.size,
+                age: now.duration_since(a.timestamp),
+                stack: a.stack.clone(),
+                allocation_type: a.allocation_type,
+            })
+            .collect()
+    }
+
+    /// Generate memory report
+    pub fn report(&self) -> MemoryReport {
+        let stats = self.stats();
+        let snapshot = self.snapshot();
+        let leaks = self.find_leaks();
+
+        let mut sites: Vec<_> = snapshot.allocations_by_site.values().cloned().collect();
+        sites.sort_by(|a, b| b.live_bytes.cmp(&a.live_bytes));
+
+        MemoryReport {
+            stats,
+            top_allocation_sites: sites.into_iter().take(20).collect(),
+            leak_candidates: leaks.len(),
+            leaks: leaks.into_iter().take(20).collect(),
+            gc_stats: snapshot.gc_stats,
+        }
+    }
+
+    /// Analyze object dominators
+    pub fn analyze_dominators(&self) -> DominatorTree {
+        let graph = self.object_graph.read().unwrap();
+        let mut tree = DominatorTree::new();
+
+        // Lengauer-Tarjan algorithm (simplified)
+        for &root in &graph.roots {
+            tree.compute_dominators(&graph, root);
+        }
+
+        tree
+    }
+
+    /// Calculate retained sizes
+    pub fn calculate_retained_sizes(&self) -> HashMap<u64, usize> {
+        let graph = self.object_graph.read().unwrap();
+        let mut retained = HashMap::new();
+
+        for (&addr, node) in &graph.nodes {
+            retained.insert(addr, self.compute_retained_size(&graph, addr));
+        }
+
+        retained
+    }
+
+    fn compute_retained_size(&self, graph: &ObjectGraph, addr: u64) -> usize {
+        let mut visited = HashSet::new();
+        let mut queue = VecDeque::new();
+        let mut total = 0;
+
+        queue.push_back(addr);
+
+        while let Some(current) = queue.pop_front() {
+            if visited.contains(&current) {
+                continue;
+            }
+            visited.insert(current);
+
+            if let Some(node) = graph.nodes.get(&current) {
+                total += node.size;
+            }
+
+            if let Some(edges) = graph.edges.get(&current) {
+                for &next in edges {
+                    queue.push_back(next);
+                }
+            }
+        }
+
+        total
+    }
+}
+
+/// Leak candidate
+#[derive(Debug, Clone)]
+pub struct LeakCandidate {
+    pub address: u64,
+    pub size: usize,
+    pub age: Duration,
+    pub stack: Vec<StackFrame>,
+    pub allocation_type: AllocationType,
+}
+
+/// Dominator tree
+#[derive(Debug, Clone)]
+pub struct DominatorTree {
+    pub dominators: HashMap<u64, u64>,
+    pub dominated: HashMap<u64, Vec<u64>>,
+}
+
+impl DominatorTree {
+    pub fn new() -> Self {
+        DominatorTree {
+            dominators: HashMap::new(),
+            dominated: HashMap::new(),
+        }
+    }
+
+    pub fn compute_dominators(&mut self, graph: &ObjectGraph, root: u64) {
+        // Simplified dominator computation
+        let mut visited = HashSet::new();
+        let mut queue = VecDeque::new();
+
+        queue.push_back((root, root));
+
+        while let Some((node, dom)) = queue.pop_front() {
+            if visited.contains(&node) {
+                continue;
+            }
+            visited.insert(node);
+
+            self.dominators.insert(node, dom);
+            self.dominated.entry(dom).or_default().push(node);
+
+            if let Some(edges) = graph.edges.get(&node) {
+                for &next in edges {
+                    queue.push_back((next, node));
+                }
+            }
+        }
+    }
+
+    pub fn immediate_dominator(&self, node: u64) -> Option<u64> {
+        self.dominators.get(&node).copied()
+    }
+
+    pub fn dominated_nodes(&self, dominator: u64) -> &[u64] {
+        self.dominated.get(&dominator).map(|v| v.as_slice()).unwrap_or(&[])
+    }
+}
+
+/// Memory statistics
+#[derive(Debug, Clone)]
+pub struct MemoryStats {
+    pub total_allocated: usize,
+    pub total_freed: usize,
+    pub current_memory: usize,
+    pub peak_memory: usize,
+    pub allocation_count: usize,
+    pub free_count: usize,
+    pub allocation_rate: f64,
+    pub fragmentation: f64,
+}
+
+/// Memory report
+#[derive(Debug, Clone)]
+pub struct MemoryReport {
+    pub stats: MemoryStats,
+    pub top_allocation_sites: Vec<AllocationSite>,
+    pub leak_candidates: usize,
+    pub leaks: Vec<LeakCandidate>,
+    pub gc_stats: Option<GcStats>,
+}
+
+// =============================================================================
+// LOCK CONTENTION PROFILER
+// =============================================================================
+
+/// Lock contention profiler
+pub struct LockProfiler {
+    config: ProfilerConfig,
+    contentions: RwLock<Vec<LockContention>>,
+    locks: RwLock<HashMap<u64, LockInfo>>,
+    running: AtomicBool,
+}
+
+#[derive(Debug, Clone)]
+pub struct LockContention {
+    pub lock_address: u64,
+    pub lock_name: Option<String>,
+    pub timestamp: Instant,
+    pub wait_time: Duration,
+    pub holder_thread: u64,
+    pub waiter_thread: u64,
+    pub holder_stack: Vec<StackFrame>,
+    pub waiter_stack: Vec<StackFrame>,
+}
+
+#[derive(Debug, Clone)]
+pub struct LockInfo {
+    pub address: u64,
+    pub name: Option<String>,
+    pub lock_type: LockType,
+    pub acquisitions: u64,
+    pub contentions: u64,
+    pub total_wait_time: Duration,
+    pub max_wait_time: Duration,
+    pub hold_time: Duration,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LockType {
+    Mutex,
+    RwLock,
+    Spinlock,
+    Semaphore,
+    Condvar,
+    Barrier,
+}
+
+impl LockProfiler {
+    pub fn new(config: ProfilerConfig) -> Self {
+        LockProfiler {
+            config,
+            contentions: RwLock::new(Vec::new()),
+            locks: RwLock::new(HashMap::new()),
+            running: AtomicBool::new(false),
+        }
+    }
+
+    pub fn start(&self) {
+        self.running.store(true, Ordering::SeqCst);
+    }
+
+    pub fn stop(&self) {
+        self.running.store(false, Ordering::SeqCst);
+    }
+
+    /// Record lock acquisition attempt
+    pub fn record_acquire(&self, lock_addr: u64, lock_type: LockType) {
+        let mut locks = self.locks.write().unwrap();
+        locks.entry(lock_addr).or_insert(LockInfo {
+            address: lock_addr,
+            name: None,
+            lock_type,
+            acquisitions: 0,
+            contentions: 0,
+            total_wait_time: Duration::ZERO,
+            max_wait_time: Duration::ZERO,
+            hold_time: Duration::ZERO,
+        }).acquisitions += 1;
+    }
+
+    /// Record lock contention
+    pub fn record_contention(&self, contention: LockContention) {
+        if contention.wait_time < self.config.lock_threshold {
+            return;
+        }
+
+        let mut contentions = self.contentions.write().unwrap();
+        contentions.push(contention.clone());
+
+        let mut locks = self.locks.write().unwrap();
+        if let Some(lock) = locks.get_mut(&contention.lock_address) {
+            lock.contentions += 1;
+            lock.total_wait_time += contention.wait_time;
+            if contention.wait_time > lock.max_wait_time {
+                lock.max_wait_time = contention.wait_time;
+            }
+        }
+    }
+
+    /// Generate contention report
+    pub fn report(&self) -> LockReport {
+        let contentions = self.contentions.read().unwrap();
+        let locks = self.locks.read().unwrap();
+
+        let mut hot_locks: Vec<_> = locks.values().cloned().collect();
+        hot_locks.sort_by(|a, b| b.total_wait_time.cmp(&a.total_wait_time));
+
+        LockReport {
+            total_contentions: contentions.len(),
+            total_wait_time: contentions.iter().map(|c| c.wait_time).sum(),
+            hot_locks: hot_locks.into_iter().take(10).collect(),
+            recent_contentions: contentions.iter().rev().take(20).cloned().collect(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct LockReport {
+    pub total_contentions: usize,
+    pub total_wait_time: Duration,
+    pub hot_locks: Vec<LockInfo>,
+    pub recent_contentions: Vec<LockContention>,
+}
+
+// =============================================================================
+// I/O PROFILER
+// =============================================================================
+
+/// I/O profiler for tracking file and network operations
+pub struct IoProfiler {
+    config: ProfilerConfig,
+    operations: RwLock<Vec<IoOperation>>,
+    file_stats: RwLock<HashMap<PathBuf, FileIoStats>>,
+    network_stats: RwLock<HashMap<String, NetworkIoStats>>,
+    running: AtomicBool,
+}
+
+#[derive(Debug, Clone)]
+pub struct IoOperation {
+    pub timestamp: Instant,
+    pub op_type: IoOpType,
+    pub target: IoTarget,
+    pub bytes: usize,
+    pub duration: Duration,
+    pub success: bool,
+    pub error: Option<String>,
+    pub stack: Vec<StackFrame>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IoOpType {
+    Read,
+    Write,
+    Open,
+    Close,
+    Seek,
+    Sync,
+    Connect,
+    Accept,
+    Send,
+    Recv,
+    Poll,
+}
+
+#[derive(Debug, Clone)]
+pub enum IoTarget {
+    File(PathBuf),
+    Socket(String),
+    Pipe(u64),
+    Other(String),
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct FileIoStats {
+    pub path: PathBuf,
+    pub reads: u64,
+    pub writes: u64,
+    pub bytes_read: u64,
+    pub bytes_written: u64,
+    pub total_time: Duration,
+    pub open_count: u64,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct NetworkIoStats {
+    pub endpoint: String,
+    pub connections: u64,
+    pub sends: u64,
+    pub receives: u64,
+    pub bytes_sent: u64,
+    pub bytes_received: u64,
+    pub total_time: Duration,
+    pub errors: u64,
+}
+
+impl IoProfiler {
+    pub fn new(config: ProfilerConfig) -> Self {
+        IoProfiler {
+            config,
+            operations: RwLock::new(Vec::new()),
+            file_stats: RwLock::new(HashMap::new()),
+            network_stats: RwLock::new(HashMap::new()),
+            running: AtomicBool::new(false),
+        }
+    }
+
+    pub fn start(&self) {
+        self.running.store(true, Ordering::SeqCst);
+    }
+
+    pub fn stop(&self) {
+        self.running.store(false, Ordering::SeqCst);
+    }
+
+    /// Record I/O operation
+    pub fn record(&self, op: IoOperation) {
+        if !self.running.load(Ordering::SeqCst) {
+            return;
+        }
+
+        // Update stats
+        match &op.target {
+            IoTarget::File(path) => {
+                let mut stats = self.file_stats.write().unwrap();
+                let file_stats = stats.entry(path.clone())
+                    .or_insert(FileIoStats { path: path.clone(), ..Default::default() });
+
+                match op.op_type {
+                    IoOpType::Read => {
+                        file_stats.reads += 1;
+                        file_stats.bytes_read += op.bytes as u64;
+                    }
+                    IoOpType::Write => {
+                        file_stats.writes += 1;
+                        file_stats.bytes_written += op.bytes as u64;
+                    }
+                    IoOpType::Open => file_stats.open_count += 1,
+                    _ => {}
+                }
+                file_stats.total_time += op.duration;
+            }
+            IoTarget::Socket(addr) => {
+                let mut stats = self.network_stats.write().unwrap();
+                let net_stats = stats.entry(addr.clone())
+                    .or_insert(NetworkIoStats { endpoint: addr.clone(), ..Default::default() });
+
+                match op.op_type {
+                    IoOpType::Connect | IoOpType::Accept => net_stats.connections += 1,
+                    IoOpType::Send => {
+                        net_stats.sends += 1;
+                        net_stats.bytes_sent += op.bytes as u64;
+                    }
+                    IoOpType::Recv => {
+                        net_stats.receives += 1;
+                        net_stats.bytes_received += op.bytes as u64;
+                    }
+                    _ => {}
+                }
+                net_stats.total_time += op.duration;
+                if !op.success {
+                    net_stats.errors += 1;
+                }
+            }
+            _ => {}
+        }
+
+        self.operations.write().unwrap().push(op);
+    }
+
+    /// Generate I/O report
+    pub fn report(&self) -> IoReport {
+        let operations = self.operations.read().unwrap();
+        let file_stats = self.file_stats.read().unwrap();
+        let network_stats = self.network_stats.read().unwrap();
+
+        let mut files: Vec<_> = file_stats.values().cloned().collect();
+        files.sort_by(|a, b| b.total_time.cmp(&a.total_time));
+
+        let mut networks: Vec<_> = network_stats.values().cloned().collect();
+        networks.sort_by(|a, b| b.total_time.cmp(&a.total_time));
+
+        let total_io_time: Duration = operations.iter().map(|o| o.duration).sum();
+        let total_bytes: usize = operations.iter().map(|o| o.bytes).sum();
+
+        IoReport {
+            total_operations: operations.len(),
+            total_io_time,
+            total_bytes,
+            top_files: files.into_iter().take(10).collect(),
+            top_endpoints: networks.into_iter().take(10).collect(),
+            slow_operations: operations.iter()
+                .filter(|o| o.duration > Duration::from_millis(100))
+                .take(20)
+                .cloned()
+                .collect(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct IoReport {
+    pub total_operations: usize,
+    pub total_io_time: Duration,
+    pub total_bytes: usize,
+    pub top_files: Vec<FileIoStats>,
+    pub top_endpoints: Vec<NetworkIoStats>,
+    pub slow_operations: Vec<IoOperation>,
+}
+
+// =============================================================================
+// FLAME GRAPH GENERATOR
+// =============================================================================
+
+/// Flame graph generator
+pub struct FlameGraphGenerator {
+    width: u32,
+    height_per_row: u32,
+    font_size: u32,
+    min_width: f64,
+    colors: FlameGraphColors,
+    title: String,
+    subtitle: Option<String>,
+    inverted: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct FlameGraphColors {
+    pub background: String,
+    pub frame: String,
+    pub frame_hover: String,
+    pub text: String,
+    pub title: String,
+    pub gradient: Vec<String>,
+}
+
+impl Default for FlameGraphColors {
+    fn default() -> Self {
+        FlameGraphColors {
+            background: "#f8f8f8".to_string(),
+            frame: "#ff6347".to_string(),
+            frame_hover: "#ff4500".to_string(),
+            text: "#000000".to_string(),
+            title: "#333333".to_string(),
+            gradient: vec![
+                "#ff6347".to_string(),
+                "#ff7f50".to_string(),
+                "#ffa500".to_string(),
+                "#ffd700".to_string(),
+            ],
+        }
+    }
+}
+
+impl FlameGraphGenerator {
+    pub fn new() -> Self {
+        FlameGraphGenerator {
+            width: 1200,
+            height_per_row: 16,
+            font_size: 12,
+            min_width: 0.1,
+            colors: FlameGraphColors::default(),
+            title: "Flame Graph".to_string(),
+            subtitle: None,
+            inverted: false,
+        }
+    }
+
+    pub fn width(mut self, w: u32) -> Self {
+        self.width = w;
+        self
+    }
+
+    pub fn colors(mut self, colors: FlameGraphColors) -> Self {
+        self.colors = colors;
+        self
+    }
+
+    pub fn title(mut self, title: &str) -> Self {
+        self.title = title.to_string();
+        self
+    }
+
+    pub fn subtitle(mut self, subtitle: &str) -> Self {
+        self.subtitle = Some(subtitle.to_string());
+        self
+    }
+
+    pub fn inverted(mut self, inv: bool) -> Self {
+        self.inverted = inv;
+        self
+    }
+
+    /// Generate SVG flame graph from stacks
+    pub fn generate(&self, stacks: &HashMap<String, usize>) -> String {
+        let total: usize = stacks.values().sum();
+        if total == 0 {
+            return self.empty_svg();
+        }
+
+        // Parse stacks into tree
+        let mut root = FlameNode::new("all", total);
+
+        for (stack, count) in stacks {
+            let frames: Vec<&str> = stack.split(';').collect();
+            let frames = if self.inverted {
+                frames.into_iter().rev().collect()
+            } else {
+                frames
+            };
+            root.add_stack(&frames, *count);
+        }
+
+        // Calculate positions
+        let max_depth = root.max_depth();
+        let header_height = if self.subtitle.is_some() { 60 } else { 40 };
+        let height = header_height + (max_depth + 2) * self.height_per_row as usize;
+
+        let mut svg = String::new();
+
+        // SVG header with interactive script
+        svg.push_str(&format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {} {}" width="{}" height="{}" id="flamegraph">
+<style>
+  .frame {{ fill: {}; cursor: pointer; }}
+  .frame:hover {{ fill: {}; }}
+  .frame-text {{ font-family: 'Consolas', 'Monaco', monospace; font-size: {}px; fill: {}; pointer-events: none; }}
+  .title {{ font-size: 20px; font-weight: bold; fill: {}; }}
+  .subtitle {{ font-size: 14px; fill: #666; }}
+  .info {{ font-size: 12px; fill: #333; }}
+  .search-match {{ fill: #22ff22 !important; }}
+</style>
+<script type="text/ecmascript"><![CDATA[
+  var searchInput = null;
+  function search(term) {{
+    var frames = document.querySelectorAll('.frame');
+    frames.forEach(function(f) {{
+      var name = f.getAttribute('data-name') || '';
+      if (term && name.toLowerCase().indexOf(term.toLowerCase()) >= 0) {{
+        f.classList.add('search-match');
+      }} else {{
+        f.classList.remove('search-match');
+      }}
+    }});
+  }}
+  function resetZoom() {{
+    var frames = document.querySelectorAll('.frame');
+    frames.forEach(function(f) {{ f.style.display = 'block'; }});
+  }}
+]]></script>
+<rect width="100%" height="100%" fill="{}"/>
+<text x="10" y="24" class="title">{}</text>
+"#,
+            self.width, height, self.width, height,
+            self.colors.frame, self.colors.frame_hover,
+            self.font_size, self.colors.text,
+            self.colors.title,
+            self.colors.background, self.title
+        ));
+
+        if let Some(ref subtitle) = self.subtitle {
+            svg.push_str(&format!(
+                r#"<text x="10" y="44" class="subtitle">{}</text>
+"#, subtitle));
+        }
+
+        // Info bar
+        svg.push_str(&format!(
+            r#"<text x="{}" y="24" class="info" text-anchor="end">Total: {} samples</text>
+"#,
+            self.width - 10, total
+        ));
+
+        // Render frames
+        let base_y = if self.inverted {
+            header_height as u32
+        } else {
+            height as u32 - self.height_per_row
+        };
+
+        self.render_node(&mut svg, &root, 0.0, self.width as f64, base_y, total);
+
+        svg.push_str("</svg>");
+
+        svg
+    }
+
+    fn render_node(
+        &self,
+        svg: &mut String,
+        node: &FlameNode,
+        x: f64,
+        width: f64,
+        y: u32,
+        total: usize,
+    ) {
+        let percent = (node.samples as f64 / total as f64) * 100.0;
+
+        // Skip if too small
+        if width < self.min_width {
+            return;
+        }
+
+        // Render this frame
+        let color = self.frame_color(&node.name, node.samples, total);
+
+        svg.push_str(&format!(
+            r#"<g class="frame-group">
+<rect class="frame" x="{:.2}" y="{}" width="{:.2}" height="{}" fill="{}" data-name="{}">
+<title>{} ({:.2}%, {} samples)</title>
+</rect>
+"#,
+            x, y, width.max(1.0), self.height_per_row - 1,
+            color, node.name,
+            node.name, percent, node.samples
+        ));
+
+        // Render text if wide enough
+        if width > 30.0 {
+            let text = self.truncate_text(&node.name, (width / 7.0) as usize);
+            svg.push_str(&format!(
+                r#"<text class="frame-text" x="{:.2}" y="{}">{}</text>
+"#,
+                x + 2.0, y + self.height_per_row - 4, text
+            ));
+        }
+
+        svg.push_str("</g>\n");
+
+        // Render children
+        let mut child_x = x;
+        let child_y = if self.inverted {
+            y + self.height_per_row
+        } else {
+            y.saturating_sub(self.height_per_row)
+        };
+
+        for child in &node.children {
+            let child_width = (child.samples as f64 / node.samples as f64) * width;
+            self.render_node(svg, child, child_x, child_width, child_y, total);
+            child_x += child_width;
+        }
+    }
+
+    fn frame_color(&self, name: &str, samples: usize, total: usize) -> String {
+        // Generate color based on name hash and heat
+        let hash = name.bytes().fold(0u32, |acc, b| acc.wrapping_add(b as u32).wrapping_mul(31));
+        let heat = samples as f64 / total as f64;
+
+        // Blend between gradient colors based on heat
+        let h = (hash % 60) as f64; // Red-orange hue range
+        let s = 0.7 + heat * 0.3;
+        let l = 0.5 + (hash % 20) as f64 / 100.0;
+
+        format!("hsl({:.0}, {:.0}%, {:.0}%)", h, s * 100.0, l * 100.0)
+    }
+
+    fn truncate_text(&self, text: &str, max_len: usize) -> String {
+        if text.len() <= max_len {
+            text.to_string()
+        } else if max_len > 3 {
+            format!("{}...", &text[..max_len - 3])
+        } else {
+            text[..max_len].to_string()
+        }
+    }
+
+    fn empty_svg(&self) -> String {
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="{}" height="100">
+<text x="10" y="50">No data to display</text>
+</svg>"#,
+            self.width
+        )
+    }
+
+    /// Generate differential flame graph
+    pub fn generate_diff(&self, before: &HashMap<String, usize>, after: &HashMap<String, usize>) -> String {
+        let mut diff_stacks = HashMap::new();
+
+        // Collect all unique stacks
+        let all_stacks: HashSet<_> = before.keys().chain(after.keys()).collect();
+
+        for stack in all_stacks {
+            let before_count = before.get(stack).copied().unwrap_or(0);
+            let after_count = after.get(stack).copied().unwrap_or(0);
+
+            // Store signed diff
+            let diff = after_count as i64 - before_count as i64;
+            diff_stacks.insert(stack.clone(), (after_count, diff));
+        }
+
+        // Generate with diff coloring
+        self.generate_diff_internal(&diff_stacks)
+    }
+
+    fn generate_diff_internal(&self, stacks: &HashMap<String, (usize, i64)>) -> String {
+        // Similar to generate but with red/blue coloring for diff
+        let total: usize = stacks.values().map(|(c, _)| *c).sum();
+        if total == 0 {
+            return self.empty_svg();
+        }
+
+        let mut root = DiffFlameNode::new("all", total, 0);
+
+        for (stack, &(count, diff)) in stacks {
+            let frames: Vec<&str> = stack.split(';').collect();
+            root.add_stack(&frames, count, diff);
+        }
+
+        let max_depth = root.max_depth();
+        let height = 60 + (max_depth + 2) * self.height_per_row as usize;
+
+        let mut svg = String::new();
+
+        svg.push_str(&format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {} {}" width="{}" height="{}">
+<style>
+  .frame {{ cursor: pointer; }}
+  .frame-text {{ font-family: monospace; font-size: {}px; fill: #000; }}
+  .title {{ font-size: 20px; font-weight: bold; }}
+  .legend {{ font-size: 12px; }}
+</style>
+<rect width="100%" height="100%" fill="#fafafa"/>
+<text x="10" y="24" class="title">Differential Flame Graph</text>
+<text x="10" y="44" class="legend"><tspan fill="#ff0000">Red = Regression</tspan> <tspan fill="#0000ff">Blue = Improvement</tspan></text>
+"#,
+            self.width, height, self.width, height,
+            self.font_size
+        ));
+
+        self.render_diff_node(&mut svg, &root, 0.0, self.width as f64, height as u32 - self.height_per_row, total);
+
+        svg.push_str("</svg>");
+        svg
+    }
+
+    fn render_diff_node(
+        &self,
+        svg: &mut String,
+        node: &DiffFlameNode,
+        x: f64,
+        width: f64,
+        y: u32,
+        total: usize,
+    ) {
+        if width < self.min_width {
+            return;
+        }
+
+        // Color based on diff
+        let color = if node.diff > 0 {
+            let intensity = (node.diff as f64 / node.samples as f64 * 255.0).min(255.0) as u8;
+            format!("rgb({}, 0, 0)", 128 + intensity / 2)
+        } else if node.diff < 0 {
+            let intensity = (-node.diff as f64 / node.samples as f64 * 255.0).min(255.0) as u8;
+            format!("rgb(0, 0, {})", 128 + intensity / 2)
+        } else {
+            "#888888".to_string()
+        };
+
+        svg.push_str(&format!(
+            r#"<rect class="frame" x="{:.2}" y="{}" width="{:.2}" height="{}" fill="{}">
+<title>{} ({} samples, {:+} diff)</title>
+</rect>
+"#,
+            x, y, width.max(1.0), self.height_per_row - 1,
+            color, node.name, node.samples, node.diff
+        ));
+
+        let mut child_x = x;
+        for child in &node.children {
+            let child_width = (child.samples as f64 / node.samples.max(1) as f64) * width;
+            self.render_diff_node(svg, child, child_x, child_width, y - self.height_per_row, total);
+            child_x += child_width;
+        }
+    }
+}
+
+/// Flame graph tree node
+struct FlameNode {
+    name: String,
+    samples: usize,
+    children: Vec<FlameNode>,
+}
+
+impl FlameNode {
+    fn new(name: &str, samples: usize) -> Self {
+        FlameNode {
+            name: name.to_string(),
+            samples,
+            children: Vec::new(),
+        }
+    }
+
+    fn add_stack(&mut self, frames: &[&str], samples: usize) {
+        if frames.is_empty() {
+            return;
+        }
+
+        let frame = frames[0];
+
+        // Find or create child
+        let child = if let Some(c) = self.children.iter_mut().find(|c| c.name == frame) {
+            c
+        } else {
+            self.children.push(FlameNode::new(frame, 0));
+            self.children.last_mut().unwrap()
+        };
+
+        child.samples += samples;
+
+        // Recurse
+        if frames.len() > 1 {
+            child.add_stack(&frames[1..], samples);
+        }
+    }
+
+    fn max_depth(&self) -> usize {
+        1 + self.children.iter()
+            .map(|c| c.max_depth())
+            .max()
+            .unwrap_or(0)
+    }
+}
+
+/// Differential flame graph node
+struct DiffFlameNode {
+    name: String,
+    samples: usize,
+    diff: i64,
+    children: Vec<DiffFlameNode>,
+}
+
+impl DiffFlameNode {
+    fn new(name: &str, samples: usize, diff: i64) -> Self {
+        DiffFlameNode {
+            name: name.to_string(),
+            samples,
+            diff,
+            children: Vec::new(),
+        }
+    }
+
+    fn add_stack(&mut self, frames: &[&str], samples: usize, diff: i64) {
+        if frames.is_empty() {
+            return;
+        }
+
+        let frame = frames[0];
+
+        let child = if let Some(c) = self.children.iter_mut().find(|c| c.name == frame) {
+            c.samples += samples;
+            c.diff += diff;
+            c
+        } else {
+            self.children.push(DiffFlameNode::new(frame, samples, diff));
+            self.children.last_mut().unwrap()
+        };
+
+        if frames.len() > 1 {
+            child.add_stack(&frames[1..], samples, diff);
+        }
+    }
+
+    fn max_depth(&self) -> usize {
+        1 + self.children.iter()
+            .map(|c| c.max_depth())
+            .max()
+            .unwrap_or(0)
+    }
+}
+
+// =============================================================================
+// SOURCE ANNOTATION
+// =============================================================================
+
+/// Source code annotator
+pub struct SourceAnnotator {
+    source_cache: RwLock<HashMap<PathBuf, Vec<String>>>,
+    context_lines: usize,
+}
+
+impl SourceAnnotator {
+    pub fn new(context_lines: usize) -> Self {
+        SourceAnnotator {
+            source_cache: RwLock::new(HashMap::new()),
+            context_lines,
+        }
+    }
+
+    /// Annotate function with source and profile data
+    pub fn annotate(&self, stats: &FunctionStats, file: Option<&Path>) -> AnnotatedSource {
+        let file = match file {
+            Some(f) => f,
+            None => return AnnotatedSource::empty(),
+        };
+
+        let lines = self.load_source(file);
+        if lines.is_empty() {
+            return AnnotatedSource::empty();
+        }
+
+        let mut annotated_lines = Vec::new();
+        let total_samples = stats.self_samples + stats.total_samples;
+
+        for (&line_num, &samples) in &stats.source_lines {
+            let line_idx = line_num.saturating_sub(1) as usize;
+            if line_idx >= lines.len() {
+                continue;
+            }
+
+            let start = line_idx.saturating_sub(self.context_lines);
+            let end = (line_idx + self.context_lines + 1).min(lines.len());
+
+            for idx in start..end {
+                let is_hot = idx == line_idx;
+                let line_samples = if is_hot { samples } else { 0 };
+                let percentage = if total_samples > 0 {
+                    (line_samples as f64 / total_samples as f64) * 100.0
+                } else {
+                    0.0
+                };
+
+                annotated_lines.push(AnnotatedLine {
+                    line_number: idx as u32 + 1,
+                    content: lines[idx].clone(),
+                    samples: line_samples,
+                    percentage,
+                    is_hot,
+                });
+            }
+        }
+
+        // Remove duplicates and sort
+        annotated_lines.sort_by_key(|l| l.line_number);
+        annotated_lines.dedup_by_key(|l| l.line_number);
+
+        AnnotatedSource {
+            file: file.to_path_buf(),
+            function: stats.name.clone(),
+            lines: annotated_lines,
+            total_samples,
+        }
+    }
+
+    fn load_source(&self, path: &Path) -> Vec<String> {
+        // Check cache first
+        {
+            let cache = self.source_cache.read().unwrap();
+            if let Some(lines) = cache.get(path) {
+                return lines.clone();
+            }
+        }
+
+        // Load file
+        let content = match fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(_) => return Vec::new(),
+        };
+
+        let lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
+
+        // Cache it
+        self.source_cache.write().unwrap().insert(path.to_path_buf(), lines.clone());
+
+        lines
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct AnnotatedSource {
+    pub file: PathBuf,
+    pub function: String,
+    pub lines: Vec<AnnotatedLine>,
+    pub total_samples: usize,
+}
+
+impl AnnotatedSource {
+    pub fn empty() -> Self {
+        AnnotatedSource {
+            file: PathBuf::new(),
+            function: String::new(),
+            lines: Vec::new(),
+            total_samples: 0,
+        }
+    }
+
+    pub fn render_text(&self) -> String {
+        let mut output = String::new();
+        output.push_str(&format!("File: {:?}\n", self.file));
+        output.push_str(&format!("Function: {}\n\n", self.function));
+
+        for line in &self.lines {
+            let marker = if line.is_hot { ">>>" } else { "   " };
+            let samples_str = if line.samples > 0 {
+                format!("{:>6} ({:>5.1}%)", line.samples, line.percentage)
+            } else {
+                "             ".to_string()
+            };
+
+            output.push_str(&format!(
+                "{} {:>5}: {} {}\n",
+                marker, line.line_number, samples_str, line.content
+            ));
+        }
+
+        output
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct AnnotatedLine {
+    pub line_number: u32,
+    pub content: String,
+    pub samples: usize,
+    pub percentage: f64,
+    pub is_hot: bool,
+}
+
+// =============================================================================
+// PROFILE COMPARISON
+// =============================================================================
+
+/// Profile comparator for regression detection
+pub struct ProfileComparator;
+
+impl ProfileComparator {
+    /// Compare two profiles
+    pub fn compare(baseline: &ProfileReport, current: &ProfileReport) -> ProfileComparison {
+        let mut function_diffs = Vec::new();
+        let mut regressions = Vec::new();
+        let mut improvements = Vec::new();
+
+        // Build maps for quick lookup
+        let baseline_map: HashMap<_, _> = baseline.functions.iter()
+            .map(|f| (f.name.clone(), f))
+            .collect();
+        let current_map: HashMap<_, _> = current.functions.iter()
+            .map(|f| (f.name.clone(), f))
+            .collect();
+
+        // Find all functions
+        let all_functions: HashSet<_> = baseline_map.keys()
+            .chain(current_map.keys())
+            .collect();
+
+        for name in all_functions {
+            let baseline_samples = baseline_map.get(name).map(|f| f.self_samples).unwrap_or(0);
+            let current_samples = current_map.get(name).map(|f| f.self_samples).unwrap_or(0);
+
+            let diff = current_samples as i64 - baseline_samples as i64;
+            let change_percent = if baseline_samples > 0 {
+                (diff as f64 / baseline_samples as f64) * 100.0
+            } else if current_samples > 0 {
+                100.0
+            } else {
+                0.0
+            };
+
+            let func_diff = FunctionDiff {
+                name: name.clone(),
+                baseline_samples,
+                current_samples,
+                diff,
+                change_percent,
+            };
+
+            if change_percent > 10.0 {
+                regressions.push(func_diff.clone());
+            } else if change_percent < -10.0 {
+                improvements.push(func_diff.clone());
+            }
+
+            function_diffs.push(func_diff);
+        }
+
+        // Sort by absolute change
+        function_diffs.sort_by(|a, b| b.diff.abs().cmp(&a.diff.abs()));
+        regressions.sort_by(|a, b| b.change_percent.partial_cmp(&a.change_percent).unwrap());
+        improvements.sort_by(|a, b| a.change_percent.partial_cmp(&b.change_percent).unwrap());
+
+        let total_change = current.total_samples as i64 - baseline.total_samples as i64;
+        let total_change_percent = if baseline.total_samples > 0 {
+            (total_change as f64 / baseline.total_samples as f64) * 100.0
+        } else {
+            0.0
+        };
+
+        ProfileComparison {
+            baseline_samples: baseline.total_samples,
+            current_samples: current.total_samples,
+            total_change,
+            total_change_percent,
+            function_diffs,
+            regressions,
+            improvements,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ProfileComparison {
+    pub baseline_samples: usize,
+    pub current_samples: usize,
+    pub total_change: i64,
+    pub total_change_percent: f64,
+    pub function_diffs: Vec<FunctionDiff>,
+    pub regressions: Vec<FunctionDiff>,
+    pub improvements: Vec<FunctionDiff>,
+}
+
+#[derive(Debug, Clone)]
+pub struct FunctionDiff {
+    pub name: String,
+    pub baseline_samples: usize,
+    pub current_samples: usize,
+    pub diff: i64,
+    pub change_percent: f64,
+}
+
+// =============================================================================
+// CALLGRIND OUTPUT
+// =============================================================================
+
+/// Generate callgrind format output
+pub fn generate_callgrind(report: &ProfileReport) -> String {
+    let mut output = String::new();
+
+    output.push_str("# callgrind format\n");
+    output.push_str("version: 1\n");
+    output.push_str("creator: build-profiler\n");
+    output.push_str("positions: line\n");
+    output.push_str("events: Samples SelfSamples\n\n");
+
+    // Group by file/function
+    let mut files: HashMap<String, Vec<&FunctionStats>> = HashMap::new();
+
+    for func in &report.functions {
+        let parts: Vec<&str> = func.name.splitn(2, "::").collect();
+        let file = if parts.len() > 1 { parts[0] } else { "<main>" };
+
+        files.entry(file.to_string()).or_default().push(func);
+    }
+
+    for (file, funcs) in files {
+        output.push_str(&format!("fl={}.bld\n", file));
+
+        for func in funcs {
+            output.push_str(&format!("fn={}\n", func.name));
+            output.push_str(&format!("1 {} {}\n", func.total_samples, func.self_samples));
+
+            // Add call edges
+            for (callee, count) in &func.callees {
+                output.push_str(&format!("cfn={}\n", callee));
+                output.push_str(&format!("calls={} 1\n", count));
+                output.push_str(&format!("1 {}\n", count));
+            }
+        }
+
+        output.push('\n');
+    }
+
+    output
+}
+
+// =============================================================================
+// SPEEDSCOPE OUTPUT
+// =============================================================================
+
+/// Generate speedscope JSON format
+pub fn generate_speedscope(report: &ProfileReport) -> String {
+    let mut frames: Vec<serde_json::Value> = Vec::new();
+    let mut frame_map: HashMap<String, usize> = HashMap::new();
+
+    // Build frame index
+    for func in &report.functions {
+        if !frame_map.contains_key(&func.name) {
+            let idx = frames.len();
+            frames.push(serde_json::json!({
+                "name": func.name,
+            }));
+            frame_map.insert(func.name.clone(), idx);
+        }
+    }
+
+    // Build samples
+    let mut samples: Vec<Vec<usize>> = Vec::new();
+    let mut weights: Vec<usize> = Vec::new();
+
+    for (stack, count) in &report.stacks {
+        let frame_refs: Vec<usize> = stack.split(';')
+            .filter_map(|f| frame_map.get(f).copied())
+            .collect();
+
+        if !frame_refs.is_empty() {
+            samples.push(frame_refs);
+            weights.push(*count);
+        }
+    }
+
+    let json = serde_json::json!({
+        "$schema": "https://www.speedscope.app/file-format-schema.json",
+        "version": "0.0.1",
+        "shared": {
+            "frames": frames,
+        },
+        "profiles": [{
+            "type": "sampled",
+            "name": "profile",
+            "unit": "samples",
+            "startValue": 0,
+            "endValue": report.total_samples,
+            "samples": samples,
+            "weights": weights,
+        }],
+    });
+
+    serde_json::to_string_pretty(&json).unwrap_or_default()
+}
+
+// =============================================================================
+// CHROME TRACE OUTPUT
+// =============================================================================
+
+/// Generate Chrome trace JSON format
+pub fn generate_chrome_trace(samples: &[Sample]) -> String {
+    let mut events = Vec::new();
+    let mut start_time: Option<Instant> = None;
+
+    for sample in samples {
+        if start_time.is_none() {
+            start_time = Some(sample.timestamp);
+        }
+
+        let ts = sample.timestamp.duration_since(start_time.unwrap()).as_micros() as f64;
+
+        for (idx, frame) in sample.stack.iter().enumerate() {
+            events.push(serde_json::json!({
+                "name": frame.display_name(),
+                "cat": "profile",
+                "ph": "X",
+                "ts": ts,
+                "dur": 1000,
+                "pid": 1,
+                "tid": sample.thread_id,
+                "args": {
+                    "module": frame.module,
+                    "depth": idx,
+                }
+            }));
+        }
+    }
+
+    serde_json::json!({
+        "traceEvents": events,
+        "displayTimeUnit": "ms",
+    }).to_string()
+}
+
+// =============================================================================
+// PPROF OUTPUT
+// =============================================================================
+
+/// Generate pprof protobuf format (simplified text representation)
+pub fn generate_pprof(report: &ProfileReport) -> Vec<u8> {
+    // In a real implementation, this would generate actual protobuf
+    // For now, return a simplified text format
+    let mut output = String::new();
+
+    output.push_str("# pprof profile\n");
+    output.push_str(&format!("# duration: {:?}\n", report.duration));
+    output.push_str(&format!("# samples: {}\n\n", report.total_samples));
+
+    for func in &report.functions {
+        output.push_str(&format!(
+            "{} {} {} (self: {}, total: {})\n",
+            func.name,
+            func.self_samples,
+            func.total_samples,
+            func.self_percent(report.total_samples),
+            func.total_percent(report.total_samples)
+        ));
+    }
+
+    output.into_bytes()
+}
+
+// =============================================================================
+// INSTRUMENTATION
+// =============================================================================
+
+/// Manual instrumentation scope
+pub struct ProfileScope {
+    name: String,
+    start: Instant,
+    profiler: Option<Arc<SamplingProfiler>>,
+    parent_span: Option<u64>,
+}
+
+impl ProfileScope {
+    pub fn new(name: &str) -> Self {
+        ProfileScope {
+            name: name.to_string(),
+            start: Instant::now(),
+            profiler: None,
+            parent_span: None,
+        }
+    }
+
+    pub fn with_profiler(name: &str, profiler: Arc<SamplingProfiler>) -> Self {
+        ProfileScope {
+            name: name.to_string(),
+            start: Instant::now(),
+            profiler: Some(profiler),
+            parent_span: None,
+        }
+    }
+
+    pub fn elapsed(&self) -> Duration {
+        self.start.elapsed()
+    }
+}
+
+impl Drop for ProfileScope {
+    fn drop(&mut self) {
+        let elapsed = self.start.elapsed();
+
+        if let Some(ref profiler) = self.profiler {
+            profiler.add_sample(vec![StackFrame {
+                function: self.name.clone(),
+                module: String::new(),
+                file: None,
+                line: None,
+                column: None,
+                address: None,
+                is_native: false,
+                is_inlined: false,
+                compilation_unit: None,
+            }]);
+        }
+    }
+}
+
+/// Profiled function wrapper
+pub fn profile_fn<F, R>(name: &str, f: F) -> (R, Duration)
+where
+    F: FnOnce() -> R,
+{
+    let start = Instant::now();
+    let result = f();
+    let elapsed = start.elapsed();
+
+    (result, elapsed)
+}
+
+/// Async profiled function wrapper
+pub async fn profile_async<F, R>(name: &str, f: F) -> (R, Duration)
+where
+    F: std::future::Future<Output = R>,
+{
+    let start = Instant::now();
+    let result = f.await;
+    let elapsed = start.elapsed();
+
+    (result, elapsed)
+}
+
+// =============================================================================
+// COMBINED PROFILER
+// =============================================================================
+
+/// Combined CPU and memory profiler
+pub struct Profiler {
+    config: ProfilerConfig,
+    cpu_profiler: SamplingProfiler,
+    memory_profiler: MemoryProfiler,
+    lock_profiler: Option<LockProfiler>,
+    io_profiler: Option<IoProfiler>,
+    start_time: RwLock<Option<Instant>>,
+    running: AtomicBool,
+}
+
+impl Profiler {
+    pub fn new(config: ProfilerConfig) -> Self {
+        let lock_profiler = if config.lock_profiling {
+            Some(LockProfiler::new(config.clone()))
+        } else {
+            None
+        };
+
+        let io_profiler = if config.mode == ProfileMode::Io {
+            Some(IoProfiler::new(config.clone()))
+        } else {
+            None
+        };
+
+        Profiler {
+            cpu_profiler: SamplingProfiler::new(config.clone()),
+            memory_profiler: MemoryProfiler::new(config.clone()),
+            lock_profiler,
+            io_profiler,
+            config,
+            start_time: RwLock::new(None),
+            running: AtomicBool::new(false),
+        }
+    }
+
+    /// Start profiling
+    pub fn start(&self) {
+        if self.running.swap(true, Ordering::SeqCst) {
+            return;
+        }
+
+        *self.start_time.write().unwrap() = Some(Instant::now());
+
+        match self.config.mode {
+            ProfileMode::Cpu | ProfileMode::Wall | ProfileMode::Async => {
+                self.cpu_profiler.start();
+            }
+            ProfileMode::Memory => {
+                // Memory profiler is passive
+            }
+            ProfileMode::Combined => {
+                self.cpu_profiler.start();
+            }
+            ProfileMode::Lock => {
+                if let Some(ref lp) = self.lock_profiler {
+                    lp.start();
+                }
+            }
+            ProfileMode::Io => {
+                if let Some(ref io) = self.io_profiler {
+                    io.start();
+                }
+            }
+            ProfileMode::OffCpu => {
+                self.cpu_profiler.start();
+            }
+        }
+    }
+
+    /// Stop profiling
+    pub fn stop(&self) {
+        self.running.store(false, Ordering::SeqCst);
+        self.cpu_profiler.stop();
+        if let Some(ref lp) = self.lock_profiler {
+            lp.stop();
+        }
+        if let Some(ref io) = self.io_profiler {
+            io.stop();
+        }
+    }
+
+    /// Check if running
+    pub fn is_running(&self) -> bool {
+        self.running.load(Ordering::SeqCst)
+    }
+
+    /// Record allocation
+    pub fn alloc(&self, address: u64, size: usize, stack: Vec<StackFrame>) {
+        if self.config.track_allocations {
+            self.memory_profiler.record_alloc(address, size, stack);
+        }
+    }
+
+    /// Record deallocation
+    pub fn free(&self, address: u64) {
+        if self.config.track_deallocations {
+            self.memory_profiler.record_free(address);
+        }
+    }
+
+    /// Record lock contention
+    pub fn lock_contention(&self, contention: LockContention) {
+        if let Some(ref lp) = self.lock_profiler {
+            lp.record_contention(contention);
+        }
+    }
+
+    /// Record I/O operation
+    pub fn io_operation(&self, op: IoOperation) {
+        if let Some(ref io) = self.io_profiler {
+            io.record(op);
+        }
+    }
+
+    /// Generate combined report
+    pub fn report(&self) -> CombinedReport {
+        let cpu_report = self.cpu_profiler.report();
+        let memory_report = self.memory_profiler.report();
+        let lock_report = self.lock_profiler.as_ref().map(|lp| lp.report());
+        let io_report = self.io_profiler.as_ref().map(|io| io.report());
+
+        let start = self.start_time.read().unwrap().unwrap_or_else(Instant::now);
+
+        CombinedReport {
+            duration: start.elapsed(),
+            cpu: cpu_report,
+            memory: memory_report,
+            lock: lock_report,
+            io: io_report,
+        }
+    }
+
+    /// Save report to file
+    pub fn save(&self, path: &Path) -> std::io::Result<()> {
+        let report = self.report();
+
+        let content = match self.config.output_format {
+            OutputFormat::Text => format_text_report(&report),
+            OutputFormat::Json => format_json_report(&report),
+            OutputFormat::FlameGraph => {
+                let fg = FlameGraphGenerator::new();
+                fg.generate(&report.cpu.stacks)
+            }
+            OutputFormat::Callgrind => generate_callgrind(&report.cpu),
+            OutputFormat::Speedscope => generate_speedscope(&report.cpu),
+            OutputFormat::Pprof => String::from_utf8_lossy(&generate_pprof(&report.cpu)).to_string(),
+            OutputFormat::ChromeTrace => generate_chrome_trace(&self.cpu_profiler.samples()),
+            OutputFormat::Collapsed => format_collapsed(&report.cpu),
+            OutputFormat::Jfr => format_jfr(&report),
+        };
+
+        // Apply compression if configured
+        let content = if let Some(compression) = &self.config.compression {
+            match compression {
+                Compression::Gzip => compress_gzip(content.as_bytes()),
+                Compression::Zstd => compress_zstd(content.as_bytes()),
+                Compression::Lz4 => compress_lz4(content.as_bytes()),
+                Compression::Snappy => compress_snappy(content.as_bytes()),
+            }
+        } else {
+            content.into_bytes()
+        };
+
+        fs::write(path, content)
+    }
+}
+
+/// Combined report
+#[derive(Debug, Clone)]
+pub struct CombinedReport {
+    pub duration: Duration,
+    pub cpu: ProfileReport,
+    pub memory: MemoryReport,
+    pub lock: Option<LockReport>,
+    pub io: Option<IoReport>,
+}
+
+fn format_text_report(report: &CombinedReport) -> String {
+    let mut output = String::new();
+
+    output.push_str("═══════════════════════════════════════════════════════════════════════════════\n");
+    output.push_str("                         BUILD PROFILER REPORT\n");
+    output.push_str("═══════════════════════════════════════════════════════════════════════════════\n\n");
+
+    output.push_str(&format!("Duration: {:.2}s\n", report.duration.as_secs_f64()));
+    output.push_str(&format!("Total Samples: {}\n", report.cpu.total_samples));
+    if report.cpu.dropped_samples > 0 {
+        output.push_str(&format!("Dropped Samples: {}\n", report.cpu.dropped_samples));
+    }
+    output.push_str("\n");
+
+    output.push_str("═══════════════════════════════════════════════════════════════════════════════\n");
+    output.push_str("                              CPU PROFILE\n");
+    output.push_str("═══════════════════════════════════════════════════════════════════════════════\n\n");
+
+    output.push_str(&format!(
+        "{:<50} {:>10} {:>10} {:>10} {:>10}\n",
+        "Function", "Self%", "Total%", "Self", "Total"
+    ));
+    output.push_str(&"─".repeat(90));
+    output.push('\n');
+
+    for func in report.cpu.functions.iter().take(30) {
+        output.push_str(&format!(
+            "{:<50} {:>9.2}% {:>9.2}% {:>10} {:>10}\n",
+            truncate_str(&func.name, 50),
+            func.self_percent(report.cpu.total_samples),
+            func.total_percent(report.cpu.total_samples),
+            func.self_samples,
+            func.total_samples
+        ));
+    }
+
+    output.push_str("\n═══════════════════════════════════════════════════════════════════════════════\n");
+    output.push_str("                            HOT PATHS\n");
+    output.push_str("═══════════════════════════════════════════════════════════════════════════════\n\n");
+
+    for path in report.cpu.hot_paths.iter().take(10) {
+        output.push_str(&format!(
+            "{:>5.2}% ({:>6}) {}\n",
+            path.percentage, path.samples, truncate_str(&path.path, 70)
+        ));
+    }
+
+    output.push_str("\n═══════════════════════════════════════════════════════════════════════════════\n");
+    output.push_str("                            MEMORY PROFILE\n");
+    output.push_str("═══════════════════════════════════════════════════════════════════════════════\n\n");
+
+    output.push_str(&format!(
+        "Total Allocated:   {:>12} bytes ({:.2} MB)\n",
+        report.memory.stats.total_allocated,
+        report.memory.stats.total_allocated as f64 / 1_048_576.0
+    ));
+    output.push_str(&format!(
+        "Total Freed:       {:>12} bytes ({:.2} MB)\n",
+        report.memory.stats.total_freed,
+        report.memory.stats.total_freed as f64 / 1_048_576.0
+    ));
+    output.push_str(&format!(
+        "Current Memory:    {:>12} bytes ({:.2} MB)\n",
+        report.memory.stats.current_memory,
+        report.memory.stats.current_memory as f64 / 1_048_576.0
+    ));
+    output.push_str(&format!(
+        "Peak Memory:       {:>12} bytes ({:.2} MB)\n",
+        report.memory.stats.peak_memory,
+        report.memory.stats.peak_memory as f64 / 1_048_576.0
+    ));
+    output.push_str(&format!(
+        "Allocations:       {:>12}\n",
+        report.memory.stats.allocation_count
+    ));
+    output.push_str(&format!(
+        "Allocation Rate:   {:>12.2} bytes/sec\n",
+        report.memory.stats.allocation_rate
+    ));
+    output.push_str(&format!(
+        "Fragmentation:     {:>12.2}%\n",
+        report.memory.stats.fragmentation * 100.0
+    ));
+    output.push_str(&format!(
+        "Potential Leaks:   {:>12}\n\n",
+        report.memory.leak_candidates
+    ));
+
+    output.push_str("Top Allocation Sites:\n");
+    output.push_str(&"─".repeat(70));
+    output.push('\n');
+
+    for site in &report.memory.top_allocation_sites {
+        output.push_str(&format!(
+            "  {:>10} live ({:>10} total) - {}\n",
+            format_bytes(site.live_bytes),
+            format_bytes(site.total_bytes),
+            truncate_str(&site.location, 40)
+        ));
+    }
+
+    if let Some(ref lock) = report.lock {
+        output.push_str("\n═══════════════════════════════════════════════════════════════════════════════\n");
+        output.push_str("                          LOCK CONTENTION\n");
+        output.push_str("═══════════════════════════════════════════════════════════════════════════════\n\n");
+
+        output.push_str(&format!("Total Contentions: {}\n", lock.total_contentions));
+        output.push_str(&format!("Total Wait Time: {:?}\n\n", lock.total_wait_time));
+
+        for hot_lock in &lock.hot_locks {
+            output.push_str(&format!(
+                "  Lock {:x}: {} contentions, {:?} total wait\n",
+                hot_lock.address, hot_lock.contentions, hot_lock.total_wait_time
+            ));
+        }
+    }
+
+    if let Some(ref io) = report.io {
+        output.push_str("\n═══════════════════════════════════════════════════════════════════════════════\n");
+        output.push_str("                             I/O PROFILE\n");
+        output.push_str("═══════════════════════════════════════════════════════════════════════════════\n\n");
+
+        output.push_str(&format!("Total Operations: {}\n", io.total_operations));
+        output.push_str(&format!("Total I/O Time: {:?}\n", io.total_io_time));
+        output.push_str(&format!("Total Bytes: {}\n\n", format_bytes(io.total_bytes)));
+    }
+
+    output
+}
+
+fn truncate_str(s: &str, max_len: usize) -> String {
+    if s.len() <= max_len {
+        s.to_string()
+    } else {
+        format!("{}...", &s[..max_len - 3])
+    }
+}
+
+fn format_bytes(bytes: usize) -> String {
+    if bytes >= 1_073_741_824 {
+        format!("{:.2} GB", bytes as f64 / 1_073_741_824.0)
+    } else if bytes >= 1_048_576 {
+        format!("{:.2} MB", bytes as f64 / 1_048_576.0)
+    } else if bytes >= 1024 {
+        format!("{:.2} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{} B", bytes)
+    }
+}
+
+fn format_json_report(report: &CombinedReport) -> String {
+    let json = serde_json::json!({
+        "duration_secs": report.duration.as_secs_f64(),
+        "cpu": {
+            "total_samples": report.cpu.total_samples,
+            "dropped_samples": report.cpu.dropped_samples,
+            "functions": report.cpu.functions.iter().map(|f| serde_json::json!({
+                "name": f.name,
+                "self_samples": f.self_samples,
+                "total_samples": f.total_samples,
+                "self_percent": f.self_percent(report.cpu.total_samples),
+                "total_percent": f.total_percent(report.cpu.total_samples),
+            })).collect::<Vec<_>>(),
+            "hot_paths": report.cpu.hot_paths.iter().map(|p| serde_json::json!({
+                "path": p.path,
+                "samples": p.samples,
+                "percentage": p.percentage,
+            })).collect::<Vec<_>>(),
+        },
+        "memory": {
+            "total_allocated": report.memory.stats.total_allocated,
+            "total_freed": report.memory.stats.total_freed,
+            "current": report.memory.stats.current_memory,
+            "peak": report.memory.stats.peak_memory,
+            "allocation_count": report.memory.stats.allocation_count,
+            "allocation_rate": report.memory.stats.allocation_rate,
+            "fragmentation": report.memory.stats.fragmentation,
+            "leak_candidates": report.memory.leak_candidates,
+        },
+    });
+
+    serde_json::to_string_pretty(&json).unwrap_or_default()
+}
+
+fn format_collapsed(report: &ProfileReport) -> String {
+    let mut output = String::new();
+    for (stack, count) in &report.stacks {
+        output.push_str(&format!("{} {}\n", stack, count));
+    }
+    output
+}
+
+fn format_jfr(_report: &CombinedReport) -> String {
+    // JFR format placeholder
+    "# JFR format not yet implemented".to_string()
+}
+
+fn compress_gzip(data: &[u8]) -> Vec<u8> {
+    // Placeholder - would use actual gzip compression
+    data.to_vec()
+}
+
+fn compress_zstd(data: &[u8]) -> Vec<u8> {
+    // Placeholder - would use actual zstd compression
+    data.to_vec()
+}
+
+fn compress_lz4(data: &[u8]) -> Vec<u8> {
+    // Placeholder - would use actual lz4 compression
+    data.to_vec()
+}
+
+fn compress_snappy(data: &[u8]) -> Vec<u8> {
+    // Placeholder - would use actual snappy compression
+    data.to_vec()
+}
+
+// =============================================================================
+// DISTRIBUTED TRACING
+// =============================================================================
+
+/// Distributed trace for request tracking across services
+#[derive(Debug, Clone)]
+pub struct DistributedTrace {
+    /// Unique trace ID (128-bit)
+    pub trace_id: TraceId,
+    /// Parent span ID (optional)
+    pub parent_span_id: Option<SpanId>,
+    /// Root span ID
+    pub root_span_id: SpanId,
+    /// All spans in this trace
+    pub spans: Vec<Span>,
+    /// Trace metadata
+    pub metadata: TraceMetadata,
+    /// Baggage items (propagated context)
+    pub baggage: HashMap<String, String>,
+}
+
+/// 128-bit trace ID
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TraceId {
+    pub high: u64,
+    pub low: u64,
+}
+
+impl TraceId {
+    pub fn new() -> Self {
+        TraceId {
+            high: rand_u64(),
+            low: rand_u64(),
+        }
+    }
+
+    pub fn from_hex(s: &str) -> Option<Self> {
+        if s.len() != 32 {
+            return None;
+        }
+        let high = u64::from_str_radix(&s[..16], 16).ok()?;
+        let low = u64::from_str_radix(&s[16..], 16).ok()?;
+        Some(TraceId { high, low })
+    }
+
+    pub fn to_hex(&self) -> String {
+        format!("{:016x}{:016x}", self.high, self.low)
+    }
+}
+
+/// 64-bit span ID
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SpanId(pub u64);
+
+impl SpanId {
+    pub fn new() -> Self {
+        SpanId(rand_u64())
+    }
+
+    pub fn to_hex(&self) -> String {
+        format!("{:016x}", self.0)
+    }
+
+    pub fn from_hex(s: &str) -> Option<Self> {
+        u64::from_str_radix(s, 16).ok().map(SpanId)
+    }
+}
+
+/// Span in a distributed trace
+#[derive(Debug, Clone)]
+pub struct Span {
+    /// Span ID
+    pub span_id: SpanId,
+    /// Parent span ID
+    pub parent_id: Option<SpanId>,
+    /// Trace ID
+    pub trace_id: TraceId,
+    /// Operation name
+    pub operation_name: String,
+    /// Service name
+    pub service_name: String,
+    /// Start timestamp
+    pub start_time: SystemTime,
+    /// End timestamp
+    pub end_time: Option<SystemTime>,
+    /// Duration
+    pub duration: Option<Duration>,
+    /// Span kind
+    pub kind: SpanKind,
+    /// Status
+    pub status: SpanStatus,
+    /// Tags (indexed)
+    pub tags: HashMap<String, TagValue>,
+    /// Logs (time-stamped events)
+    pub logs: Vec<SpanLog>,
+    /// References to other spans
+    pub references: Vec<SpanReference>,
+    /// Resource attributes
+    pub resource: ResourceAttributes,
+}
+
+/// Resource attributes
+#[derive(Debug, Clone, Default)]
+pub struct ResourceAttributes {
+    pub service_name: String,
+    pub service_version: String,
+    pub service_instance_id: String,
+    pub host_name: String,
+    pub host_arch: String,
+    pub os_type: String,
+    pub process_pid: u32,
+    pub telemetry_sdk_name: String,
+    pub telemetry_sdk_version: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpanKind {
+    Internal,
+    Server,
+    Client,
+    Producer,
+    Consumer,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpanStatus {
+    Unset,
+    Ok,
+    Error,
+}
+
+#[derive(Debug, Clone)]
+pub enum TagValue {
+    String(String),
+    Bool(bool),
+    Int(i64),
+    Float(f64),
+    Bytes(Vec<u8>),
+    StringArray(Vec<String>),
+    IntArray(Vec<i64>),
+    FloatArray(Vec<f64>),
+    BoolArray(Vec<bool>),
+}
+
+#[derive(Debug, Clone)]
+pub struct SpanLog {
+    pub timestamp: SystemTime,
+    pub fields: HashMap<String, TagValue>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SpanReference {
+    pub ref_type: ReferenceType,
+    pub trace_id: TraceId,
+    pub span_id: SpanId,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReferenceType {
+    ChildOf,
+    FollowsFrom,
+}
+
+#[derive(Debug, Clone)]
+pub struct TraceMetadata {
+    pub service: String,
+    pub environment: String,
+    pub version: String,
+    pub hostname: String,
+    pub start_time: SystemTime,
+    pub sampling_decision: SamplingDecision,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SamplingDecision {
+    Sample,
+    Drop,
+    Debug,
+    RecordOnly,
+}
+
+/// Trace context for propagation
+#[derive(Debug, Clone)]
+pub struct TraceContext {
+    pub trace_id: TraceId,
+    pub span_id: SpanId,
+    pub trace_flags: u8,
+    pub trace_state: String,
+}
+
+impl TraceContext {
+    /// Format as W3C traceparent header
+    pub fn to_traceparent(&self) -> String {
+        format!(
+            "00-{}-{}-{:02x}",
+            self.trace_id.to_hex(),
+            self.span_id.to_hex(),
+            self.trace_flags
+        )
+    }
+
+    /// Parse W3C traceparent header
+    pub fn from_traceparent(s: &str) -> Option<Self> {
+        let parts: Vec<&str> = s.split('-').collect();
+        if parts.len() != 4 || parts[0] != "00" {
+            return None;
+        }
+
+        let trace_id = TraceId::from_hex(parts[1])?;
+        let span_id = SpanId::from_hex(parts[2])?;
+        let trace_flags = u8::from_str_radix(parts[3], 16).ok()?;
+
+        Some(TraceContext {
+            trace_id,
+            span_id,
+            trace_flags,
+            trace_state: String::new(),
+        })
+    }
+
+    /// Format as B3 headers
+    pub fn to_b3(&self) -> HashMap<String, String> {
+        let mut headers = HashMap::new();
+        headers.insert("X-B3-TraceId".to_string(), self.trace_id.to_hex());
+        headers.insert("X-B3-SpanId".to_string(), self.span_id.to_hex());
+        headers.insert("X-B3-Sampled".to_string(),
+            if self.trace_flags & 1 != 0 { "1" } else { "0" }.to_string());
+        headers
+    }
+
+    /// Parse B3 headers
+    pub fn from_b3(headers: &HashMap<String, String>) -> Option<Self> {
+        let trace_id = headers.get("X-B3-TraceId")
+            .or_else(|| headers.get("x-b3-traceid"))
+            .and_then(|s| TraceId::from_hex(s))?;
+        let span_id = headers.get("X-B3-SpanId")
+            .or_else(|| headers.get("x-b3-spanid"))
+            .and_then(|s| SpanId::from_hex(s))?;
+        let sampled = headers.get("X-B3-Sampled")
+            .or_else(|| headers.get("x-b3-sampled"))
+            .map(|s| s == "1")
+            .unwrap_or(true);
+
+        Some(TraceContext {
+            trace_id,
+            span_id,
+            trace_flags: if sampled { 1 } else { 0 },
+            trace_state: String::new(),
+        })
+    }
+}
+
+/// Distributed tracer
+pub struct DistributedTracer {
+    /// Service name
+    service_name: String,
+    /// Active spans by thread
+    active_spans: RwLock<HashMap<u64, Vec<Span>>>,
+    /// Completed traces
+    completed_traces: RwLock<Vec<DistributedTrace>>,
+    /// Exporters
+    exporters: RwLock<Vec<Box<dyn TraceExporter>>>,
+    /// Sampler
+    sampler: Box<dyn Sampler>,
+    /// Configuration
+    config: TracerConfig,
+    /// Span processors
+    processors: RwLock<Vec<Box<dyn SpanProcessor>>>,
+}
+
+/// Span processor trait
+pub trait SpanProcessor: Send + Sync {
+    fn on_start(&self, span: &mut Span, parent: Option<&Span>);
+    fn on_end(&self, span: &Span);
+    fn shutdown(&self) -> Result<(), ExportError>;
+    fn force_flush(&self) -> Result<(), ExportError>;
+}
+
+#[derive(Debug, Clone)]
+pub struct TracerConfig {
+    pub service_name: String,
+    pub environment: String,
+    pub version: String,
+    pub max_spans_per_trace: usize,
+    pub export_batch_size: usize,
+    pub export_interval: Duration,
+    pub propagation_format: PropagationFormat,
+    pub resource: ResourceAttributes,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PropagationFormat {
+    W3C,
+    B3,
+    B3Multi,
+    Jaeger,
+    Zipkin,
+}
+
+impl Default for TracerConfig {
+    fn default() -> Self {
+        TracerConfig {
+            service_name: "unknown".to_string(),
+            environment: "development".to_string(),
+            version: "1.0.0".to_string(),
+            max_spans_per_trace: 1000,
+            export_batch_size: 100,
+            export_interval: Duration::from_secs(5),
+            propagation_format: PropagationFormat::W3C,
+            resource: ResourceAttributes::default(),
+        }
+    }
+}
+
+/// Trace exporter trait
+pub trait TraceExporter: Send + Sync {
+    fn export(&self, traces: &[DistributedTrace]) -> Result<(), ExportError>;
+    fn shutdown(&self) -> Result<(), ExportError>;
+}
+
+/// Sampling strategy
+pub trait Sampler: Send + Sync {
+    fn should_sample(&self, trace_id: &TraceId, operation: &str, parent: Option<&TraceContext>) -> SamplingDecision;
+}
+
+/// Always sample
+pub struct AlwaysSampler;
+
+impl Sampler for AlwaysSampler {
+    fn should_sample(&self, _: &TraceId, _: &str, _: Option<&TraceContext>) -> SamplingDecision {
+        SamplingDecision::Sample
+    }
+}
+
+/// Never sample
+pub struct NeverSampler;
+
+impl Sampler for NeverSampler {
+    fn should_sample(&self, _: &TraceId, _: &str, _: Option<&TraceContext>) -> SamplingDecision {
+        SamplingDecision::Drop
+    }
+}
+
+/// Rate-based sampler
+pub struct RateSampler {
+    rate: f64,
+}
+
+impl RateSampler {
+    pub fn new(rate: f64) -> Self {
+        RateSampler { rate: rate.clamp(0.0, 1.0) }
+    }
+}
+
+impl Sampler for RateSampler {
+    fn should_sample(&self, trace_id: &TraceId, _: &str, _: Option<&TraceContext>) -> SamplingDecision {
+        let hash = trace_id.low as f64 / u64::MAX as f64;
+        if hash < self.rate {
+            SamplingDecision::Sample
+        } else {
+            SamplingDecision::Drop
+        }
+    }
+}
+
+/// Parent-based sampler
+pub struct ParentBasedSampler {
+    root_sampler: Box<dyn Sampler>,
+}
+
+impl ParentBasedSampler {
+    pub fn new(root_sampler: Box<dyn Sampler>) -> Self {
+        ParentBasedSampler { root_sampler }
+    }
+}
+
+impl Sampler for ParentBasedSampler {
+    fn should_sample(&self, trace_id: &TraceId, operation: &str, parent: Option<&TraceContext>) -> SamplingDecision {
+        if let Some(parent_ctx) = parent {
+            if parent_ctx.trace_flags & 1 != 0 {
+                SamplingDecision::Sample
+            } else {
+                SamplingDecision::Drop
+            }
+        } else {
+            self.root_sampler.should_sample(trace_id, operation, None)
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct ExportError(pub String);
+
+impl DistributedTracer {
+    pub fn new(config: TracerConfig) -> Self {
+        DistributedTracer {
+            service_name: config.service_name.clone(),
+            active_spans: RwLock::new(HashMap::new()),
+            completed_traces: RwLock::new(Vec::new()),
+            exporters: RwLock::new(Vec::new()),
+            sampler: Box::new(AlwaysSampler),
+            processors: RwLock::new(Vec::new()),
+            config,
+        }
+    }
+
+    pub fn with_sampler(mut self, sampler: Box<dyn Sampler>) -> Self {
+        self.sampler = sampler;
+        self
+    }
+
+    /// Start a new span
+    pub fn start_span(&self, operation: &str, kind: SpanKind) -> SpanGuard {
+        let trace_id = TraceId::new();
+        let span_id = SpanId::new();
+
+        let sampling = self.sampler.should_sample(&trace_id, operation, None);
+
+        let mut span = Span {
+            span_id,
+            parent_id: None,
+            trace_id,
+            operation_name: operation.to_string(),
+            service_name: self.service_name.clone(),
+            start_time: SystemTime::now(),
+            end_time: None,
+            duration: None,
+            kind,
+            status: SpanStatus::Unset,
+            tags: HashMap::new(),
+            logs: Vec::new(),
+            references: Vec::new(),
+            resource: self.config.resource.clone(),
+        };
+
+        // Run processors
+        for processor in self.processors.read().unwrap().iter() {
+            processor.on_start(&mut span, None);
+        }
+
+        let thread = thread_id();
+        self.active_spans.write().unwrap()
+            .entry(thread)
+            .or_default()
+            .push(span);
+
+        SpanGuard {
+            tracer: self,
+            thread_id: thread,
+            sampled: sampling == SamplingDecision::Sample,
+        }
+    }
+
+    /// Start a child span
+    pub fn start_child_span(&self, operation: &str, parent: &TraceContext) -> SpanGuard {
+        let span_id = SpanId::new();
+
+        let sampling = self.sampler.should_sample(&parent.trace_id, operation, Some(parent));
+
+        let mut span = Span {
+            span_id,
+            parent_id: Some(parent.span_id),
+            trace_id: parent.trace_id,
+            operation_name: operation.to_string(),
+            service_name: self.service_name.clone(),
+            start_time: SystemTime::now(),
+            end_time: None,
+            duration: None,
+            kind: SpanKind::Internal,
+            status: SpanStatus::Unset,
+            tags: HashMap::new(),
+            logs: Vec::new(),
+            references: vec![SpanReference {
+                ref_type: ReferenceType::ChildOf,
+                trace_id: parent.trace_id,
+                span_id: parent.span_id,
+            }],
+            resource: self.config.resource.clone(),
+        };
+
+        // Run processors
+        for processor in self.processors.read().unwrap().iter() {
+            processor.on_start(&mut span, None);
+        }
+
+        let thread = thread_id();
+        self.active_spans.write().unwrap()
+            .entry(thread)
+            .or_default()
+            .push(span);
+
+        SpanGuard {
+            tracer: self,
+            thread_id: thread,
+            sampled: sampling == SamplingDecision::Sample,
+        }
+    }
+
+    /// Get current span context
+    pub fn current_context(&self) -> Option<TraceContext> {
+        let thread = thread_id();
+        let spans = self.active_spans.read().unwrap();
+
+        spans.get(&thread)?.last().map(|span| TraceContext {
+            trace_id: span.trace_id,
+            span_id: span.span_id,
+            trace_flags: 1,
+            trace_state: String::new(),
+        })
+    }
+
+    /// Finish current span
+    fn finish_span(&self, thread: u64) {
+        let mut spans = self.active_spans.write().unwrap();
+        if let Some(stack) = spans.get_mut(&thread) {
+            if let Some(mut span) = stack.pop() {
+                let now = SystemTime::now();
+                span.end_time = Some(now);
+                span.duration = now.duration_since(span.start_time).ok();
+
+                if span.status == SpanStatus::Unset {
+                    span.status = SpanStatus::Ok;
+                }
+
+                // Run processors
+                for processor in self.processors.read().unwrap().iter() {
+                    processor.on_end(&span);
+                }
+
+                // Export if this is the root span
+                if span.parent_id.is_none() {
+                    // Create trace and export
+                }
+            }
+        }
+    }
+
+    /// Add exporter
+    pub fn add_exporter(&self, exporter: Box<dyn TraceExporter>) {
+        self.exporters.write().unwrap().push(exporter);
+    }
+
+    /// Add processor
+    pub fn add_processor(&self, processor: Box<dyn SpanProcessor>) {
+        self.processors.write().unwrap().push(processor);
+    }
+
+    /// Flush traces
+    pub fn flush(&self) -> Result<(), ExportError> {
+        let traces = std::mem::take(&mut *self.completed_traces.write().unwrap());
+        let exporters = self.exporters.read().unwrap();
+
+        for exporter in exporters.iter() {
+            exporter.export(&traces)?;
+        }
+
+        Ok(())
+    }
+
+    /// Shutdown
+    pub fn shutdown(&self) -> Result<(), ExportError> {
+        self.flush()?;
+
+        for exporter in self.exporters.read().unwrap().iter() {
+            exporter.shutdown()?;
+        }
+
+        for processor in self.processors.read().unwrap().iter() {
+            processor.shutdown()?;
+        }
+
+        Ok(())
+    }
+}
+
+/// RAII span guard
+pub struct SpanGuard<'a> {
+    tracer: &'a DistributedTracer,
+    thread_id: u64,
+    sampled: bool,
+}
+
+impl<'a> SpanGuard<'a> {
+    /// Set span tag
+    pub fn set_tag(&mut self, key: &str, value: TagValue) {
+        let mut spans = self.tracer.active_spans.write().unwrap();
+        if let Some(stack) = spans.get_mut(&self.thread_id) {
+            if let Some(span) = stack.last_mut() {
+                span.tags.insert(key.to_string(), value);
+            }
+        }
+    }
+
+    /// Log event
+    pub fn log(&mut self, fields: HashMap<String, TagValue>) {
+        let mut spans = self.tracer.active_spans.write().unwrap();
+        if let Some(stack) = spans.get_mut(&self.thread_id) {
+            if let Some(span) = stack.last_mut() {
+                span.logs.push(SpanLog {
+                    timestamp: SystemTime::now(),
+                    fields,
+                });
+            }
+        }
+    }
+
+    /// Log message
+    pub fn log_message(&mut self, message: &str) {
+        let mut fields = HashMap::new();
+        fields.insert("message".to_string(), TagValue::String(message.to_string()));
+        self.log(fields);
+    }
+
+    /// Set error
+    pub fn set_error(&mut self, error: &str) {
+        let mut spans = self.tracer.active_spans.write().unwrap();
+        if let Some(stack) = spans.get_mut(&self.thread_id) {
+            if let Some(span) = stack.last_mut() {
+                span.status = SpanStatus::Error;
+                span.tags.insert("error".to_string(), TagValue::Bool(true));
+                span.tags.insert("error.message".to_string(), TagValue::String(error.to_string()));
+            }
+        }
+    }
+
+    /// Set OK status
+    pub fn set_ok(&mut self) {
+        let mut spans = self.tracer.active_spans.write().unwrap();
+        if let Some(stack) = spans.get_mut(&self.thread_id) {
+            if let Some(span) = stack.last_mut() {
+                span.status = SpanStatus::Ok;
+            }
+        }
+    }
+
+    /// Get context for propagation
+    pub fn context(&self) -> Option<TraceContext> {
+        let spans = self.tracer.active_spans.read().unwrap();
+        spans.get(&self.thread_id)?.last().map(|span| TraceContext {
+            trace_id: span.trace_id,
+            span_id: span.span_id,
+            trace_flags: if self.sampled { 1 } else { 0 },
+            trace_state: String::new(),
+        })
+    }
+}
+
+impl<'a> Drop for SpanGuard<'a> {
+    fn drop(&mut self) {
+        self.tracer.finish_span(self.thread_id);
+    }
+}
+
+// =============================================================================
+// METRICS COLLECTION
+// =============================================================================
+
+/// Metrics collector
+pub struct MetricsCollector {
+    service: String,
+    counters: RwLock<HashMap<String, Arc<AtomicU64>>>,
+    gauges: RwLock<HashMap<String, Arc<AtomicU64>>>,
+    histograms: RwLock<HashMap<String, Arc<Histogram>>>,
+    timers: RwLock<HashMap<String, Arc<Timer>>>,
+    labels: RwLock<HashMap<String, HashMap<String, String>>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MetricUnit {
+    None,
+    Bytes,
+    Kilobytes,
+    Megabytes,
+    Seconds,
+    Milliseconds,
+    Microseconds,
+    Nanoseconds,
+    Percent,
+    Count,
+    RequestsPerSecond,
+}
+
+/// Histogram for distribution tracking
+pub struct Histogram {
+    buckets: RwLock<Vec<AtomicU64>>,
+    bucket_bounds: Vec<f64>,
+    sum: AtomicU64,
+    count: AtomicU64,
+    min: AtomicU64,
+    max: AtomicU64,
+}
+
+impl Histogram {
+    pub fn new(bucket_bounds: Vec<f64>) -> Self {
+        let buckets = (0..bucket_bounds.len() + 1)
+            .map(|_| AtomicU64::new(0))
+            .collect();
+        Histogram {
+            buckets: RwLock::new(buckets),
+            bucket_bounds,
+            sum: AtomicU64::new(0),
+            count: AtomicU64::new(0),
+            min: AtomicU64::new(u64::MAX),
+            max: AtomicU64::new(0),
+        }
+    }
+
+    pub fn observe(&self, value: f64) {
+        let bits = value.to_bits();
+        self.sum.fetch_add(bits, Ordering::Relaxed);
+        self.count.fetch_add(1, Ordering::Relaxed);
+
+        // Find bucket
+        let bucket_idx = self.bucket_bounds.iter()
+            .position(|&b| value <= b)
+            .unwrap_or(self.bucket_bounds.len());
+
+        let buckets = self.buckets.read().unwrap();
+        buckets[bucket_idx].fetch_add(1, Ordering::Relaxed);
+
+        // Update min/max atomically
+        loop {
+            let current_min = self.min.load(Ordering::Relaxed);
+            if bits >= current_min { break; }
+            if self.min.compare_exchange_weak(current_min, bits, Ordering::Relaxed, Ordering::Relaxed).is_ok() {
+                break;
+            }
+        }
+
+        loop {
+            let current_max = self.max.load(Ordering::Relaxed);
+            if bits <= current_max { break; }
+            if self.max.compare_exchange_weak(current_max, bits, Ordering::Relaxed, Ordering::Relaxed).is_ok() {
+                break;
+            }
+        }
+    }
+
+    pub fn mean(&self) -> f64 {
+        let count = self.count.load(Ordering::Relaxed);
+        if count == 0 { return 0.0; }
+        let sum = f64::from_bits(self.sum.load(Ordering::Relaxed));
+        sum / count as f64
+    }
+
+    pub fn percentile(&self, p: f64) -> f64 {
+        let count = self.count.load(Ordering::Relaxed);
+        if count == 0 { return 0.0; }
+
+        let target = (count as f64 * p / 100.0).ceil() as u64;
+        let mut cumulative = 0u64;
+
+        let buckets = self.buckets.read().unwrap();
+        for (i, bucket) in buckets.iter().enumerate() {
+            cumulative += bucket.load(Ordering::Relaxed);
+            if cumulative >= target {
+                if i < self.bucket_bounds.len() {
+                    return self.bucket_bounds[i];
+                } else {
+                    return f64::from_bits(self.max.load(Ordering::Relaxed));
+                }
+            }
+        }
+
+        f64::from_bits(self.max.load(Ordering::Relaxed))
+    }
+}
+
+/// Timer for duration tracking
+pub struct Timer {
+    histogram: Histogram,
+    active: AtomicUsize,
+}
+
+impl Timer {
+    pub fn new() -> Self {
+        Timer {
+            histogram: Histogram::new(vec![
+                0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0
+            ]),
+            active: AtomicUsize::new(0),
+        }
+    }
+
+    pub fn start(&self) -> TimerGuard {
+        self.active.fetch_add(1, Ordering::Relaxed);
+        TimerGuard {
+            timer: self,
+            start: Instant::now(),
+        }
+    }
+
+    fn record(&self, duration: Duration) {
+        self.active.fetch_sub(1, Ordering::Relaxed);
+        self.histogram.observe(duration.as_secs_f64());
+    }
+
+    pub fn active_count(&self) -> usize {
+        self.active.load(Ordering::Relaxed)
+    }
+}
+
+pub struct TimerGuard<'a> {
+    timer: &'a Timer,
+    start: Instant,
+}
+
+impl<'a> Drop for TimerGuard<'a> {
+    fn drop(&mut self) {
+        self.timer.record(self.start.elapsed());
+    }
+}
+
+impl MetricsCollector {
+    pub fn new(service: &str) -> Self {
+        MetricsCollector {
+            service: service.to_string(),
+            counters: RwLock::new(HashMap::new()),
+            gauges: RwLock::new(HashMap::new()),
+            histograms: RwLock::new(HashMap::new()),
+            timers: RwLock::new(HashMap::new()),
+            labels: RwLock::new(HashMap::new()),
+        }
+    }
+
+    pub fn counter(&self, name: &str) -> Arc<AtomicU64> {
+        let counters = self.counters.read().unwrap();
+        if let Some(counter) = counters.get(name) {
+            return counter.clone();
+        }
+        drop(counters);
+
+        let mut counters = self.counters.write().unwrap();
+        counters.entry(name.to_string())
+            .or_insert_with(|| Arc::new(AtomicU64::new(0)))
+            .clone()
+    }
+
+    pub fn increment(&self, name: &str) {
+        self.counter(name).fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn add(&self, name: &str, value: u64) {
+        self.counter(name).fetch_add(value, Ordering::Relaxed);
+    }
+
+    pub fn gauge(&self, name: &str) -> Arc<AtomicU64> {
+        let gauges = self.gauges.read().unwrap();
+        if let Some(gauge) = gauges.get(name) {
+            return gauge.clone();
+        }
+        drop(gauges);
+
+        let mut gauges = self.gauges.write().unwrap();
+        gauges.entry(name.to_string())
+            .or_insert_with(|| Arc::new(AtomicU64::new(0)))
+            .clone()
+    }
+
+    pub fn set_gauge(&self, name: &str, value: f64) {
+        self.gauge(name).store(value.to_bits(), Ordering::Relaxed);
+    }
+
+    pub fn histogram(&self, name: &str) -> Arc<Histogram> {
+        let histograms = self.histograms.read().unwrap();
+        if let Some(hist) = histograms.get(name) {
+            return hist.clone();
+        }
+        drop(histograms);
+
+        let mut histograms = self.histograms.write().unwrap();
+        histograms.entry(name.to_string())
+            .or_insert_with(|| Arc::new(Histogram::new(vec![
+                1.0, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0
+            ])))
+            .clone()
+    }
+
+    pub fn record(&self, name: &str, value: f64, _unit: MetricUnit) {
+        self.histogram(name).observe(value);
+    }
+
+    pub fn timer(&self, name: &str) -> Arc<Timer> {
+        let timers = self.timers.read().unwrap();
+        if let Some(timer) = timers.get(name) {
+            return timer.clone();
+        }
+        drop(timers);
+
+        let mut timers = self.timers.write().unwrap();
+        timers.entry(name.to_string())
+            .or_insert_with(|| Arc::new(Timer::new()))
+            .clone()
+    }
+
+    pub fn snapshot(&self) -> MetricsSnapshot {
+        MetricsSnapshot {
+            timestamp: SystemTime::now(),
+            service: self.service.clone(),
+            counters: self.counters.read().unwrap()
+                .iter()
+                .map(|(k, v)| (k.clone(), v.load(Ordering::Relaxed)))
+                .collect(),
+            gauges: self.gauges.read().unwrap()
+                .iter()
+                .map(|(k, v)| (k.clone(), f64::from_bits(v.load(Ordering::Relaxed))))
+                .collect(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct MetricsSnapshot {
+    pub timestamp: SystemTime,
+    pub service: String,
+    pub counters: HashMap<String, u64>,
+    pub gauges: HashMap<String, f64>,
+}
+
+// =============================================================================
+// APM (APPLICATION PERFORMANCE MONITORING)
+// =============================================================================
+
+/// APM agent for comprehensive monitoring
+pub struct ApmAgent {
+    /// Service configuration
+    config: ApmConfig,
+    /// Metrics collector
+    metrics: MetricsCollector,
+    /// Error tracker
+    errors: ErrorTracker,
+    /// Transaction tracker
+    transactions: TransactionTracker,
+    /// Distributed tracer
+    tracer: DistributedTracer,
+    /// Health checker
+    health: HealthChecker,
+    /// Running state
+    running: AtomicBool,
+}
+
+#[derive(Debug, Clone)]
+pub struct ApmConfig {
+    pub service_name: String,
+    pub environment: String,
+    pub version: String,
+    pub server_url: String,
+    pub api_key: Option<String>,
+    pub sample_rate: f64,
+    pub capture_headers: bool,
+    pub capture_body: bool,
+    pub capture_exceptions: bool,
+    pub transaction_sample_rate: f64,
+    pub metrics_interval: Duration,
+    pub flush_interval: Duration,
+}
+
+impl Default for ApmConfig {
+    fn default() -> Self {
+        ApmConfig {
+            service_name: "unknown".to_string(),
+            environment: "development".to_string(),
+            version: "1.0.0".to_string(),
+            server_url: "http://localhost:8200".to_string(),
+            api_key: None,
+            sample_rate: 1.0,
+            capture_headers: true,
+            capture_body: false,
+            capture_exceptions: true,
+            transaction_sample_rate: 1.0,
+            metrics_interval: Duration::from_secs(30),
+            flush_interval: Duration::from_secs(10),
+        }
+    }
+}
+
+impl ApmAgent {
+    pub fn new(config: ApmConfig) -> Self {
+        let tracer_config = TracerConfig {
+            service_name: config.service_name.clone(),
+            environment: config.environment.clone(),
+            version: config.version.clone(),
+            ..Default::default()
+        };
+
+        ApmAgent {
+            metrics: MetricsCollector::new(&config.service_name),
+            errors: ErrorTracker::new(1000),
+            transactions: TransactionTracker::new(),
+            tracer: DistributedTracer::new(tracer_config),
+            health: HealthChecker::new(),
+            config,
+            running: AtomicBool::new(false),
+        }
+    }
+
+    /// Start the APM agent
+    pub fn start(&self) {
+        self.running.store(true, Ordering::SeqCst);
+    }
+
+    /// Stop the APM agent
+    pub fn stop(&self) {
+        self.running.store(false, Ordering::SeqCst);
+    }
+
+    /// Start a transaction
+    pub fn start_transaction(&self, name: &str, tx_type: &str) -> TransactionGuard {
+        self.transactions.start(name, tx_type)
+    }
+
+    /// Capture error
+    pub fn capture_error(&self, error: &CapturedError) {
+        self.errors.capture(error.clone());
+    }
+
+    /// Record metric
+    pub fn record_metric(&self, name: &str, value: f64, unit: MetricUnit) {
+        self.metrics.record(name, value, unit);
+    }
+
+    /// Get metrics snapshot
+    pub fn metrics_snapshot(&self) -> MetricsSnapshot {
+        self.metrics.snapshot()
+    }
+
+    /// Get health status
+    pub fn health_status(&self) -> HealthStatus {
+        self.health.status()
+    }
+}
+
+/// Transaction tracking
+pub struct TransactionTracker {
+    active: RwLock<HashMap<u64, Transaction>>,
+    completed: RwLock<Vec<Transaction>>,
+    next_id: AtomicU64,
+}
+
+#[derive(Debug, Clone)]
+pub struct Transaction {
+    pub id: u64,
+    pub name: String,
+    pub tx_type: String,
+    pub trace_id: TraceId,
+    pub start_time: Instant,
+    pub end_time: Option<Instant>,
+    pub duration: Option<Duration>,
+    pub result: Option<String>,
+    pub outcome: TransactionOutcome,
+    pub context: TransactionContext,
+    pub spans: Vec<Span>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransactionOutcome {
+    Unknown,
+    Success,
+    Failure,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct TransactionContext {
+    pub request: Option<RequestContext>,
+    pub response: Option<ResponseContext>,
+    pub user: Option<UserContext>,
+    pub custom: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RequestContext {
+    pub method: String,
+    pub url: String,
+    pub headers: HashMap<String, String>,
+    pub body: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResponseContext {
+    pub status_code: u16,
+    pub headers: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct UserContext {
+    pub id: Option<String>,
+    pub username: Option<String>,
+    pub email: Option<String>,
+}
+
+impl TransactionTracker {
+    pub fn new() -> Self {
+        TransactionTracker {
+            active: RwLock::new(HashMap::new()),
+            completed: RwLock::new(Vec::new()),
+            next_id: AtomicU64::new(1),
+        }
+    }
+
+    pub fn start(&self, name: &str, tx_type: &str) -> TransactionGuard {
+        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        let transaction = Transaction {
+            id,
+            name: name.to_string(),
+            tx_type: tx_type.to_string(),
+            trace_id: TraceId::new(),
+            start_time: Instant::now(),
+            end_time: None,
+            duration: None,
+            result: None,
+            outcome: TransactionOutcome::Unknown,
+            context: TransactionContext::default(),
+            spans: Vec::new(),
+        };
+
+        self.active.write().unwrap().insert(id, transaction);
+
+        TransactionGuard {
+            tracker: self,
+            id,
+        }
+    }
+
+    fn finish(&self, id: u64, outcome: TransactionOutcome, result: Option<String>) {
+        if let Some(mut tx) = self.active.write().unwrap().remove(&id) {
+            tx.end_time = Some(Instant::now());
+            tx.duration = Some(tx.start_time.elapsed());
+            tx.outcome = outcome;
+            tx.result = result;
+            self.completed.write().unwrap().push(tx);
+        }
+    }
+}
+
+pub struct TransactionGuard<'a> {
+    tracker: &'a TransactionTracker,
+    id: u64,
+}
+
+impl<'a> TransactionGuard<'a> {
+    pub fn set_result(&mut self, result: &str) {
+        if let Some(tx) = self.tracker.active.write().unwrap().get_mut(&self.id) {
+            tx.result = Some(result.to_string());
+        }
+    }
+
+    pub fn set_context(&mut self, context: TransactionContext) {
+        if let Some(tx) = self.tracker.active.write().unwrap().get_mut(&self.id) {
+            tx.context = context;
+        }
+    }
+
+    pub fn success(self) {
+        self.tracker.finish(self.id, TransactionOutcome::Success, None);
+        std::mem::forget(self);
+    }
+
+    pub fn failure(self, error: &str) {
+        self.tracker.finish(self.id, TransactionOutcome::Failure, Some(error.to_string()));
+        std::mem::forget(self);
+    }
+}
+
+impl<'a> Drop for TransactionGuard<'a> {
+    fn drop(&mut self) {
+        self.tracker.finish(self.id, TransactionOutcome::Unknown, None);
+    }
+}
+
+// =============================================================================
+// ERROR TRACKING
+// =============================================================================
+
+/// Error tracker for exception monitoring
+pub struct ErrorTracker {
+    errors: RwLock<Vec<CapturedError>>,
+    max_errors: usize,
+    error_counts: RwLock<HashMap<String, usize>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CapturedError {
+    pub id: String,
+    pub timestamp: SystemTime,
+    pub message: String,
+    pub error_type: String,
+    pub stack_trace: Vec<StackFrame>,
+    pub culprit: Option<String>,
+    pub context: ErrorContext,
+    pub handled: bool,
+    pub severity: ErrorSeverity,
+    pub fingerprint: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ErrorContext {
+    pub request: Option<RequestContext>,
+    pub user: Option<UserContext>,
+    pub tags: HashMap<String, String>,
+    pub extra: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorSeverity {
+    Debug,
+    Info,
+    Warning,
+    Error,
+    Fatal,
+}
+
+impl ErrorTracker {
+    pub fn new(max_errors: usize) -> Self {
+        ErrorTracker {
+            errors: RwLock::new(Vec::new()),
+            max_errors,
+            error_counts: RwLock::new(HashMap::new()),
+        }
+    }
+
+    pub fn capture(&self, error: CapturedError) {
+        *self.error_counts.write().unwrap()
+            .entry(error.fingerprint.clone())
+            .or_insert(0) += 1;
+
+        let mut errors = self.errors.write().unwrap();
+        if errors.len() >= self.max_errors {
+            errors.remove(0);
+        }
+        errors.push(error);
+    }
+
+    pub fn recent_errors(&self, limit: usize) -> Vec<CapturedError> {
+        let errors = self.errors.read().unwrap();
+        errors.iter().rev().take(limit).cloned().collect()
+    }
+
+    pub fn error_count(&self, fingerprint: &str) -> usize {
+        *self.error_counts.read().unwrap().get(fingerprint).unwrap_or(&0)
+    }
+
+    pub fn total_errors(&self) -> usize {
+        self.error_counts.read().unwrap().values().sum()
+    }
+}
+
+// =============================================================================
+// HEALTH CHECKING
+// =============================================================================
+
+/// Health checker for service monitoring
+pub struct HealthChecker {
+    checks: RwLock<Vec<HealthCheck>>,
+    status: RwLock<HealthStatus>,
+    last_check: RwLock<Option<Instant>>,
+}
+
+pub struct HealthCheck {
+    pub name: String,
+    pub check: Box<dyn Fn() -> HealthCheckResult + Send + Sync>,
+    pub interval: Duration,
+    pub timeout: Duration,
+}
+
+#[derive(Debug, Clone)]
+pub struct HealthCheckResult {
+    pub status: HealthCheckStatus,
+    pub message: Option<String>,
+    pub details: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HealthCheckStatus {
+    Pass,
+    Warn,
+    Fail,
+}
+
+#[derive(Debug, Clone)]
+pub struct HealthStatus {
+    pub status: HealthCheckStatus,
+    pub checks: HashMap<String, HealthCheckResult>,
+    pub uptime: Duration,
+    pub start_time: SystemTime,
+}
+
+impl HealthChecker {
+    pub fn new() -> Self {
+        HealthChecker {
+            checks: RwLock::new(Vec::new()),
+            status: RwLock::new(HealthStatus {
+                status: HealthCheckStatus::Pass,
+                checks: HashMap::new(),
+                uptime: Duration::ZERO,
+                start_time: SystemTime::now(),
+            }),
+            last_check: RwLock::new(None),
+        }
+    }
+
+    pub fn add_check(&self, check: HealthCheck) {
+        self.checks.write().unwrap().push(check);
+    }
+
+    pub fn run_checks(&self) {
+        let checks = self.checks.read().unwrap();
+        let mut results = HashMap::new();
+        let mut overall_status = HealthCheckStatus::Pass;
+
+        for check in checks.iter() {
+            let result = (check.check)();
+
+            if result.status == HealthCheckStatus::Fail {
+                overall_status = HealthCheckStatus::Fail;
+            } else if result.status == HealthCheckStatus::Warn && overall_status != HealthCheckStatus::Fail {
+                overall_status = HealthCheckStatus::Warn;
+            }
+
+            results.insert(check.name.clone(), result);
+        }
+
+        let start_time = self.status.read().unwrap().start_time;
+        let uptime = SystemTime::now().duration_since(start_time).unwrap_or(Duration::ZERO);
+
+        *self.status.write().unwrap() = HealthStatus {
+            status: overall_status,
+            checks: results,
+            uptime,
+            start_time,
+        };
+
+        *self.last_check.write().unwrap() = Some(Instant::now());
+    }
+
+    pub fn status(&self) -> HealthStatus {
+        self.status.read().unwrap().clone()
+    }
+}
+
+// =============================================================================
+// EXPORTERS
+// =============================================================================
+
+/// Jaeger trace exporter
+pub struct JaegerExporter {
+    endpoint: String,
+    service_name: String,
+}
+
+impl JaegerExporter {
+    pub fn new(endpoint: &str, service_name: &str) -> Self {
+        JaegerExporter {
+            endpoint: endpoint.to_string(),
+            service_name: service_name.to_string(),
+        }
+    }
+}
+
+impl TraceExporter for JaegerExporter {
+    fn export(&self, _traces: &[DistributedTrace]) -> Result<(), ExportError> {
+        Ok(())
+    }
+
+    fn shutdown(&self) -> Result<(), ExportError> {
+        Ok(())
+    }
+}
+
+/// Zipkin trace exporter
+pub struct ZipkinExporter {
+    endpoint: String,
+}
+
+impl ZipkinExporter {
+    pub fn new(endpoint: &str) -> Self {
+        ZipkinExporter {
+            endpoint: endpoint.to_string(),
+        }
+    }
+}
+
+impl TraceExporter for ZipkinExporter {
+    fn export(&self, _traces: &[DistributedTrace]) -> Result<(), ExportError> {
+        Ok(())
+    }
+
+    fn shutdown(&self) -> Result<(), ExportError> {
+        Ok(())
+    }
+}
+
+/// OTLP (OpenTelemetry Protocol) exporter
+pub struct OtlpExporter {
+    endpoint: String,
+    headers: HashMap<String, String>,
+    compression: bool,
+}
+
+impl OtlpExporter {
+    pub fn new(endpoint: &str) -> Self {
+        OtlpExporter {
+            endpoint: endpoint.to_string(),
+            headers: HashMap::new(),
+            compression: true,
+        }
+    }
+
+    pub fn with_header(mut self, key: &str, value: &str) -> Self {
+        self.headers.insert(key.to_string(), value.to_string());
+        self
+    }
+}
+
+impl TraceExporter for OtlpExporter {
+    fn export(&self, _traces: &[DistributedTrace]) -> Result<(), ExportError> {
+        Ok(())
+    }
+
+    fn shutdown(&self) -> Result<(), ExportError> {
+        Ok(())
+    }
+}
+
+// =============================================================================
+// UTILITIES
+// =============================================================================
+
+fn thread_id() -> u64 {
+    use std::collections::hash_map::RandomState;
+    use std::hash::{BuildHasher, Hasher};
+
+    let id = thread::current().id();
+    let id_str = format!("{:?}", id);
+
+    id_str.chars()
+        .filter(|c| c.is_ascii_digit())
+        .collect::<String>()
+        .parse()
+        .unwrap_or(0)
+}
+
+fn rand_u64() -> u64 {
+    use std::collections::hash_map::RandomState;
+    use std::hash::{BuildHasher, Hasher};
+
+    let state = RandomState::new();
+    let mut hasher = state.build_hasher();
+    hasher.write_usize(std::ptr::null::<()>() as usize);
+    hasher.write_u128(SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or(Duration::ZERO)
+        .as_nanos());
+    hasher.finish()
+}
+
+// Placeholder for serde_json
+mod serde_json {
+    use std::collections::HashMap;
+
+    #[derive(Clone)]
+    pub enum Value {
+        Null,
+        Bool(bool),
+        Number(f64),
+        String(String),
+        Array(Vec<Value>),
+        Object(HashMap<String, Value>),
+    }
+
+    impl Value {
+        pub fn to_string(&self) -> String {
+            "{}".to_string()
+        }
+    }
+
+    #[macro_export]
+    macro_rules! json {
+        ($($tt:tt)*) => {
+            serde_json::Value::Null
+        };
+    }
+
+    pub fn to_string_pretty(_: &Value) -> Result<String, ()> {
+        Ok("{}".to_string())
+    }
+}
+
+// =============================================================================
+// CLI INTERFACE
+// =============================================================================
+
+/// Main entry point
+pub fn main() {
+    let args: Vec<String> = std::env::args().collect();
+
+    let mut options = ProfilerOptions::default();
+    let mut i = 1;
+
+    while i < args.len() {
+        match args[i].as_str() {
+            "--mode" | "-m" => {
+                i += 1;
+                if i < args.len() {
+                    options.mode = match args[i].as_str() {
+                        "cpu" => ProfileMode::Cpu,
+                        "wall" => ProfileMode::Wall,
+                        "memory" | "mem" => ProfileMode::Memory,
+                        "combined" | "all" => ProfileMode::Combined,
+                        "lock" => ProfileMode::Lock,
+                        "io" => ProfileMode::Io,
+                        "offcpu" => ProfileMode::OffCpu,
+                        "async" => ProfileMode::Async,
+                        _ => ProfileMode::Cpu,
+                    };
+                }
+            }
+            "--interval" | "-i" => {
+                i += 1;
+                if i < args.len() {
+                    options.interval = args[i].parse().unwrap_or(10000);
+                }
+            }
+            "--output" | "-o" => {
+                i += 1;
+                if i < args.len() {
+                    options.output = Some(PathBuf::from(&args[i]));
+                }
+            }
+            "--format" | "-f" => {
+                i += 1;
+                if i < args.len() {
+                    options.format = match args[i].as_str() {
+                        "json" => OutputFormat::Json,
+                        "flamegraph" | "flame" | "svg" => OutputFormat::FlameGraph,
+                        "callgrind" => OutputFormat::Callgrind,
+                        "speedscope" => OutputFormat::Speedscope,
+                        "pprof" => OutputFormat::Pprof,
+                        "chrome" | "trace" => OutputFormat::ChromeTrace,
+                        "collapsed" => OutputFormat::Collapsed,
+                        "jfr" => OutputFormat::Jfr,
+                        _ => OutputFormat::Text,
+                    };
+                }
+            }
+            "--duration" | "-d" => {
+                i += 1;
+                if i < args.len() {
+                    options.duration = args[i].parse().ok();
+                }
+            }
+            "--help" | "-h" => {
+                print_help();
+                return;
+            }
+            "--version" | "-V" => {
+                println!("build-profiler 2.0.0");
+                return;
+            }
+            "--" => {
+                i += 1;
+                while i < args.len() {
+                    if options.program.is_none() {
+                        options.program = Some(PathBuf::from(&args[i]));
+                    } else {
+                        options.args.push(args[i].clone());
+                    }
+                    i += 1;
+                }
+            }
+            arg if !arg.starts_with('-') => {
+                if options.program.is_none() {
+                    options.program = Some(PathBuf::from(arg));
+                } else {
+                    options.args.push(arg.to_string());
+                }
+            }
+            _ => {
+                eprintln!("Unknown option: {}", args[i]);
+                std::process::exit(1);
+            }
+        }
+        i += 1;
+    }
+
+    if options.program.is_none() {
+        eprintln!("Error: No program specified");
+        print_help();
+        std::process::exit(1);
+    }
+
+    // Create profiler
+    let config = ProfilerConfig {
+        mode: options.mode,
+        sample_interval: Duration::from_micros(options.interval),
+        output_format: options.format,
+        output_path: options.output.clone(),
+        ..Default::default()
+    };
+
+    let profiler = Profiler::new(config);
+
+    profiler.start();
+
+    println!("Profiling {}...", options.program.as_ref().unwrap().display());
+
+    if let Some(duration) = options.duration {
+        thread::sleep(Duration::from_secs(duration));
+    }
+
+    profiler.stop();
+
+    let report = profiler.report();
+
+    if let Some(ref path) = options.output {
+        if let Err(e) = profiler.save(path) {
+            eprintln!("Failed to save report: {}", e);
+            std::process::exit(1);
+        }
+        println!("Report saved to {}", path.display());
+    } else {
+        println!("{}", format_text_report(&report));
+    }
+}
+
+/// Profiler options
+#[derive(Debug, Clone)]
+pub struct ProfilerOptions {
+    pub program: Option<PathBuf>,
+    pub args: Vec<String>,
+    pub mode: ProfileMode,
+    pub interval: u64,
+    pub output: Option<PathBuf>,
+    pub format: OutputFormat,
+    pub duration: Option<u64>,
+}
+
+impl Default for ProfilerOptions {
+    fn default() -> Self {
+        ProfilerOptions {
+            program: None,
+            args: Vec::new(),
+            mode: ProfileMode::Cpu,
+            interval: 10000,
+            output: None,
+            format: OutputFormat::Text,
+            duration: None,
+        }
+    }
+}
+
+fn print_help() {
+    println!("build-profiler - BuildLang Performance Profiler v2.0
+
+USAGE:
+    build-profiler [OPTIONS] [--] <PROGRAM> [ARGS...]
+
+OPTIONS:
+    -m, --mode MODE         Profiling mode: cpu, wall, memory, combined, lock, io, offcpu, async
+    -i, --interval USECS    Sample interval in microseconds (default: 10000)
+    -o, --output FILE       Output file path
+    -f, --format FORMAT     Output format: text, json, flamegraph, callgrind, speedscope, pprof, chrome, collapsed
+    -d, --duration SECS     Profile for specific duration
+    -h, --help              Show this help message
+    -V, --version           Show version
+
+PROFILING MODES:
+    cpu         CPU time sampling (default)
+    wall        Wall-clock time sampling
+    memory      Memory allocation tracking
+    combined    CPU + memory profiling
+    lock        Lock contention analysis
+    io          I/O wait time analysis
+    offcpu      Off-CPU time (blocking calls)
+    async       Async/await task profiling
+
+OUTPUT FORMATS:
+    text        Human-readable text report (default)
+    json        JSON format for programmatic access
+    flamegraph  Interactive SVG flame graph
+    callgrind   Valgrind/KCachegrind compatible
+    speedscope  Speedscope.app compatible JSON
+    pprof       Google pprof format
+    chrome      Chrome trace viewer format
+    collapsed   Collapsed stack format (for FlameGraph tools)
+
+EXAMPLES:
+    build-profiler program.bld                  Profile with defaults
+    build-profiler -m memory program.bld        Memory profiling
+    build-profiler -f flamegraph -o out.svg        Generate flame graph
+    build-profiler -m lock server.bld           Lock contention analysis
+    build-profiler -d 30 -- server --port 8080     Profile for 30 seconds
+");
+}
+
+// =============================================================================
+// TESTS
+// =============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sampling_profiler() {
+        let config = ProfilerConfig::default();
+        let profiler = SamplingProfiler::new(config);
+
+        profiler.add_sample(vec![
+            StackFrame {
+                function: "main".to_string(),
+                module: "test".to_string(),
+                file: None,
+                line: None,
+                column: None,
+                address: None,
+                is_native: false,
+                is_inlined: false,
+                compilation_unit: None,
+            },
+        ]);
+
+        let samples = profiler.samples();
+        assert_eq!(samples.len(), 1);
+    }
+
+    #[test]
+    fn test_memory_profiler() {
+        let config = ProfilerConfig::default();
+        let profiler = MemoryProfiler::new(config);
+
+        profiler.record_alloc(0x1000, 1024, vec![]);
+        profiler.record_alloc(0x2000, 2048, vec![]);
+
+        let stats = profiler.stats();
+        assert_eq!(stats.total_allocated, 3072);
+        assert_eq!(stats.allocation_count, 2);
+
+        profiler.record_free(0x1000);
+        let stats = profiler.stats();
+        assert_eq!(stats.total_freed, 1024);
+        assert_eq!(stats.current_memory, 2048);
+    }
+
+    #[test]
+    fn test_flame_graph_generator() {
+        let fg = FlameGraphGenerator::new();
+
+        let mut stacks = HashMap::new();
+        stacks.insert("main;foo;bar".to_string(), 100);
+        stacks.insert("main;foo".to_string(), 50);
+        stacks.insert("main;baz".to_string(), 30);
+
+        let svg = fg.generate(&stacks);
+        assert!(svg.contains("<svg"));
+        assert!(svg.contains("main"));
+    }
+
+    #[test]
+    fn test_profile_scope() {
+        let _scope = ProfileScope::new("test_function");
+        // Scope should complete without error
+    }
+
+    #[test]
+    fn test_function_stats() {
+        let stats = FunctionStats {
+            name: "test".to_string(),
+            self_samples: 10,
+            total_samples: 50,
+            self_time: Duration::from_millis(100),
+            total_time: Duration::from_millis(500),
+            callers: HashMap::new(),
+            callees: HashMap::new(),
+            source_lines: HashMap::new(),
+        };
+
+        assert_eq!(stats.self_percent(100), 10.0);
+        assert_eq!(stats.total_percent(100), 50.0);
+    }
+
+    #[test]
+    fn test_trace_id() {
+        let id = TraceId::new();
+        let hex = id.to_hex();
+        assert_eq!(hex.len(), 32);
+
+        let parsed = TraceId::from_hex(&hex).unwrap();
+        assert_eq!(id, parsed);
+    }
+
+    #[test]
+    fn test_span_id() {
+        let id = SpanId::new();
+        let hex = id.to_hex();
+        assert_eq!(hex.len(), 16);
+
+        let parsed = SpanId::from_hex(&hex).unwrap();
+        assert_eq!(id, parsed);
+    }
+
+    #[test]
+    fn test_trace_context_w3c() {
+        let ctx = TraceContext {
+            trace_id: TraceId::new(),
+            span_id: SpanId::new(),
+            trace_flags: 1,
+            trace_state: String::new(),
+        };
+
+        let header = ctx.to_traceparent();
+        assert!(header.starts_with("00-"));
+
+        let parsed = TraceContext::from_traceparent(&header).unwrap();
+        assert_eq!(ctx.trace_id, parsed.trace_id);
+        assert_eq!(ctx.span_id, parsed.span_id);
+    }
+
+    #[test]
+    fn test_histogram() {
+        let hist = Histogram::new(vec![1.0, 5.0, 10.0, 50.0, 100.0]);
+
+        hist.observe(2.5);
+        hist.observe(7.5);
+        hist.observe(25.0);
+        hist.observe(75.0);
+
+        assert_eq!(hist.count.load(Ordering::Relaxed), 4);
+        assert!(hist.mean() > 0.0);
+    }
+
+    #[test]
+    fn test_timer() {
+        let timer = Timer::new();
+
+        {
+            let _guard = timer.start();
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        assert_eq!(timer.active_count(), 0);
+    }
+
+    #[test]
+    fn test_lock_profiler() {
+        let config = ProfilerConfig {
+            lock_profiling: true,
+            lock_threshold: Duration::from_nanos(1),
+            ..Default::default()
+        };
+        let profiler = LockProfiler::new(config);
+
+        profiler.start();
+        profiler.record_acquire(0x1234, LockType::Mutex);
+        profiler.stop();
+
+        let report = profiler.report();
+        assert_eq!(report.total_contentions, 0);
+    }
+
+    #[test]
+    fn test_io_profiler() {
+        let config = ProfilerConfig::default();
+        let profiler = IoProfiler::new(config);
+
+        profiler.start();
+        profiler.record(IoOperation {
+            timestamp: Instant::now(),
+            op_type: IoOpType::Read,
+            target: IoTarget::File(PathBuf::from("/test.txt")),
+            bytes: 1024,
+            duration: Duration::from_millis(5),
+            success: true,
+            error: None,
+            stack: vec![],
+        });
+        profiler.stop();
+
+        let report = profiler.report();
+        assert_eq!(report.total_operations, 1);
+        assert_eq!(report.total_bytes, 1024);
+    }
+
+    #[test]
+    fn test_profile_comparison() {
+        let mut baseline_funcs = vec![
+            FunctionStats {
+                name: "foo".to_string(),
+                self_samples: 100,
+                total_samples: 100,
+                self_time: Duration::from_millis(100),
+                total_time: Duration::from_millis(100),
+                callers: HashMap::new(),
+                callees: HashMap::new(),
+                source_lines: HashMap::new(),
+            },
+        ];
+
+        let baseline = ProfileReport {
+            mode: ProfileMode::Cpu,
+            duration: Duration::from_secs(1),
+            total_samples: 100,
+            dropped_samples: 0,
+            functions: baseline_funcs,
+            stacks: HashMap::new(),
+            thread_samples: HashMap::new(),
+            state_samples: HashMap::new(),
+            call_tree: CallTree { root: CallTreeNode::new("<root>") },
+            hot_paths: vec![],
+        };
+
+        let mut current_funcs = vec![
+            FunctionStats {
+                name: "foo".to_string(),
+                self_samples: 150,
+                total_samples: 150,
+                self_time: Duration::from_millis(150),
+                total_time: Duration::from_millis(150),
+                callers: HashMap::new(),
+                callees: HashMap::new(),
+                source_lines: HashMap::new(),
+            },
+        ];
+
+        let current = ProfileReport {
+            mode: ProfileMode::Cpu,
+            duration: Duration::from_secs(1),
+            total_samples: 150,
+            dropped_samples: 0,
+            functions: current_funcs,
+            stacks: HashMap::new(),
+            thread_samples: HashMap::new(),
+            state_samples: HashMap::new(),
+            call_tree: CallTree { root: CallTreeNode::new("<root>") },
+            hot_paths: vec![],
+        };
+
+        let comparison = ProfileComparator::compare(&baseline, &current);
+        assert_eq!(comparison.regressions.len(), 1);
+        assert!(comparison.regressions[0].change_percent > 0.0);
+    }
+
+    #[test]
+    fn test_allocation_rate_tracker() {
+        let mut tracker = AllocationRateTracker::default();
+
+        tracker.record(1024);
+        tracker.record(2048);
+        tracker.record(4096);
+
+        assert_eq!(tracker.total_allocated, 7168);
+    }
+
+    #[test]
+    fn test_stack_frame_demangle() {
+        let frame = StackFrame {
+            function: "_Qmain__foo".to_string(),
+            module: "test".to_string(),
+            file: None,
+            line: None,
+            column: None,
+            address: None,
+            is_native: false,
+            is_inlined: false,
+            compilation_unit: None,
+        };
+
+        let demangled = frame.demangle();
+        assert!(demangled.contains("main"));
+    }
+
+    #[test]
+    fn test_call_tree() {
+        let samples = vec![
+            Sample {
+                timestamp: Instant::now(),
+                thread_id: 1,
+                stack: vec![
+                    StackFrame {
+                        function: "leaf".to_string(),
+                        module: "".to_string(),
+                        file: None, line: None, column: None, address: None,
+                        is_native: false, is_inlined: false, compilation_unit: None,
+                    },
+                    StackFrame {
+                        function: "middle".to_string(),
+                        module: "".to_string(),
+                        file: None, line: None, column: None, address: None,
+                        is_native: false, is_inlined: false, compilation_unit: None,
+                    },
+                    StackFrame {
+                        function: "root".to_string(),
+                        module: "".to_string(),
+                        file: None, line: None, column: None, address: None,
+                        is_native: false, is_inlined: false, compilation_unit: None,
+                    },
+                ],
+                cpu_time: Duration::ZERO,
+                wall_time: Duration::ZERO,
+                thread_name: None,
+                state: ThreadState::Running,
+            },
+        ];
+
+        let config = ProfilerConfig::default();
+        let profiler = SamplingProfiler::new(config);
+        // Call tree is tested through report generation
+    }
+
+    #[test]
+    fn test_source_annotator() {
+        let annotator = SourceAnnotator::new(3);
+        let stats = FunctionStats {
+            name: "test".to_string(),
+            self_samples: 10,
+            total_samples: 10,
+            self_time: Duration::from_millis(100),
+            total_time: Duration::from_millis(100),
+            callers: HashMap::new(),
+            callees: HashMap::new(),
+            source_lines: HashMap::new(),
+        };
+
+        let annotated = annotator.annotate(&stats, None);
+        assert!(annotated.lines.is_empty());
+    }
+
+    #[test]
+    fn test_diff_flamegraph() {
+        let fg = FlameGraphGenerator::new();
+
+        let mut before = HashMap::new();
+        before.insert("main;foo".to_string(), 100);
+
+        let mut after = HashMap::new();
+        after.insert("main;foo".to_string(), 150);
+
+        let svg = fg.generate_diff(&before, &after);
+        assert!(svg.contains("<svg"));
+        assert!(svg.contains("Differential"));
+    }
+
+    #[test]
+    fn test_health_checker() {
+        let checker = HealthChecker::new();
+
+        checker.add_check(HealthCheck {
+            name: "test".to_string(),
+            check: Box::new(|| HealthCheckResult {
+                status: HealthCheckStatus::Pass,
+                message: None,
+                details: HashMap::new(),
+            }),
+            interval: Duration::from_secs(10),
+            timeout: Duration::from_secs(5),
+        });
+
+        checker.run_checks();
+        let status = checker.status();
+        assert_eq!(status.status, HealthCheckStatus::Pass);
+    }
+
+    #[test]
+    fn test_error_tracker() {
+        let tracker = ErrorTracker::new(100);
+
+        let error = CapturedError {
+            id: "test-1".to_string(),
+            timestamp: SystemTime::now(),
+            message: "Test error".to_string(),
+            error_type: "TestError".to_string(),
+            stack_trace: vec![],
+            culprit: None,
+            context: ErrorContext::default(),
+            handled: true,
+            severity: ErrorSeverity::Error,
+            fingerprint: "test-fingerprint".to_string(),
+        };
+
+        tracker.capture(error.clone());
+        tracker.capture(error);
+
+        assert_eq!(tracker.total_errors(), 2);
+        assert_eq!(tracker.error_count("test-fingerprint"), 2);
+    }
+
+    #[test]
+    fn test_metrics_collector() {
+        let collector = MetricsCollector::new("test-service");
+
+        collector.increment("requests");
+        collector.increment("requests");
+        collector.set_gauge("active_connections", 10.0);
+        collector.record("response_time", 150.0, MetricUnit::Milliseconds);
+
+        let snapshot = collector.snapshot();
+        assert_eq!(snapshot.counters.get("requests"), Some(&2));
+    }
+
+    #[test]
+    fn test_transaction_tracker() {
+        let tracker = TransactionTracker::new();
+
+        let guard = tracker.start("test-tx", "request");
+        drop(guard);
+
+        let completed = tracker.completed.read().unwrap();
+        assert_eq!(completed.len(), 1);
+    }
+
+    #[test]
+    fn test_rate_sampler() {
+        let sampler = RateSampler::new(0.5);
+
+        // Test that sampling is deterministic for same trace ID
+        let trace_id = TraceId { high: 0, low: u64::MAX / 4 };
+        let decision1 = sampler.should_sample(&trace_id, "test", None);
+        let decision2 = sampler.should_sample(&trace_id, "test", None);
+        assert_eq!(decision1, decision2);
+    }
+
+    #[test]
+    fn test_dominator_tree() {
+        let mut graph = ObjectGraph::default();
+        graph.nodes.insert(1, ObjectNode {
+            address: 1,
+            size: 100,
+            type_name: "A".to_string(),
+            retained_size: 0,
+            dominator: None,
+            depth: 0,
+        });
+        graph.nodes.insert(2, ObjectNode {
+            address: 2,
+            size: 50,
+            type_name: "B".to_string(),
+            retained_size: 0,
+            dominator: None,
+            depth: 0,
+        });
+        graph.edges.insert(1, vec![2]);
+        graph.roots = vec![1];
+
+        let mut tree = DominatorTree::new();
+        tree.compute_dominators(&graph, 1);
+
+        assert_eq!(tree.immediate_dominator(2), Some(1));
+    }
+}

@@ -1,0 +1,1711 @@
+// ═══════════════════════════════════════════════════════════════════════════════
+// ORACLE - Time Series Decomposition v2.0.0
+// ═══════════════════════════════════════════════════════════════════════════════
+// Copyright © 2024-2025 Zain Dana Harper. All Rights Reserved.
+// Copyright (c) 2024-2025 Zain Dana Harper. All Rights Reserved.
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// Comprehensive time series decomposition methods:
+// - Classical decomposition (additive/multiplicative)
+// - STL (Seasonal and Trend decomposition using Loess)
+// - MSTL (Multiple Seasonal-Trend decomposition)
+// - X-11/X-13 ARIMA-SEATS style decomposition
+// - Empirical Mode Decomposition (EMD)
+// - Singular Spectrum Analysis (SSA)
+// - Wavelet decomposition
+// - Hodrick-Prescott filter
+// - Baxter-King filter
+// - Christiano-Fitzgerald filter
+//
+// ═══════════════════════════════════════════════════════════════════════════════
+
+module oracle::decomposition
+
+use std::math::{sin, cos, exp, log, sqrt, pow, abs, min, max, PI}
+use std::collections::{Vec, VecDeque}
+use oracle::{Tensor, TimeSeries, Frequency}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// DECOMPOSITION RESULT
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Result of time series decomposition
+#[derive(Debug, Clone)]
+pub struct DecompositionResult {
+    pub observed: Vec<f64>,
+    pub trend: Vec<f64>,
+    pub seasonal: Vec<f64>,
+    pub residual: Vec<f64>,
+    pub method: String,
+    pub seasonal_periods: usize,
+}
+
+impl DecompositionResult {
+    pub fn new(observed: Vec<f64>, trend: Vec<f64>, seasonal: Vec<f64>, method: &str, periods: usize) -> Self {
+        let residual: Vec<f64> = observed.iter()
+            .zip(trend.iter())
+            .zip(seasonal.iter())
+            .map(|((&o, &t), &s)| o - t - s)
+            .collect();
+
+        DecompositionResult {
+            observed,
+            trend,
+            seasonal,
+            residual,
+            method: method.to_string(),
+            seasonal_periods: periods,
+        }
+    }
+
+    /// Seasonally adjusted series
+    pub fn seasonally_adjusted(&self) -> Vec<f64> {
+        self.observed.iter()
+            .zip(self.seasonal.iter())
+            .map(|(&o, &s)| o - s)
+            .collect()
+    }
+
+    /// Trend-cycle component
+    pub fn trend_cycle(&self) -> &[f64] {
+        &self.trend
+    }
+
+    /// Get seasonal indices
+    pub fn seasonal_indices(&self) -> Vec<f64> {
+        let mut indices = vec![0.0; self.seasonal_periods];
+        let mut counts = vec![0; self.seasonal_periods];
+
+        for (i, &s) in self.seasonal.iter().enumerate() {
+            let idx = i % self.seasonal_periods;
+            indices[idx] += s;
+            counts[idx] += 1;
+        }
+
+        for i in 0..self.seasonal_periods {
+            if counts[i] > 0 {
+                indices[i] /= counts[i] as f64;
+            }
+        }
+
+        indices
+    }
+
+    /// Compute strength of trend (0-1)
+    pub fn trend_strength(&self) -> f64 {
+        let residual_var = variance(&self.residual);
+        let trend_residual: Vec<f64> = self.trend.iter()
+            .zip(self.residual.iter())
+            .map(|(&t, &r)| t + r)
+            .collect();
+        let combined_var = variance(&trend_residual);
+
+        if combined_var > 1e-10 {
+            max(0.0, 1.0 - residual_var / combined_var)
+        } else {
+            0.0
+        }
+    }
+
+    /// Compute strength of seasonality (0-1)
+    pub fn seasonal_strength(&self) -> f64 {
+        let residual_var = variance(&self.residual);
+        let seasonal_residual: Vec<f64> = self.seasonal.iter()
+            .zip(self.residual.iter())
+            .map(|(&s, &r)| s + r)
+            .collect();
+        let combined_var = variance(&seasonal_residual);
+
+        if combined_var > 1e-10 {
+            max(0.0, 1.0 - residual_var / combined_var)
+        } else {
+            0.0
+        }
+    }
+}
+
+/// Multiple seasonal decomposition result
+#[derive(Debug, Clone)]
+pub struct MultiSeasonalResult {
+    pub observed: Vec<f64>,
+    pub trend: Vec<f64>,
+    pub seasonals: Vec<(usize, Vec<f64>)>,  // (period, seasonal component)
+    pub residual: Vec<f64>,
+    pub method: String,
+}
+
+fn variance(data: &[f64]) -> f64 {
+    if data.is_empty() { return 0.0; }
+    let mean: f64 = data.iter().sum::<f64>() / data.len() as f64;
+    data.iter().map(|&x| (x - mean).powi(2)).sum::<f64>() / data.len() as f64
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CLASSICAL DECOMPOSITION
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Classical time series decomposition
+pub struct ClassicalDecomposition {
+    pub method: DecompositionMethod,
+    pub periods: usize,
+    pub centered: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum DecompositionMethod {
+    Additive,
+    Multiplicative,
+}
+
+impl ClassicalDecomposition {
+    pub fn new(periods: usize, method: DecompositionMethod) -> Self {
+        ClassicalDecomposition {
+            method,
+            periods,
+            centered: true,
+        }
+    }
+
+    pub fn additive(periods: usize) -> Self {
+        Self::new(periods, DecompositionMethod::Additive)
+    }
+
+    pub fn multiplicative(periods: usize) -> Self {
+        Self::new(periods, DecompositionMethod::Multiplicative)
+    }
+
+    /// Decompose the time series
+    pub fn decompose(&self, series: &TimeSeries) -> DecompositionResult {
+        let values = series.values();
+        let n = values.len();
+
+        // Step 1: Compute trend using centered moving average
+        let trend = self.moving_average(&values);
+
+        // Step 2: Detrend to get seasonal + residual
+        let detrended: Vec<f64> = match self.method {
+            DecompositionMethod::Additive => {
+                values.iter().zip(trend.iter())
+                    .map(|(&v, &t)| if t.is_finite() { v - t } else { 0.0 })
+                    .collect()
+            }
+            DecompositionMethod::Multiplicative => {
+                values.iter().zip(trend.iter())
+                    .map(|(&v, &t)| if t.is_finite() && t.abs() > 1e-10 { v / t } else { 1.0 })
+                    .collect()
+            }
+        };
+
+        // Step 3: Compute seasonal indices
+        let seasonal_indices = self.compute_seasonal_indices(&detrended);
+
+        // Step 4: Extend seasonal to full length
+        let seasonal: Vec<f64> = (0..n)
+            .map(|i| seasonal_indices[i % self.periods])
+            .collect();
+
+        // Step 5: Residual
+        let residual: Vec<f64> = match self.method {
+            DecompositionMethod::Additive => {
+                values.iter()
+                    .zip(trend.iter())
+                    .zip(seasonal.iter())
+                    .map(|((&v, &t), &s)| v - t - s)
+                    .collect()
+            }
+            DecompositionMethod::Multiplicative => {
+                values.iter()
+                    .zip(trend.iter())
+                    .zip(seasonal.iter())
+                    .map(|((&v, &t), &s)| {
+                        if t.is_finite() && t.abs() > 1e-10 && s.abs() > 1e-10 {
+                            v / (t * s)
+                        } else {
+                            1.0
+                        }
+                    })
+                    .collect()
+            }
+        };
+
+        DecompositionResult {
+            observed: values,
+            trend,
+            seasonal,
+            residual,
+            method: format!("Classical {:?}", self.method),
+            seasonal_periods: self.periods,
+        }
+    }
+
+    fn moving_average(&self, values: &[f64]) -> Vec<f64> {
+        let n = values.len();
+        let k = self.periods;
+        let mut result = vec![f64::NAN; n];
+
+        // For even period, use centered MA (2xk)
+        if k % 2 == 0 {
+            let half = k / 2;
+            for i in half..(n - half) {
+                let mut sum = 0.0;
+                for j in (i - half)..(i + half) {
+                    sum += values[j];
+                }
+                // Weight first and last elements by 0.5
+                sum -= values[i - half] * 0.5;
+                sum -= values[i + half] * 0.5;
+                sum += values[i + half] * 0.5;
+                result[i] = sum / k as f64;
+            }
+        } else {
+            let half = k / 2;
+            for i in half..(n - half) {
+                let mut sum = 0.0;
+                for j in (i - half)..=(i + half) {
+                    sum += values[j];
+                }
+                result[i] = sum / k as f64;
+            }
+        }
+
+        result
+    }
+
+    fn compute_seasonal_indices(&self, detrended: &[f64]) -> Vec<f64> {
+        let mut indices = vec![0.0; self.periods];
+        let mut counts = vec![0; self.periods];
+
+        for (i, &v) in detrended.iter().enumerate() {
+            if v.is_finite() {
+                let idx = i % self.periods;
+                indices[idx] += v;
+                counts[idx] += 1;
+            }
+        }
+
+        // Average
+        for i in 0..self.periods {
+            if counts[i] > 0 {
+                indices[i] /= counts[i] as f64;
+            }
+        }
+
+        // Normalize
+        match self.method {
+            DecompositionMethod::Additive => {
+                let mean: f64 = indices.iter().sum::<f64>() / self.periods as f64;
+                for idx in &mut indices {
+                    *idx -= mean;
+                }
+            }
+            DecompositionMethod::Multiplicative => {
+                let mean: f64 = indices.iter().sum::<f64>() / self.periods as f64;
+                if mean.abs() > 1e-10 {
+                    for idx in &mut indices {
+                        *idx /= mean;
+                    }
+                }
+            }
+        }
+
+        indices
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// STL DECOMPOSITION
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// STL - Seasonal and Trend decomposition using Loess
+pub struct STL {
+    pub seasonal_periods: usize,
+    pub seasonal_smoothing: usize,
+    pub trend_smoothing: usize,
+    pub low_pass_smoothing: usize,
+    pub robust: bool,
+    pub inner_iterations: usize,
+    pub outer_iterations: usize,
+}
+
+impl STL {
+    pub fn new(seasonal_periods: usize) -> Self {
+        // Default smoothing parameters
+        let ns = seasonal_periods;
+        let nt = (1.5 * ns as f64 / (1.0 - 1.5 / ns as f64)).ceil() as usize | 1;
+        let nl = ns | 1;
+
+        STL {
+            seasonal_periods: ns,
+            seasonal_smoothing: 7,
+            trend_smoothing: nt,
+            low_pass_smoothing: nl,
+            robust: false,
+            inner_iterations: 2,
+            outer_iterations: 1,
+        }
+    }
+
+    pub fn robust(mut self) -> Self {
+        self.robust = true;
+        self.outer_iterations = 15;
+        self
+    }
+
+    pub fn with_seasonal_smoothing(mut self, s: usize) -> Self {
+        self.seasonal_smoothing = s | 1; // Ensure odd
+        self
+    }
+
+    pub fn with_trend_smoothing(mut self, t: usize) -> Self {
+        self.trend_smoothing = t | 1;
+        self
+    }
+
+    /// Decompose using STL
+    pub fn decompose(&self, series: &TimeSeries) -> DecompositionResult {
+        let values = series.values();
+        let n = values.len();
+        let np = self.seasonal_periods;
+
+        if n < 2 * np {
+            return DecompositionResult::new(
+                values.clone(),
+                vec![values.iter().sum::<f64>() / n as f64; n],
+                vec![0.0; n],
+                "STL",
+                np,
+            );
+        }
+
+        let mut seasonal = vec![0.0; n];
+        let mut trend = vec![0.0; n];
+        let mut weights = vec![1.0; n];
+
+        for _outer in 0..self.outer_iterations {
+            for _inner in 0..self.inner_iterations {
+                // Step 1: Detrending
+                let detrended: Vec<f64> = values.iter()
+                    .zip(trend.iter())
+                    .map(|(&y, &t)| y - t)
+                    .collect();
+
+                // Step 2: Cycle-subseries smoothing
+                let mut cycle_subseries = vec![Vec::new(); np];
+                for (i, &v) in detrended.iter().enumerate() {
+                    cycle_subseries[i % np].push((i, v * weights[i]));
+                }
+
+                // Smooth each subseries
+                let mut smoothed_seasonal = vec![0.0; n];
+                for p in 0..np {
+                    let subseries: Vec<f64> = cycle_subseries[p].iter().map(|(_, v)| *v).collect();
+                    if subseries.len() >= 3 {
+                        let smoothed = self.loess_smooth(&subseries, self.seasonal_smoothing);
+                        for (j, (i, _)) in cycle_subseries[p].iter().enumerate() {
+                            if j < smoothed.len() {
+                                smoothed_seasonal[*i] = smoothed[j];
+                            }
+                        }
+                    }
+                }
+
+                // Step 3: Low-pass filter of smoothed cycle-subseries
+                let low_pass = self.moving_average_filter(&smoothed_seasonal, np);
+                let low_pass = self.moving_average_filter(&low_pass, np);
+                let low_pass = self.moving_average_filter(&low_pass, 3);
+                let low_pass = self.loess_smooth(&low_pass, self.low_pass_smoothing);
+
+                // Step 4: Detrending of smoothed cycle-subseries
+                seasonal = smoothed_seasonal.iter()
+                    .zip(low_pass.iter())
+                    .map(|(&s, &l)| s - l)
+                    .collect();
+
+                // Step 5: Deseasonalizing
+                let deseasonalized: Vec<f64> = values.iter()
+                    .zip(seasonal.iter())
+                    .map(|(&y, &s)| y - s)
+                    .collect();
+
+                // Step 6: Trend smoothing
+                trend = self.loess_smooth(&deseasonalized, self.trend_smoothing);
+            }
+
+            // Robustness iteration
+            if self.robust {
+                let residuals: Vec<f64> = values.iter()
+                    .zip(seasonal.iter())
+                    .zip(trend.iter())
+                    .map(|((&y, &s), &t)| y - s - t)
+                    .collect();
+
+                weights = self.compute_robustness_weights(&residuals);
+            }
+        }
+
+        DecompositionResult::new(values, trend, seasonal, "STL", np)
+    }
+
+    fn loess_smooth(&self, values: &[f64], window: usize) -> Vec<f64> {
+        let n = values.len();
+        if n < 3 {
+            return values.to_vec();
+        }
+
+        let mut result = Vec::with_capacity(n);
+        let half = window / 2;
+
+        for i in 0..n {
+            let start = if i > half { i - half } else { 0 };
+            let end = min(i + half + 1, n);
+
+            // Local weighted regression
+            let mut sum_w = 0.0;
+            let mut sum_wy = 0.0;
+
+            for j in start..end {
+                let dist = (i as f64 - j as f64).abs() / (half as f64 + 1.0);
+                let w = (1.0 - dist.powi(3)).powi(3).max(0.0);
+                sum_w += w;
+                sum_wy += w * values[j];
+            }
+
+            result.push(if sum_w > 1e-10 { sum_wy / sum_w } else { values[i] });
+        }
+
+        result
+    }
+
+    fn moving_average_filter(&self, values: &[f64], window: usize) -> Vec<f64> {
+        let n = values.len();
+        let half = window / 2;
+        let mut result = Vec::with_capacity(n);
+
+        for i in 0..n {
+            let start = if i > half { i - half } else { 0 };
+            let end = min(i + half + 1, n);
+            let sum: f64 = values[start..end].iter().sum();
+            result.push(sum / (end - start) as f64);
+        }
+
+        result
+    }
+
+    fn compute_robustness_weights(&self, residuals: &[f64]) -> Vec<f64> {
+        let abs_residuals: Vec<f64> = residuals.iter().map(|&r| r.abs()).collect();
+        let h = 6.0 * self.median(&abs_residuals);
+
+        residuals.iter()
+            .map(|&r| {
+                let u = r.abs() / h;
+                if u < 1.0 {
+                    (1.0 - u * u).powi(2)
+                } else {
+                    0.0
+                }
+            })
+            .collect()
+    }
+
+    fn median(&self, values: &[f64]) -> f64 {
+        let mut sorted = values.to_vec();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let n = sorted.len();
+        if n == 0 {
+            0.0
+        } else if n % 2 == 0 {
+            (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
+        } else {
+            sorted[n / 2]
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MSTL (MULTIPLE SEASONAL-TREND DECOMPOSITION)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// MSTL - Handle multiple seasonal periods
+pub struct MSTL {
+    pub seasonal_periods: Vec<usize>,
+    pub stl_configs: Vec<STL>,
+}
+
+impl MSTL {
+    pub fn new(periods: Vec<usize>) -> Self {
+        let stl_configs: Vec<STL> = periods.iter()
+            .map(|&p| STL::new(p))
+            .collect();
+
+        MSTL {
+            seasonal_periods: periods,
+            stl_configs,
+        }
+    }
+
+    /// Decompose with multiple seasonal components
+    pub fn decompose(&self, series: &TimeSeries) -> MultiSeasonalResult {
+        let values = series.values();
+        let n = values.len();
+
+        if self.seasonal_periods.is_empty() {
+            return MultiSeasonalResult {
+                observed: values.clone(),
+                trend: values.clone(),
+                seasonals: Vec::new(),
+                residual: vec![0.0; n],
+                method: "MSTL".to_string(),
+            };
+        }
+
+        // Start with original series
+        let mut remaining = values.clone();
+        let mut seasonals = Vec::new();
+
+        // Extract seasonal components from shortest to longest period
+        let mut periods_sorted: Vec<usize> = self.seasonal_periods.clone();
+        periods_sorted.sort();
+
+        for period in &periods_sorted {
+            let temp_series = TimeSeries::from_values("temp", &remaining, series.frequency);
+            let stl = STL::new(*period);
+            let result = stl.decompose(&temp_series);
+
+            seasonals.push((*period, result.seasonal.clone()));
+
+            // Remove seasonal from remaining
+            remaining = remaining.iter()
+                .zip(result.seasonal.iter())
+                .map(|(&r, &s)| r - s)
+                .collect();
+        }
+
+        // Final trend extraction on deseasoned series
+        let temp_series = TimeSeries::from_values("temp", &remaining, series.frequency);
+        let stl = STL::new(periods_sorted[0]);
+        let final_result = stl.decompose(&temp_series);
+
+        let trend = final_result.trend;
+
+        // Compute residual
+        let mut total_seasonal = vec![0.0; n];
+        for (_, seasonal) in &seasonals {
+            for i in 0..n {
+                total_seasonal[i] += seasonal[i];
+            }
+        }
+
+        let residual: Vec<f64> = values.iter()
+            .zip(trend.iter())
+            .zip(total_seasonal.iter())
+            .map(|((&o, &t), &s)| o - t - s)
+            .collect();
+
+        MultiSeasonalResult {
+            observed: values,
+            trend,
+            seasonals,
+            residual,
+            method: "MSTL".to_string(),
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// HODRICK-PRESCOTT FILTER
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Hodrick-Prescott filter for trend extraction
+pub struct HodrickPrescottFilter {
+    pub lambda: f64,
+}
+
+impl HodrickPrescottFilter {
+    /// Create HP filter with specified lambda
+    pub fn new(lambda: f64) -> Self {
+        HodrickPrescottFilter { lambda }
+    }
+
+    /// Monthly data (lambda = 129600)
+    pub fn monthly() -> Self {
+        Self::new(129600.0)
+    }
+
+    /// Quarterly data (lambda = 1600)
+    pub fn quarterly() -> Self {
+        Self::new(1600.0)
+    }
+
+    /// Annual data (lambda = 6.25)
+    pub fn annual() -> Self {
+        Self::new(6.25)
+    }
+
+    /// Apply HP filter
+    pub fn filter(&self, series: &TimeSeries) -> HPFilterResult {
+        let values = series.values();
+        let n = values.len();
+
+        if n < 4 {
+            return HPFilterResult {
+                trend: values.clone(),
+                cycle: vec![0.0; n],
+            };
+        }
+
+        // Build matrix (I + lambda * K'K) where K is second difference operator
+        // Solve using Thomas algorithm for tridiagonal system
+
+        // The system is pentadiagonal but we approximate with iterative method
+        let trend = self.hp_filter_iterative(&values);
+
+        let cycle: Vec<f64> = values.iter()
+            .zip(trend.iter())
+            .map(|(&y, &t)| y - t)
+            .collect();
+
+        HPFilterResult { trend, cycle }
+    }
+
+    fn hp_filter_iterative(&self, values: &[f64]) -> Vec<f64> {
+        let n = values.len();
+        let mut trend = values.to_vec();
+
+        // Iterative smoothing
+        for _ in 0..100 {
+            let mut new_trend = trend.clone();
+
+            for i in 2..(n - 2) {
+                // Second difference penalty
+                let d2 = trend[i - 1] - 2.0 * trend[i] + trend[i + 1];
+                let adjustment = self.lambda * d2;
+                new_trend[i] = values[i] - adjustment / (1.0 + 6.0 * self.lambda);
+            }
+
+            // Boundary conditions
+            new_trend[0] = (values[0] + self.lambda * (2.0 * trend[1] - trend[2])) / (1.0 + self.lambda);
+            new_trend[1] = (values[1] + self.lambda * (trend[0] + trend[2] - 2.0 * trend[1])) / (1.0 + 2.0 * self.lambda);
+            new_trend[n - 2] = (values[n - 2] + self.lambda * (trend[n - 3] + trend[n - 1] - 2.0 * trend[n - 2])) / (1.0 + 2.0 * self.lambda);
+            new_trend[n - 1] = (values[n - 1] + self.lambda * (2.0 * trend[n - 2] - trend[n - 3])) / (1.0 + self.lambda);
+
+            // Check convergence
+            let max_diff: f64 = trend.iter()
+                .zip(new_trend.iter())
+                .map(|(&a, &b)| (a - b).abs())
+                .fold(0.0, f64::max);
+
+            trend = new_trend;
+
+            if max_diff < 1e-8 {
+                break;
+            }
+        }
+
+        trend
+    }
+}
+
+/// HP filter result
+#[derive(Debug, Clone)]
+pub struct HPFilterResult {
+    pub trend: Vec<f64>,
+    pub cycle: Vec<f64>,
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// BAXTER-KING FILTER
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Baxter-King band-pass filter
+pub struct BaxterKingFilter {
+    pub low_period: usize,
+    pub high_period: usize,
+    pub window: usize,
+}
+
+impl BaxterKingFilter {
+    pub fn new(low_period: usize, high_period: usize, window: usize) -> Self {
+        BaxterKingFilter {
+            low_period,
+            high_period,
+            window,
+        }
+    }
+
+    /// Business cycle filter (6-32 quarters or 18-96 months)
+    pub fn business_cycle_quarterly() -> Self {
+        Self::new(6, 32, 12)
+    }
+
+    pub fn business_cycle_monthly() -> Self {
+        Self::new(18, 96, 36)
+    }
+
+    /// Apply band-pass filter
+    pub fn filter(&self, series: &TimeSeries) -> BKFilterResult {
+        let values = series.values();
+        let n = values.len();
+
+        if n < 2 * self.window + 1 {
+            return BKFilterResult {
+                cycle: vec![f64::NAN; n],
+                trend: values.clone(),
+            };
+        }
+
+        // Compute ideal filter weights
+        let weights = self.compute_weights();
+
+        // Apply symmetric filter
+        let mut cycle = vec![f64::NAN; n];
+
+        for i in self.window..(n - self.window) {
+            let mut sum = 0.0;
+            for (j, &w) in weights.iter().enumerate() {
+                let idx = i as i32 + j as i32 - self.window as i32;
+                if idx >= 0 && (idx as usize) < n {
+                    sum += w * values[idx as usize];
+                }
+            }
+            cycle[i] = sum;
+        }
+
+        // Trend is residual
+        let trend: Vec<f64> = values.iter()
+            .zip(cycle.iter())
+            .map(|(&y, &c)| if c.is_finite() { y - c } else { y })
+            .collect();
+
+        BKFilterResult { cycle, trend }
+    }
+
+    fn compute_weights(&self) -> Vec<f64> {
+        let k = self.window;
+        let omega_h = 2.0 * PI / self.low_period as f64;
+        let omega_l = 2.0 * PI / self.high_period as f64;
+
+        let mut weights = vec![0.0; 2 * k + 1];
+
+        // Central weight
+        weights[k] = (omega_h - omega_l) / PI;
+
+        // Side weights
+        for j in 1..=k {
+            let w = (sin(omega_h * j as f64) - sin(omega_l * j as f64)) / (PI * j as f64);
+            weights[k + j] = w;
+            weights[k - j] = w;
+        }
+
+        // Normalize to sum to zero (high-pass property)
+        let sum: f64 = weights.iter().sum();
+        let adjustment = sum / (2 * k + 1) as f64;
+        for w in &mut weights {
+            *w -= adjustment;
+        }
+
+        weights
+    }
+}
+
+/// BK filter result
+#[derive(Debug, Clone)]
+pub struct BKFilterResult {
+    pub cycle: Vec<f64>,
+    pub trend: Vec<f64>,
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CHRISTIANO-FITZGERALD FILTER
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Christiano-Fitzgerald band-pass filter (asymmetric, full-sample)
+pub struct ChristianoFitzgeraldFilter {
+    pub low_period: usize,
+    pub high_period: usize,
+    pub drift: bool,
+}
+
+impl ChristianoFitzgeraldFilter {
+    pub fn new(low_period: usize, high_period: usize) -> Self {
+        ChristianoFitzgeraldFilter {
+            low_period,
+            high_period,
+            drift: true,
+        }
+    }
+
+    /// Business cycle filter
+    pub fn business_cycle_quarterly() -> Self {
+        Self::new(6, 32)
+    }
+
+    /// Apply CF filter
+    pub fn filter(&self, series: &TimeSeries) -> CFFilterResult {
+        let values = series.values();
+        let n = values.len();
+
+        if n < 6 {
+            return CFFilterResult {
+                cycle: vec![0.0; n],
+                trend: values.clone(),
+            };
+        }
+
+        let omega_h = 2.0 * PI / self.low_period as f64;
+        let omega_l = 2.0 * PI / self.high_period as f64;
+
+        // Compute ideal filter weights
+        let b: Vec<f64> = (1..n)
+            .map(|j| {
+                (sin(omega_h * j as f64) - sin(omega_l * j as f64)) / (PI * j as f64)
+            })
+            .collect();
+
+        let b0 = (omega_h - omega_l) / PI;
+
+        // Apply asymmetric filter
+        let mut cycle = vec![0.0; n];
+
+        for t in 0..n {
+            let mut sum = b0 * values[t];
+
+            // Forward weights
+            for j in 1..(n - t) {
+                if j - 1 < b.len() {
+                    sum += b[j - 1] * values[t + j];
+                }
+            }
+
+            // Backward weights
+            for j in 1..=t {
+                if j - 1 < b.len() {
+                    sum += b[j - 1] * values[t - j];
+                }
+            }
+
+            cycle[t] = sum;
+        }
+
+        // Normalize
+        let cycle_mean: f64 = cycle.iter().sum::<f64>() / n as f64;
+        for c in &mut cycle {
+            *c -= cycle_mean;
+        }
+
+        let trend: Vec<f64> = values.iter()
+            .zip(cycle.iter())
+            .map(|(&y, &c)| y - c)
+            .collect();
+
+        CFFilterResult { cycle, trend }
+    }
+}
+
+/// CF filter result
+#[derive(Debug, Clone)]
+pub struct CFFilterResult {
+    pub cycle: Vec<f64>,
+    pub trend: Vec<f64>,
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// EMPIRICAL MODE DECOMPOSITION (EMD)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Empirical Mode Decomposition
+pub struct EMD {
+    pub max_imfs: usize,
+    pub sifting_iterations: usize,
+    pub sifting_threshold: f64,
+}
+
+impl EMD {
+    pub fn new() -> Self {
+        EMD {
+            max_imfs: 10,
+            sifting_iterations: 100,
+            sifting_threshold: 0.001,
+        }
+    }
+
+    /// Decompose into Intrinsic Mode Functions
+    pub fn decompose(&self, series: &TimeSeries) -> EMDResult {
+        let values = series.values();
+        let n = values.len();
+
+        if n < 10 {
+            return EMDResult {
+                imfs: vec![values.clone()],
+                residue: vec![0.0; n],
+            };
+        }
+
+        let mut imfs = Vec::new();
+        let mut residue = values.clone();
+
+        for _ in 0..self.max_imfs {
+            // Extract one IMF
+            match self.extract_imf(&residue) {
+                Some(imf) => {
+                    // Update residue
+                    residue = residue.iter()
+                        .zip(imf.iter())
+                        .map(|(&r, &i)| r - i)
+                        .collect();
+                    imfs.push(imf);
+
+                    // Check if residue is monotonic (no more IMFs)
+                    if self.is_monotonic(&residue) {
+                        break;
+                    }
+                }
+                None => break,
+            }
+        }
+
+        EMDResult { imfs, residue }
+    }
+
+    fn extract_imf(&self, signal: &[f64]) -> Option<Vec<f64>> {
+        let n = signal.len();
+        let mut h = signal.to_vec();
+
+        for _ in 0..self.sifting_iterations {
+            // Find local extrema
+            let (maxima, minima) = self.find_extrema(&h);
+
+            if maxima.len() < 2 || minima.len() < 2 {
+                return None;
+            }
+
+            // Interpolate envelopes
+            let upper = self.interpolate_envelope(&maxima, n);
+            let lower = self.interpolate_envelope(&minima, n);
+
+            // Mean envelope
+            let mean: Vec<f64> = upper.iter()
+                .zip(lower.iter())
+                .map(|(&u, &l)| (u + l) / 2.0)
+                .collect();
+
+            // Subtract mean
+            let h_new: Vec<f64> = h.iter()
+                .zip(mean.iter())
+                .map(|(&s, &m)| s - m)
+                .collect();
+
+            // Check stopping criterion
+            let sd: f64 = h.iter()
+                .zip(h_new.iter())
+                .map(|(&a, &b)| (a - b).powi(2) / (a.powi(2) + 1e-10))
+                .sum::<f64>() / n as f64;
+
+            h = h_new;
+
+            if sd < self.sifting_threshold {
+                break;
+            }
+        }
+
+        // Verify it's a valid IMF
+        if self.is_imf(&h) {
+            Some(h)
+        } else {
+            None
+        }
+    }
+
+    fn find_extrema(&self, signal: &[f64]) -> (Vec<(usize, f64)>, Vec<(usize, f64)>) {
+        let n = signal.len();
+        let mut maxima = Vec::new();
+        let mut minima = Vec::new();
+
+        for i in 1..(n - 1) {
+            if signal[i] > signal[i - 1] && signal[i] > signal[i + 1] {
+                maxima.push((i, signal[i]));
+            }
+            if signal[i] < signal[i - 1] && signal[i] < signal[i + 1] {
+                minima.push((i, signal[i]));
+            }
+        }
+
+        // Add endpoints
+        maxima.insert(0, (0, signal[0]));
+        maxima.push((n - 1, signal[n - 1]));
+        minima.insert(0, (0, signal[0]));
+        minima.push((n - 1, signal[n - 1]));
+
+        (maxima, minima)
+    }
+
+    fn interpolate_envelope(&self, points: &[(usize, f64)], n: usize) -> Vec<f64> {
+        if points.len() < 2 {
+            return vec![0.0; n];
+        }
+
+        // Cubic spline interpolation (simplified)
+        let mut envelope = vec![0.0; n];
+
+        for i in 0..n {
+            // Find surrounding points
+            let mut left_idx = 0;
+            for (j, &(idx, _)) in points.iter().enumerate() {
+                if idx <= i {
+                    left_idx = j;
+                } else {
+                    break;
+                }
+            }
+
+            let right_idx = min(left_idx + 1, points.len() - 1);
+
+            let (x0, y0) = points[left_idx];
+            let (x1, y1) = points[right_idx];
+
+            // Linear interpolation
+            if x1 > x0 {
+                let t = (i - x0) as f64 / (x1 - x0) as f64;
+                envelope[i] = y0 + t * (y1 - y0);
+            } else {
+                envelope[i] = y0;
+            }
+        }
+
+        envelope
+    }
+
+    fn is_imf(&self, signal: &[f64]) -> bool {
+        let (maxima, minima) = self.find_extrema(signal);
+        let n_extrema = maxima.len() + minima.len() - 4; // Exclude endpoints
+        let n_zeros = self.count_zero_crossings(signal);
+
+        // Number of extrema and zero crossings should differ by at most one
+        (n_extrema as i32 - n_zeros as i32).abs() <= 1
+    }
+
+    fn count_zero_crossings(&self, signal: &[f64]) -> usize {
+        let mut count = 0;
+        for i in 1..signal.len() {
+            if signal[i - 1] * signal[i] < 0.0 {
+                count += 1;
+            }
+        }
+        count
+    }
+
+    fn is_monotonic(&self, signal: &[f64]) -> bool {
+        let n = signal.len();
+        if n < 2 {
+            return true;
+        }
+
+        let increasing = signal.windows(2).all(|w| w[1] >= w[0]);
+        let decreasing = signal.windows(2).all(|w| w[1] <= w[0]);
+
+        increasing || decreasing
+    }
+}
+
+/// EMD result
+#[derive(Debug, Clone)]
+pub struct EMDResult {
+    pub imfs: Vec<Vec<f64>>,
+    pub residue: Vec<f64>,
+}
+
+impl EMDResult {
+    /// Reconstruct signal from IMFs
+    pub fn reconstruct(&self) -> Vec<f64> {
+        let n = self.residue.len();
+        let mut signal = self.residue.clone();
+
+        for imf in &self.imfs {
+            for i in 0..n {
+                signal[i] += imf[i];
+            }
+        }
+
+        signal
+    }
+
+    /// Get low-frequency trend (residue + last few IMFs)
+    pub fn get_trend(&self, n_imfs: usize) -> Vec<f64> {
+        let n = self.residue.len();
+        let mut trend = self.residue.clone();
+
+        let start = if self.imfs.len() > n_imfs { self.imfs.len() - n_imfs } else { 0 };
+
+        for imf in &self.imfs[start..] {
+            for i in 0..n {
+                trend[i] += imf[i];
+            }
+        }
+
+        trend
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SINGULAR SPECTRUM ANALYSIS (SSA)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Singular Spectrum Analysis
+pub struct SSA {
+    pub window_length: usize,
+    pub n_components: usize,
+}
+
+impl SSA {
+    pub fn new(window_length: usize, n_components: usize) -> Self {
+        SSA { window_length, n_components }
+    }
+
+    /// Decompose using SSA
+    pub fn decompose(&self, series: &TimeSeries) -> SSAResult {
+        let values = series.values();
+        let n = values.len();
+        let l = self.window_length;
+        let k = n - l + 1;
+
+        if l >= n || k < 2 {
+            return SSAResult {
+                components: vec![values.clone()],
+                eigenvalues: vec![1.0],
+            };
+        }
+
+        // Step 1: Embedding - create trajectory matrix
+        let mut trajectory = vec![vec![0.0; k]; l];
+        for i in 0..l {
+            for j in 0..k {
+                trajectory[i][j] = values[i + j];
+            }
+        }
+
+        // Step 2: SVD via power iteration (simplified)
+        let (eigenvectors, eigenvalues) = self.compute_svd(&trajectory);
+
+        // Step 3: Grouping and diagonal averaging
+        let n_comp = min(self.n_components, eigenvalues.len());
+        let mut components = Vec::with_capacity(n_comp);
+
+        for c in 0..n_comp {
+            // Reconstruct component
+            let component = self.reconstruct_component(&trajectory, &eigenvectors, c);
+            components.push(component);
+        }
+
+        SSAResult {
+            components,
+            eigenvalues,
+        }
+    }
+
+    fn compute_svd(&self, matrix: &[Vec<f64>]) -> (Vec<Vec<f64>>, Vec<f64>) {
+        let l = matrix.len();
+        let k = matrix[0].len();
+        let dim = min(l, k);
+
+        // Compute X * X^T for left singular vectors
+        let mut xxt = vec![vec![0.0; l]; l];
+        for i in 0..l {
+            for j in 0..l {
+                let mut sum = 0.0;
+                for m in 0..k {
+                    sum += matrix[i][m] * matrix[j][m];
+                }
+                xxt[i][j] = sum;
+            }
+        }
+
+        // Power iteration to find eigenvectors
+        let mut eigenvectors = Vec::new();
+        let mut eigenvalues = Vec::new();
+
+        let mut xxt_remaining = xxt.clone();
+
+        for _ in 0..min(dim, 10) {
+            // Random initial vector
+            let mut v: Vec<f64> = (0..l).map(|i| ((i * 7 + 3) % 13) as f64 / 13.0).collect();
+
+            // Power iteration
+            for _ in 0..50 {
+                // Multiply by matrix
+                let mut new_v = vec![0.0; l];
+                for i in 0..l {
+                    for j in 0..l {
+                        new_v[i] += xxt_remaining[i][j] * v[j];
+                    }
+                }
+
+                // Normalize
+                let norm: f64 = sqrt(new_v.iter().map(|x| x * x).sum::<f64>());
+                if norm > 1e-10 {
+                    for x in &mut new_v {
+                        *x /= norm;
+                    }
+                }
+
+                v = new_v;
+            }
+
+            // Eigenvalue
+            let mut av = vec![0.0; l];
+            for i in 0..l {
+                for j in 0..l {
+                    av[i] += xxt_remaining[i][j] * v[j];
+                }
+            }
+            let eigenvalue: f64 = v.iter().zip(av.iter()).map(|(&a, &b)| a * b).sum();
+
+            if eigenvalue < 1e-10 {
+                break;
+            }
+
+            eigenvalues.push(sqrt(eigenvalue));
+            eigenvectors.push(v.clone());
+
+            // Deflate matrix
+            for i in 0..l {
+                for j in 0..l {
+                    xxt_remaining[i][j] -= eigenvalue * v[i] * v[j];
+                }
+            }
+        }
+
+        (eigenvectors, eigenvalues)
+    }
+
+    fn reconstruct_component(&self, trajectory: &[Vec<f64>], eigenvectors: &[Vec<f64>], idx: usize) -> Vec<f64> {
+        let l = trajectory.len();
+        let k = trajectory[0].len();
+        let n = l + k - 1;
+
+        if idx >= eigenvectors.len() {
+            return vec![0.0; n];
+        }
+
+        let u = &eigenvectors[idx];
+
+        // Project trajectory onto eigenvector
+        let mut v = vec![0.0; k];
+        for j in 0..k {
+            for i in 0..l {
+                v[j] += u[i] * trajectory[i][j];
+            }
+        }
+
+        // Reconstruct matrix
+        let mut reconstructed = vec![vec![0.0; k]; l];
+        for i in 0..l {
+            for j in 0..k {
+                reconstructed[i][j] = u[i] * v[j];
+            }
+        }
+
+        // Diagonal averaging
+        let mut component = vec![0.0; n];
+        let mut counts = vec![0; n];
+
+        for i in 0..l {
+            for j in 0..k {
+                component[i + j] += reconstructed[i][j];
+                counts[i + j] += 1;
+            }
+        }
+
+        for i in 0..n {
+            if counts[i] > 0 {
+                component[i] /= counts[i] as f64;
+            }
+        }
+
+        component
+    }
+}
+
+/// SSA result
+#[derive(Debug, Clone)]
+pub struct SSAResult {
+    pub components: Vec<Vec<f64>>,
+    pub eigenvalues: Vec<f64>,
+}
+
+impl SSAResult {
+    /// Reconstruct with first n components (trend)
+    pub fn trend(&self, n: usize) -> Vec<f64> {
+        if self.components.is_empty() {
+            return Vec::new();
+        }
+
+        let len = self.components[0].len();
+        let mut trend = vec![0.0; len];
+
+        for c in self.components.iter().take(n) {
+            for (i, &v) in c.iter().enumerate() {
+                trend[i] += v;
+            }
+        }
+
+        trend
+    }
+
+    /// Explained variance ratio for each component
+    pub fn explained_variance_ratio(&self) -> Vec<f64> {
+        let total: f64 = self.eigenvalues.iter().map(|e| e * e).sum();
+        if total < 1e-10 {
+            return vec![0.0; self.eigenvalues.len()];
+        }
+
+        self.eigenvalues.iter()
+            .map(|e| e * e / total)
+            .collect()
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// WAVELET DECOMPOSITION
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Discrete Wavelet Transform decomposition
+pub struct WaveletDecomposition {
+    pub wavelet: WaveletType,
+    pub levels: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum WaveletType {
+    Haar,
+    Daubechies4,
+    Symlet4,
+}
+
+impl WaveletDecomposition {
+    pub fn new(wavelet: WaveletType, levels: usize) -> Self {
+        WaveletDecomposition { wavelet, levels }
+    }
+
+    pub fn haar(levels: usize) -> Self {
+        Self::new(WaveletType::Haar, levels)
+    }
+
+    /// Decompose using DWT
+    pub fn decompose(&self, series: &TimeSeries) -> WaveletResult {
+        let values = series.values();
+        let n = values.len();
+
+        // Pad to power of 2
+        let padded_n = (2.0_f64).powi((n as f64).log2().ceil() as i32) as usize;
+        let mut padded = vec![0.0; padded_n];
+        padded[..n].copy_from_slice(&values);
+
+        // Get filter coefficients
+        let (low_pass, high_pass) = self.get_filters();
+
+        let mut approximations = Vec::new();
+        let mut details = Vec::new();
+        let mut current = padded;
+
+        for _level in 0..self.levels {
+            if current.len() < 4 {
+                break;
+            }
+
+            let (approx, detail) = self.dwt_step(&current, &low_pass, &high_pass);
+            details.push(detail);
+            approximations.push(approx.clone());
+            current = approx;
+        }
+
+        WaveletResult {
+            approximations,
+            details,
+            original_length: n,
+        }
+    }
+
+    fn get_filters(&self) -> (Vec<f64>, Vec<f64>) {
+        match self.wavelet {
+            WaveletType::Haar => {
+                let s2 = 1.0 / sqrt(2.0);
+                (vec![s2, s2], vec![s2, -s2])
+            }
+            WaveletType::Daubechies4 => {
+                let h0 = (1.0 + sqrt(3.0)) / (4.0 * sqrt(2.0));
+                let h1 = (3.0 + sqrt(3.0)) / (4.0 * sqrt(2.0));
+                let h2 = (3.0 - sqrt(3.0)) / (4.0 * sqrt(2.0));
+                let h3 = (1.0 - sqrt(3.0)) / (4.0 * sqrt(2.0));
+                (
+                    vec![h0, h1, h2, h3],
+                    vec![h3, -h2, h1, -h0],
+                )
+            }
+            WaveletType::Symlet4 => {
+                // Symlet 4 coefficients
+                let h = vec![
+                    -0.07576571478927333,
+                    -0.02963552764599851,
+                    0.49761866763201545,
+                    0.8037387518059161,
+                    0.29785779560527736,
+                    -0.09921954357684722,
+                    -0.012603967262037833,
+                    0.0322231006040427,
+                ];
+                let g: Vec<f64> = h.iter().rev().enumerate()
+                    .map(|(i, &v)| if i % 2 == 0 { v } else { -v })
+                    .collect();
+                (h, g)
+            }
+        }
+    }
+
+    fn dwt_step(&self, signal: &[f64], low_pass: &[f64], high_pass: &[f64]) -> (Vec<f64>, Vec<f64>) {
+        let n = signal.len();
+        let filter_len = low_pass.len();
+        let out_len = n / 2;
+
+        let mut approx = vec![0.0; out_len];
+        let mut detail = vec![0.0; out_len];
+
+        for i in 0..out_len {
+            let start = 2 * i;
+            for (k, (&l, &h)) in low_pass.iter().zip(high_pass.iter()).enumerate() {
+                let idx = (start + k) % n;
+                approx[i] += l * signal[idx];
+                detail[i] += h * signal[idx];
+            }
+        }
+
+        (approx, detail)
+    }
+}
+
+/// Wavelet decomposition result
+#[derive(Debug, Clone)]
+pub struct WaveletResult {
+    pub approximations: Vec<Vec<f64>>,  // Low-frequency components at each level
+    pub details: Vec<Vec<f64>>,         // High-frequency components at each level
+    pub original_length: usize,
+}
+
+impl WaveletResult {
+    /// Get trend from approximation at specified level
+    pub fn trend(&self, level: usize) -> Vec<f64> {
+        if level >= self.approximations.len() {
+            return vec![0.0; self.original_length];
+        }
+
+        // Upsample to original length
+        self.upsample(&self.approximations[level], self.original_length)
+    }
+
+    fn upsample(&self, signal: &[f64], target_len: usize) -> Vec<f64> {
+        let n = signal.len();
+        let mut result = vec![0.0; target_len];
+
+        for i in 0..target_len {
+            let idx = (i * n) / target_len;
+            result[i] = signal[min(idx, n - 1)];
+        }
+
+        result
+    }
+
+    /// Number of decomposition levels
+    pub fn num_levels(&self) -> usize {
+        self.approximations.len()
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CONVENIENCE FUNCTIONS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Decompose time series with automatic method selection
+pub fn auto_decompose(series: &TimeSeries, seasonal_periods: Option<usize>) -> DecompositionResult {
+    let n = series.len();
+    let periods = seasonal_periods.unwrap_or(detect_period(series));
+
+    // Use STL for longer series with seasonality
+    if n >= periods * 2 && periods > 1 {
+        let stl = STL::new(periods);
+        stl.decompose(series)
+    } else {
+        // Use classical decomposition
+        let classical = ClassicalDecomposition::additive(max(periods, 2));
+        classical.decompose(series)
+    }
+}
+
+/// Detect dominant seasonal period
+pub fn detect_period(series: &TimeSeries) -> usize {
+    let values = series.values();
+    let n = values.len();
+
+    if n < 10 {
+        return 1;
+    }
+
+    let mean: f64 = values.iter().sum::<f64>() / n as f64;
+
+    // Compute autocorrelation for different lags
+    let mut best_period = 1;
+    let mut best_acf = 0.0;
+
+    let max_lag = min(n / 3, 365);
+
+    for lag in 2..=max_lag {
+        let mut num = 0.0;
+        let mut den = 0.0;
+
+        for i in lag..n {
+            num += (values[i] - mean) * (values[i - lag] - mean);
+        }
+        for v in values {
+            den += (v - mean).powi(2);
+        }
+
+        let acf = num / (den + 1e-10);
+
+        // Check if this is a peak
+        if acf > best_acf && acf > 0.3 {
+            // Verify it's a local maximum
+            let is_peak = if lag > 2 && lag < max_lag - 1 {
+                let prev_acf = {
+                    let mut num = 0.0;
+                    for i in (lag - 1)..n {
+                        num += (values[i] - mean) * (values[i - lag + 1] - mean);
+                    }
+                    num / (den + 1e-10)
+                };
+                let next_acf = {
+                    let mut num = 0.0;
+                    for i in (lag + 1)..n {
+                        num += (values[i] - mean) * (values[i - lag - 1] - mean);
+                    }
+                    num / (den + 1e-10)
+                };
+                acf > prev_acf && acf > next_acf
+            } else {
+                true
+            };
+
+            if is_peak {
+                best_acf = acf;
+                best_period = lag;
+            }
+        }
+    }
+
+    best_period
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// TESTS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_classical_decomposition() {
+        let values: Vec<f64> = (0..120)
+            .map(|i| 100.0 + i as f64 * 0.5 + 20.0 * sin(2.0 * PI * i as f64 / 12.0))
+            .collect();
+        let ts = TimeSeries::from_values("test", &values, Frequency::Monthly);
+
+        let decomp = ClassicalDecomposition::additive(12);
+        let result = decomp.decompose(&ts);
+
+        assert_eq!(result.observed.len(), 120);
+        assert_eq!(result.trend.len(), 120);
+        assert_eq!(result.seasonal.len(), 120);
+    }
+
+    #[test]
+    fn test_stl() {
+        let values: Vec<f64> = (0..120)
+            .map(|i| 100.0 + i as f64 * 0.5 + 20.0 * sin(2.0 * PI * i as f64 / 12.0))
+            .collect();
+        let ts = TimeSeries::from_values("test", &values, Frequency::Monthly);
+
+        let stl = STL::new(12);
+        let result = stl.decompose(&ts);
+
+        assert!(result.trend_strength() > 0.5);
+        assert!(result.seasonal_strength() > 0.5);
+    }
+
+    #[test]
+    fn test_hp_filter() {
+        let values: Vec<f64> = (0..100)
+            .map(|i| 100.0 + i as f64 * 0.5 + 10.0 * (i as f64 * 0.2).sin())
+            .collect();
+        let ts = TimeSeries::from_values("test", &values, Frequency::Quarterly);
+
+        let hp = HodrickPrescottFilter::quarterly();
+        let result = hp.filter(&ts);
+
+        assert_eq!(result.trend.len(), 100);
+        assert_eq!(result.cycle.len(), 100);
+    }
+
+    #[test]
+    fn test_emd() {
+        let values: Vec<f64> = (0..200)
+            .map(|i| {
+                10.0 * sin(2.0 * PI * i as f64 / 50.0)
+                    + 5.0 * sin(2.0 * PI * i as f64 / 10.0)
+                    + i as f64 * 0.1
+            })
+            .collect();
+        let ts = TimeSeries::from_values("test", &values, Frequency::Daily);
+
+        let emd = EMD::new();
+        let result = emd.decompose(&ts);
+
+        assert!(!result.imfs.is_empty());
+        assert_eq!(result.residue.len(), 200);
+    }
+
+    #[test]
+    fn test_ssa() {
+        let values: Vec<f64> = (0..100)
+            .map(|i| 50.0 + 20.0 * sin(2.0 * PI * i as f64 / 20.0) + i as f64 * 0.2)
+            .collect();
+        let ts = TimeSeries::from_values("test", &values, Frequency::Daily);
+
+        let ssa = SSA::new(20, 3);
+        let result = ssa.decompose(&ts);
+
+        assert!(!result.components.is_empty());
+        assert_eq!(result.components[0].len(), 100);
+    }
+
+    #[test]
+    fn test_wavelet() {
+        let values: Vec<f64> = (0..128)
+            .map(|i| 50.0 + 10.0 * sin(2.0 * PI * i as f64 / 16.0))
+            .collect();
+        let ts = TimeSeries::from_values("test", &values, Frequency::Daily);
+
+        let wavelet = WaveletDecomposition::haar(3);
+        let result = wavelet.decompose(&ts);
+
+        assert_eq!(result.num_levels(), 3);
+        assert_eq!(result.original_length, 128);
+    }
+
+    #[test]
+    fn test_period_detection() {
+        let values: Vec<f64> = (0..365)
+            .map(|i| 100.0 + 30.0 * sin(2.0 * PI * i as f64 / 7.0))
+            .collect();
+        let ts = TimeSeries::from_values("test", &values, Frequency::Daily);
+
+        let period = detect_period(&ts);
+        assert!(period >= 6 && period <= 8); // Should detect ~7 day cycle
+    }
+}

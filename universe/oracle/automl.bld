@@ -1,0 +1,1542 @@
+// ============================================================================
+// BUILD-UNIVERSE: Oracle AutoML Module
+// ============================================================================
+// Copyright © 2024-2025 Zain Dana Harper. All Rights Reserved.
+// Copyright (c) 2024-2025 Zain Dana Harper. All Rights Reserved.
+// ============================================================================
+// Automatic model selection and hyperparameter optimization
+// ============================================================================
+
+use foundation::collections::{Vec, HashMap, HashSet, BinaryHeap};
+use foundation::math::{Matrix, Vector, sqrt, log, exp, abs, min, max, pow};
+use foundation::sync::{Arc, RwLock, Mutex};
+use foundation::io::{Result, Error};
+
+// ============================================================================
+// MODEL TYPES
+// ============================================================================
+
+/// Available forecasting model types
+@derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ModelType {
+    // Statistical Models
+    ARIMA,
+    SARIMA,
+    ETS,
+    Theta,
+    HoltWinters,
+
+    // Machine Learning
+    RandomForest,
+    GradientBoosting,
+    XGBoost,
+    LightGBM,
+
+    // Neural Networks
+    MLP,
+    LSTM,
+    GRU,
+    Transformer,
+    NBEATS,
+    TFT,
+
+    // Ensemble
+    SimpleAverage,
+    WeightedAverage,
+    StackedEnsemble,
+}
+
+/// Model configuration with hyperparameters
+@derive(Clone, Debug)]
+pub struct ModelConfig {
+    pub model_type: ModelType,
+    pub hyperparameters: HashMap<String, HyperparamValue>,
+    pub preprocessing: PreprocessingConfig,
+}
+
+/// Hyperparameter value types
+@derive(Clone, Debug)]
+pub enum HyperparamValue {
+    Int(Int),
+    Float(Float),
+    Bool(Bool),
+    String(String),
+    IntList(Vec<Int>),
+    FloatList(Vec<Float>),
+}
+
+impl HyperparamValue {
+    pub fn as_int(&self) -> Option<Int> {
+        match self {
+            HyperparamValue::Int(v) => Some(*v),
+            _ => None,
+        }
+    }
+
+    pub fn as_float(&self) -> Option<Float> {
+        match self {
+            HyperparamValue::Float(v) => Some(*v),
+            HyperparamValue::Int(v) => Some(*v as Float),
+            _ => None,
+        }
+    }
+
+    pub fn as_bool(&self) -> Option<Bool> {
+        match self {
+            HyperparamValue::Bool(v) => Some(*v),
+            _ => None,
+        }
+    }
+}
+
+/// Preprocessing configuration
+@derive(Clone, Debug)]
+pub struct PreprocessingConfig {
+    pub differencing: Int,
+    pub log_transform: Bool,
+    pub scaling: ScalingMethod,
+    pub deseasonalize: Bool,
+    pub remove_outliers: Bool,
+}
+
+impl PreprocessingConfig {
+    pub fn default() -> Self {
+        Self {
+            differencing: 0,
+            log_transform: false,
+            scaling: ScalingMethod::None,
+            deseasonalize: false,
+            remove_outliers: false,
+        }
+    }
+}
+
+@derive(Clone, Copy, Debug, PartialEq)]
+pub enum ScalingMethod {
+    None,
+    MinMax,
+    Standard,
+    Robust,
+}
+
+// ============================================================================
+// HYPERPARAMETER SEARCH SPACE
+// ============================================================================
+
+/// Definition of hyperparameter search space
+@derive(Clone, Debug)]
+pub struct SearchSpace {
+    pub parameters: HashMap<String, ParameterSpace>,
+}
+
+impl SearchSpace {
+    pub fn new() -> Self {
+        Self {
+            parameters: HashMap::new(),
+        }
+    }
+
+    pub fn add_int(&mut self, name: &str, min: Int, max: Int) -> &mut Self {
+        self.parameters.insert(
+            name.to_string(),
+            ParameterSpace::Int { min, max }
+        );
+        self
+    }
+
+    pub fn add_float(&mut self, name: &str, min: Float, max: Float, log_scale: Bool) -> &mut Self {
+        self.parameters.insert(
+            name.to_string(),
+            ParameterSpace::Float { min, max, log_scale }
+        );
+        self
+    }
+
+    pub fn add_categorical(&mut self, name: &str, options: Vec<String>) -> &mut Self {
+        self.parameters.insert(
+            name.to_string(),
+            ParameterSpace::Categorical { options }
+        );
+        self
+    }
+
+    pub fn add_bool(&mut self, name: &str) -> &mut Self {
+        self.parameters.insert(
+            name.to_string(),
+            ParameterSpace::Bool
+        );
+        self
+    }
+
+    /// Sample a random configuration
+    pub fn sample(&self, rng: &mut RandomGenerator) -> HashMap<String, HyperparamValue> {
+        let mut config = HashMap::new();
+
+        for (name, space) in &self.parameters {
+            let value = match space {
+                ParameterSpace::Int { min, max } => {
+                    HyperparamValue::Int(rng.rand_int(*min, *max))
+                }
+                ParameterSpace::Float { min, max, log_scale } => {
+                    let v = if *log_scale {
+                        let log_min = log(*min);
+                        let log_max = log(*max);
+                        exp(rng.rand_float(log_min, log_max))
+                    } else {
+                        rng.rand_float(*min, *max)
+                    };
+                    HyperparamValue::Float(v)
+                }
+                ParameterSpace::Categorical { options } => {
+                    let idx = rng.rand_int(0, options.len() as Int - 1) as usize;
+                    HyperparamValue::String(options[idx].clone())
+                }
+                ParameterSpace::Bool => {
+                    HyperparamValue::Bool(rng.rand_float(0.0, 1.0) > 0.5)
+                }
+            };
+            config.insert(name.clone(), value);
+        }
+
+        config
+    }
+}
+
+/// Individual parameter space
+@derive(Clone, Debug)]
+pub enum ParameterSpace {
+    Int { min: Int, max: Int },
+    Float { min: Float, max: Float, log_scale: Bool },
+    Categorical { options: Vec<String> },
+    Bool,
+}
+
+// ============================================================================
+// HYPERPARAMETER OPTIMIZER
+// ============================================================================
+
+/// Base trait for hyperparameter optimizers
+pub trait HyperparamOptimizer {
+    fn suggest(&mut self, search_space: &SearchSpace) -> HashMap<String, HyperparamValue>;
+    fn observe(&mut self, params: HashMap<String, HyperparamValue>, score: Float);
+    fn best_params(&self) -> Option<HashMap<String, HyperparamValue>>;
+    fn best_score(&self) -> Option<Float>;
+}
+
+/// Random search optimizer
+pub struct RandomSearch {
+    n_iterations: Int,
+    current_iter: Int,
+    rng: RandomGenerator,
+    history: Vec<(HashMap<String, HyperparamValue>, Float)>,
+}
+
+impl RandomSearch {
+    pub fn new(n_iterations: Int, seed: u64) -> Self {
+        Self {
+            n_iterations,
+            current_iter: 0,
+            rng: RandomGenerator::new(seed),
+            history: Vec::new(),
+        }
+    }
+}
+
+impl HyperparamOptimizer for RandomSearch {
+    fn suggest(&mut self, search_space: &SearchSpace) -> HashMap<String, HyperparamValue> {
+        self.current_iter += 1;
+        search_space.sample(&mut self.rng)
+    }
+
+    fn observe(&mut self, params: HashMap<String, HyperparamValue>, score: Float) {
+        self.history.push((params, score));
+    }
+
+    fn best_params(&self) -> Option<HashMap<String, HyperparamValue>> {
+        self.history.iter()
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+            .map(|(p, _)| p.clone())
+    }
+
+    fn best_score(&self) -> Option<Float> {
+        self.history.iter()
+            .map(|(_, s)| *s)
+            .fold(None, |acc, s| match acc {
+                None => Some(s),
+                Some(best) => Some(if s > best { s } else { best }),
+            })
+    }
+}
+
+/// Grid search optimizer
+pub struct GridSearch {
+    grid_points: Vec<HashMap<String, HyperparamValue>>,
+    current_idx: usize,
+    history: Vec<(HashMap<String, HyperparamValue>, Float)>,
+}
+
+impl GridSearch {
+    pub fn new(search_space: &SearchSpace, n_points_per_dim: Int) -> Self {
+        let grid_points = Self::generate_grid(search_space, n_points_per_dim);
+        Self {
+            grid_points,
+            current_idx: 0,
+            history: Vec::new(),
+        }
+    }
+
+    fn generate_grid(space: &SearchSpace, n_points: Int) -> Vec<HashMap<String, HyperparamValue>> {
+        let mut axes: Vec<(String, Vec<HyperparamValue>)> = Vec::new();
+
+        for (name, param_space) in &space.parameters {
+            let values = match param_space {
+                ParameterSpace::Int { min, max } => {
+                    let step = (max - min) / (n_points - 1);
+                    (0..n_points)
+                        .map(|i| HyperparamValue::Int(min + i * step))
+                        .collect()
+                }
+                ParameterSpace::Float { min, max, log_scale } => {
+                    if *log_scale {
+                        let log_min = log(*min);
+                        let log_max = log(*max);
+                        let step = (log_max - log_min) / (n_points - 1) as Float;
+                        (0..n_points)
+                            .map(|i| HyperparamValue::Float(exp(log_min + i as Float * step)))
+                            .collect()
+                    } else {
+                        let step = (max - min) / (n_points - 1) as Float;
+                        (0..n_points)
+                            .map(|i| HyperparamValue::Float(min + i as Float * step))
+                            .collect()
+                    }
+                }
+                ParameterSpace::Categorical { options } => {
+                    options.iter()
+                        .map(|o| HyperparamValue::String(o.clone()))
+                        .collect()
+                }
+                ParameterSpace::Bool => {
+                    vec![HyperparamValue::Bool(false), HyperparamValue::Bool(true)]
+                }
+            };
+            axes.push((name.clone(), values));
+        }
+
+        // Generate cartesian product
+        Self::cartesian_product(&axes)
+    }
+
+    fn cartesian_product(axes: &[(String, Vec<HyperparamValue>)]) -> Vec<HashMap<String, HyperparamValue>> {
+        if axes.is_empty() {
+            return vec![HashMap::new()];
+        }
+
+        let (name, values) = &axes[0];
+        let rest = Self::cartesian_product(&axes[1..]);
+
+        let mut result = Vec::new();
+        for v in values {
+            for r in &rest {
+                let mut config = r.clone();
+                config.insert(name.clone(), v.clone());
+                result.push(config);
+            }
+        }
+
+        result
+    }
+}
+
+impl HyperparamOptimizer for GridSearch {
+    fn suggest(&mut self, _search_space: &SearchSpace) -> HashMap<String, HyperparamValue> {
+        let params = self.grid_points[self.current_idx].clone();
+        self.current_idx = (self.current_idx + 1) % self.grid_points.len();
+        params
+    }
+
+    fn observe(&mut self, params: HashMap<String, HyperparamValue>, score: Float) {
+        self.history.push((params, score));
+    }
+
+    fn best_params(&self) -> Option<HashMap<String, HyperparamValue>> {
+        self.history.iter()
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+            .map(|(p, _)| p.clone())
+    }
+
+    fn best_score(&self) -> Option<Float> {
+        self.history.iter()
+            .map(|(_, s)| *s)
+            .fold(None, |acc, s| match acc {
+                None => Some(s),
+                Some(best) => Some(if s > best { s } else { best }),
+            })
+    }
+}
+
+/// Bayesian optimization using Gaussian Process
+pub struct BayesianOptimizer {
+    n_initial_random: Int,
+    acquisition: AcquisitionFunction,
+    rng: RandomGenerator,
+    history: Vec<(HashMap<String, HyperparamValue>, Float)>,
+    gp: Option<GaussianProcess>,
+}
+
+@derive(Clone, Copy, Debug)]
+pub enum AcquisitionFunction {
+    ExpectedImprovement,
+    ProbabilityOfImprovement,
+    UpperConfidenceBound { kappa: Float },
+    ThompsonSampling,
+}
+
+impl BayesianOptimizer {
+    pub fn new(n_initial_random: Int, acquisition: AcquisitionFunction, seed: u64) -> Self {
+        Self {
+            n_initial_random,
+            acquisition,
+            rng: RandomGenerator::new(seed),
+            history: Vec::new(),
+            gp: None,
+        }
+    }
+}
+
+impl HyperparamOptimizer for BayesianOptimizer {
+    fn suggest(&mut self, search_space: &SearchSpace) -> HashMap<String, HyperparamValue> {
+        // Initial random exploration
+        if self.history.len() < self.n_initial_random as usize {
+            return search_space.sample(&mut self.rng);
+        }
+
+        // Fit Gaussian Process
+        let x_train: Vec<Vec<Float>> = self.history.iter()
+            .map(|(params, _)| self.params_to_vector(params, search_space))
+            .collect();
+        let y_train: Vec<Float> = self.history.iter()
+            .map(|(_, score)| *score)
+            .collect();
+
+        let gp = GaussianProcess::new(Kernel::RBF { length_scale: 1.0 })
+            .fit(&x_train, &y_train);
+        self.gp = Some(gp);
+
+        // Optimize acquisition function
+        self.optimize_acquisition(search_space)
+    }
+
+    fn observe(&mut self, params: HashMap<String, HyperparamValue>, score: Float) {
+        self.history.push((params, score));
+    }
+
+    fn best_params(&self) -> Option<HashMap<String, HyperparamValue>> {
+        self.history.iter()
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+            .map(|(p, _)| p.clone())
+    }
+
+    fn best_score(&self) -> Option<Float> {
+        self.history.iter()
+            .map(|(_, s)| *s)
+            .fold(None, |acc, s| match acc {
+                None => Some(s),
+                Some(best) => Some(if s > best { s } else { best }),
+            })
+    }
+}
+
+impl BayesianOptimizer {
+    /// Convert parameters to numeric vector
+    fn params_to_vector(&self, params: &HashMap<String, HyperparamValue>, space: &SearchSpace) -> Vec<Float> {
+        let mut vec = Vec::new();
+
+        for (name, param_space) in &space.parameters {
+            if let Some(value) = params.get(name) {
+                let normalized = match (value, param_space) {
+                    (HyperparamValue::Int(v), ParameterSpace::Int { min, max }) => {
+                        (*v - min) as Float / (max - min) as Float
+                    }
+                    (HyperparamValue::Float(v), ParameterSpace::Float { min, max, log_scale }) => {
+                        if *log_scale {
+                            (log(*v) - log(*min)) / (log(*max) - log(*min))
+                        } else {
+                            (v - min) / (max - min)
+                        }
+                    }
+                    (HyperparamValue::String(s), ParameterSpace::Categorical { options }) => {
+                        options.iter().position(|o| o == s).unwrap_or(0) as Float / options.len() as Float
+                    }
+                    (HyperparamValue::Bool(b), ParameterSpace::Bool) => {
+                        if *b { 1.0 } else { 0.0 }
+                    }
+                    _ => 0.5,
+                };
+                vec.push(normalized);
+            }
+        }
+
+        vec
+    }
+
+    /// Convert vector back to parameters
+    fn vector_to_params(&self, vec: &[Float], space: &SearchSpace) -> HashMap<String, HyperparamValue> {
+        let mut params = HashMap::new();
+        let mut idx = 0;
+
+        for (name, param_space) in &space.parameters {
+            if idx >= vec.len() {
+                break;
+            }
+
+            let value = match param_space {
+                ParameterSpace::Int { min, max } => {
+                    let v = (vec[idx] * (max - min) as Float + *min as Float).round() as Int;
+                    HyperparamValue::Int(v.clamp(*min, *max))
+                }
+                ParameterSpace::Float { min, max, log_scale } => {
+                    let v = if *log_scale {
+                        exp(vec[idx] * (log(*max) - log(*min)) + log(*min))
+                    } else {
+                        vec[idx] * (max - min) + min
+                    };
+                    HyperparamValue::Float(v.clamp(*min, *max))
+                }
+                ParameterSpace::Categorical { options } => {
+                    let idx = (vec[idx] * options.len() as Float) as usize;
+                    let idx = idx.min(options.len() - 1);
+                    HyperparamValue::String(options[idx].clone())
+                }
+                ParameterSpace::Bool => {
+                    HyperparamValue::Bool(vec[idx] > 0.5)
+                }
+            };
+
+            params.insert(name.clone(), value);
+            idx += 1;
+        }
+
+        params
+    }
+
+    /// Optimize acquisition function
+    fn optimize_acquisition(&mut self, space: &SearchSpace) -> HashMap<String, HyperparamValue> {
+        let gp = self.gp.as_ref().unwrap();
+        let y_best = self.best_score().unwrap_or(Float::NEG_INFINITY);
+
+        let n_candidates = 100;
+        let mut best_value = Float::NEG_INFINITY;
+        let mut best_params = space.sample(&mut self.rng);
+
+        for _ in 0..n_candidates {
+            let params = space.sample(&mut self.rng);
+            let x = self.params_to_vector(&params, space);
+            let (mean, std) = gp.predict(&x);
+
+            let acq_value = match self.acquisition {
+                AcquisitionFunction::ExpectedImprovement => {
+                    if std < 1e-10 {
+                        0.0
+                    } else {
+                        let z = (mean - y_best) / std;
+                        (mean - y_best) * normal_cdf(z) + std * normal_pdf(z)
+                    }
+                }
+                AcquisitionFunction::ProbabilityOfImprovement => {
+                    if std < 1e-10 {
+                        0.0
+                    } else {
+                        normal_cdf((mean - y_best) / std)
+                    }
+                }
+                AcquisitionFunction::UpperConfidenceBound { kappa } => {
+                    mean + kappa * std
+                }
+                AcquisitionFunction::ThompsonSampling => {
+                    // Sample from posterior
+                    mean + std * self.rng.rand_normal()
+                }
+            };
+
+            if acq_value > best_value {
+                best_value = acq_value;
+                best_params = params;
+            }
+        }
+
+        best_params
+    }
+}
+
+// ============================================================================
+// GAUSSIAN PROCESS
+// ============================================================================
+
+/// Gaussian Process for Bayesian optimization
+pub struct GaussianProcess {
+    kernel: Kernel,
+    x_train: Vec<Vec<Float>>,
+    y_train: Vec<Float>,
+    alpha: Vec<Float>,        // (K + noise*I)^-1 * y
+    l_matrix: Matrix<Float>,  // Cholesky of K + noise*I
+    noise: Float,
+}
+
+@derive(Clone, Debug)]
+pub enum Kernel {
+    RBF { length_scale: Float },
+    Matern { nu: Float, length_scale: Float },
+    RationalQuadratic { alpha: Float, length_scale: Float },
+    Periodic { period: Float, length_scale: Float },
+}
+
+impl GaussianProcess {
+    pub fn new(kernel: Kernel) -> Self {
+        Self {
+            kernel,
+            x_train: Vec::new(),
+            y_train: Vec::new(),
+            alpha: Vec::new(),
+            l_matrix: Matrix::zeros(0, 0),
+            noise: 1e-5,
+        }
+    }
+
+    pub fn with_noise(mut self, noise: Float) -> Self {
+        self.noise = noise;
+        self
+    }
+
+    /// Fit the GP to training data
+    pub fn fit(mut self, x: &[Vec<Float>], y: &[Float]) -> Self {
+        let n = x.len();
+        self.x_train = x.to_vec();
+        self.y_train = y.to_vec();
+
+        // Compute kernel matrix
+        let mut k = Matrix::zeros(n, n);
+        for i in 0..n {
+            for j in 0..n {
+                k[(i, j)] = self.kernel_value(&x[i], &x[j]);
+            }
+            k[(i, i)] += self.noise;  // Add noise to diagonal
+        }
+
+        // Cholesky decomposition
+        self.l_matrix = self.cholesky(&k);
+
+        // Solve for alpha: L * L' * alpha = y
+        let z = self.solve_lower(&self.l_matrix, y);
+        self.alpha = self.solve_upper_transpose(&self.l_matrix, &z);
+
+        self
+    }
+
+    /// Predict mean and std at new point
+    pub fn predict(&self, x: &[Float]) -> (Float, Float) {
+        let n = self.x_train.len();
+        if n == 0 {
+            return (0.0, 1.0);
+        }
+
+        // Compute kernel vector
+        let mut k_star = vec![0.0; n];
+        for i in 0..n {
+            k_star[i] = self.kernel_value(x, &self.x_train[i]);
+        }
+
+        // Mean: k* * alpha
+        let mean: Float = k_star.iter().zip(self.alpha.iter())
+            .map(|(&k, &a)| k * a)
+            .sum();
+
+        // Variance: k** - k* * K^-1 * k*
+        let k_self = self.kernel_value(x, x) + self.noise;
+        let v = self.solve_lower(&self.l_matrix, &k_star);
+        let variance = k_self - v.iter().map(|&vi| vi * vi).sum::<Float>();
+        let std = sqrt(variance.max(0.0));
+
+        (mean, std)
+    }
+
+    /// Compute kernel value between two points
+    fn kernel_value(&self, x1: &[Float], x2: &[Float]) -> Float {
+        let sq_dist: Float = x1.iter().zip(x2.iter())
+            .map(|(&a, &b)| (a - b).powi(2))
+            .sum();
+
+        match &self.kernel {
+            Kernel::RBF { length_scale } => {
+                exp(-sq_dist / (2.0 * length_scale * length_scale))
+            }
+            Kernel::Matern { nu, length_scale } => {
+                let r = sqrt(sq_dist) / length_scale;
+                if *nu == 0.5 {
+                    exp(-r)
+                } else if *nu == 1.5 {
+                    (1.0 + sqrt(3.0) * r) * exp(-sqrt(3.0) * r)
+                } else if *nu == 2.5 {
+                    (1.0 + sqrt(5.0) * r + 5.0 * sq_dist / (3.0 * length_scale * length_scale)) *
+                        exp(-sqrt(5.0) * r)
+                } else {
+                    exp(-r)  // Default to Matern 1/2
+                }
+            }
+            Kernel::RationalQuadratic { alpha, length_scale } => {
+                pow(1.0 + sq_dist / (2.0 * alpha * length_scale * length_scale), -*alpha)
+            }
+            Kernel::Periodic { period, length_scale } => {
+                let r = sqrt(sq_dist);
+                let arg = 3.14159265359 * r / period;
+                exp(-2.0 * (sin(arg) / length_scale).powi(2))
+            }
+        }
+    }
+
+    /// Cholesky decomposition
+    fn cholesky(&self, a: &Matrix<Float>) -> Matrix<Float> {
+        let n = a.rows();
+        let mut l = Matrix::zeros(n, n);
+
+        for i in 0..n {
+            for j in 0..=i {
+                let mut sum = a[(i, j)];
+                for k in 0..j {
+                    sum -= l[(i, k)] * l[(j, k)];
+                }
+
+                if i == j {
+                    l[(i, i)] = sqrt(max(sum, 1e-10));
+                } else {
+                    l[(i, j)] = if l[(j, j)].abs() > 1e-10 {
+                        sum / l[(j, j)]
+                    } else {
+                        0.0
+                    };
+                }
+            }
+        }
+
+        l
+    }
+
+    /// Solve lower triangular system L * x = b
+    fn solve_lower(&self, l: &Matrix<Float>, b: &[Float]) -> Vec<Float> {
+        let n = b.len();
+        let mut x = vec![0.0; n];
+
+        for i in 0..n {
+            let mut sum = b[i];
+            for j in 0..i {
+                sum -= l[(i, j)] * x[j];
+            }
+            x[i] = if l[(i, i)].abs() > 1e-10 { sum / l[(i, i)] } else { 0.0 };
+        }
+
+        x
+    }
+
+    /// Solve L' * x = b
+    fn solve_upper_transpose(&self, l: &Matrix<Float>, b: &[Float]) -> Vec<Float> {
+        let n = b.len();
+        let mut x = vec![0.0; n];
+
+        for i in (0..n).rev() {
+            let mut sum = b[i];
+            for j in (i + 1)..n {
+                sum -= l[(j, i)] * x[j];
+            }
+            x[i] = if l[(i, i)].abs() > 1e-10 { sum / l[(i, i)] } else { 0.0 };
+        }
+
+        x
+    }
+}
+
+// ============================================================================
+// CROSS-VALIDATION
+// ============================================================================
+
+/// Cross-validation for time series
+pub struct TimeSeriesCV {
+    n_splits: Int,
+    gap: Int,
+    min_train_size: Int,
+    max_train_size: Option<Int>,
+    test_size: Int,
+    strategy: CVStrategy,
+}
+
+@derive(Clone, Copy, Debug)]
+pub enum CVStrategy {
+    Expanding,      // Train on all previous data
+    Sliding,        // Fixed training window
+    BlockedKFold,   // K-fold respecting temporal order
+}
+
+impl TimeSeriesCV {
+    pub fn new(n_splits: Int) -> Self {
+        Self {
+            n_splits,
+            gap: 0,
+            min_train_size: 10,
+            max_train_size: None,
+            test_size: 1,
+            strategy: CVStrategy::Expanding,
+        }
+    }
+
+    pub fn with_gap(mut self, gap: Int) -> Self {
+        self.gap = gap;
+        self
+    }
+
+    pub fn with_test_size(mut self, size: Int) -> Self {
+        self.test_size = size;
+        self
+    }
+
+    pub fn with_strategy(mut self, strategy: CVStrategy) -> Self {
+        self.strategy = strategy;
+        self
+    }
+
+    /// Generate train/test indices for each fold
+    pub fn split(&self, n: Int) -> Vec<(Vec<Int>, Vec<Int>)> {
+        let mut splits = Vec::new();
+
+        match self.strategy {
+            CVStrategy::Expanding => {
+                let test_starts = self.compute_test_starts(n);
+                for &test_start in &test_starts {
+                    let train_end = test_start - self.gap;
+                    let train_start = if let Some(max) = self.max_train_size {
+                        (train_end - max).max(0)
+                    } else {
+                        0
+                    };
+
+                    if train_end - train_start >= self.min_train_size {
+                        let train_indices: Vec<Int> = (train_start..train_end).collect();
+                        let test_end = (test_start + self.test_size).min(n);
+                        let test_indices: Vec<Int> = (test_start..test_end).collect();
+                        splits.push((train_indices, test_indices));
+                    }
+                }
+            }
+            CVStrategy::Sliding => {
+                let window = self.max_train_size.unwrap_or(n / 2);
+                let test_starts = self.compute_test_starts(n);
+
+                for &test_start in &test_starts {
+                    let train_end = test_start - self.gap;
+                    let train_start = (train_end - window).max(0);
+
+                    if train_end - train_start >= self.min_train_size {
+                        let train_indices: Vec<Int> = (train_start..train_end).collect();
+                        let test_end = (test_start + self.test_size).min(n);
+                        let test_indices: Vec<Int> = (test_start..test_end).collect();
+                        splits.push((train_indices, test_indices));
+                    }
+                }
+            }
+            CVStrategy::BlockedKFold => {
+                let block_size = n / self.n_splits;
+                for i in 0..self.n_splits {
+                    let test_start = i * block_size;
+                    let test_end = if i == self.n_splits - 1 { n } else { (i + 1) * block_size };
+
+                    let mut train_indices = Vec::new();
+                    for j in 0..i {
+                        for k in (j * block_size)..((j + 1) * block_size) {
+                            train_indices.push(k);
+                        }
+                    }
+
+                    if !train_indices.is_empty() {
+                        let test_indices: Vec<Int> = (test_start..test_end).collect();
+                        splits.push((train_indices, test_indices));
+                    }
+                }
+            }
+        }
+
+        splits
+    }
+
+    /// Compute test fold start indices
+    fn compute_test_starts(&self, n: Int) -> Vec<Int> {
+        let available = n - self.min_train_size - self.gap - self.test_size + 1;
+        if available <= 0 {
+            return Vec::new();
+        }
+
+        let step = available / self.n_splits;
+        let mut starts = Vec::with_capacity(self.n_splits as usize);
+
+        for i in 0..self.n_splits {
+            let start = self.min_train_size + self.gap + i * step;
+            if start + self.test_size <= n {
+                starts.push(start);
+            }
+        }
+
+        starts
+    }
+}
+
+// ============================================================================
+// AUTO MODEL SELECTION
+// ============================================================================
+
+/// Automatic model selection and tuning
+pub struct AutoML {
+    models_to_try: Vec<ModelType>,
+    metric: EvaluationMetric,
+    cv: TimeSeriesCV,
+    time_budget_seconds: Option<Float>,
+    n_trials_per_model: Int,
+    parallel: Bool,
+}
+
+@derive(Clone, Copy, Debug)]
+pub enum EvaluationMetric {
+    MAE,
+    MSE,
+    RMSE,
+    MAPE,
+    SMAPE,
+    MASE,
+    R2,
+}
+
+impl AutoML {
+    pub fn new() -> Self {
+        Self {
+            models_to_try: vec![
+                ModelType::ARIMA,
+                ModelType::ETS,
+                ModelType::HoltWinters,
+                ModelType::RandomForest,
+                ModelType::LSTM,
+            ],
+            metric: EvaluationMetric::RMSE,
+            cv: TimeSeriesCV::new(5),
+            time_budget_seconds: None,
+            n_trials_per_model: 20,
+            parallel: false,
+        }
+    }
+
+    pub fn with_models(mut self, models: Vec<ModelType>) -> Self {
+        self.models_to_try = models;
+        self
+    }
+
+    pub fn with_metric(mut self, metric: EvaluationMetric) -> Self {
+        self.metric = metric;
+        self
+    }
+
+    pub fn with_cv(mut self, cv: TimeSeriesCV) -> Self {
+        self.cv = cv;
+        self
+    }
+
+    pub fn with_budget(mut self, seconds: Float) -> Self {
+        self.time_budget_seconds = Some(seconds);
+        self
+    }
+
+    /// Run automatic model selection
+    pub fn fit(&self, data: &[Float], horizon: Int) -> AutoMLResult {
+        let mut results = Vec::new();
+
+        for &model_type in &self.models_to_try {
+            let search_space = self.get_search_space(model_type);
+            let mut optimizer = BayesianOptimizer::new(
+                5,
+                AcquisitionFunction::ExpectedImprovement,
+                42
+            );
+
+            for _ in 0..self.n_trials_per_model {
+                let params = optimizer.suggest(&search_space);
+                let score = self.evaluate_model(data, model_type, &params, horizon);
+                optimizer.observe(params.clone(), score);
+
+                results.push(ModelResult {
+                    model_type,
+                    hyperparameters: params,
+                    score,
+                    cv_scores: Vec::new(),
+                });
+            }
+        }
+
+        // Sort by score (higher is better for most metrics)
+        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
+
+        let best = results.first().cloned();
+
+        AutoMLResult {
+            best_model: best,
+            all_models: results,
+            metric: self.metric,
+            cv_strategy: self.cv.strategy,
+        }
+    }
+
+    /// Get default search space for model type
+    fn get_search_space(&self, model_type: ModelType) -> SearchSpace {
+        let mut space = SearchSpace::new();
+
+        match model_type {
+            ModelType::ARIMA => {
+                space.add_int("p", 0, 5);
+                space.add_int("d", 0, 2);
+                space.add_int("q", 0, 5);
+            }
+            ModelType::SARIMA => {
+                space.add_int("p", 0, 3);
+                space.add_int("d", 0, 2);
+                space.add_int("q", 0, 3);
+                space.add_int("P", 0, 2);
+                space.add_int("D", 0, 1);
+                space.add_int("Q", 0, 2);
+                space.add_int("m", 1, 12);
+            }
+            ModelType::ETS => {
+                space.add_categorical("error", vec!["add".to_string(), "mul".to_string()]);
+                space.add_categorical("trend", vec!["none".to_string(), "add".to_string(), "mul".to_string()]);
+                space.add_categorical("seasonal", vec!["none".to_string(), "add".to_string(), "mul".to_string()]);
+                space.add_bool("damped");
+            }
+            ModelType::RandomForest => {
+                space.add_int("n_estimators", 10, 200);
+                space.add_int("max_depth", 3, 20);
+                space.add_int("min_samples_split", 2, 20);
+                space.add_int("lags", 5, 50);
+            }
+            ModelType::LSTM => {
+                space.add_int("hidden_size", 16, 128);
+                space.add_int("n_layers", 1, 3);
+                space.add_float("learning_rate", 0.0001, 0.1, true);
+                space.add_float("dropout", 0.0, 0.5, false);
+                space.add_int("lookback", 10, 100);
+            }
+            ModelType::Transformer => {
+                space.add_int("d_model", 32, 256);
+                space.add_int("n_heads", 2, 8);
+                space.add_int("n_layers", 1, 4);
+                space.add_float("learning_rate", 0.0001, 0.01, true);
+                space.add_int("lookback", 20, 200);
+            }
+            _ => {
+                // Default parameters
+                space.add_float("learning_rate", 0.001, 0.1, true);
+            }
+        }
+
+        space
+    }
+
+    /// Evaluate model with cross-validation
+    fn evaluate_model(
+        &self,
+        data: &[Float],
+        model_type: ModelType,
+        params: &HashMap<String, HyperparamValue>,
+        horizon: Int
+    ) -> Float {
+        let n = data.len() as Int;
+        let splits = self.cv.split(n);
+
+        if splits.is_empty() {
+            return Float::NEG_INFINITY;
+        }
+
+        let mut scores = Vec::new();
+
+        for (train_idx, test_idx) in splits {
+            let train: Vec<Float> = train_idx.iter()
+                .map(|&i| data[i as usize])
+                .collect();
+            let test: Vec<Float> = test_idx.iter()
+                .map(|&i| data[i as usize])
+                .collect();
+
+            // Generate predictions
+            let predictions = self.generate_predictions(&train, &test, model_type, params, horizon);
+
+            // Compute metric
+            let score = self.compute_metric(&test, &predictions);
+            scores.push(score);
+        }
+
+        // Return mean score (negated for metrics where lower is better)
+        let mean_score: Float = scores.iter().sum::<Float>() / scores.len() as Float;
+
+        match self.metric {
+            EvaluationMetric::R2 => mean_score,  // Higher is better
+            _ => -mean_score,  // Negate so higher is better for optimization
+        }
+    }
+
+    /// Generate predictions using specified model
+    fn generate_predictions(
+        &self,
+        train: &[Float],
+        test: &[Float],
+        model_type: ModelType,
+        params: &HashMap<String, HyperparamValue>,
+        horizon: Int
+    ) -> Vec<Float> {
+        // Simplified prediction generation
+        // In practice, this would call the actual model implementations
+
+        let n_test = test.len();
+        let mut predictions = Vec::with_capacity(n_test);
+
+        match model_type {
+            ModelType::ARIMA | ModelType::SARIMA => {
+                // Simple AR prediction
+                let p = params.get("p")
+                    .and_then(|v| v.as_int())
+                    .unwrap_or(1) as usize;
+
+                for i in 0..n_test {
+                    let history = if i == 0 { train } else {
+                        // Use previous predictions
+                        &predictions[..i]
+                    };
+
+                    let pred = if history.len() >= p {
+                        let recent: Vec<Float> = history[history.len()-p..].to_vec();
+                        recent.iter().sum::<Float>() / p as Float
+                    } else {
+                        history.last().cloned().unwrap_or(0.0)
+                    };
+
+                    predictions.push(pred);
+                }
+            }
+            ModelType::ETS | ModelType::HoltWinters => {
+                // Exponential smoothing
+                let alpha = 0.3;
+                let mut level = train.last().cloned().unwrap_or(0.0);
+
+                for i in 0..n_test {
+                    predictions.push(level);
+                    if i < test.len() {
+                        level = alpha * test[i] + (1.0 - alpha) * level;
+                    }
+                }
+            }
+            _ => {
+                // Naive prediction
+                let mean: Float = train.iter().sum::<Float>() / train.len() as Float;
+                for _ in 0..n_test {
+                    predictions.push(mean);
+                }
+            }
+        }
+
+        predictions
+    }
+
+    /// Compute evaluation metric
+    fn compute_metric(&self, actual: &[Float], predicted: &[Float]) -> Float {
+        let n = min(actual.len(), predicted.len());
+        if n == 0 {
+            return 0.0;
+        }
+
+        match self.metric {
+            EvaluationMetric::MAE => {
+                let sum: Float = actual.iter().zip(predicted.iter())
+                    .map(|(&a, &p)| abs(a - p))
+                    .sum();
+                sum / n as Float
+            }
+            EvaluationMetric::MSE => {
+                let sum: Float = actual.iter().zip(predicted.iter())
+                    .map(|(&a, &p)| (a - p).powi(2))
+                    .sum();
+                sum / n as Float
+            }
+            EvaluationMetric::RMSE => {
+                let mse: Float = actual.iter().zip(predicted.iter())
+                    .map(|(&a, &p)| (a - p).powi(2))
+                    .sum::<Float>() / n as Float;
+                sqrt(mse)
+            }
+            EvaluationMetric::MAPE => {
+                let sum: Float = actual.iter().zip(predicted.iter())
+                    .filter(|(&a, _)| a.abs() > 1e-10)
+                    .map(|(&a, &p)| abs((a - p) / a))
+                    .sum();
+                100.0 * sum / n as Float
+            }
+            EvaluationMetric::SMAPE => {
+                let sum: Float = actual.iter().zip(predicted.iter())
+                    .map(|(&a, &p)| 2.0 * abs(a - p) / (abs(a) + abs(p) + 1e-10))
+                    .sum();
+                100.0 * sum / n as Float
+            }
+            EvaluationMetric::MASE => {
+                // Simplified MASE using mean absolute error of naive forecast
+                let mae: Float = actual.iter().zip(predicted.iter())
+                    .map(|(&a, &p)| abs(a - p))
+                    .sum::<Float>() / n as Float;
+
+                let naive_mae: Float = (1..actual.len())
+                    .map(|i| abs(actual[i] - actual[i-1]))
+                    .sum::<Float>() / (actual.len() - 1) as Float;
+
+                if naive_mae > 1e-10 { mae / naive_mae } else { mae }
+            }
+            EvaluationMetric::R2 => {
+                let mean_actual: Float = actual.iter().sum::<Float>() / n as Float;
+
+                let ss_res: Float = actual.iter().zip(predicted.iter())
+                    .map(|(&a, &p)| (a - p).powi(2))
+                    .sum();
+
+                let ss_tot: Float = actual.iter()
+                    .map(|&a| (a - mean_actual).powi(2))
+                    .sum();
+
+                if ss_tot > 1e-10 { 1.0 - ss_res / ss_tot } else { 0.0 }
+            }
+        }
+    }
+}
+
+/// Result of AutoML
+@derive(Clone, Debug)]
+pub struct AutoMLResult {
+    pub best_model: Option<ModelResult>,
+    pub all_models: Vec<ModelResult>,
+    pub metric: EvaluationMetric,
+    pub cv_strategy: CVStrategy,
+}
+
+/// Individual model result
+@derive(Clone, Debug)]
+pub struct ModelResult {
+    pub model_type: ModelType,
+    pub hyperparameters: HashMap<String, HyperparamValue>,
+    pub score: Float,
+    pub cv_scores: Vec<Float>,
+}
+
+// ============================================================================
+// ENSEMBLE LEARNING
+// ============================================================================
+
+/// Ensemble of multiple forecasting models
+pub struct ForecastEnsemble {
+    models: Vec<(ModelType, HashMap<String, HyperparamValue>, Float)>,
+    combination_method: CombinationMethod,
+}
+
+@derive(Clone, Copy, Debug)]
+pub enum CombinationMethod {
+    SimpleAverage,
+    WeightedAverage,
+    MedianCombine,
+    TrimmedMean { trim_fraction: Float },
+    OptimalWeights,
+}
+
+impl ForecastEnsemble {
+    pub fn new(combination_method: CombinationMethod) -> Self {
+        Self {
+            models: Vec::new(),
+            combination_method,
+        }
+    }
+
+    /// Add a model to the ensemble
+    pub fn add_model(&mut self, model_type: ModelType, params: HashMap<String, HyperparamValue>, weight: Float) {
+        self.models.push((model_type, params, weight));
+    }
+
+    /// Combine predictions from multiple models
+    pub fn combine(&self, predictions: &[Vec<Float>]) -> Vec<Float> {
+        if predictions.is_empty() {
+            return Vec::new();
+        }
+
+        let n = predictions[0].len();
+        let n_models = predictions.len();
+
+        match self.combination_method {
+            CombinationMethod::SimpleAverage => {
+                (0..n).map(|i| {
+                    let sum: Float = predictions.iter().map(|p| p[i]).sum();
+                    sum / n_models as Float
+                }).collect()
+            }
+            CombinationMethod::WeightedAverage => {
+                let weights: Vec<Float> = self.models.iter().map(|(_, _, w)| *w).collect();
+                let weight_sum: Float = weights.iter().sum();
+
+                (0..n).map(|i| {
+                    let sum: Float = predictions.iter().zip(weights.iter())
+                        .map(|(p, w)| p[i] * w)
+                        .sum();
+                    sum / weight_sum
+                }).collect()
+            }
+            CombinationMethod::MedianCombine => {
+                (0..n).map(|i| {
+                    let mut values: Vec<Float> = predictions.iter().map(|p| p[i]).collect();
+                    values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                    values[values.len() / 2]
+                }).collect()
+            }
+            CombinationMethod::TrimmedMean { trim_fraction } => {
+                (0..n).map(|i| {
+                    let mut values: Vec<Float> = predictions.iter().map(|p| p[i]).collect();
+                    values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+                    let n_trim = (values.len() as Float * trim_fraction) as usize;
+                    let trimmed = &values[n_trim..values.len() - n_trim];
+
+                    if trimmed.is_empty() {
+                        values.iter().sum::<Float>() / values.len() as Float
+                    } else {
+                        trimmed.iter().sum::<Float>() / trimmed.len() as Float
+                    }
+                }).collect()
+            }
+            CombinationMethod::OptimalWeights => {
+                // Use simple average for now (optimal weights require validation data)
+                (0..n).map(|i| {
+                    let sum: Float = predictions.iter().map(|p| p[i]).sum();
+                    sum / n_models as Float
+                }).collect()
+            }
+        }
+    }
+
+    /// Find optimal weights using validation data
+    pub fn optimize_weights(&mut self, predictions: &[Vec<Float>], actual: &[Float]) {
+        let n_models = predictions.len();
+        if n_models < 2 {
+            return;
+        }
+
+        // Grid search for optimal weights
+        let n_steps = 10;
+        let mut best_weights = vec![1.0 / n_models as Float; n_models];
+        let mut best_error = Float::INFINITY;
+
+        // Simplified: optimize pairwise weights
+        for i in 0..n_models {
+            for j in (i + 1)..n_models {
+                for step in 0..=n_steps {
+                    let w = step as Float / n_steps as Float;
+                    let mut weights = vec![0.0; n_models];
+                    weights[i] = w;
+                    weights[j] = 1.0 - w;
+
+                    let combined = self.weighted_combine(predictions, &weights);
+                    let error = self.compute_mse(&combined, actual);
+
+                    if error < best_error {
+                        best_error = error;
+                        best_weights = weights;
+                    }
+                }
+            }
+        }
+
+        // Update model weights
+        for (i, (_, _, weight)) in self.models.iter_mut().enumerate() {
+            *weight = best_weights[i];
+        }
+    }
+
+    fn weighted_combine(&self, predictions: &[Vec<Float>], weights: &[Float]) -> Vec<Float> {
+        let n = predictions[0].len();
+        let weight_sum: Float = weights.iter().sum();
+
+        (0..n).map(|i| {
+            let sum: Float = predictions.iter().zip(weights.iter())
+                .map(|(p, w)| p[i] * w)
+                .sum();
+            sum / weight_sum.max(1e-10)
+        }).collect()
+    }
+
+    fn compute_mse(&self, predicted: &[Float], actual: &[Float]) -> Float {
+        let n = min(predicted.len(), actual.len());
+        if n == 0 {
+            return Float::INFINITY;
+        }
+
+        predicted.iter().zip(actual.iter())
+            .map(|(&p, &a)| (p - a).powi(2))
+            .sum::<Float>() / n as Float
+    }
+}
+
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+
+/// Simple random number generator
+pub struct RandomGenerator {
+    state: u64,
+}
+
+impl RandomGenerator {
+    pub fn new(seed: u64) -> Self {
+        Self { state: seed }
+    }
+
+    pub fn next_u64(&mut self) -> u64 {
+        self.state = self.state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.state
+    }
+
+    pub fn rand_float(&mut self, min: Float, max: Float) -> Float {
+        let r = (self.next_u64() as Float) / (u64::MAX as Float);
+        min + r * (max - min)
+    }
+
+    pub fn rand_int(&mut self, min: Int, max: Int) -> Int {
+        let r = self.next_u64() as Int;
+        min + (r.abs() % (max - min + 1))
+    }
+
+    pub fn rand_normal(&mut self) -> Float {
+        // Box-Muller transform
+        let u1 = self.rand_float(0.0001, 1.0);
+        let u2 = self.rand_float(0.0, 1.0);
+        sqrt(-2.0 * log(u1)) * cos(2.0 * 3.14159265359 * u2)
+    }
+}
+
+/// Normal PDF
+fn normal_pdf(x: Float) -> Float {
+    exp(-0.5 * x * x) / sqrt(2.0 * 3.14159265359)
+}
+
+/// Normal CDF approximation
+fn normal_cdf(x: Float) -> Float {
+    let a1 = 0.254829592;
+    let a2 = -0.284496736;
+    let a3 = 1.421413741;
+    let a4 = -1.453152027;
+    let a5 = 1.061405429;
+    let p = 0.3275911;
+
+    let sign = if x < 0.0 { -1.0 } else { 1.0 };
+    let x = abs(x) / sqrt(2.0);
+
+    let t = 1.0 / (1.0 + p * x);
+    let y = 1.0 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * exp(-x * x);
+
+    0.5 * (1.0 + sign * y)
+}
+
+fn sin(x: Float) -> Float {
+    let x = x % (2.0 * 3.14159265359);
+    let mut result = 0.0;
+    let mut term = x;
+    let mut n = 1;
+
+    while abs(term) > 1e-15 && n < 20 {
+        result += term;
+        term *= -x * x / ((2 * n) * (2 * n + 1)) as Float;
+        n += 1;
+    }
+
+    result
+}
+
+fn cos(x: Float) -> Float {
+    sin(x + 3.14159265359 / 2.0)
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_random_search() {
+        let mut space = SearchSpace::new();
+        space.add_int("n_estimators", 10, 100);
+        space.add_float("learning_rate", 0.001, 0.1, true);
+
+        let mut optimizer = RandomSearch::new(10, 42);
+
+        for _ in 0..10 {
+            let params = optimizer.suggest(&space);
+            optimizer.observe(params, 0.5);
+        }
+
+        assert!(optimizer.best_params().is_some());
+    }
+
+    #[test]
+    fn test_time_series_cv() {
+        let cv = TimeSeriesCV::new(3)
+            .with_strategy(CVStrategy::Expanding);
+
+        let splits = cv.split(100);
+        assert!(!splits.is_empty());
+
+        // Verify temporal order is maintained
+        for (train, test) in splits {
+            let max_train = train.iter().max().unwrap_or(&0);
+            let min_test = test.iter().min().unwrap_or(&0);
+            assert!(max_train < min_test);
+        }
+    }
+
+    #[test]
+    fn test_gaussian_process() {
+        let x_train = vec![
+            vec![0.0],
+            vec![0.25],
+            vec![0.5],
+            vec![0.75],
+            vec![1.0],
+        ];
+        let y_train = vec![0.0, 0.25, 0.5, 0.75, 1.0];
+
+        let gp = GaussianProcess::new(Kernel::RBF { length_scale: 0.5 })
+            .fit(&x_train, &y_train);
+
+        let (mean, std) = gp.predict(&[0.5]);
+
+        // Prediction at training point should be close to actual value
+        assert!((mean - 0.5).abs() < 0.1);
+        assert!(std < 0.5);
+    }
+
+    #[test]
+    fn test_ensemble() {
+        let mut ensemble = ForecastEnsemble::new(CombinationMethod::SimpleAverage);
+        ensemble.add_model(ModelType::ARIMA, HashMap::new(), 1.0);
+        ensemble.add_model(ModelType::ETS, HashMap::new(), 1.0);
+
+        let pred1 = vec![1.0, 2.0, 3.0];
+        let pred2 = vec![1.5, 2.5, 3.5];
+
+        let combined = ensemble.combine(&[pred1, pred2]);
+
+        assert_eq!(combined.len(), 3);
+        assert!((combined[0] - 1.25).abs() < 0.001);
+    }
+}

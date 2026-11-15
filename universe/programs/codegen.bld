@@ -1,0 +1,2490 @@
+// =============================================================================
+// qcodegen - BuildLang-to-C Code Generator written in BuildLang
+// =============================================================================
+// Sixth self-hosting tool. The FINAL piece of the self-hosting compiler chain:
+//   tokenize -> parse -> check -> codegen
+//
+// Reads a .bld source file, tokenizes it, and emits equivalent C code
+// that compiles with gcc/MSVC.
+//
+// Scope (handles a subset of BuildLang):
+//   - Functions (fn name(params) -> ret { ... })
+//   - Structs (typedef, literals, field access)
+//   - Let bindings (let x = 5; let mut y = 0;)
+//   - Arithmetic, comparisons, logical operators
+//   - If/else, while, return, if-expressions
+//   - Function calls
+//   - println!("{}", x) -> printf("%lld\n", x)
+//   - String literals, booleans, integers, floats
+//   - Vec: vec![], vec_push, vec_get, vec_len -> QVec runtime
+//
+// Type mapping:
+//   i64 -> int64_t    i32 -> int32_t    f64 -> double    f32 -> float
+//   bool -> int       String/&str -> const char*
+//
+// Usage:
+//   qcodegen file.bld              print C code to stdout
+//   qcodegen file.bld -o out.c     write to file
+//   qcodegen --help                   usage
+// =============================================================================
+
+include!("stdlib/chars.bld");
+include!("stdlib/tokenizer.bld");
+
+
+// ===========================================================================
+// CODE GENERATOR
+// ===========================================================================
+// Syntax-directed translation: parse and emit C code in one pass.
+// We do a two-pass approach:
+//   Pass 1: Scan for all fn signatures to emit forward declarations.
+//   Pass 2: Full codegen.
+// ===========================================================================
+
+struct CG {
+    pool: String,
+    tk: Vec<i32>,
+    ts: Vec<i32>,
+    tl: Vec<i32>,
+    count: i32,
+    pos: i32,
+    // Output buffer
+    out: String,
+    // Forward declarations buffer
+    fwd: String,
+    // Indentation level
+    indent: i32,
+    // Variable type registry: pipe-delimited "name1|name2|" and "type1|type2|"
+    var_names: String,
+    var_types: String,
+    // Whether we need the string runtime helpers
+    needs_str_runtime: i32,
+    // Whether we need the Vec runtime helpers
+    needs_vec_runtime: i32,
+    // Known struct type names: pipe-delimited "Point|Rect|"
+    struct_names: String,
+    // Impl method registry: pipe-delimited "Point_sum|Point_scale|"
+    impl_methods: String,
+    // Current impl type name (set during impl block codegen)
+    impl_type: String,
+    // Lambda/closure support: counter for unique names, buffer for static functions
+    lambda_count: i32,
+    lambdas: String,
+}
+
+fn cg_new(t: &Tok) -> CG {
+    CG {
+        pool: t.pool,
+        tk: t.t_types, ts: t.t_starts, tl: t.t_lens,
+        count: t.count,
+        pos: 0,
+        out: "",
+        fwd: "",
+        indent: 0,
+        var_names: "",
+        var_types: "",
+        needs_str_runtime: 0,
+        needs_vec_runtime: 0,
+        struct_names: "",
+        impl_methods: "",
+        impl_type: "",
+        lambda_count: 0,
+        lambdas: "",
+    }
+}
+
+// --- Variable type registry ---
+// Register a variable with its C type
+fn reg_var(cg: &mut CG, name: String, ctype: String) {
+    cg.var_names = cg.var_names + name + "|";
+    cg.var_types = cg.var_types + ctype + "|";
+}
+
+// Look up the C type of a variable. Returns "" if not found.
+fn lookup_var(cg: &CG, name: String) -> String {
+    let search = name + "|";
+    let names = cg.var_names;
+    let types = cg.var_types;
+    let nlen = names.len();
+    let slen = search.len();
+    // Walk through var_names counting entries to find the index
+    let mut pos: i32 = 0;
+    let mut idx: i32 = 0;
+    let mut found = false;
+    let mut go = true;
+    while go && pos + slen <= nlen {
+        let chunk = names.substring(pos, slen);
+        if chunk == search {
+            found = true;
+            go = false;
+        } else {
+            // Advance past this entry (find next |)
+            let rest = names.substring(pos, nlen - pos);
+            let pipe = rest.index_of("|");
+            if pipe < 0 { go = false; }
+            else {
+                pos = pos + pipe + 1;
+                idx = idx + 1;
+            }
+        }
+    }
+    if !found { return ""; }
+    // Now find the idx-th entry in var_types
+    let tlen = types.len();
+    let mut tpos: i32 = 0;
+    let mut tidx: i32 = 0;
+    let mut tgo = true;
+    while tgo && tidx < idx {
+        let trest = types.substring(tpos, tlen - tpos);
+        let tpipe = trest.index_of("|");
+        if tpipe < 0 { return ""; }
+        tpos = tpos + tpipe + 1;
+        tidx = tidx + 1;
+    }
+    // Extract this entry up to the next |
+    let trest2 = types.substring(tpos, tlen - tpos);
+    let tpipe2 = trest2.index_of("|");
+    if tpipe2 < 0 { return trest2; }
+    types.substring(tpos, tpipe2)
+}
+
+// Register a struct type name
+fn reg_struct(cg: &mut CG, name: String) {
+    cg.struct_names = cg.struct_names + name + "|";
+}
+
+// Check if a name is a known struct type
+fn is_struct_type(cg: &CG, name: String) -> bool {
+    let search = name + "|";
+    cg.struct_names.contains(search)
+}
+
+// Register an impl method: Type_methodname
+fn reg_impl_method(cg: &mut CG, mangled: String) {
+    cg.impl_methods = cg.impl_methods + mangled + "|";
+}
+
+// Check if a mangled name is a known impl method
+fn is_impl_method(cg: &CG, mangled: String) -> bool {
+    let search = mangled + "|";
+    cg.impl_methods.contains(search)
+}
+
+// Check if a C expression is "string-typed" based on its shape
+fn is_str_expr(cg: &CG, expr: String) -> bool {
+    if expr.starts_with("\"") { return true; }
+    if expr.starts_with("argv[") { return true; }
+    // qc_ helpers that return strings
+    if expr.starts_with("qc_substring(") { return true; }
+    if expr.starts_with("qc_char_at(") { return true; }
+    if expr.starts_with("qc_read_file(") { return true; }
+    if expr.starts_with("qc_read_all(") { return true; }
+    if expr.starts_with("qc_strcat(") { return true; }
+    if expr.starts_with("getenv(") { return true; }
+    if expr.starts_with("qc_itoa(") { return true; }
+    if expr.starts_with("qc_ftoa(") { return true; }
+    if expr.starts_with("qc_to_lower(") { return true; }
+    if expr.starts_with("qc_to_upper(") { return true; }
+    if expr.starts_with("qc_replace(") { return true; }
+    if expr.starts_with("qc_trim(") { return true; }
+    // Check variable registry
+    let vtype = lookup_var(cg, expr);
+    if vtype == "const char*" { return true; }
+    false
+}
+
+// --- Token access helpers ---
+fn pk(cg: &CG) -> i32 {
+    if cg.pos >= cg.count { return 0; }
+    vec_get(cg.tk, cg.pos)
+}
+
+fn pk_at(cg: &CG, off: i32) -> i32 {
+    let i = cg.pos + off;
+    if i >= cg.count { return 0; }
+    vec_get(cg.tk, i)
+}
+
+fn ptxt(cg: &CG) -> String {
+    if cg.pos >= cg.count { return ""; }
+    let s = vec_get(cg.ts, cg.pos);
+    let l = vec_get(cg.tl, cg.pos);
+    if l == 0 { return ""; }
+    cg.pool.substring(s, l)
+}
+
+fn ptxt_at(cg: &CG, off: i32) -> String {
+    let i = cg.pos + off;
+    if i >= cg.count { return ""; }
+    let s = vec_get(cg.ts, i);
+    let l = vec_get(cg.tl, i);
+    if l == 0 { return ""; }
+    cg.pool.substring(s, l)
+}
+
+fn adv(cg: &mut CG) {
+    if cg.pos < cg.count { cg.pos = cg.pos + 1; }
+}
+
+fn at_end(cg: &CG) -> bool { cg.pos >= cg.count }
+
+fn expect_kind(cg: &mut CG, kind: i32) -> bool {
+    if pk(cg) == kind { adv(cg); return true; }
+    false
+}
+
+fn expect_text(cg: &mut CG, text: String) -> bool {
+    if ptxt(cg) == text { adv(cg); return true; }
+    false
+}
+
+// --- Output helpers ---
+fn make_indent(n: i32) -> String {
+    let mut out = "";
+    let mut i: i32 = 0;
+    while i < n {
+        out = out + "    ";
+        i = i + 1;
+    }
+    out
+}
+
+fn emit(cg: &mut CG, text: String) {
+    cg.out = cg.out + text;
+}
+
+fn emit_indent(cg: &mut CG) {
+    let pad = make_indent(cg.indent);
+    cg.out = cg.out + pad;
+}
+
+fn emit_line(cg: &mut CG, text: String) {
+    let pad = make_indent(cg.indent);
+    cg.out = cg.out + pad + text + "\n";
+}
+
+fn emit_fwd(cg: &mut CG, text: String) {
+    cg.fwd = cg.fwd + text + "\n";
+}
+
+// --- Skip helpers ---
+fn skip_balanced_braces(cg: &mut CG) {
+    if pk(cg) != TK_LBRACE() { return; }
+    adv(cg);
+    let mut depth: i32 = 1;
+    let mut go = true;
+    while go {
+        if at_end(cg) { go = false; }
+        else if pk(cg) == TK_LBRACE() { depth = depth + 1; adv(cg); }
+        else if pk(cg) == TK_RBRACE() {
+            depth = depth - 1; adv(cg);
+            if depth == 0 { go = false; }
+        }
+        else { adv(cg); }
+    }
+}
+
+fn skip_to_semi(cg: &mut CG) {
+    let mut go = true;
+    while go {
+        if at_end(cg) { go = false; }
+        else if pk(cg) == TK_SEMI() { adv(cg); go = false; }
+        else { adv(cg); }
+    }
+}
+
+// Check if the next brace-block contains multiple statements (let or >1 semicolon).
+// Saves and restores cg.pos — non-destructive lookahead.
+fn is_multi_stmt_block(cg: &mut CG) -> bool {
+    let saved = cg.pos;
+    // We expect pos to be at '{'
+    if pk(cg) != TK_LBRACE() { cg.pos = saved; return false; }
+    adv(cg); // skip '{'
+    let mut depth: i32 = 1;
+    let mut semi_count: i32 = 0;
+    let mut has_let = false;
+    let mut go = true;
+    while go {
+        if at_end(cg) { go = false; }
+        else if pk(cg) == TK_LBRACE() { depth = depth + 1; adv(cg); }
+        else if pk(cg) == TK_RBRACE() {
+            depth = depth - 1;
+            if depth == 0 { go = false; }
+            else { adv(cg); }
+        }
+        else {
+            // Only count at top-level depth (depth==1)
+            if depth == 1 {
+                if pk(cg) == TK_SEMI() { semi_count = semi_count + 1; }
+                if pk(cg) == TK_KEYWORD() && ptxt(cg) == "let" { has_let = true; }
+            }
+            adv(cg);
+        }
+    }
+    cg.pos = saved;
+    // Multi-statement if it has a let binding, or more than 1 semicolon
+    if has_let { return true; }
+    if semi_count > 1 { return true; }
+    false
+}
+
+// Check if an if-expression (pos at 'if') has multi-statement branches.
+// Scans: if <expr> { ... } else { ... } — checks both branches.
+fn if_has_multi_stmt(cg: &mut CG) -> bool {
+    let saved = cg.pos;
+    // Skip "if" keyword
+    adv(cg);
+    // Skip the condition expression — scan until we hit '{'
+    let mut go = true;
+    while go {
+        if at_end(cg) || pk(cg) == TK_LBRACE() { go = false; }
+        else { adv(cg); }
+    }
+    // Check first branch
+    let first_multi = is_multi_stmt_block(cg);
+    // Skip past the first block
+    skip_balanced_braces(cg);
+    // Check else branch if present
+    let mut second_multi = false;
+    if ptxt(cg) == "else" {
+        adv(cg); // skip "else"
+        if ptxt(cg) == "if" {
+            // else-if chain — treat as multi-statement to be safe
+            second_multi = true;
+        } else {
+            second_multi = is_multi_stmt_block(cg);
+        }
+    }
+    cg.pos = saved;
+    if first_multi { return true; }
+    if second_multi { return true; }
+    false
+}
+
+// Emit a multi-statement if-expression block that assigns to a target variable.
+// The caller has already emitted `c_type target_var;`.
+// Parses: if <cond> { stmts...; last_expr } else { stmts...; last_expr }
+// Emits C: if (cond) { stmts; target = last_expr; } else { stmts; target = last_expr; }
+fn codegen_if_block_assign(cg: &mut CG, target: String) {
+    // "if" keyword already consumed by caller
+    let cond = parse_expr(cg);
+
+    // --- then branch ---
+    emit_line(cg, "if (" + cond + ") {");
+    cg.indent = cg.indent + 1;
+    codegen_if_branch_body(cg, target);
+    cg.indent = cg.indent - 1;
+
+    // --- else / else-if chain ---
+    let mut ego = true;
+    while ego {
+        if ptxt(cg) == "else" {
+            adv(cg);
+            if ptxt(cg) == "if" {
+                adv(cg);
+                let cond2 = parse_expr(cg);
+                emit_line(cg, "} else if (" + cond2 + ") {");
+                cg.indent = cg.indent + 1;
+                codegen_if_branch_body(cg, target);
+                cg.indent = cg.indent - 1;
+            } else {
+                emit_line(cg, "} else {");
+                cg.indent = cg.indent + 1;
+                codegen_if_branch_body(cg, target);
+                cg.indent = cg.indent - 1;
+                ego = false;
+            }
+        } else { ego = false; }
+    }
+    emit_line(cg, "}");
+}
+
+// Parse a single if-branch body: { stmt; stmt; last_expr }
+// All statements except the last are emitted normally.
+// The last expression becomes `target = expr;`.
+fn codegen_if_branch_body(cg: &mut CG, target: String) {
+    expect_kind(cg, TK_LBRACE());
+    let mut go = true;
+    while go {
+        if at_end(cg) || pk(cg) == TK_RBRACE() { go = false; }
+        else {
+            // Peek ahead: is this the last expression before '}'?
+            // Save pos, try to parse an expr, check if '}' follows
+            let save_pos = cg.pos;
+            // If the next token is a let/while/if/return statement keyword, emit it normally
+            let kk = pk(cg);
+            let tt = ptxt(cg);
+            if kk == TK_KEYWORD() && (tt == "let" || tt == "while" || tt == "loop" || tt == "return") {
+                codegen_stmt(cg);
+            }
+            // println!/eprintln!/print! macro — always a statement, never the last expr
+            else if kk == TK_IDENT() && (tt == "println" || tt == "eprintln" || tt == "print") && pk_at(cg, 1) == TK_NOT() {
+                codegen_stmt(cg);
+            }
+            else {
+                // Parse expression
+                let expr = parse_expr(cg);
+                // Skip optional semicolon
+                let had_semi = pk(cg) == TK_SEMI();
+                if had_semi { adv(cg); }
+                // If '}' follows, this is the last expression — assign to target
+                if pk(cg) == TK_RBRACE() {
+                    emit_line(cg, target + " = " + expr + ";");
+                } else {
+                    // Not the last — emit as regular statement
+                    emit_line(cg, expr + ";");
+                }
+            }
+        }
+    }
+    expect_kind(cg, TK_RBRACE());
+}
+
+// Infer the C type of a multi-statement if-expression by peeking at the last
+// token before '}' in the first branch.  Non-destructive (saves/restores pos).
+fn infer_if_block_type(cg: &mut CG) -> String {
+    let saved = cg.pos;
+    // We are positioned at "if". Skip to the first '{'.
+    let mut go = true;
+    while go {
+        if at_end(cg) || pk(cg) == TK_LBRACE() { go = false; }
+        else { adv(cg); }
+    }
+    if pk(cg) != TK_LBRACE() { cg.pos = saved; return "int64_t"; }
+    adv(cg); // skip '{'
+    // Scan the block at depth 1, recording the last token text before depth returns to 0
+    let mut depth: i32 = 1;
+    let mut last_txt = "";
+    let mut go2 = true;
+    while go2 {
+        if at_end(cg) { go2 = false; }
+        else if pk(cg) == TK_LBRACE() { depth = depth + 1; adv(cg); }
+        else if pk(cg) == TK_RBRACE() {
+            depth = depth - 1;
+            if depth == 0 { go2 = false; }
+            else { adv(cg); }
+        }
+        else {
+            if depth == 1 {
+                // Track last meaningful token (skip semicolons)
+                if pk(cg) != TK_SEMI() {
+                    last_txt = ptxt(cg);
+                }
+            }
+            adv(cg);
+        }
+    }
+    cg.pos = saved;
+    // If the last expression in the branch is a string literal, return const char*
+    if last_txt.starts_with("\"") { return "const char*"; }
+    // If it's a known string-returning function
+    if last_txt == "qc_strcat" || last_txt == "qc_substring" || last_txt == "qc_read_file" { return "const char*"; }
+    // If it references a known string variable
+    if is_str_expr(cg, last_txt) { return "const char*"; }
+    // Default
+    "int64_t"
+}
+
+// ===========================================================================
+// Type mapping: BuildLang types -> C types
+// ===========================================================================
+fn map_type(ty: String) -> String {
+    if ty == "i64" { return "int64_t"; }
+    if ty == "i32" { return "int32_t"; }
+    if ty == "i16" { return "int16_t"; }
+    if ty == "i8" { return "int8_t"; }
+    if ty == "u64" { return "uint64_t"; }
+    if ty == "u32" { return "uint32_t"; }
+    if ty == "u16" { return "uint16_t"; }
+    if ty == "u8" { return "uint8_t"; }
+    if ty == "f64" { return "double"; }
+    if ty == "f32" { return "float"; }
+    if ty == "bool" { return "int"; }
+    if ty == "String" { return "const char*"; }
+    if ty == "&str" { return "const char*"; }
+    if ty == "()" { return "void"; }
+    if ty == "Vec" { return "QVec"; }
+    // Default: pass through
+    ty
+}
+
+// Parse a type annotation from the token stream and return the C type string
+fn parse_type(cg: &mut CG) -> String {
+    // Handle & and &mut references -> pass as pointer in C
+    if pk(cg) == TK_BIT_AND() {
+        adv(cg);
+        if ptxt(cg) == "mut" { adv(cg); }
+        let inner = parse_type(cg);
+        return inner;
+    }
+    // Handle fn(T) -> T function pointer types
+    if pk(cg) == TK_KEYWORD() && ptxt(cg) == "fn" {
+        adv(cg); // skip "fn"
+        // Parse parameter types: (T1, T2, ...)
+        let mut param_types = "";
+        let mut pfirst = true;
+        if pk(cg) == TK_LPAREN() {
+            adv(cg);
+            let mut fpgo = true;
+            while fpgo {
+                if at_end(cg) || pk(cg) == TK_RPAREN() { fpgo = false; }
+                else {
+                    if !pfirst { param_types = param_types + ", "; }
+                    pfirst = false;
+                    let pt = parse_type(cg);
+                    param_types = param_types + pt;
+                    if pk(cg) == TK_COMMA() { adv(cg); }
+                    else { fpgo = false; }
+                }
+            }
+            expect_kind(cg, TK_RPAREN());
+        }
+        // Parse return type: -> T
+        let mut fn_ret = "void";
+        if pk(cg) == TK_ARROW() {
+            adv(cg);
+            fn_ret = parse_type(cg);
+        }
+        // Emit as C function pointer typedef name
+        // We generate a unique typedef in the lambdas buffer
+        cg.lambda_count = cg.lambda_count + 1;
+        let tdef_name = "__QFnPtr_" + to_string_i32(cg.lambda_count);
+        cg.lambdas = cg.lambdas + "typedef " + fn_ret + " (*" + tdef_name + ")(" + param_types + ");\n";
+        return tdef_name;
+    }
+    // Handle main type name
+    let mut name = "";
+    if pk(cg) == TK_IDENT() || pk(cg) == TK_KEYWORD() {
+        name = ptxt(cg);
+        adv(cg);
+    }
+    // Handle :: paths (e.g., std::io::Result)
+    let mut go = true;
+    while go {
+        if pk(cg) == TK_COLONCOLON() {
+            name = name + "::";
+            adv(cg);
+            if pk(cg) == TK_IDENT() || pk(cg) == TK_KEYWORD() {
+                name = name + ptxt(cg);
+                adv(cg);
+            }
+        } else { go = false; }
+    }
+    // Handle <T> generics - skip
+    if pk(cg) == TK_LT() {
+        adv(cg);
+        let mut depth: i32 = 1;
+        let mut go2 = true;
+        while go2 {
+            if at_end(cg) { go2 = false; }
+            else if pk(cg) == TK_LT() { depth = depth + 1; adv(cg); }
+            else if pk(cg) == TK_GT() {
+                depth = depth - 1; adv(cg);
+                if depth == 0 { go2 = false; }
+            }
+            else { adv(cg); }
+        }
+    }
+    map_type(name)
+}
+
+// ===========================================================================
+// PASS 1: Collect forward declarations
+// ===========================================================================
+// Scan top-level fn signatures and emit C forward declarations.
+fn pass1_scan(cg: &mut CG) {
+    let saved_pos = cg.pos;
+    cg.pos = 0;
+
+    let mut go = true;
+    while go {
+        if at_end(cg) { go = false; }
+        else {
+            let k = pk(cg);
+            let txt = ptxt(cg);
+            // Skip 'pub' keyword
+            if k == TK_KEYWORD() && txt == "pub" { adv(cg); }
+            let k2 = pk(cg);
+            let txt2 = ptxt(cg);
+            if k2 == TK_KEYWORD() && txt2 == "struct" {
+                adv(cg); // skip "struct"
+                let sname = ptxt(cg);
+                adv(cg); // skip struct name
+                reg_struct(cg, sname);
+                // Parse struct body: { field: type, ... }
+                if pk(cg) == TK_LBRACE() {
+                    adv(cg); // skip {
+                    let mut fields_c = "";
+                    let mut fgo = true;
+                    while fgo {
+                        if at_end(cg) || pk(cg) == TK_RBRACE() { fgo = false; }
+                        else {
+                            let fname = ptxt(cg);
+                            adv(cg); // skip field name
+                            expect_kind(cg, TK_COLON()); // skip :
+                            let fty = parse_type(cg);
+                            fields_c = fields_c + " " + fty + " " + fname + ";";
+                            if pk(cg) == TK_COMMA() { adv(cg); }
+                        }
+                    }
+                    expect_kind(cg, TK_RBRACE());
+                    emit_fwd(cg, "typedef struct {" + fields_c + " } " + sname + ";");
+                }
+            } else if k2 == TK_KEYWORD() && txt2 == "fn" {
+                adv(cg); // skip "fn"
+                let name = ptxt(cg);
+                adv(cg); // skip name
+                // Parse params for the forward declaration
+                expect_kind(cg, TK_LPAREN());
+                let mut params_c = "";
+                let mut first = true;
+                let mut pgo = true;
+                while pgo {
+                    if at_end(cg) || pk(cg) == TK_RPAREN() { pgo = false; }
+                    else {
+                        if !first { params_c = params_c + ", "; }
+                        first = false;
+                        // Skip mut keyword if present
+                        if ptxt(cg) == "mut" { adv(cg); }
+                        // param name
+                        let pname = ptxt(cg);
+                        adv(cg);
+                        // : type
+                        expect_kind(cg, TK_COLON());
+                        let pty = parse_type(cg);
+                        params_c = params_c + pty + " " + pname;
+                        if pk(cg) == TK_COMMA() { adv(cg); }
+                        else { pgo = false; }
+                    }
+                }
+                expect_kind(cg, TK_RPAREN());
+                // Return type
+                let mut ret_c = "void";
+                if pk(cg) == TK_ARROW() {
+                    adv(cg);
+                    ret_c = parse_type(cg);
+                }
+                // Emit forward declaration (skip main)
+                if name == "main" {
+                    // no forward decl for main
+                } else {
+                    emit_fwd(cg, ret_c + " " + name + "(" + params_c + ");");
+                }
+                // Skip the body
+                if pk(cg) == TK_LBRACE() { skip_balanced_braces(cg); }
+            } else if k2 == TK_KEYWORD() && txt2 == "impl" {
+                adv(cg); // skip "impl"
+                let impl_tname = ptxt(cg);
+                adv(cg); // skip type name
+                // Parse impl body: { fn method(...) { ... } ... }
+                if pk(cg) == TK_LBRACE() {
+                    adv(cg); // skip {
+                    let mut igo = true;
+                    while igo {
+                        if at_end(cg) || pk(cg) == TK_RBRACE() { igo = false; }
+                        else {
+                            // Skip pub if present
+                            if ptxt(cg) == "pub" { adv(cg); }
+                            if ptxt(cg) == "fn" {
+                                adv(cg); // skip "fn"
+                                let mname = ptxt(cg);
+                                adv(cg); // skip method name
+                                let mangled = impl_tname + "_" + mname;
+                                reg_impl_method(cg, mangled);
+                                // Parse params
+                                expect_kind(cg, TK_LPAREN());
+                                let mut mparams_c = "";
+                                let mut mfirst = true;
+                                let mut has_self = false;
+                                let mut mpgo = true;
+                                while mpgo {
+                                    if at_end(cg) || pk(cg) == TK_RPAREN() { mpgo = false; }
+                                    else {
+                                        let ptok = ptxt(cg);
+                                        // Handle &self or &mut self
+                                        if pk(cg) == TK_BIT_AND() {
+                                            adv(cg); // skip &
+                                            if ptxt(cg) == "mut" { adv(cg); } // skip mut
+                                            if ptxt(cg) == "self" {
+                                                adv(cg); // skip self
+                                                has_self = true;
+                                                mparams_c = impl_tname + "* self";
+                                                mfirst = false;
+                                                if pk(cg) == TK_COMMA() { adv(cg); }
+                                            }
+                                        } else if ptok == "self" || ptok == "mut" {
+                                            // self or mut self (by value)
+                                            if ptok == "mut" { adv(cg); }
+                                            if ptxt(cg) == "self" { adv(cg); }
+                                            has_self = true;
+                                            mparams_c = impl_tname + " self";
+                                            mfirst = false;
+                                            if pk(cg) == TK_COMMA() { adv(cg); }
+                                        } else {
+                                            // Regular param: name: type
+                                            if !mfirst { mparams_c = mparams_c + ", "; }
+                                            mfirst = false;
+                                            if ptxt(cg) == "mut" { adv(cg); }
+                                            let mpname = ptxt(cg);
+                                            adv(cg);
+                                            expect_kind(cg, TK_COLON());
+                                            let mpty = parse_type(cg);
+                                            mparams_c = mparams_c + mpty + " " + mpname;
+                                            if pk(cg) == TK_COMMA() { adv(cg); }
+                                            else { mpgo = false; }
+                                        }
+                                    }
+                                }
+                                expect_kind(cg, TK_RPAREN());
+                                // Return type
+                                let mut mret_c = "void";
+                                if pk(cg) == TK_ARROW() {
+                                    adv(cg);
+                                    mret_c = parse_type(cg);
+                                }
+                                // Emit forward declaration
+                                emit_fwd(cg, mret_c + " " + mangled + "(" + mparams_c + ");");
+                                // Skip the body
+                                if pk(cg) == TK_LBRACE() { skip_balanced_braces(cg); }
+                            } else {
+                                // Skip non-fn inside impl
+                                if pk(cg) == TK_LBRACE() { skip_balanced_braces(cg); }
+                                else { adv(cg); }
+                            }
+                        }
+                    }
+                    expect_kind(cg, TK_RBRACE()); // skip closing }
+                }
+            } else {
+                // Skip non-fn items
+                if pk(cg) == TK_LBRACE() { skip_balanced_braces(cg); }
+                else if pk(cg) == TK_SEMI() { adv(cg); }
+                else { adv(cg); }
+            }
+        }
+    }
+
+    // Restore position
+    cg.pos = saved_pos;
+}
+
+// ===========================================================================
+// PASS 2: Expression codegen
+// ===========================================================================
+// All parse_*_expr functions return a C expression string.
+
+fn parse_expr(cg: &mut CG) -> String {
+    let left = parse_or_expr(cg);
+    left
+}
+
+fn parse_or_expr(cg: &mut CG) -> String {
+    let mut result = parse_and_expr(cg);
+    let mut go = true;
+    while go {
+        if pk(cg) == TK_OR() {
+            adv(cg);
+            let right = parse_and_expr(cg);
+            result = result + " || " + right;
+        } else { go = false; }
+    }
+    result
+}
+
+fn parse_and_expr(cg: &mut CG) -> String {
+    let mut result = parse_cmp_expr(cg);
+    let mut go = true;
+    while go {
+        if pk(cg) == TK_AND() {
+            adv(cg);
+            let right = parse_cmp_expr(cg);
+            result = result + " && " + right;
+        } else { go = false; }
+    }
+    result
+}
+
+fn parse_cmp_expr(cg: &mut CG) -> String {
+    let mut result = parse_add_expr(cg);
+    let k = pk(cg);
+    if k == TK_EQ() {
+        adv(cg);
+        let r = parse_add_expr(cg);
+        // Use strcmp for string comparisons
+        if is_str_expr(cg, result) || is_str_expr(cg, r) {
+            result = "strcmp(" + result + ", " + r + ") == 0";
+        } else {
+            result = result + " == " + r;
+        }
+    }
+    else if k == TK_NEQ() {
+        adv(cg);
+        let r = parse_add_expr(cg);
+        if is_str_expr(cg, result) || is_str_expr(cg, r) {
+            result = "strcmp(" + result + ", " + r + ") != 0";
+        } else {
+            result = result + " != " + r;
+        }
+    }
+    else if k == TK_LT() { adv(cg); let r = parse_add_expr(cg); result = result + " < " + r; }
+    else if k == TK_GT() { adv(cg); let r = parse_add_expr(cg); result = result + " > " + r; }
+    else if k == TK_LE() { adv(cg); let r = parse_add_expr(cg); result = result + " <= " + r; }
+    else if k == TK_GE() { adv(cg); let r = parse_add_expr(cg); result = result + " >= " + r; }
+    result
+}
+
+fn parse_add_expr(cg: &mut CG) -> String {
+    let mut result = parse_mul_expr(cg);
+    let mut go = true;
+    while go {
+        let k = pk(cg);
+        if k == TK_PLUS() {
+            adv(cg);
+            let r = parse_mul_expr(cg);
+            // String concatenation: use qc_strcat if either side is a string
+            if is_str_expr(cg, result) || is_str_expr(cg, r) {
+                cg.needs_str_runtime = 1;
+                result = "qc_strcat(" + result + ", " + r + ")";
+            } else {
+                result = result + " + " + r;
+            }
+        }
+        else if k == TK_MINUS() { adv(cg); let r = parse_mul_expr(cg); result = result + " - " + r; }
+        else { go = false; }
+    }
+    result
+}
+
+fn parse_mul_expr(cg: &mut CG) -> String {
+    let mut result = parse_unary_expr(cg);
+    let mut go = true;
+    while go {
+        let k = pk(cg);
+        if k == TK_STAR() { adv(cg); let r = parse_unary_expr(cg); result = result + " * " + r; }
+        else if k == TK_SLASH() { adv(cg); let r = parse_unary_expr(cg); result = result + " / " + r; }
+        else if k == TK_PERCENT() { adv(cg); let r = parse_unary_expr(cg); result = result + " % " + r; }
+        else { go = false; }
+    }
+    result
+}
+
+fn parse_unary_expr(cg: &mut CG) -> String {
+    if pk(cg) == TK_MINUS() { adv(cg); let v = parse_unary_expr(cg); return "-" + v; }
+    if pk(cg) == TK_NOT() { adv(cg); let v = parse_unary_expr(cg); return "!" + v; }
+    // Skip & and &mut (references don't exist in our C output for simple values)
+    if pk(cg) == TK_BIT_AND() {
+        adv(cg);
+        if ptxt(cg) == "mut" { adv(cg); }
+        let v = parse_unary_expr(cg);
+        return v;
+    }
+    parse_postfix_expr(cg)
+}
+
+fn parse_postfix_expr(cg: &mut CG) -> String {
+    let mut result = parse_primary_expr(cg);
+    let mut go = true;
+    while go {
+        if pk(cg) == TK_DOT() {
+            adv(cg);
+            if pk(cg) == TK_IDENT() || pk(cg) == TK_KEYWORD() {
+                let field = ptxt(cg);
+                adv(cg);
+                if pk(cg) == TK_LPAREN() {
+                    // Method call: obj.method(args) -> C helper function
+                    adv(cg);
+                    let args = parse_call_args(cg);
+                    expect_kind(cg, TK_RPAREN());
+                    // Translate string methods to C helper calls
+                    if field == "starts_with" {
+                        cg.needs_str_runtime = 1;
+                        result = "qc_starts_with(" + result + ", " + args + ")";
+                    } else if field == "len" {
+                        cg.needs_str_runtime = 1;
+                        result = "qc_strlen(" + result + ")";
+                    } else if field == "substring" {
+                        cg.needs_str_runtime = 1;
+                        result = "qc_substring(" + result + ", " + args + ")";
+                    } else if field == "parse_int" {
+                        cg.needs_str_runtime = 1;
+                        result = "qc_parse_int(" + result + ")";
+                    } else if field == "char_at" {
+                        cg.needs_str_runtime = 1;
+                        result = "qc_char_at(" + result + ", " + args + ")";
+                    } else if field == "contains" {
+                        cg.needs_str_runtime = 1;
+                        result = "qc_contains(" + result + ", " + args + ")";
+                    } else if field == "index_of" {
+                        cg.needs_str_runtime = 1;
+                        result = "qc_index_of(" + result + ", " + args + ")";
+                    } else if field == "ends_with" {
+                        cg.needs_str_runtime = 1;
+                        result = "qc_ends_with(" + result + ", " + args + ")";
+                    } else if field == "trim" {
+                        cg.needs_str_runtime = 1;
+                        result = "qc_trim(" + result + ")";
+                    } else if field == "split" {
+                        cg.needs_str_runtime = 1;
+                        result = "qc_split(" + result + ", " + args + ")";
+                    } else if field == "split_whitespace" {
+                        cg.needs_str_runtime = 1;
+                        result = "qc_split_ws(" + result + ")";
+                    } else if field == "parse_float" {
+                        result = "atof(" + result + ")";
+                    } else if field == "compare" {
+                        result = "strcmp(" + result + ", " + args + ")";
+                    } else if field == "to_lowercase" {
+                        cg.needs_str_runtime = 1;
+                        result = "qc_to_lower(" + result + ")";
+                    } else if field == "to_uppercase" {
+                        cg.needs_str_runtime = 1;
+                        result = "qc_to_upper(" + result + ")";
+                    } else if field == "replace" {
+                        cg.needs_str_runtime = 1;
+                        result = "qc_replace(" + result + ", " + args + ")";
+                    } else if field == "iter" {
+                        // .iter() is a no-op in codegen; the receiver is already a QVec
+                        // result stays the same
+                    } else if field == "collect" {
+                        // .collect() is a no-op; the result from map/filter is already a QVec
+                        // result stays the same
+                    } else if field == "map" {
+                        // .map(|x| expr) -> inline for-loop building new QVec
+                        // args is the lambda function name (e.g. __lambda_1)
+                        cg.needs_vec_runtime = 1;
+                        cg.lambda_count = cg.lambda_count + 1;
+                        let map_tmp = "__map_" + to_string_i32(cg.lambda_count);
+                        let map_src = result;
+                        // We emit inline: creates a new vec, loops over source, applies lambda, pushes result
+                        // Use a compound statement expression (GCC/Clang extension) or temp variable approach
+                        // For portability, use a helper macro pattern via a temp QVec in the lambdas buffer
+                        // Actually, we return a special marker that codegen_stmt's let-binding can expand
+                        result = "__QMAP(" + map_src + ", " + args + ")";
+                    } else if field == "filter" {
+                        // .filter(|x| pred) -> inline loop with conditional push
+                        cg.needs_vec_runtime = 1;
+                        result = "__QFILTER(" + result + ", " + args + ")";
+                    } else if field == "fold" {
+                        // .fold(init, |acc, x| expr) -> inline loop that accumulates
+                        // args contains "init, lambda_name"
+                        result = "__QFOLD(" + result + ", " + args + ")";
+                    } else {
+                        // Check for impl method dispatch: obj.method(args) -> Type_method(&obj, args)
+                        let obj_type = lookup_var(cg, result);
+                        let mut dispatched = false;
+                        if obj_type != "" {
+                            let mangled = obj_type + "_" + field;
+                            if is_impl_method(cg, mangled) {
+                                if args != "" {
+                                    result = mangled + "(&" + result + ", " + args + ")";
+                                } else {
+                                    result = mangled + "(&" + result + ")";
+                                }
+                                dispatched = true;
+                            }
+                        }
+                        if !dispatched {
+                            // Generic method call passthrough
+                            result = result + "." + field + "(" + args + ")";
+                        }
+                    }
+                } else {
+                    // Field access: check if receiver is self inside impl -> use ->
+                    if result == "self" && cg.impl_type != "" {
+                        result = "self->" + field;
+                    } else {
+                        result = result + "." + field;
+                    }
+                }
+            } else { go = false; }
+        } else if pk(cg) == TK_LPAREN() {
+            // Function call: f(args)
+            adv(cg);
+            let args = parse_call_args(cg);
+            expect_kind(cg, TK_RPAREN());
+            // Translate BuildLang builtins to C equivalents
+            if result == "args_count" {
+                result = "argc";
+            } else if result == "args_get" {
+                result = "argv[" + args + "]";
+            } else if result == "process_exit" {
+                result = "exit(" + args + ")";
+            } else if result == "file_exists" {
+                cg.needs_str_runtime = 1;
+                result = "qc_file_exists(" + args + ")";
+            } else if result == "read_file" {
+                cg.needs_str_runtime = 1;
+                result = "qc_read_file(" + args + ")";
+            } else if result == "write_file" {
+                cg.needs_str_runtime = 1;
+                result = "qc_write_file(" + args + ")";
+            } else if result == "stdin_is_pipe" {
+                cg.needs_str_runtime = 1;
+                result = "qc_stdin_is_pipe()";
+            } else if result == "read_all" {
+                cg.needs_str_runtime = 1;
+                result = "qc_read_all()";
+            } else if result == "vec_push" {
+                // vec_push(v, x) -> qv_push(&v, x)
+                cg.needs_vec_runtime = 1;
+                let comma_pos = args.index_of(",");
+                if comma_pos > 0 {
+                    let first_arg = args.substring(0, comma_pos);
+                    let rest_args = args.substring(comma_pos, args.len() - comma_pos);
+                    result = "qv_push(&" + first_arg + rest_args + ")";
+                } else {
+                    result = "qv_push(&" + args + ")";
+                }
+            } else if result == "vec_get" {
+                // vec_get(v, i) -> qv_get(&v, i)
+                cg.needs_vec_runtime = 1;
+                let comma_pos = args.index_of(",");
+                if comma_pos > 0 {
+                    let first_arg = args.substring(0, comma_pos);
+                    let rest_args = args.substring(comma_pos, args.len() - comma_pos);
+                    result = "qv_get(&" + first_arg + rest_args + ")";
+                } else {
+                    result = "qv_get(&" + args + ")";
+                }
+            } else if result == "vec_len" {
+                // vec_len(v) -> qv_len(&v)
+                cg.needs_vec_runtime = 1;
+                result = "qv_len(&" + args + ")";
+            } else if result == "time_unix" {
+                result = "time(NULL)";
+            } else if result == "clock_ms" {
+                cg.needs_str_runtime = 1;
+                result = "qc_clock_ms()";
+            } else if result == "getenv" {
+                result = "getenv(" + args + ")";
+            } else if result == "to_string_i32" || result == "to_string_i64" {
+                cg.needs_str_runtime = 1;
+                result = "qc_itoa(" + args + ")";
+            } else if result == "to_string_f64" {
+                cg.needs_str_runtime = 1;
+                result = "qc_ftoa(" + args + ")";
+            } else {
+                result = result + "(" + args + ")";
+            }
+        } else if pk(cg) == TK_LBRACK() {
+            // Index: a[i]
+            adv(cg);
+            let idx = parse_expr(cg);
+            expect_kind(cg, TK_RBRACK());
+            result = result + "[" + idx + "]";
+        } else if pk(cg) == TK_NOT() {
+            // Macro call: ident!(args) - we handle println! specially
+            // but the name is already parsed; this handles the ! after ident
+            adv(cg); // skip !
+            if pk(cg) == TK_LPAREN() {
+                adv(cg);
+                let args = parse_call_args(cg);
+                expect_kind(cg, TK_RPAREN());
+                // result already has the macro name
+                result = result + "!(" + args + ")";
+            } else if pk(cg) == TK_LBRACK() {
+                adv(cg);
+                let args = parse_call_args(cg);
+                expect_kind(cg, TK_RBRACK());
+                // vec![] -> qv_new()
+                if result == "vec" {
+                    cg.needs_vec_runtime = 1;
+                    result = "qv_new()";
+                } else {
+                    result = result + "![" + args + "]";
+                }
+            }
+        } else { go = false; }
+    }
+    result
+}
+
+fn parse_call_args(cg: &mut CG) -> String {
+    let mut result = "";
+    let mut first = true;
+    let mut go = true;
+    while go {
+        if at_end(cg) || pk(cg) == TK_RPAREN() || pk(cg) == TK_RBRACK() { go = false; }
+        else {
+            if !first { result = result + ", "; }
+            first = false;
+            let arg = parse_expr(cg);
+            result = result + arg;
+            if pk(cg) == TK_COMMA() { adv(cg); }
+            else { go = false; }
+        }
+    }
+    result
+}
+
+// Parse a closure: |param1, param2| body_expr
+// Emits a static C function with a unique name and returns that name.
+// Closure params default to int64_t since BuildLang closures are typically numeric.
+fn parse_closure(cg: &mut CG) -> String {
+    adv(cg); // skip opening |
+    // Parse parameter names
+    let mut param_names = "";
+    let mut param_count: i32 = 0;
+    let mut cgo = true;
+    while cgo {
+        if at_end(cg) || pk(cg) == TK_BIT_OR() { cgo = false; }
+        else {
+            if param_count > 0 { param_names = param_names + ","; }
+            let pname = ptxt(cg);
+            adv(cg);
+            param_names = param_names + pname;
+            param_count = param_count + 1;
+            if pk(cg) == TK_COMMA() { adv(cg); }
+            else { cgo = false; }
+        }
+    }
+    expect_kind(cg, TK_BIT_OR()); // skip closing |
+
+    // Parse the body expression
+    let body = parse_expr(cg);
+
+    // Generate a unique lambda name
+    cg.lambda_count = cg.lambda_count + 1;
+    let lambda_name = "__lambda_" + to_string_i32(cg.lambda_count);
+
+    // Build C parameter list (all int64_t by default)
+    let mut c_params = "";
+    let mut pi: i32 = 0;
+    let mut pstart: i32 = 0;
+    let pnames_len = param_names.len();
+    while pi <= pnames_len {
+        let mut is_sep = false;
+        if pi == pnames_len { is_sep = true; }
+        else {
+            let ch = param_names.char_at(pi);
+            if ch == "," { is_sep = true; }
+        }
+        if is_sep {
+            if pi > pstart {
+                let pn = param_names.substring(pstart, pi - pstart);
+                if c_params != "" { c_params = c_params + ", "; }
+                c_params = c_params + "int64_t " + pn;
+            }
+            pstart = pi + 1;
+        }
+        pi = pi + 1;
+    }
+
+    // Emit the static lambda function into the lambdas buffer
+    cg.lambdas = cg.lambdas + "static int64_t " + lambda_name + "(" + c_params + ") { return " + body + "; }\n";
+
+    lambda_name
+}
+
+fn parse_primary_expr(cg: &mut CG) -> String {
+    let k = pk(cg);
+    // Closure/lambda: |params| body -> emit static function, return its name
+    if k == TK_BIT_OR() {
+        return parse_closure(cg);
+    }
+    // Parenthesized expression
+    if k == TK_LPAREN() {
+        adv(cg);
+        let inner = parse_expr(cg);
+        expect_kind(cg, TK_RPAREN());
+        return "(" + inner + ")";
+    }
+    // Integer literal
+    if k == TK_INT_LIT() {
+        let v = ptxt(cg); adv(cg); return v;
+    }
+    // Float literal
+    if k == TK_FLOAT_LIT() {
+        let v = ptxt(cg); adv(cg); return v;
+    }
+    // String literal - pass through
+    if k == TK_STR_LIT() {
+        let v = ptxt(cg); adv(cg); return v;
+    }
+    // Char literal
+    if k == TK_CHAR_LIT() {
+        let v = ptxt(cg); adv(cg); return v;
+    }
+    // Keywords: true, false, if-expr
+    if k == TK_KEYWORD() {
+        let txt = ptxt(cg);
+        if txt == "true" { adv(cg); return "1"; }
+        if txt == "false" { adv(cg); return "0"; }
+        // If-expression: if cond { a } else { b } -> (cond) ? (a) : (b)
+        if txt == "if" {
+            adv(cg); // skip "if"
+            let cond = parse_expr(cg);
+            // Parse then-block: { expr }
+            expect_kind(cg, TK_LBRACE());
+            let then_val = parse_expr(cg);
+            // Skip optional semicolon inside block
+            if pk(cg) == TK_SEMI() { adv(cg); }
+            expect_kind(cg, TK_RBRACE());
+            // Parse else-block: else { expr }
+            let mut else_val = "0";
+            if ptxt(cg) == "else" {
+                adv(cg); // skip "else"
+                expect_kind(cg, TK_LBRACE());
+                else_val = parse_expr(cg);
+                if pk(cg) == TK_SEMI() { adv(cg); }
+                expect_kind(cg, TK_RBRACE());
+            }
+            return "(" + cond + ") ? (" + then_val + ") : (" + else_val + ")";
+        }
+    }
+    // Identifier or struct literal
+    if k == TK_IDENT() || k == TK_KEYWORD() {
+        let name = ptxt(cg);
+        adv(cg);
+        // Handle :: paths
+        let mut path = name;
+        let mut pgo = true;
+        while pgo {
+            if pk(cg) == TK_COLONCOLON() {
+                adv(cg);
+                if pk(cg) == TK_IDENT() || pk(cg) == TK_KEYWORD() {
+                    path = path + "_" + ptxt(cg);
+                    adv(cg);
+                }
+            } else { pgo = false; }
+        }
+        // Struct literal: StructName { field: expr, ... }
+        if pk(cg) == TK_LBRACE() && is_struct_type(cg, path) {
+            adv(cg); // skip {
+            let mut fields_c = "";
+            let mut sfirst = true;
+            let mut sgo = true;
+            while sgo {
+                if at_end(cg) || pk(cg) == TK_RBRACE() { sgo = false; }
+                else {
+                    if !sfirst { fields_c = fields_c + ", "; }
+                    sfirst = false;
+                    let fname = ptxt(cg);
+                    adv(cg); // skip field name
+                    expect_kind(cg, TK_COLON()); // skip :
+                    let fval = parse_expr(cg);
+                    fields_c = fields_c + "." + fname + " = " + fval;
+                    if pk(cg) == TK_COMMA() { adv(cg); }
+                }
+            }
+            expect_kind(cg, TK_RBRACE());
+            return "(" + path + "){ " + fields_c + " }";
+        }
+        return path;
+    }
+    // Fallback
+    if !at_end(cg) {
+        let v = ptxt(cg); adv(cg); return v;
+    }
+    ""
+}
+
+// ===========================================================================
+// PASS 2: Statement codegen
+// ===========================================================================
+
+// Build a printf/fprintf C format string from a BuildLang format string token.
+// The token text includes the quotes: "format {}" -> we strip quotes.
+// arg_types is a pipe-delimited list of C types for each {} placeholder.
+// For each {}, emits %s if the corresponding arg is const char*, else %lld.
+fn build_c_format(fmt_tok: String, newline: bool, arg_types: String) -> String {
+    // Strip surrounding quotes: "..." -> ...
+    let flen = fmt_tok.len();
+    let mut inner = fmt_tok;
+    if flen >= 2 {
+        if fmt_tok.starts_with("\"") {
+            inner = fmt_tok.substring(1, flen - 2);
+        }
+    }
+    // Replace {} with appropriate format specifier
+    let ilen = inner.len();
+    let atlen = arg_types.len();
+    let mut result = "";
+    let mut i: i32 = 0;
+    let mut arg_idx: i32 = 0;
+    let mut at_pos: i32 = 0;
+    while i < ilen {
+        let ch = inner.char_at(i);
+        if ch == "{" && i + 1 < ilen {
+            let next = inner.char_at(i + 1);
+            if next == "}" {
+                // Find the arg_idx-th type in arg_types (pipe-delimited)
+                let mut cur_at_pos = at_pos;
+                // Advance at_pos to current arg
+                let mut skip: i32 = 0;
+                let mut sgo = true;
+                while sgo && skip < arg_idx {
+                    if cur_at_pos >= atlen { sgo = false; }
+                    else {
+                        let atrest = arg_types.substring(cur_at_pos, atlen - cur_at_pos);
+                        let atp = atrest.index_of("|");
+                        if atp < 0 { sgo = false; }
+                        else { cur_at_pos = cur_at_pos + atp + 1; skip = skip + 1; }
+                    }
+                }
+                // Extract this type entry
+                let mut this_type = "int64_t";
+                if cur_at_pos < atlen {
+                    let atrest2 = arg_types.substring(cur_at_pos, atlen - cur_at_pos);
+                    let atp2 = atrest2.index_of("|");
+                    if atp2 >= 0 {
+                        this_type = arg_types.substring(cur_at_pos, atp2);
+                    } else {
+                        this_type = atrest2;
+                    }
+                }
+                if this_type == "const char*" {
+                    result = result + "%s";
+                } else if this_type == "double" || this_type == "float" {
+                    result = result + "%f";
+                } else {
+                    result = result + "%lld";
+                }
+                arg_idx = arg_idx + 1;
+                i = i + 2;
+            } else {
+                result = result + ch;
+                i = i + 1;
+            }
+        } else {
+            result = result + ch;
+            i = i + 1;
+        }
+    }
+    if newline { result = result + "\\n"; }
+    result
+}
+
+// Codegen a println!/print!/eprintln! macro call directly from the token stream.
+// Caller has already consumed the macro name token. We expect: ! ( args ) ;
+fn codegen_macro_print(cg: &mut CG, macro_name: String) {
+    // Consume ! (
+    expect_kind(cg, TK_NOT());
+    expect_kind(cg, TK_LPAREN());
+
+    let is_println = macro_name == "println";
+    let is_eprintln = macro_name == "eprintln";
+
+    // Check for no-arg println!()
+    if pk(cg) == TK_RPAREN() {
+        adv(cg); // skip )
+        if pk(cg) == TK_SEMI() { adv(cg); }
+        if is_eprintln {
+            emit_line(cg, "fprintf(stderr, \"\\n\");");
+        } else if is_println {
+            emit_line(cg, "printf(\"\\n\");");
+        } else {
+            emit_line(cg, "printf(\"\");");
+        }
+        return;
+    }
+
+    // First arg should be a format string literal
+    let mut fmt_tok = "";
+    let mut has_fmt = false;
+    if pk(cg) == TK_STR_LIT() {
+        fmt_tok = ptxt(cg);
+        has_fmt = true;
+        adv(cg);
+    } else {
+        // Not a string literal - just emit the arg as-is with a format
+        let arg = parse_expr(cg);
+        if pk(cg) == TK_RPAREN() { adv(cg); }
+        if pk(cg) == TK_SEMI() { adv(cg); }
+        let mut spec = "%lld";
+        if is_str_expr(cg, arg) { spec = "%s"; }
+        if is_println {
+            emit_line(cg, "printf(\"" + spec + "\\n\", " + arg + ");");
+        } else if is_eprintln {
+            emit_line(cg, "fprintf(stderr, \"" + spec + "\\n\", " + arg + ");");
+        } else {
+            emit_line(cg, "printf(\"" + spec + "\", " + arg + ");");
+        }
+        return;
+    }
+
+    // Collect remaining args and their types (for format specifier selection)
+    let mut args_str = "";
+    let mut arg_types = "";
+    let mut has_args = false;
+    if pk(cg) == TK_COMMA() {
+        adv(cg); // skip comma after format string
+        let mut first = true;
+        let mut ago = true;
+        while ago {
+            if at_end(cg) || pk(cg) == TK_RPAREN() { ago = false; }
+            else {
+                if !first { args_str = args_str + ", "; }
+                first = false;
+                has_args = true;
+                let arg = parse_expr(cg);
+                args_str = args_str + arg;
+                // Determine the type of this arg for format string
+                if is_str_expr(cg, arg) {
+                    arg_types = arg_types + "const char*|";
+                } else {
+                    arg_types = arg_types + "int64_t|";
+                }
+                if pk(cg) == TK_COMMA() { adv(cg); }
+                else { ago = false; }
+            }
+        }
+    }
+
+    expect_kind(cg, TK_RPAREN());
+    if pk(cg) == TK_SEMI() { adv(cg); }
+
+    // Build the format string with correct specifiers
+    let c_fmt = build_c_format(fmt_tok, is_println, arg_types);
+
+    // Build the printf/fprintf call
+    let mut call = "";
+    if is_eprintln {
+        call = "fprintf(stderr, \"" + c_fmt + "\"";
+    } else {
+        call = "printf(\"" + c_fmt + "\"";
+    }
+    if has_args {
+        call = call + ", " + args_str;
+    }
+    call = call + ");";
+    emit_line(cg, call);
+}
+
+// Parse a statement and emit C code
+fn codegen_stmt(cg: &mut CG) {
+    let k = pk(cg);
+    let txt = ptxt(cg);
+
+    // --- println! / eprintln! / print! macro calls ---
+    if k == TK_IDENT() && (txt == "println" || txt == "eprintln" || txt == "print") {
+        // Check if next token is !
+        if pk_at(cg, 1) == TK_NOT() {
+            let macro_name = txt;
+            adv(cg); // consume the macro name
+            codegen_macro_print(cg, macro_name);
+            return;
+        }
+    }
+
+    // --- let binding ---
+    if k == TK_KEYWORD() && txt == "let" {
+        adv(cg); // skip "let"
+        let mut is_mut = false;
+        if ptxt(cg) == "mut" { is_mut = true; adv(cg); }
+        let var_name = ptxt(cg);
+        adv(cg); // skip name
+
+        // Optional type annotation: : Type
+        let mut explicit_type = "";
+        if pk(cg) == TK_COLON() {
+            adv(cg);
+            explicit_type = parse_type(cg);
+        }
+
+        // = initializer
+        let mut init_val = "";
+        if pk(cg) == TK_ASSIGN() {
+            adv(cg);
+
+            // Check for multi-statement if-expression: let x = if cond { let t = ...; t + 1 } else { 0 };
+            if pk(cg) == TK_KEYWORD() && ptxt(cg) == "if" && if_has_multi_stmt(cg) {
+                // Determine C type from explicit annotation or infer from branch content
+                let mut c_type = "";
+                if explicit_type != "" {
+                    c_type = explicit_type;
+                } else {
+                    c_type = infer_if_block_type(cg);
+                }
+                reg_var(cg, var_name, c_type);
+                // Emit: type varname;
+                emit_line(cg, c_type + " " + var_name + ";");
+                // Skip "if" keyword, then emit the block-assignment
+                adv(cg);
+                codegen_if_block_assign(cg, var_name);
+                // Skip trailing semicolon after the if-expression
+                if pk(cg) == TK_SEMI() { adv(cg); }
+                return;
+            }
+
+            init_val = parse_expr(cg);
+        }
+        if pk(cg) == TK_SEMI() { adv(cg); }
+
+        // Determine C type
+        let mut c_type = "";
+        if explicit_type != "" {
+            c_type = explicit_type;
+        } else {
+            // Infer type from the initializer
+            c_type = infer_type(cg, init_val);
+        }
+
+        // Register variable type for later lookups
+        reg_var(cg, var_name, c_type);
+
+        // Handle iterator desugaring: __QMAP, __QFILTER, __QFOLD
+        if init_val.starts_with("__QMAP(") {
+            cg.needs_vec_runtime = 1;
+            // Extract: __QMAP(source, lambda_name)
+            let map_inner = init_val.substring(7, init_val.len() - 8); // strip __QMAP( and )
+            let map_comma = map_inner.index_of(", ");
+            let map_src = map_inner.substring(0, map_comma);
+            let map_fn = map_inner.substring(map_comma + 2, map_inner.len() - map_comma - 2);
+            // Emit: QVec var = qv_new(); for loop calling lambda
+            emit_line(cg, "QVec " + var_name + " = qv_new();");
+            emit_line(cg, "for (int64_t __mi = 0; __mi < qv_len(&" + map_src + "); __mi++) {");
+            cg.indent = cg.indent + 1;
+            emit_line(cg, "int64_t __mx = qv_get(&" + map_src + ", __mi);");
+            emit_line(cg, "qv_push(&" + var_name + ", " + map_fn + "(__mx));");
+            cg.indent = cg.indent - 1;
+            emit_line(cg, "}");
+            reg_var(cg, var_name, "QVec");
+            return;
+        }
+        if init_val.starts_with("__QFILTER(") {
+            cg.needs_vec_runtime = 1;
+            let flt_inner = init_val.substring(10, init_val.len() - 11);
+            let flt_comma = flt_inner.index_of(", ");
+            let flt_src = flt_inner.substring(0, flt_comma);
+            let flt_fn = flt_inner.substring(flt_comma + 2, flt_inner.len() - flt_comma - 2);
+            emit_line(cg, "QVec " + var_name + " = qv_new();");
+            emit_line(cg, "for (int64_t __fi = 0; __fi < qv_len(&" + flt_src + "); __fi++) {");
+            cg.indent = cg.indent + 1;
+            emit_line(cg, "int64_t __fx = qv_get(&" + flt_src + ", __fi);");
+            emit_line(cg, "if (" + flt_fn + "(__fx)) { qv_push(&" + var_name + ", __fx); }");
+            cg.indent = cg.indent - 1;
+            emit_line(cg, "}");
+            reg_var(cg, var_name, "QVec");
+            return;
+        }
+        if init_val.starts_with("__QFOLD(") {
+            // Extract: __QFOLD(source, init, lambda_name)
+            let fold_inner = init_val.substring(8, init_val.len() - 9);
+            let fold_c1 = fold_inner.index_of(", ");
+            let fold_src = fold_inner.substring(0, fold_c1);
+            let fold_rest = fold_inner.substring(fold_c1 + 2, fold_inner.len() - fold_c1 - 2);
+            let fold_c2 = fold_rest.index_of(", ");
+            let fold_init = fold_rest.substring(0, fold_c2);
+            let fold_fn = fold_rest.substring(fold_c2 + 2, fold_rest.len() - fold_c2 - 2);
+            cg.needs_vec_runtime = 1;
+            emit_line(cg, "int64_t " + var_name + " = " + fold_init + ";");
+            emit_line(cg, "for (int64_t __di = 0; __di < qv_len(&" + fold_src + "); __di++) {");
+            cg.indent = cg.indent + 1;
+            emit_line(cg, "int64_t __dx = qv_get(&" + fold_src + ", __di);");
+            emit_line(cg, var_name + " = " + fold_fn + "(" + var_name + ", __dx);");
+            cg.indent = cg.indent - 1;
+            emit_line(cg, "}");
+            reg_var(cg, var_name, "int64_t");
+            return;
+        }
+
+        if init_val != "" {
+            emit_line(cg, c_type + " " + var_name + " = " + init_val + ";");
+        } else {
+            emit_line(cg, c_type + " " + var_name + ";");
+        }
+        return;
+    }
+
+    // --- if / else ---
+    if k == TK_KEYWORD() && txt == "if" {
+        adv(cg); // skip "if"
+        let cond = parse_expr(cg);
+        emit_line(cg, "if (" + cond + ") {");
+        cg.indent = cg.indent + 1;
+        codegen_block(cg);
+        cg.indent = cg.indent - 1;
+        // Handle else / else if chain
+        let mut ego = true;
+        while ego {
+            if ptxt(cg) == "else" {
+                adv(cg);
+                if ptxt(cg) == "if" {
+                    adv(cg);
+                    let cond2 = parse_expr(cg);
+                    emit_line(cg, "} else if (" + cond2 + ") {");
+                    cg.indent = cg.indent + 1;
+                    codegen_block(cg);
+                    cg.indent = cg.indent - 1;
+                } else {
+                    emit_line(cg, "} else {");
+                    cg.indent = cg.indent + 1;
+                    codegen_block(cg);
+                    cg.indent = cg.indent - 1;
+                    ego = false;
+                }
+            } else { ego = false; }
+        }
+        emit_line(cg, "}");
+        return;
+    }
+
+    // --- while ---
+    if k == TK_KEYWORD() && txt == "while" {
+        adv(cg);
+        let cond = parse_expr(cg);
+        emit_line(cg, "while (" + cond + ") {");
+        cg.indent = cg.indent + 1;
+        codegen_block(cg);
+        cg.indent = cg.indent - 1;
+        emit_line(cg, "}");
+        return;
+    }
+
+    // --- loop -> while(1) ---
+    if k == TK_KEYWORD() && txt == "loop" {
+        adv(cg);
+        emit_line(cg, "while (1) {");
+        cg.indent = cg.indent + 1;
+        codegen_block(cg);
+        cg.indent = cg.indent - 1;
+        emit_line(cg, "}");
+        return;
+    }
+
+    // --- return ---
+    if k == TK_KEYWORD() && txt == "return" {
+        adv(cg);
+        if pk(cg) == TK_SEMI() {
+            adv(cg);
+            emit_line(cg, "return;");
+        } else {
+            let val = parse_expr(cg);
+            if pk(cg) == TK_SEMI() { adv(cg); }
+            emit_line(cg, "return " + val + ";");
+        }
+        return;
+    }
+
+    // --- break / continue ---
+    if k == TK_KEYWORD() && (txt == "break" || txt == "continue") {
+        adv(cg);
+        if pk(cg) == TK_SEMI() { adv(cg); }
+        emit_line(cg, txt + ";");
+        return;
+    }
+
+    // --- Expression statement ---
+    let expr = parse_expr(cg);
+
+    // Check for assignment: expr = rhs
+    let ak = pk(cg);
+    if ak == TK_ASSIGN() {
+        adv(cg);
+        let rhs = parse_expr(cg);
+        if pk(cg) == TK_SEMI() { adv(cg); }
+        emit_line(cg, expr + " = " + rhs + ";");
+        return;
+    }
+    // Compound assignment: += -= *= /=
+    if ak == TK_PLUS_EQ() {
+        adv(cg); let rhs = parse_expr(cg);
+        if pk(cg) == TK_SEMI() { adv(cg); }
+        emit_line(cg, expr + " += " + rhs + ";");
+        return;
+    }
+    if ak == TK_MINUS_EQ() {
+        adv(cg); let rhs = parse_expr(cg);
+        if pk(cg) == TK_SEMI() { adv(cg); }
+        emit_line(cg, expr + " -= " + rhs + ";");
+        return;
+    }
+    if ak == TK_STAR_EQ() {
+        adv(cg); let rhs = parse_expr(cg);
+        if pk(cg) == TK_SEMI() { adv(cg); }
+        emit_line(cg, expr + " *= " + rhs + ";");
+        return;
+    }
+    if ak == TK_SLASH_EQ() {
+        adv(cg); let rhs = parse_expr(cg);
+        if pk(cg) == TK_SEMI() { adv(cg); }
+        emit_line(cg, expr + " /= " + rhs + ";");
+        return;
+    }
+
+    if pk(cg) == TK_SEMI() { adv(cg); }
+
+    // Regular expression statement
+    if expr != "" {
+        emit_line(cg, expr + ";");
+    }
+}
+
+// Infer C type from an initializer expression (simple heuristic)
+// Uses only .starts_with() which works on both String and &str
+fn infer_type(cg: &CG, init: String) -> String {
+    if init == "" { return "int64_t"; }
+    // Vec: qv_new() -> QVec
+    if init == "qv_new()" { return "QVec"; }
+    // Iterator desugaring markers
+    if init.starts_with("__QMAP(") { return "QVec"; }
+    if init.starts_with("__QFILTER(") { return "QVec"; }
+    if init.starts_with("__QFOLD(") { return "int64_t"; }
+    // Struct literal: (StructName){ ... } -> StructName
+    if init.starts_with("(") {
+        let ilen = init.len();
+        let close = init.index_of(")");
+        if close > 1 {
+            let sname = init.substring(1, close - 1);
+            if is_struct_type(cg, sname) { return sname; }
+        }
+    }
+    // Impl associated function: Type_new(...) -> Type
+    let new_pos = init.index_of("_new(");
+    if new_pos > 0 {
+        let candidate = init.substring(0, new_pos);
+        if is_struct_type(cg, candidate) { return candidate; }
+    }
+    // Ternary from if-expression: check if branch is a string
+    if init.contains(") ? (") {
+        // Extract the then-branch from (cond) ? (then_expr) : (else_expr)
+        let qpos = init.index_of(") ? (");
+        if qpos > 0 {
+            let after_q = init.substring(qpos + 5, init.len() - qpos - 5);
+            let close_paren = after_q.index_of(")");
+            if close_paren > 0 {
+                let then_expr = after_q.substring(0, close_paren);
+                if is_str_expr(cg, then_expr) { return "const char*"; }
+            }
+        }
+    }
+    // String literal
+    if init.starts_with("\"") { return "const char*"; }
+    // Char literal
+    if init.starts_with("'") { return "char"; }
+    // args_get returns const char*
+    if init.starts_with("argv[") { return "const char*"; }
+    // String method returns: qc_substring, qc_char_at, qc_read_file, qc_read_all
+    if init.starts_with("qc_substring(") { return "const char*"; }
+    if init.starts_with("qc_char_at(") { return "const char*"; }
+    if init.starts_with("qc_read_file(") { return "const char*"; }
+    if init.starts_with("qc_read_all(") { return "const char*"; }
+    if init.starts_with("qc_strcat(") { return "const char*"; }
+    // Feature 3: getenv returns const char*
+    if init.starts_with("getenv(") { return "const char*"; }
+    // to_string helpers return const char*
+    if init.starts_with("qc_itoa(") { return "const char*"; }
+    if init.starts_with("qc_ftoa(") { return "const char*"; }
+    // String transform helpers return const char*
+    if init.starts_with("qc_to_lower(") { return "const char*"; }
+    if init.starts_with("qc_to_upper(") { return "const char*"; }
+    if init.starts_with("qc_replace(") { return "const char*"; }
+    if init.starts_with("qc_trim(") { return "const char*"; }
+    // Int-returning helpers
+    if init.starts_with("qc_strlen(") { return "int64_t"; }
+    if init.starts_with("qc_parse_int(") { return "int64_t"; }
+    if init.starts_with("qc_index_of(") { return "int64_t"; }
+    // time(NULL) returns int64_t
+    if init == "time(NULL)" { return "int64_t"; }
+    if init.starts_with("qc_clock_ms(") { return "int64_t"; }
+    // Float-returning helpers
+    if init.starts_with("atof(") { return "double"; }
+    // Bool-returning helpers
+    if init.starts_with("qc_starts_with(") { return "int"; }
+    if init.starts_with("qc_ends_with(") { return "int"; }
+    if init.starts_with("qc_contains(") { return "int"; }
+    if init.starts_with("qc_file_exists(") { return "int"; }
+    if init.starts_with("qc_stdin_is_pipe(") { return "int"; }
+    // argc
+    if init == "argc" { return "int64_t"; }
+    // Variable that is already known to be a string
+    if is_str_expr(cg, init) { return "const char*"; }
+    // Float literal (starts with a digit and contains .)
+    if init.len() > 0 {
+        let fc = init.char_at(0);
+        if fc == "0" || fc == "1" || fc == "2" || fc == "3" || fc == "4" ||
+           fc == "5" || fc == "6" || fc == "7" || fc == "8" || fc == "9" {
+            if init.contains(".") { return "double"; }
+        }
+    }
+    // Default: i64 for numeric
+    "int64_t"
+}
+
+// Parse a brace-delimited block { stmt; stmt; ... }
+fn codegen_block(cg: &mut CG) {
+    if !expect_kind(cg, TK_LBRACE()) { return; }
+    let mut go = true;
+    while go {
+        if at_end(cg) || pk(cg) == TK_RBRACE() { go = false; }
+        else { codegen_stmt(cg); }
+    }
+    expect_kind(cg, TK_RBRACE());
+}
+
+// ===========================================================================
+// PASS 2: Top-level item codegen
+// ===========================================================================
+
+fn codegen_function(cg: &mut CG) {
+    // "fn" already consumed. Parse name, params, return type, body.
+    let name = ptxt(cg);
+    adv(cg); // skip name
+
+    // Clear variable registry for this function scope
+    cg.var_names = "";
+    cg.var_types = "";
+
+    // Parse params
+    expect_kind(cg, TK_LPAREN());
+    let mut params_c = "";
+    let mut first = true;
+    let mut pgo = true;
+    while pgo {
+        if at_end(cg) || pk(cg) == TK_RPAREN() { pgo = false; }
+        else {
+            if !first { params_c = params_c + ", "; }
+            first = false;
+            // Skip mut
+            if ptxt(cg) == "mut" { adv(cg); }
+            let pname = ptxt(cg);
+            adv(cg);
+            expect_kind(cg, TK_COLON());
+            let pty = parse_type(cg);
+            params_c = params_c + pty + " " + pname;
+            // Register parameter types
+            reg_var(cg, pname, pty);
+            if pk(cg) == TK_COMMA() { adv(cg); }
+            else { pgo = false; }
+        }
+    }
+    expect_kind(cg, TK_RPAREN());
+
+    // Return type
+    let mut ret_c = "void";
+    if pk(cg) == TK_ARROW() {
+        adv(cg);
+        ret_c = parse_type(cg);
+    }
+
+    // Emit function header
+    if name == "main" {
+        emit(cg, "int main(int argc, char** argv) {\n");
+    } else {
+        emit(cg, ret_c + " " + name + "(" + params_c + ") {\n");
+    }
+
+    // Body
+    cg.indent = cg.indent + 1;
+    codegen_block(cg);
+    // For main, add return 0 if not explicitly present
+    if name == "main" {
+        emit_line(cg, "return 0;");
+    }
+    cg.indent = cg.indent - 1;
+    emit(cg, "}\n\n");
+}
+
+// Codegen a single method inside an impl block.
+// impl_tname is the struct type name. "fn" has already been consumed.
+fn codegen_impl_method(cg: &mut CG, impl_tname: String) {
+    let mname = ptxt(cg);
+    adv(cg); // skip method name
+    let mangled = impl_tname + "_" + mname;
+
+    // Clear variable registry for this method scope
+    cg.var_names = "";
+    cg.var_types = "";
+
+    // Parse params
+    expect_kind(cg, TK_LPAREN());
+    let mut params_c = "";
+    let mut mfirst = true;
+    let mut has_self = false;
+    let mut mpgo = true;
+    while mpgo {
+        if at_end(cg) || pk(cg) == TK_RPAREN() { mpgo = false; }
+        else {
+            let ptok = ptxt(cg);
+            // Handle &self or &mut self
+            if pk(cg) == TK_BIT_AND() {
+                adv(cg); // skip &
+                if ptxt(cg) == "mut" { adv(cg); } // skip mut
+                if ptxt(cg) == "self" {
+                    adv(cg); // skip self
+                    has_self = true;
+                    params_c = impl_tname + "* self";
+                    mfirst = false;
+                    if pk(cg) == TK_COMMA() { adv(cg); }
+                }
+            } else if ptok == "self" || (ptok == "mut" && ptxt_at(cg, 1) == "self") {
+                // self or mut self (by value)
+                if ptok == "mut" { adv(cg); }
+                if ptxt(cg) == "self" { adv(cg); }
+                has_self = true;
+                params_c = impl_tname + " self";
+                mfirst = false;
+                if pk(cg) == TK_COMMA() { adv(cg); }
+            } else {
+                // Regular param: name: type
+                if !mfirst { params_c = params_c + ", "; }
+                mfirst = false;
+                if ptxt(cg) == "mut" { adv(cg); }
+                let mpname = ptxt(cg);
+                adv(cg);
+                expect_kind(cg, TK_COLON());
+                let mpty = parse_type(cg);
+                params_c = params_c + mpty + " " + mpname;
+                reg_var(cg, mpname, mpty);
+                if pk(cg) == TK_COMMA() { adv(cg); }
+                else { mpgo = false; }
+            }
+        }
+    }
+    expect_kind(cg, TK_RPAREN());
+
+    // Return type
+    let mut ret_c = "void";
+    if pk(cg) == TK_ARROW() {
+        adv(cg);
+        ret_c = parse_type(cg);
+    }
+
+    // Set impl_type so self.field -> self->field works in codegen
+    cg.impl_type = impl_tname;
+
+    // Emit function header
+    emit(cg, ret_c + " " + mangled + "(" + params_c + ") {\n");
+
+    // Body
+    cg.indent = cg.indent + 1;
+    codegen_block(cg);
+    cg.indent = cg.indent - 1;
+    emit(cg, "}\n\n");
+
+    cg.impl_type = "";
+}
+
+// Codegen an impl block: impl TypeName { fn method(...) { ... } ... }
+// "impl" has already been consumed.
+fn codegen_impl(cg: &mut CG) {
+    let impl_tname = ptxt(cg);
+    adv(cg); // skip type name
+    if pk(cg) == TK_LBRACE() {
+        adv(cg); // skip {
+        let mut igo = true;
+        while igo {
+            if at_end(cg) || pk(cg) == TK_RBRACE() { igo = false; }
+            else {
+                // Skip pub if present
+                if ptxt(cg) == "pub" { adv(cg); }
+                if ptxt(cg) == "fn" {
+                    adv(cg); // skip "fn"
+                    codegen_impl_method(cg, impl_tname);
+                } else {
+                    // Skip non-fn inside impl
+                    if pk(cg) == TK_LBRACE() { skip_balanced_braces(cg); }
+                    else { adv(cg); }
+                }
+            }
+        }
+        expect_kind(cg, TK_RBRACE());
+    }
+}
+
+fn codegen_item(cg: &mut CG) {
+    let k = pk(cg);
+    let txt = ptxt(cg);
+
+    // Skip pub
+    if k == TK_KEYWORD() && txt == "pub" { adv(cg); }
+
+    let k2 = pk(cg);
+    let txt2 = ptxt(cg);
+
+    // fn
+    if k2 == TK_KEYWORD() && txt2 == "fn" {
+        adv(cg); // consume "fn"
+        codegen_function(cg);
+        return;
+    }
+
+    // impl block: generate methods with mangled names
+    if k2 == TK_KEYWORD() && txt2 == "impl" {
+        adv(cg); // consume "impl"
+        codegen_impl(cg);
+        return;
+    }
+
+    // struct, enum, trait, mod, use, const, type -> skip
+    if k2 == TK_KEYWORD() && (txt2 == "struct" || txt2 == "enum" ||
+       txt2 == "trait" || txt2 == "mod" || txt2 == "type") {
+        adv(cg);
+        // Skip name
+        if pk(cg) == TK_IDENT() || pk(cg) == TK_KEYWORD() { adv(cg); }
+        // Skip body or semicolon
+        if pk(cg) == TK_LBRACE() { skip_balanced_braces(cg); }
+        else if pk(cg) == TK_SEMI() { adv(cg); }
+        return;
+    }
+    if k2 == TK_KEYWORD() && txt2 == "use" {
+        adv(cg);
+        skip_to_semi(cg);
+        return;
+    }
+    if k2 == TK_KEYWORD() && txt2 == "const" {
+        adv(cg);
+        skip_to_semi(cg);
+        return;
+    }
+
+    // Attribute: #[...]
+    if k2 == 51 {
+        adv(cg);
+        if pk(cg) == TK_LBRACK() {
+            adv(cg);
+            let mut go = true;
+            while go {
+                if at_end(cg) || pk(cg) == TK_RBRACK() { go = false; }
+                else { adv(cg); }
+            }
+            expect_kind(cg, TK_RBRACK());
+        }
+        return;
+    }
+
+    // Unknown: skip
+    if !at_end(cg) { adv(cg); }
+}
+
+fn codegen_module(cg: &mut CG) {
+    let mut go = true;
+    while go {
+        if at_end(cg) { go = false; }
+        else { codegen_item(cg); }
+    }
+}
+
+// ===========================================================================
+// MAIN DRIVER
+// ===========================================================================
+fn generate(cg: &mut CG) -> String {
+    // Pass 1: collect forward declarations
+    pass1_scan(cg);
+
+    // Pass 2: generate function bodies (this sets needs_str_runtime)
+    cg.pos = 0;
+    codegen_module(cg);
+
+    // Build the output header
+    let mut header = "";
+    header = header + "/* Generated by qcodegen - BuildLang to C compiler */\n";
+    header = header + "#include <stdio.h>\n";
+    header = header + "#include <stdint.h>\n";
+    header = header + "#include <stdlib.h>\n";
+    header = header + "#include <string.h>\n";
+    header = header + "#include <stdbool.h>\n";
+    header = header + "#include <time.h>\n";
+    header = header + "#ifdef _WIN32\n";
+    header = header + "#include <windows.h>\n";
+    header = header + "#endif\n";
+    header = header + "\n";
+
+    // Emit string runtime helpers if needed
+    if cg.needs_str_runtime == 1 {
+        header = header + "/* BuildLang string runtime helpers */\n";
+        header = header + "static int qc_starts_with(const char* s, const char* prefix) {\n";
+        header = header + "    size_t plen = strlen(prefix);\n";
+        header = header + "    return strncmp(s, prefix, plen) == 0;\n";
+        header = header + "}\n";
+        header = header + "static int64_t qc_strlen(const char* s) {\n";
+        header = header + "    return (int64_t)strlen(s);\n";
+        header = header + "}\n";
+        header = header + "static const char* qc_substring(const char* s, int64_t start, int64_t len) {\n";
+        header = header + "    static char buf[4096];\n";
+        header = header + "    if (start < 0) start = 0;\n";
+        header = header + "    int64_t slen = (int64_t)strlen(s);\n";
+        header = header + "    if (start >= slen) { buf[0] = '\\0'; return buf; }\n";
+        header = header + "    if (start + len > slen) len = slen - start;\n";
+        header = header + "    if (len < 0) len = 0;\n";
+        header = header + "    if (len >= 4095) len = 4095;\n";
+        header = header + "    memcpy(buf, s + start, (size_t)len);\n";
+        header = header + "    buf[len] = '\\0';\n";
+        header = header + "    return buf;\n";
+        header = header + "}\n";
+        header = header + "static int64_t qc_parse_int(const char* s) {\n";
+        header = header + "    return (int64_t)strtoll(s, NULL, 10);\n";
+        header = header + "}\n";
+        header = header + "static const char* qc_char_at(const char* s, int64_t idx) {\n";
+        header = header + "    static char cbuf[2];\n";
+        header = header + "    int64_t slen = (int64_t)strlen(s);\n";
+        header = header + "    if (idx < 0 || idx >= slen) { cbuf[0] = '\\0'; return cbuf; }\n";
+        header = header + "    cbuf[0] = s[idx]; cbuf[1] = '\\0';\n";
+        header = header + "    return cbuf;\n";
+        header = header + "}\n";
+        header = header + "static const char* qc_strcat(const char* a, const char* b) {\n";
+        header = header + "    size_t la = strlen(a), lb = strlen(b);\n";
+        header = header + "    char* buf = (char*)malloc(la + lb + 1);\n";
+        header = header + "    memcpy(buf, a, la);\n";
+        header = header + "    memcpy(buf + la, b, lb);\n";
+        header = header + "    buf[la + lb] = '\\0';\n";
+        header = header + "    return buf;\n";
+        header = header + "}\n";
+        header = header + "static int qc_contains(const char* s, const char* sub) {\n";
+        header = header + "    return strstr(s, sub) != NULL;\n";
+        header = header + "}\n";
+        header = header + "static int64_t qc_index_of(const char* s, const char* sub) {\n";
+        header = header + "    const char* p = strstr(s, sub);\n";
+        header = header + "    if (!p) return -1;\n";
+        header = header + "    return (int64_t)(p - s);\n";
+        header = header + "}\n";
+        header = header + "static int qc_file_exists(const char* path) {\n";
+        header = header + "    FILE* f = fopen(path, \"r\");\n";
+        header = header + "    if (f) { fclose(f); return 1; }\n";
+        header = header + "    return 0;\n";
+        header = header + "}\n";
+        header = header + "static const char* qc_read_file(const char* path) {\n";
+        header = header + "    FILE* f = fopen(path, \"rb\");\n";
+        header = header + "    if (!f) return \"\";\n";
+        header = header + "    fseek(f, 0, SEEK_END);\n";
+        header = header + "    long sz = ftell(f);\n";
+        header = header + "    fseek(f, 0, SEEK_SET);\n";
+        header = header + "    char* buf = (char*)malloc((size_t)sz + 1);\n";
+        header = header + "    fread(buf, 1, (size_t)sz, f);\n";
+        header = header + "    buf[sz] = '\\0';\n";
+        header = header + "    fclose(f);\n";
+        header = header + "    return buf;\n";
+        header = header + "}\n";
+        header = header + "static void qc_write_file(const char* path, const char* data) {\n";
+        header = header + "    FILE* f = fopen(path, \"wb\");\n";
+        header = header + "    if (f) { fputs(data, f); fclose(f); }\n";
+        header = header + "}\n";
+        header = header + "#ifdef _WIN32\n";
+        header = header + "#include <io.h>\n";
+        header = header + "static int qc_stdin_is_pipe(void) { return !_isatty(_fileno(stdin)); }\n";
+        header = header + "#else\n";
+        header = header + "#include <unistd.h>\n";
+        header = header + "static int qc_stdin_is_pipe(void) { return !isatty(fileno(stdin)); }\n";
+        header = header + "#endif\n";
+        header = header + "static const char* qc_read_all(void) {\n";
+        header = header + "    size_t cap = 4096, len = 0;\n";
+        header = header + "    char* buf = (char*)malloc(cap);\n";
+        header = header + "    int c;\n";
+        header = header + "    while ((c = getchar()) != EOF) {\n";
+        header = header + "        if (len + 1 >= cap) { cap *= 2; buf = (char*)realloc(buf, cap); }\n";
+        header = header + "        buf[len++] = (char)c;\n";
+        header = header + "    }\n";
+        header = header + "    buf[len] = '\\0';\n";
+        header = header + "    return buf;\n";
+        header = header + "}\n";
+        // to_string helpers
+        header = header + "static const char* qc_itoa(int64_t n) {\n";
+        header = header + "    static char buf[32]; snprintf(buf, 32, \"%lld\", (long long)n); return buf;\n";
+        header = header + "}\n";
+        header = header + "static const char* qc_ftoa(double n) {\n";
+        header = header + "    static char buf[64]; snprintf(buf, 64, \"%g\", n); return buf;\n";
+        header = header + "}\n";
+        // clock_ms helper
+        header = header + "static int64_t qc_clock_ms(void) {\n";
+        header = header + "#ifdef _WIN32\n";
+        header = header + "    return (int64_t)GetTickCount64();\n";
+        header = header + "#else\n";
+        header = header + "    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);\n";
+        header = header + "    return ts.tv_sec * 1000 + ts.tv_nsec / 1000000;\n";
+        header = header + "#endif\n";
+        header = header + "}\n";
+        // ends_with helper
+        header = header + "static int qc_ends_with(const char* s, const char* suffix) {\n";
+        header = header + "    size_t sl = strlen(s), xl = strlen(suffix);\n";
+        header = header + "    if (xl > sl) return 0;\n";
+        header = header + "    return strcmp(s + sl - xl, suffix) == 0;\n";
+        header = header + "}\n";
+        // trim helper
+        header = header + "static const char* qc_trim(const char* s) {\n";
+        header = header + "    while (*s == ' ' || *s == '\\t' || *s == '\\n' || *s == '\\r') s++;\n";
+        header = header + "    size_t len = strlen(s);\n";
+        header = header + "    if (len == 0) return \"\";\n";
+        header = header + "    static char buf[4096];\n";
+        header = header + "    if (len >= 4095) len = 4095;\n";
+        header = header + "    memcpy(buf, s, len);\n";
+        header = header + "    buf[len] = '\\0';\n";
+        header = header + "    while (len > 0 && (buf[len-1]==' '||buf[len-1]=='\\t'||buf[len-1]=='\\n'||buf[len-1]=='\\r')) buf[--len]='\\0';\n";
+        header = header + "    return buf;\n";
+        header = header + "}\n";
+        // to_lowercase / to_uppercase helpers
+        header = header + "static const char* qc_to_lower(const char* s) {\n";
+        header = header + "    size_t len = strlen(s);\n";
+        header = header + "    char* buf = (char*)malloc(len + 1);\n";
+        header = header + "    for (size_t i = 0; i <= len; i++) buf[i] = (s[i]>='A'&&s[i]<='Z') ? s[i]+32 : s[i];\n";
+        header = header + "    return buf;\n";
+        header = header + "}\n";
+        header = header + "static const char* qc_to_upper(const char* s) {\n";
+        header = header + "    size_t len = strlen(s);\n";
+        header = header + "    char* buf = (char*)malloc(len + 1);\n";
+        header = header + "    for (size_t i = 0; i <= len; i++) buf[i] = (s[i]>='a'&&s[i]<='z') ? s[i]-32 : s[i];\n";
+        header = header + "    return buf;\n";
+        header = header + "}\n";
+        // replace helper
+        header = header + "static const char* qc_replace(const char* s, const char* from, const char* to) {\n";
+        header = header + "    size_t sl=strlen(s), fl=strlen(from), tl=strlen(to);\n";
+        header = header + "    if (fl==0) return s;\n";
+        header = header + "    size_t cap=sl*2+1; char* buf=(char*)malloc(cap); size_t pos=0;\n";
+        header = header + "    const char* p=s;\n";
+        header = header + "    while (*p) {\n";
+        header = header + "        if (strncmp(p,from,fl)==0) {\n";
+        header = header + "            if (pos+tl>=cap){cap*=2;buf=(char*)realloc(buf,cap);}\n";
+        header = header + "            memcpy(buf+pos,to,tl); pos+=tl; p+=fl;\n";
+        header = header + "        } else { if(pos+1>=cap){cap*=2;buf=(char*)realloc(buf,cap);} buf[pos++]=*p++; }\n";
+        header = header + "    }\n";
+        header = header + "    buf[pos]='\\0'; return buf;\n";
+        header = header + "}\n";
+        // split helpers (return pipe-delimited string for simplicity)
+        header = header + "/* qc_split is not yet needed - programs use lr_new/lr_get pattern */\n";
+        header = header + "\n";
+    }
+
+    // Emit Vec runtime helpers if needed
+    if cg.needs_vec_runtime == 1 {
+        header = header + "/* BuildLang Vec runtime helpers */\n";
+        header = header + "typedef struct { int64_t* data; int64_t len; int64_t cap; } QVec;\n";
+        header = header + "static QVec qv_new(void) {\n";
+        header = header + "    QVec v;\n";
+        header = header + "    v.cap = 64;\n";
+        header = header + "    v.len = 0;\n";
+        header = header + "    v.data = (int64_t*)malloc(64 * sizeof(int64_t));\n";
+        header = header + "    return v;\n";
+        header = header + "}\n";
+        header = header + "static void qv_push(QVec* v, int64_t val) {\n";
+        header = header + "    if (v->len >= v->cap) {\n";
+        header = header + "        v->cap *= 2;\n";
+        header = header + "        v->data = (int64_t*)realloc(v->data, v->cap * sizeof(int64_t));\n";
+        header = header + "    }\n";
+        header = header + "    v->data[v->len++] = val;\n";
+        header = header + "}\n";
+        header = header + "static int64_t qv_get(QVec* v, int64_t idx) {\n";
+        header = header + "    return v->data[idx];\n";
+        header = header + "}\n";
+        header = header + "static int64_t qv_len(QVec* v) {\n";
+        header = header + "    return v->len;\n";
+        header = header + "}\n";
+        header = header + "\n";
+    }
+
+    // Forward declarations
+    if cg.fwd != "" {
+        header = header + "/* Forward declarations */\n";
+        header = header + cg.fwd;
+        header = header + "\n";
+    }
+
+    // Lambda/closure static functions and typedefs
+    if cg.lambdas != "" {
+        header = header + "/* Lambda/closure functions */\n";
+        header = header + cg.lambdas;
+        header = header + "\n";
+    }
+
+    header + cg.out
+}
+
+// ===========================================================================
+// INCLUDE PREPROCESSING
+// ===========================================================================
+// Before tokenizing, scan for include!("path"); lines and splice in file
+// contents. Resolves paths relative to the source file's directory.
+// Tracks already-included files to prevent double-inclusion.
+
+// Extract a single line from source starting at pos. Returns the line text.
+// Sets line_end_out to the position after the newline (or end of source).
+fn extract_line(source: String, pos: i32, slen: i32) -> String {
+    // Find next newline
+    let mut scan: i32 = pos;
+    let mut go = true;
+    while go && scan < slen {
+        let ch = source.char_at(scan);
+        if ch == "\n" {
+            go = false;
+        } else {
+            scan = scan + 1;
+        }
+    }
+    let line_len = scan - pos;
+    if line_len <= 0 { return ""; }
+    if line_len > 3900 { return source.substring(pos, 3900); }
+    source.substring(pos, line_len)
+}
+
+// Find where the next line starts (skip past newline)
+fn next_line_start(source: String, pos: i32, slen: i32) -> i32 {
+    let mut scan: i32 = pos;
+    let mut go = true;
+    while go && scan < slen {
+        let ch = source.char_at(scan);
+        if ch == "\n" {
+            return scan + 1;
+        }
+        scan = scan + 1;
+    }
+    slen
+}
+
+// Extract include path from a line like: include!("stdlib/lines.bld");
+// Returns the path string or "" if not an include line.
+fn extract_include_path(line: String) -> String {
+    let inc_pos = line.index_of("include!(\"");
+    if inc_pos < 0 { return ""; }
+    let after_inc = inc_pos + 10;
+    let ll = line.len();
+    // Find closing quote
+    let mut qi: i32 = after_inc;
+    let mut go = true;
+    while go && qi < ll {
+        let qc = line.char_at(qi);
+        if qc == "\"" {
+            let path_len = qi - after_inc;
+            if path_len > 0 {
+                return line.substring(after_inc, path_len);
+            }
+            return "";
+        }
+        qi = qi + 1;
+    }
+    ""
+}
+
+fn preprocess(source: String, base_dir: String) -> String ~ FileSystem {
+    let slen = source.len();
+    let mut result = "";
+    let mut included = "";
+    let mut pos: i32 = 0;
+    let mut go = true;
+    while go {
+        if pos >= slen { go = false; }
+        else {
+            let line = extract_line(source, pos, slen);
+            pos = next_line_start(source, pos, slen);
+            let inc_path = extract_include_path(line);
+            if inc_path != "" {
+                // Check for double-inclusion
+                let check = "|" + inc_path + "|";
+                if !included.contains(check) {
+                    included = included + check;
+                    // Resolve relative to base_dir
+                    let full_path = base_dir + inc_path;
+                    if file_exists(full_path) {
+                        let inc_source = read_file(full_path);
+                        // Non-recursive: just inline (stdlib files don't include other files)
+                        result = result + inc_source + "\n";
+                    }
+                }
+            } else {
+                result = result + line + "\n";
+            }
+        }
+    }
+    result
+}
+
+// Derive the directory part of a file path (everything up to last / or \)
+fn path_dir(path: String) -> String {
+    let plen = path.len();
+    let mut last_sep: i32 = -1;
+    let mut i: i32 = 0;
+    while i < plen {
+        let c = path.char_at(i);
+        if c == "/" || c == "\\" {
+            last_sep = i;
+        }
+        i = i + 1;
+    }
+    if last_sep < 0 { return ""; }
+    path.substring(0, last_sep + 1)
+}
+
+// ===========================================================================
+// HELP
+// ===========================================================================
+fn print_help() ~ Console {
+    println!("qcodegen - BuildLang to C code generator (self-hosting tool #6)");
+    println!("");
+    println!("Usage:");
+    println!("  qcodegen FILE              generate C code, print to stdout");
+    println!("  qcodegen FILE -o OUT.c     generate C code, write to file");
+    println!("  qcodegen --help            display this help and exit");
+    println!("");
+    println!("Translates a subset of BuildLang to C:");
+    println!("  fn, let, if/else, while, return, arithmetic,");
+    println!("  function calls, println!/eprintln!/print! macros,");
+    println!("  structs (typedef, literals, field access), if-expressions,");
+    println!("  Vec (vec![], vec_push, vec_get, vec_len).");
+    println!("");
+    println!("Type mapping:");
+    println!("  i64 -> int64_t   i32 -> int32_t   f64 -> double");
+    println!("  f32 -> float     bool -> int       String -> const char*");
+    println!("  Vec<T> -> QVec   (int64_t-backed dynamic array)");
+}
+
+// ===========================================================================
+// MAIN
+// ===========================================================================
+fn main() ~ Console + Environment + FileSystem + Process {
+    let nargs = args_count();
+
+    let mut filename = "";
+    let mut has_file = false;
+    let mut out_file = "";
+    let mut has_out = false;
+
+    let mut i: i32 = 1;
+    while i < nargs {
+        let arg = args_get(i);
+        if arg == "--help" || arg == "-h" {
+            print_help();
+            process_exit(0);
+        } else if arg == "-o" {
+            // Next arg is output file
+            if i + 1 < nargs {
+                i = i + 1;
+                out_file = args_get(i);
+                has_out = true;
+            } else {
+                println!("qcodegen: -o requires an argument");
+                process_exit(2);
+            }
+        } else if arg.starts_with("-") {
+            println!("qcodegen: unknown option '{}'", arg);
+            process_exit(2);
+        } else {
+            filename = arg;
+            has_file = true;
+        }
+        i = i + 1;
+    }
+
+    if !has_file {
+        print_help();
+        process_exit(0);
+    }
+
+    // Read input
+    let exists = file_exists(filename);
+    if !exists {
+        println!("qcodegen: {}: No such file or directory", filename);
+        process_exit(2);
+    }
+    let raw_input = read_file(filename);
+    if raw_input.len() == 0 {
+        process_exit(0);
+    }
+
+    // Preprocess: expand include!() directives
+    let base_dir = path_dir(filename);
+    let input = preprocess(raw_input, base_dir);
+
+    // Tokenize
+    let mut t = tok_new(input);
+    tokenize(&mut t);
+
+    // Generate C code
+    let mut cg = cg_new(&t);
+    let c_code = generate(&mut cg);
+
+    // Output
+    if has_out {
+        write_file(out_file, c_code);
+        println!("qcodegen: wrote {}", out_file);
+    } else {
+        print!("{}", c_code);
+    }
+}

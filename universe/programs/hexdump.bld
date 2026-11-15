@@ -1,0 +1,262 @@
+// =============================================================================
+// qhex — Hex dump utility written in BuildLang
+// =============================================================================
+// The seventh showcase program compiled to a native binary.
+// Displays file contents in hex + ASCII format like xxd.
+//
+// Usage:
+//   qhex file.txt              hex dump of file
+//   cat file.bin | qhex        hex dump from stdin
+//   qhex -n 64 file.txt        only first 64 bytes
+//   qhex --help                usage info
+//
+// Output format (like xxd):
+//   00000000: 4865 6c6c 6f2c 2057 6f72 6c64 210a       Hello, World!.
+// =============================================================================
+
+// ---------------------------------------------------------------------------
+// ASCII lookup table — maps printable characters to byte values.
+// Same pattern as qbase64. Covers ASCII 32 (space) through 126 (~).
+// ---------------------------------------------------------------------------
+
+struct Tables {
+    ascii: String,
+    hex_chars: String,
+    digits: String,
+}
+
+fn tables_new() -> Tables {
+    Tables {
+        ascii: " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~",
+        hex_chars: "0123456789abcdef",
+        digits: "0123456789",
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Byte value helpers
+// ---------------------------------------------------------------------------
+
+fn char_code(t: &Tables, c: String) -> i64 {
+    let idx = t.ascii.index_of(c);
+    if idx < 0 {
+        if c == "\n" { return 10; }
+        if c == "\r" { return 13; }
+        if c == "\t" { return 9; }
+        return 0;
+    }
+    idx + 32
+}
+
+// ---------------------------------------------------------------------------
+// Hex conversion helpers
+// ---------------------------------------------------------------------------
+
+fn byte_to_hex(t: &Tables, b: i64) -> String {
+    let hi = t.hex_chars.char_at(b / 16);
+    let lo = t.hex_chars.char_at(b % 16);
+    hi + lo
+}
+
+fn offset_to_hex(t: &Tables, off: i64) -> String {
+    let b0 = byte_to_hex(t, off / 16777216 % 256);
+    let b1 = byte_to_hex(t, off / 65536 % 256);
+    let b2 = byte_to_hex(t, off / 256 % 256);
+    let b3 = byte_to_hex(t, off % 256);
+    b0 + b1 + b2 + b3
+}
+
+// ---------------------------------------------------------------------------
+// Check if a byte value is a printable ASCII character (32-126)
+// ---------------------------------------------------------------------------
+
+fn is_printable(code: i64) -> bool {
+    code >= 32 && code <= 126
+}
+
+// ---------------------------------------------------------------------------
+// Get the printable ASCII character for a byte, or "." for non-printable
+// ---------------------------------------------------------------------------
+
+fn byte_to_ascii(t: &Tables, code: i64) -> String {
+    if is_printable(code) {
+        let idx = code - 32;
+        t.ascii.char_at(idx)
+    } else {
+        "."
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Hex dump engine — processes data 16 bytes at a time
+// ---------------------------------------------------------------------------
+
+fn hexdump(t: &Tables, data: String, max_bytes: i64) ~ Console {
+    let total_len = data.len();
+    let limit = if max_bytes > 0 && max_bytes < total_len { max_bytes } else { total_len };
+
+    let mut offset: i64 = 0;
+
+    while offset < limit {
+        // How many bytes on this line
+        let remaining = limit - offset;
+        let line_len = if remaining < 16 { remaining } else { 16 };
+
+        // Build the offset prefix
+        let mut line = offset_to_hex(t, offset) + ": ";
+
+        // Build hex part and ASCII part together
+        let mut ascii_part = "";
+        let mut col: i64 = 0;
+
+        while col < line_len {
+            let c = data.char_at(offset + col);
+            let code = char_code(t, c);
+            let hex = byte_to_hex(t, code);
+
+            // Add hex byte
+            line = line + hex;
+
+            // Space after every 2 bytes (pair grouping)
+            if col % 2 == 1 {
+                line = line + " ";
+            }
+
+            // Build ASCII representation
+            ascii_part = ascii_part + byte_to_ascii(t, code);
+
+            col = col + 1;
+        }
+
+        // Pad hex section if fewer than 16 bytes
+        // Each byte = 2 hex chars, plus a space after every pair
+        // Full 16 bytes = 32 hex chars + 8 spaces = 40 chars
+        // For line_len bytes: hex chars = line_len * 2, pair spaces = line_len / 2
+        // But we need to calculate what we already printed vs full width
+        let mut pad_col = line_len;
+        while pad_col < 16 {
+            line = line + "  ";
+            if pad_col % 2 == 1 {
+                line = line + " ";
+            }
+            pad_col = pad_col + 1;
+        }
+
+        // If line_len is even and < 16, we need one more space
+        // because the last real byte didn't get a trailing space
+        if line_len % 2 == 1 && line_len < 16 {
+            line = line + " ";
+        }
+
+        // Print the complete line
+        println!("{}{}", line, ascii_part);
+
+        offset = offset + 16;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Parse a decimal number string to i64
+// ---------------------------------------------------------------------------
+
+fn parse_number(t: &Tables, s: String) -> i64 ~ Console + Process {
+    let slen = s.len();
+    let mut result: i64 = 0;
+    let mut i: i64 = 0;
+    while i < slen {
+        let c = s.char_at(i);
+        let d = t.digits.index_of(c);
+        if d < 0 {
+            println!("Error: '{}' is not a valid number", s);
+            process_exit(1);
+        }
+        result = result * 10 + d;
+        i = i + 1;
+    }
+    result
+}
+
+// ---------------------------------------------------------------------------
+// CLI
+// ---------------------------------------------------------------------------
+
+fn print_help() ~ Console {
+    println!("qhex — hex dump utility");
+    println!("");
+    println!("Usage:");
+    println!("  qhex [FILE]            Hex dump of FILE");
+    println!("  qhex -n NUM [FILE]     Hex dump of first NUM bytes");
+    println!("  cat FILE | qhex        Hex dump from stdin");
+    println!("  qhex --help            Show this help message");
+    println!("");
+    println!("Output format (like xxd):");
+    println!("  00000000: 4865 6c6c 6f2c 2057 6f72 6c64 210a       Hello, World!.");
+}
+
+fn main() ~ Console + Environment + FileSystem + Process {
+    let t = tables_new();
+    let nargs = args_count();
+
+    if nargs < 2 {
+        // No args: try reading from stdin
+        let piped = stdin_is_pipe();
+        if piped {
+            let data = read_all();
+            hexdump(&t, data, 0);
+            process_exit(0);
+        }
+        print_help();
+        process_exit(0);
+    }
+
+    // Parse arguments
+    let mut max_bytes: i64 = 0;
+    let mut filename = "";
+    let mut filename_set = false;
+    let mut i: i64 = 1;
+
+    while i < nargs {
+        let arg = args_get(i);
+
+        if arg == "--help" || arg == "-h" {
+            print_help();
+            process_exit(0);
+        } else if arg == "-n" {
+            // Next arg is the byte count
+            if i + 1 >= nargs {
+                println!("Error: -n requires a number argument");
+                process_exit(1);
+            }
+            i = i + 1;
+            max_bytes = parse_number(&t, args_get(i));
+        } else if arg.starts_with("-") {
+            println!("Error: unknown option '{}'", arg);
+            println!("Try 'qhex --help' for usage.");
+            process_exit(1);
+        } else {
+            filename = arg;
+            filename_set = true;
+        }
+
+        i = i + 1;
+    }
+
+    // Read input
+    let data = if filename_set {
+        if !file_exists(filename) {
+            println!("Error: file not found: {}", filename);
+            process_exit(1);
+        }
+        read_file(filename)
+    } else {
+        let piped = stdin_is_pipe();
+        if !piped {
+            println!("Error: no input. Provide a file or pipe data via stdin.");
+            println!("Try 'qhex --help' for usage.");
+            process_exit(1);
+        }
+        read_all()
+    };
+
+    hexdump(&t, data, max_bytes);
+}

@@ -1,0 +1,186 @@
+// =============================================================================
+// qwc - Word Count (wc clone) written in BuildLang
+// =============================================================================
+// The first real CLI tool written in BuildLang.
+// Usage: qwc [OPTION]... [FILE]...
+// =============================================================================
+
+fn count_lines(content: String) -> i64 {
+    // GNU wc counts newline characters, not logical lines.
+    // split("\n") gives N+1 parts for N newlines, so subtract 1.
+    let parts = content.split("\n");
+    let n = parts.len();
+    if n > 0 {
+        n - 1
+    } else {
+        0
+    }
+}
+
+fn count_words(content: String) -> i64 {
+    let parts = content.split_whitespace();
+    let count = parts.len();
+    count
+}
+
+fn count_bytes(content: String) -> i64 {
+    let count = content.len();
+    count
+}
+
+fn print_help() ~ Console {
+    println!("Usage: qwc [OPTION]... [FILE]...");
+    println!("Print newline, word, and byte counts for each FILE.");
+    println!("");
+    println!("  -c    print the byte counts");
+    println!("  -l    print the newline counts");
+    println!("  -w    print the word counts");
+    println!("  --help display this help and exit");
+    println!("");
+    println!("With no FILE, read standard input.");
+    println!("With no OPTION, print lines, words, and bytes.");
+}
+
+fn main() ~ Console + Environment + FileSystem + Process {
+    let nargs = args_count();
+
+    // Parse flags and collect filenames
+    let mut show_lines = false;
+    let mut show_words = false;
+    let mut show_bytes = false;
+
+    // Track file count and totals
+    let mut total_lines: i64 = 0;
+    let mut total_words: i64 = 0;
+    let mut total_bytes: i64 = 0;
+    let mut file_count: i64 = 0;
+    let mut has_flags = false;
+
+    // First pass: parse flags
+    let mut i: i64 = 1;
+    while i < nargs {
+        let arg = args_get(i);
+
+        if arg.starts_with("--") {
+            // Long option
+            if arg.contains("help") {
+                print_help();
+                process_exit(0);
+            }
+        } else if arg.starts_with("-") {
+            // Short flags: could be -l, -w, -c, or combined like -lwc
+            has_flags = true;
+            if arg.contains("l") {
+                show_lines = true;
+            }
+            if arg.contains("w") {
+                show_words = true;
+            }
+            if arg.contains("c") {
+                show_bytes = true;
+            }
+        } else {
+            file_count += 1;
+        }
+
+        i += 1;
+    }
+
+    // If no specific flags set, show all
+    if !has_flags {
+        show_lines = true;
+        show_words = true;
+        show_bytes = true;
+    }
+
+    // No files: read from stdin
+    if file_count == 0 {
+        let piped = stdin_is_pipe();
+        if piped {
+            let content = read_all();
+            let lines = count_lines(content);
+            let words = count_words(content);
+            let bytes = count_bytes(content);
+
+            // Print counts for stdin
+            if show_lines && show_words && show_bytes {
+                println!("{} {} {}", lines, words, bytes);
+            } else if show_lines && show_words {
+                println!("{} {}", lines, words);
+            } else if show_lines && show_bytes {
+                println!("{} {}", lines, bytes);
+            } else if show_words && show_bytes {
+                println!("{} {}", words, bytes);
+            } else if show_lines {
+                println!("{}", lines);
+            } else if show_words {
+                println!("{}", words);
+            } else if show_bytes {
+                println!("{}", bytes);
+            }
+        } else {
+            print_help();
+        }
+        process_exit(0);
+    }
+
+    // Process each file argument
+    let mut j: i64 = 1;
+    while j < nargs {
+        let arg = args_get(j);
+
+        // Skip flags
+        if arg.starts_with("-") {
+            j += 1;
+        } else {
+            // It's a filename
+            let content = read_file(arg);
+
+            let lines = count_lines(content);
+            let words = count_words(content);
+            let bytes = count_bytes(content);
+
+            total_lines += lines;
+            total_words += words;
+            total_bytes += bytes;
+
+            // Print counts for this file
+            if show_lines && show_words && show_bytes {
+                println!("{} {} {} {}", lines, words, bytes, arg);
+            } else if show_lines && show_words {
+                println!("{} {} {}", lines, words, arg);
+            } else if show_lines && show_bytes {
+                println!("{} {} {}", lines, bytes, arg);
+            } else if show_words && show_bytes {
+                println!("{} {} {}", words, bytes, arg);
+            } else if show_lines {
+                println!("{} {}", lines, arg);
+            } else if show_words {
+                println!("{} {}", words, arg);
+            } else if show_bytes {
+                println!("{} {}", bytes, arg);
+            }
+
+            j += 1;
+        }
+    }
+
+    // Print total if more than one file
+    if file_count > 1 {
+        if show_lines && show_words && show_bytes {
+            println!("{} {} {} total", total_lines, total_words, total_bytes);
+        } else if show_lines && show_words {
+            println!("{} {} total", total_lines, total_words);
+        } else if show_lines && show_bytes {
+            println!("{} {} total", total_lines, total_bytes);
+        } else if show_words && show_bytes {
+            println!("{} {} total", total_words, total_bytes);
+        } else if show_lines {
+            println!("{} total", total_lines);
+        } else if show_words {
+            println!("{} total", total_words);
+        } else if show_bytes {
+            println!("{} total", total_bytes);
+        }
+    }
+}

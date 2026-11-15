@@ -1,0 +1,417 @@
+// ═══════════════════════════════════════════════════════════════════════════════
+// JSON PARSER — BuildLang
+// ═══════════════════════════════════════════════════════════════════════════════
+// Complete JSON parser: null, booleans, numbers, strings, arrays, objects.
+// Foundation for jq-lite.
+//
+// Design: ALL state lives in one flat struct (JP) to avoid the &mut sub-struct
+// copy codegen limitation. Strings are pooled in a single buffer. Numbers are
+// stored as raw text. Every value is an i32 index into parallel i32 Vec arrays.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// --- Helpers ---
+fn is_ws(c: String) -> bool { c == " " || c == "\n" || c == "\r" || c == "\t" }
+fn is_digit(c: String) -> bool { c == "0" || c == "1" || c == "2" || c == "3" || c == "4" || c == "5" || c == "6" || c == "7" || c == "8" || c == "9" }
+fn is_lower(c: String) -> bool { c == "a" || c == "b" || c == "c" || c == "d" || c == "e" || c == "f" || c == "g" || c == "h" || c == "i" || c == "j" || c == "k" || c == "l" || c == "m" || c == "n" || c == "o" || c == "p" || c == "q" || c == "r" || c == "s" || c == "t" || c == "u" || c == "v" || c == "w" || c == "x" || c == "y" || c == "z" }
+
+// --- Flat combined struct ---
+// Kind tags: 0=null, 1=true, 2=false, 3=number, 4=string, 5=array, 6=object
+
+struct JP {
+    // Lexer
+    input: String, pos: i32, ilen: i32,
+    // Token
+    tk: i32, tv: String, tp: i32,
+    // String pool
+    sp_buf: String, sp_n: i32, sp_starts: Vec<i32>, sp_lens: Vec<i32>,
+    // Arena
+    ar_n: i32, ar_kinds: Vec<i32>, ar_sids: Vec<i32>,
+    ar_cs: Vec<i32>, ar_cc: Vec<i32>, ar_oks: Vec<i32>,
+    // Children / object keys
+    ch: Vec<i32>, ok: Vec<i32>,
+    // Temp stacks for collecting children before committing
+    // tv_top/tk_top track logical length (we can't shrink Vecs)
+    tmp_vals: Vec<i32>, tv_top: i32,
+    tmp_keys: Vec<i32>, tk_top: i32,
+}
+
+fn jp_new(input: String) -> JP {
+    let ilen = input.len();
+    let mut j = JP {
+        input: input, pos: 0, ilen: ilen,
+        tk: 11, tv: "", tp: 0,
+        sp_buf: "", sp_n: 0, sp_starts: vec![], sp_lens: vec![],
+        ar_n: 0, ar_kinds: vec![], ar_sids: vec![],
+        ar_cs: vec![], ar_cc: vec![], ar_oks: vec![],
+        ch: vec![], ok: vec![],
+        tmp_vals: vec![], tv_top: 0,
+        tmp_keys: vec![], tk_top: 0,
+    };
+    jp_next(&mut j);
+    j
+}
+
+// --- String pool ops (inline on JP) ---
+fn jp_sp_add(j: &mut JP, s: String) -> i32 {
+    let id = j.sp_n;
+    let st = j.sp_buf.len();
+    j.sp_buf = j.sp_buf + s;
+    let en = j.sp_buf.len();
+    vec_push(j.sp_starts, st);
+    vec_push(j.sp_lens, en - st);
+    j.sp_n = j.sp_n + 1;
+    id
+}
+
+fn jp_sp_get(j: &JP, id: i32) -> String {
+    let st = vec_get(j.sp_starts, id);
+    let ln = vec_get(j.sp_lens, id);
+    j.sp_buf.substring(st, ln)
+}
+
+// --- Arena ops (inline on JP) ---
+fn jp_ar(j: &mut JP, kind: i32, sid: i32, cs: i32, cc: i32, oks: i32) -> i32 {
+    let id = j.ar_n;
+    vec_push(j.ar_kinds, kind);
+    vec_push(j.ar_sids, sid);
+    vec_push(j.ar_cs, cs);
+    vec_push(j.ar_cc, cc);
+    vec_push(j.ar_oks, oks);
+    j.ar_n = j.ar_n + 1;
+    id
+}
+
+// --- Lexer ops (inline on JP) ---
+fn jp_skip_ws(j: &mut JP) {
+    let mut go = true;
+    while go {
+        if j.pos >= j.ilen { go = false; }
+        else { let c = j.input.char_at(j.pos); if is_ws(c) { j.pos = j.pos + 1; } else { go = false; } }
+    }
+}
+
+fn jp_read_str(j: &mut JP) -> String {
+    j.pos = j.pos + 1;
+    let mut r = "";
+    let mut go = true;
+    while go {
+        if j.pos >= j.ilen { go = false; }
+        else {
+            let c = j.input.char_at(j.pos);
+            if c == "\"" { go = false; }
+            else if c == "\\" {
+                j.pos = j.pos + 1;
+                if j.pos < j.ilen {
+                    let e = j.input.char_at(j.pos);
+                    if e == "\"" { r = r + "\""; }
+                    else if e == "\\" { r = r + "\\"; }
+                    else if e == "/" { r = r + "/"; }
+                    else if e == "n" { r = r + "\n"; }
+                    else if e == "t" { r = r + "\t"; }
+                    else if e == "r" { r = r + "\r"; }
+                    else if e == "b" { r = r + "b"; }
+                    else if e == "f" { r = r + "f"; }
+                    else { r = r + e; }
+                    j.pos = j.pos + 1;
+                }
+            } else { r = r + c; j.pos = j.pos + 1; }
+        }
+    }
+    if j.pos < j.ilen { j.pos = j.pos + 1; }
+    r
+}
+
+fn jp_read_num(j: &mut JP) -> String {
+    let st = j.pos;
+    let mut ln = 0;
+    if j.pos < j.ilen { let c = j.input.char_at(j.pos); if c == "-" { j.pos = j.pos + 1; ln = ln + 1; } }
+    let mut go = true;
+    while go {
+        if j.pos >= j.ilen { go = false; }
+        else { let c = j.input.char_at(j.pos); if is_digit(c) { j.pos = j.pos + 1; ln = ln + 1; } else { go = false; } }
+    }
+    if j.pos < j.ilen {
+        let c = j.input.char_at(j.pos);
+        if c == "." {
+            j.pos = j.pos + 1; ln = ln + 1;
+            let mut g2 = true;
+            while g2 { if j.pos >= j.ilen { g2 = false; } else { let d = j.input.char_at(j.pos); if is_digit(d) { j.pos = j.pos + 1; ln = ln + 1; } else { g2 = false; } } }
+        }
+    }
+    if j.pos < j.ilen {
+        let c = j.input.char_at(j.pos);
+        if c == "e" || c == "E" {
+            j.pos = j.pos + 1; ln = ln + 1;
+            if j.pos < j.ilen { let s = j.input.char_at(j.pos); if s == "+" || s == "-" { j.pos = j.pos + 1; ln = ln + 1; } }
+            let mut g3 = true;
+            while g3 { if j.pos >= j.ilen { g3 = false; } else { let d = j.input.char_at(j.pos); if is_digit(d) { j.pos = j.pos + 1; ln = ln + 1; } else { g3 = false; } } }
+        }
+    }
+    j.input.substring(st, ln)
+}
+
+fn jp_read_kw(j: &mut JP) -> String {
+    let st = j.pos;
+    let mut ln = 0;
+    let mut go = true;
+    while go { if j.pos >= j.ilen { go = false; } else { let c = j.input.char_at(j.pos); if is_lower(c) { j.pos = j.pos + 1; ln = ln + 1; } else { go = false; } } }
+    j.input.substring(st, ln)
+}
+
+fn jp_next(j: &mut JP) {
+    jp_skip_ws(j);
+    if j.pos >= j.ilen { j.tk = 11; j.tv = ""; j.tp = j.pos; return; }
+    let st = j.pos;
+    let c = j.input.char_at(j.pos);
+    if c == "{" { j.pos = j.pos + 1; j.tk = 0; j.tv = "{"; j.tp = st; return; }
+    if c == "}" { j.pos = j.pos + 1; j.tk = 1; j.tv = "}"; j.tp = st; return; }
+    if c == "[" { j.pos = j.pos + 1; j.tk = 2; j.tv = "["; j.tp = st; return; }
+    if c == "]" { j.pos = j.pos + 1; j.tk = 3; j.tv = "]"; j.tp = st; return; }
+    if c == ":" { j.pos = j.pos + 1; j.tk = 4; j.tv = ":"; j.tp = st; return; }
+    if c == "," { j.pos = j.pos + 1; j.tk = 5; j.tv = ","; j.tp = st; return; }
+    if c == "\"" { let s = jp_read_str(j); j.tk = 6; j.tv = s; j.tp = st; return; }
+    if c == "-" || is_digit(c) { let n = jp_read_num(j); j.tk = 7; j.tv = n; j.tp = st; return; }
+    if c == "t" || c == "f" || c == "n" {
+        let kw = jp_read_kw(j);
+        if kw == "true"  { j.tk = 8; j.tv = "true"; j.tp = st; return; }
+        if kw == "false" { j.tk = 9; j.tv = "false"; j.tp = st; return; }
+        if kw == "null"  { j.tk = 10; j.tv = "null"; j.tp = st; return; }
+        j.tk = 12; j.tv = kw; j.tp = st; return;
+    }
+    j.pos = j.pos + 1; j.tk = 12; j.tv = c; j.tp = st;
+}
+
+// --- Parser ---
+fn jp_expect(j: &mut JP, exp: i32) ~ Console + Process {
+    if j.tk != exp { println!("Error: expected token {} got {} at pos {}", exp, j.tk, j.tp); process_exit(1); }
+    jp_next(j);
+}
+
+fn jp_parse(j: &mut JP) -> i32 ~ Console + Process { jp_value(j) }
+
+fn jp_value(j: &mut JP) -> i32 ~ Console + Process {
+    let k = j.tk;
+    if k == 10 { jp_next(j); return jp_ar(j, 0, 0, 0, 0, 0); }
+    if k == 8  { jp_next(j); return jp_ar(j, 1, 0, 0, 0, 0); }
+    if k == 9  { jp_next(j); return jp_ar(j, 2, 0, 0, 0, 0); }
+    if k == 7 { let v = j.tv; jp_next(j); let sid = jp_sp_add(j, v); return jp_ar(j, 3, sid, 0, 0, 0); }
+    if k == 6 { let v = j.tv; jp_next(j); let sid = jp_sp_add(j, v); return jp_ar(j, 4, sid, 0, 0, 0); }
+    if k == 2 { return jp_array(j); }
+    if k == 0 { return jp_object(j); }
+    println!("Error: unexpected token {} at pos {}", k, j.tp);
+    process_exit(1);
+    0
+}
+
+// Child collection uses tmp_vals with -1/-2 frame markers.
+// Each container pushes -1 (start), then child IDs (interleaved with nested
+// frames), then -2 (end). Extraction scans forward, tracking depth, collecting
+// only entries at depth == 1 (our direct children).
+
+fn jp_array(j: &mut JP) -> i32 ~ Console + Process {
+    jp_next(j);
+    if j.tk == 3 { jp_next(j); let s = vec_len(j.ch); return jp_ar(j, 5, 0, s, 0, 0); }
+    let frame = vec_len(j.tmp_vals);
+    vec_push(j.tmp_vals, -1);
+    let first = jp_value(j);
+    vec_push(j.tmp_vals, first);
+    let mut n = 1;
+    let mut go = true;
+    while go {
+        if j.tk == 5 { jp_next(j); let e = jp_value(j); vec_push(j.tmp_vals, e); n = n + 1; }
+        else { go = false; }
+    }
+    jp_expect(j, 3);
+    vec_push(j.tmp_vals, -2);
+    // Extract our n child IDs by scanning our frame
+    let total = vec_len(j.tmp_vals);
+    let start = vec_len(j.ch);
+    let mut p = frame;
+    let mut depth = 0;
+    while p < total {
+        let v = vec_get(j.tmp_vals, p);
+        if v == -1 { depth = depth + 1; }
+        else if v == -2 { depth = depth - 1; }
+        else if depth == 1 { vec_push(j.ch, v); }
+        p = p + 1;
+    }
+    jp_ar(j, 5, 0, start, n, 0)
+}
+
+fn jp_object(j: &mut JP) -> i32 ~ Console + Process {
+    jp_next(j);
+    if j.tk == 1 { jp_next(j); let ks = vec_len(j.ok); let vs = vec_len(j.ch); return jp_ar(j, 6, 0, vs, 0, ks); }
+    let frame_v = vec_len(j.tmp_vals);
+    let frame_k = vec_len(j.tmp_keys);
+    vec_push(j.tmp_vals, -1);
+    vec_push(j.tmp_keys, -1);
+    if j.tk != 6 { println!("Error: expected string key at pos {}", j.tp); process_exit(1); }
+    let k1 = j.tv; jp_next(j); jp_expect(j, 4);
+    let v1 = jp_value(j);
+    let kid1 = jp_sp_add(j, k1);
+    vec_push(j.tmp_keys, kid1);
+    vec_push(j.tmp_vals, v1);
+    let mut n = 1;
+    let mut go = true;
+    while go {
+        if j.tk == 5 {
+            jp_next(j);
+            if j.tk != 6 { println!("Error: expected string key at pos {}", j.tp); process_exit(1); }
+            let k = j.tv; jp_next(j); jp_expect(j, 4);
+            let v = jp_value(j);
+            let kid = jp_sp_add(j, k);
+            vec_push(j.tmp_keys, kid);
+            vec_push(j.tmp_vals, v);
+            n = n + 1;
+        } else { go = false; }
+    }
+    jp_expect(j, 1);
+    vec_push(j.tmp_vals, -2);
+    vec_push(j.tmp_keys, -2);
+    // Extract keys and values from our frames
+    let ks = vec_len(j.ok);
+    let vs = vec_len(j.ch);
+    let total_v = vec_len(j.tmp_vals);
+    let total_k = vec_len(j.tmp_keys);
+    // Extract values
+    let mut p = frame_v;
+    let mut depth = 0;
+    while p < total_v {
+        let v = vec_get(j.tmp_vals, p);
+        if v == -1 { depth = depth + 1; }
+        else if v == -2 { depth = depth - 1; }
+        else if depth == 1 { vec_push(j.ch, v); }
+        p = p + 1;
+    }
+    // Extract keys (keys don't have nested frames from arrays, only from objects)
+    let mut pk = frame_k;
+    let mut dk = 0;
+    while pk < total_k {
+        let kv = vec_get(j.tmp_keys, pk);
+        if kv == -1 { dk = dk + 1; }
+        else if kv == -2 { dk = dk - 1; }
+        else if dk == 1 { vec_push(j.ok, kv); }
+        pk = pk + 1;
+    }
+    jp_ar(j, 6, 0, vs, n, ks)
+}
+
+// --- Pretty printer (reads from JP via &JP, Vecs by value) ---
+fn make_indent(level: i32) -> String {
+    let mut o = ""; let mut i = 0;
+    while i < level { o = o + "  "; i = i + 1; }
+    o
+}
+
+fn pretty(j: &JP, ch: Vec<i32>, ok: Vec<i32>, id: i32, ind: i32) -> String {
+    let kind = vec_get(j.ar_kinds, id);
+    if kind == 0 { return "null"; }
+    if kind == 1 { return "true"; }
+    if kind == 2 { return "false"; }
+    if kind == 3 { let sid = vec_get(j.ar_sids, id); return jp_sp_get(j, sid); }
+    if kind == 4 {
+        let sid = vec_get(j.ar_sids, id);
+        let s = jp_sp_get(j, sid);
+        return "\"" + s + "\"";
+    }
+    if kind == 5 {
+        let st = vec_get(j.ar_cs, id);
+        let cnt = vec_get(j.ar_cc, id);
+        if cnt == 0 { return "[]"; }
+        let ni = ind + 1;
+        let pad = make_indent(ni);
+        let ep = make_indent(ind);
+        let mut o = "[\n";
+        let mut i = 0;
+        while i < cnt {
+            let cid = vec_get(ch, st + i);
+            let cv = pretty(j, ch, ok, cid, ni);
+            o = o + pad + cv;
+            if i < cnt - 1 { o = o + ","; }
+            o = o + "\n";
+            i = i + 1;
+        }
+        return o + ep + "]";
+    }
+    if kind == 6 {
+        let kst = vec_get(j.ar_oks, id);
+        let vst = vec_get(j.ar_cs, id);
+        let cnt = vec_get(j.ar_cc, id);
+        if cnt == 0 { return "{}"; }
+        let ni = ind + 1;
+        let pad = make_indent(ni);
+        let ep = make_indent(ind);
+        let mut o = "{\n";
+        let mut i = 0;
+        while i < cnt {
+            let kid = vec_get(ok, kst + i);
+            let key = jp_sp_get(j, kid);
+            let vid = vec_get(ch, vst + i);
+            let val = pretty(j, ch, ok, vid, ni);
+            o = o + pad + "\"" + key + "\": " + val;
+            if i < cnt - 1 { o = o + ","; }
+            o = o + "\n";
+            i = i + 1;
+        }
+        return o + ep + "}";
+    }
+    "null"
+}
+
+fn compact(j: &JP, ch: Vec<i32>, ok: Vec<i32>, id: i32) -> String {
+    let kind = vec_get(j.ar_kinds, id);
+    if kind == 0 { return "null"; }
+    if kind == 1 { return "true"; }
+    if kind == 2 { return "false"; }
+    if kind == 3 { let sid = vec_get(j.ar_sids, id); return jp_sp_get(j, sid); }
+    if kind == 4 {
+        let sid = vec_get(j.ar_sids, id);
+        let s = jp_sp_get(j, sid);
+        return "\"" + s + "\"";
+    }
+    if kind == 5 {
+        let st = vec_get(j.ar_cs, id);
+        let cnt = vec_get(j.ar_cc, id);
+        if cnt == 0 { return "[]"; }
+        let mut o = "[";
+        let mut i = 0;
+        while i < cnt {
+            let cid = vec_get(ch, st + i);
+            let cv = compact(j, ch, ok, cid);
+            o = o + cv; if i < cnt - 1 { o = o + ","; }
+            i = i + 1;
+        }
+        return o + "]";
+    }
+    if kind == 6 {
+        let kst = vec_get(j.ar_oks, id);
+        let vst = vec_get(j.ar_cs, id);
+        let cnt = vec_get(j.ar_cc, id);
+        if cnt == 0 { return "{}"; }
+        let mut o = "{";
+        let mut i = 0;
+        while i < cnt {
+            let kid = vec_get(ok, kst + i);
+            let key = jp_sp_get(j, kid);
+            let vid = vec_get(ch, vst + i);
+            let val = compact(j, ch, ok, vid);
+            o = o + "\"" + key + "\":" + val;
+            if i < cnt - 1 { o = o + ","; }
+            i = i + 1;
+        }
+        return o + "}";
+    }
+    "null"
+}
+
+// --- Main ---
+fn main() ~ Console + Environment + FileSystem + Process {
+    let ac = args_count();
+    let input = if ac > 1 { read_file(args_get(1)) } else { read_all() };
+    let trimmed = input.trim();
+    if trimmed.len() == 0 { println!("Error: empty input"); process_exit(1); }
+    let mut jp = jp_new(trimmed);
+    let root = jp_parse(&mut jp);
+    let output = pretty(&jp, jp.ch, jp.ok, root, 0);
+    println!("{}", output);
+}

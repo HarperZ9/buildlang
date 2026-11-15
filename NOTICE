@@ -14,6 +14,13 @@ their sole copyright holder, relicensed them on 2026-11-09. Copies taken
 from build-universe up to its commit 4a296c1 keep the Functional Source
 License 1.1 with MIT future licence (FSL-1.1-MIT) they were published under.
 
+The files under universe/ (Build Universe: modules, example programs, the
+BuildOS kernel and frametrace) moved here from HarperZ9/build-universe on
+2026-11-15 at its commit 1633fc3. They keep the licence they were published
+under, the Functional Source License 1.1 with MIT future licence
+(FSL-1.1-MIT); see universe/LICENSE. The five packages under suite/ likewise
+keep their own LICENSE files.
+
 This product includes original software whose API design was informed by, but
 which does not copy the source of, the following project:
 

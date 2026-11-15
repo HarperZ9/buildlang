@@ -1,0 +1,1839 @@
+// BUILD Spectrum - Color Appearance Models
+// Comprehensive CAM16, CAM-UCS, and color appearance modeling
+// Implements perceptual color attributes under diverse viewing conditions
+
+module spectrum::color_appearance;
+
+use core::simd::{Vec3, Vec4, Mat3x3};
+use core::math::{pow, sqrt, abs, sin, cos, atan2, exp, log, PI, TWO_PI};
+
+// ============================================================================
+// VIEWING CONDITIONS
+// ============================================================================
+
+/// Surround condition enumeration
+enum Surround {
+    Average,    // Average surround (normal viewing)
+    Dim,        // Dim surround (cinema)
+    Dark,       // Dark surround (projector)
+}
+
+/// Viewing conditions for color appearance computation
+struct ViewingConditions {
+    /// Adapting luminance (cd/m²)
+    adapting_luminance: f32,
+
+    /// Background relative luminance (Y_b / Y_w)
+    background_luminance: f32,
+
+    /// Reference white XYZ
+    white_point: Vec3,
+
+    /// Surround condition
+    surround: Surround,
+
+    /// Discounting the illuminant (chromatic adaptation degree)
+    discounting: f32,
+}
+
+impl ViewingConditions {
+    /// Standard viewing conditions (sRGB D65, office lighting)
+    fn standard() -> Self {
+        Self {
+            adapting_luminance: 64.0,      // ~200 lux office lighting
+            background_luminance: 0.2,      // 20% gray background
+            white_point: Vec3::new(95.047, 100.0, 108.883),  // D65
+            surround: Surround::Average,
+            discounting: 1.0,
+        }
+    }
+
+    /// Cinema viewing conditions
+    fn cinema() -> Self {
+        Self {
+            adapting_luminance: 16.0,
+            background_luminance: 0.1,
+            white_point: Vec3::new(95.047, 100.0, 108.883),
+            surround: Surround::Dim,
+            discounting: 1.0,
+        }
+    }
+
+    /// Dark room viewing conditions
+    fn dark_room() -> Self {
+        Self {
+            adapting_luminance: 4.0,
+            background_luminance: 0.05,
+            white_point: Vec3::new(95.047, 100.0, 108.883),
+            surround: Surround::Dark,
+            discounting: 1.0,
+        }
+    }
+
+    /// HDR viewing conditions
+    fn hdr() -> Self {
+        Self {
+            adapting_luminance: 200.0,
+            background_luminance: 0.2,
+            white_point: Vec3::new(95.047, 100.0, 108.883),
+            surround: Surround::Average,
+            discounting: 1.0,
+        }
+    }
+
+    /// Custom viewing conditions
+    fn custom(la: f32, yb: f32, white: Vec3, surround: Surround) -> Self {
+        Self {
+            adapting_luminance: la,
+            background_luminance: yb,
+            white_point: white,
+            surround,
+            discounting: 1.0,
+        }
+    }
+
+    /// Get surround parameters (c, Nc, F)
+    fn surround_params(&self) -> (f32, f32, f32) {
+        match self.surround {
+            Surround::Average => (0.69, 1.0, 1.0),
+            Surround::Dim => (0.59, 0.9, 0.9),
+            Surround::Dark => (0.525, 0.8, 0.8),
+        }
+    }
+}
+
+// ============================================================================
+// CAM16 - CIE Color Appearance Model 2016
+// ============================================================================
+
+/// CAM16 color appearance correlates
+struct Cam16Color {
+    /// Lightness (0-100)
+    lightness: f32,
+
+    /// Brightness
+    brightness: f32,
+
+    /// Chroma
+    chroma: f32,
+
+    /// Colorfulness
+    colorfulness: f32,
+
+    /// Saturation
+    saturation: f32,
+
+    /// Hue angle (degrees)
+    hue_angle: f32,
+
+    /// Hue quadrature (0-400)
+    hue_quadrature: f32,
+
+    /// a (red-green)
+    a: f32,
+
+    /// b (yellow-blue)
+    b: f32,
+}
+
+impl Cam16Color {
+    fn new(J: f32, Q: f32, C: f32, M: f32, s: f32, h: f32, H: f32, a: f32, b: f32) -> Self {
+        Self {
+            lightness: J,
+            brightness: Q,
+            chroma: C,
+            colorfulness: M,
+            saturation: s,
+            hue_angle: h,
+            hue_quadrature: H,
+            a,
+            b,
+        }
+    }
+
+    /// Create from lightness, chroma, hue
+    fn from_jch(J: f32, C: f32, h: f32) -> Self {
+        Self {
+            lightness: J,
+            brightness: 0.0,
+            chroma: C,
+            colorfulness: 0.0,
+            saturation: 0.0,
+            hue_angle: h,
+            hue_quadrature: 0.0,
+            a: 0.0,
+            b: 0.0,
+        }
+    }
+
+    /// Check if color is achromatic
+    fn is_achromatic(&self) -> bool {
+        self.chroma < 0.001
+    }
+}
+
+/// CAM16 color appearance model implementation
+struct Cam16 {
+    /// Viewing conditions
+    conditions: ViewingConditions,
+
+    // Pre-computed values
+    /// Degree of adaptation
+    d: f32,
+    /// Factor k
+    k: f32,
+    /// Factor n
+    n: f32,
+    /// Chromatic induction factor Nbb
+    n_bb: f32,
+    /// Chromatic induction factor Ncb
+    n_cb: f32,
+    /// Background luminance factor z
+    z: f32,
+    /// Factor F_L (luminance-level adaptation factor)
+    f_l: f32,
+    /// Factor A_w (achromatic response for white)
+    a_w: f32,
+    /// Adapted white point
+    d_rgb: Vec3,
+}
+
+impl Cam16 {
+    /// CAT16 forward matrix (XYZ to sharpened RGB)
+    const M16: Mat3x3 = Mat3x3::from_rows(
+        Vec3::new(0.401288, 0.650173, -0.051461),
+        Vec3::new(-0.250268, 1.204414, 0.045854),
+        Vec3::new(-0.002079, 0.048952, 0.953127)
+    );
+
+    /// CAT16 inverse matrix
+    const M16_INV: Mat3x3 = Mat3x3::from_rows(
+        Vec3::new(1.862068, -1.011255, 0.149187),
+        Vec3::new(0.387527, 0.621447, -0.008974),
+        Vec3::new(-0.015841, -0.034123, 1.049964)
+    );
+
+    /// Create CAM16 model with viewing conditions
+    fn new(conditions: ViewingConditions) -> Self {
+        let (c, nc, f) = conditions.surround_params();
+
+        // Degree of adaptation
+        let d = if conditions.discounting > 0.0 {
+            conditions.discounting * f * (1.0 - (1.0 / 3.6) *
+                exp((-conditions.adapting_luminance - 42.0) / 92.0))
+        } else {
+            0.0
+        };
+        let d = d.clamp(0.0, 1.0);
+
+        // Compute adapted white point
+        let rgb_w = Self::M16 * conditions.white_point;
+        let d_rgb = Vec3::new(
+            d * (conditions.white_point.y / rgb_w.x) + 1.0 - d,
+            d * (conditions.white_point.y / rgb_w.y) + 1.0 - d,
+            d * (conditions.white_point.y / rgb_w.z) + 1.0 - d
+        );
+
+        // Background and chromatic induction factors
+        let n = conditions.background_luminance;
+        let n_bb = 0.725 * pow(1.0 / n, 0.2);
+        let n_cb = n_bb;
+        let z = 1.48 + sqrt(n);
+
+        // Luminance adaptation factor
+        let k = 1.0 / (5.0 * conditions.adapting_luminance + 1.0);
+        let k4 = k * k * k * k;
+        let f_l = k4 * conditions.adapting_luminance +
+            0.1 * pow(1.0 - k4, 2.0) * pow(5.0 * conditions.adapting_luminance, 1.0 / 3.0);
+
+        // Achromatic response for white
+        let rgb_c_w = Vec3::new(
+            d_rgb.x * rgb_w.x,
+            d_rgb.y * rgb_w.y,
+            d_rgb.z * rgb_w.z
+        );
+        let rgb_a_w = Self::post_adaptation_response(rgb_c_w, f_l);
+        let a_w = (2.0 * rgb_a_w.x + rgb_a_w.y + rgb_a_w.z / 20.0 - 0.305) * n_bb;
+
+        Self {
+            conditions,
+            d,
+            k,
+            n,
+            n_bb,
+            n_cb,
+            z,
+            f_l,
+            a_w,
+            d_rgb,
+        }
+    }
+
+    /// Post-adaptation nonlinear response
+    fn post_adaptation_response(rgb: Vec3, f_l: f32) -> Vec3 {
+        let adapt = |x: f32| -> f32 {
+            let f_l_x = pow(f_l * abs(x) / 100.0, 0.42);
+            let sign = if x >= 0.0 { 1.0 } else { -1.0 };
+            sign * 400.0 * f_l_x / (f_l_x + 27.13) + 0.1
+        };
+
+        Vec3::new(adapt(rgb.x), adapt(rgb.y), adapt(rgb.z))
+    }
+
+    /// Inverse post-adaptation response
+    fn inverse_post_adaptation(rgb_a: Vec3, f_l: f32) -> Vec3 {
+        let inv_adapt = |x: f32| -> f32 {
+            let t = x - 0.1;
+            let sign = if t >= 0.0 { 1.0 } else { -1.0 };
+            let abs_t = abs(t);
+
+            if abs_t < 0.0001 {
+                0.0
+            } else {
+                sign * 100.0 / f_l * pow(27.13 * abs_t / (400.0 - abs_t), 1.0 / 0.42)
+            }
+        };
+
+        Vec3::new(inv_adapt(rgb_a.x), inv_adapt(rgb_a.y), inv_adapt(rgb_a.z))
+    }
+
+    /// Convert XYZ to CAM16 appearance correlates
+    fn xyz_to_cam16(&self, xyz: Vec3) -> Cam16Color {
+        let (c, nc, _) = self.conditions.surround_params();
+
+        // Step 1: Chromatic adaptation
+        let rgb = Self::M16 * xyz;
+        let rgb_c = Vec3::new(
+            self.d_rgb.x * rgb.x,
+            self.d_rgb.y * rgb.y,
+            self.d_rgb.z * rgb.z
+        );
+
+        // Step 2: Post-adaptation nonlinear response
+        let rgb_a = Self::post_adaptation_response(rgb_c, self.f_l);
+
+        // Step 3: Opponent color dimensions
+        let a = rgb_a.x - 12.0 * rgb_a.y / 11.0 + rgb_a.z / 11.0;
+        let b = (rgb_a.x + rgb_a.y - 2.0 * rgb_a.z) / 9.0;
+
+        // Step 4: Hue angle
+        let h = atan2(b, a) * 180.0 / PI;
+        let h = if h < 0.0 { h + 360.0 } else { h };
+
+        // Step 5: Eccentricity factor and hue composition
+        let h_rad = h * PI / 180.0;
+        let e_t = 0.25 * (cos(h_rad + 2.0) + 3.8);
+
+        // Hue quadrature (simplified)
+        let H = self.compute_hue_quadrature(h);
+
+        // Step 6: Achromatic response
+        let A = (2.0 * rgb_a.x + rgb_a.y + rgb_a.z / 20.0 - 0.305) * self.n_bb;
+
+        // Step 7: Lightness
+        let J = 100.0 * pow(A / self.a_w, c * self.z);
+
+        // Step 8: Brightness
+        let Q = (4.0 / c) * sqrt(J / 100.0) * (self.a_w + 4.0) * pow(self.f_l, 0.25);
+
+        // Step 9: Chroma
+        let t = (50000.0 / 13.0 * nc * self.n_cb * e_t * sqrt(a * a + b * b)) /
+            (rgb_a.x + rgb_a.y + 21.0 * rgb_a.z / 20.0);
+        let C = pow(t, 0.9) * sqrt(J / 100.0) * pow(1.64 - pow(0.29, self.n), 0.73);
+
+        // Step 10: Colorfulness
+        let M = C * pow(self.f_l, 0.25);
+
+        // Step 11: Saturation
+        let s = 100.0 * sqrt(M / Q);
+
+        Cam16Color::new(J, Q, C, M, s, h, H, a, b)
+    }
+
+    /// Convert CAM16 (J, C, h) to XYZ
+    fn cam16_to_xyz(&self, J: f32, C: f32, h: f32) -> Vec3 {
+        let (c, nc, _) = self.conditions.surround_params();
+
+        // Handle black
+        if J <= 0.0 {
+            return Vec3::zero();
+        }
+
+        let h_rad = h * PI / 180.0;
+
+        // Eccentricity factor
+        let e_t = 0.25 * (cos(h_rad + 2.0) + 3.8);
+
+        // Achromatic response
+        let A = self.a_w * pow(J / 100.0, 1.0 / (c * self.z));
+
+        // Temporary value for chroma calculation
+        let t = pow(C / (sqrt(J / 100.0) * pow(1.64 - pow(0.29, self.n), 0.73)), 1.0 / 0.9);
+
+        // Calculate a and b
+        let p1 = 50000.0 / 13.0 * nc * self.n_cb * e_t;
+        let p2 = A / self.n_bb + 0.305;
+
+        let sin_h = sin(h_rad);
+        let cos_h = cos(h_rad);
+
+        let gamma = 23.0 * (p2 - 0.305) * (t / (23.0 * p1 + 11.0 * t * cos_h + 108.0 * t * sin_h));
+        let a = gamma * cos_h;
+        let b = gamma * sin_h;
+
+        // Calculate post-adaptation RGB
+        let rgb_a = Vec3::new(
+            460.0 * p2 / 1403.0 + 451.0 * a / 1403.0 + 288.0 * b / 1403.0,
+            460.0 * p2 / 1403.0 - 891.0 * a / 1403.0 - 261.0 * b / 1403.0,
+            460.0 * p2 / 1403.0 - 220.0 * a / 1403.0 - 6300.0 * b / 1403.0
+        );
+
+        // Inverse post-adaptation
+        let rgb_c = Self::inverse_post_adaptation(rgb_a, self.f_l);
+
+        // Undo chromatic adaptation
+        let rgb = Vec3::new(
+            rgb_c.x / self.d_rgb.x,
+            rgb_c.y / self.d_rgb.y,
+            rgb_c.z / self.d_rgb.z
+        );
+
+        // Convert to XYZ
+        Self::M16_INV * rgb
+    }
+
+    /// Compute hue quadrature from hue angle
+    fn compute_hue_quadrature(&self, h: f32) -> f32 {
+        // Hue angle boundaries and eccentricity factors
+        let h_i = [20.14, 90.0, 164.25, 237.53, 380.14];  // Red, Yellow, Green, Blue, Red
+        let e_i = [0.8, 0.7, 1.0, 1.2, 0.8];
+        let H_i = [0.0, 100.0, 200.0, 300.0, 400.0];
+
+        let h_prime = if h < h_i[0] { h + 360.0 } else { h };
+
+        // Find interval
+        let mut i = 0;
+        while i < 4 && h_prime >= h_i[i + 1] {
+            i += 1;
+        }
+
+        let h_diff = h_prime - h_i[i];
+        let e_ratio = e_i[i + 1] / e_i[i];
+
+        H_i[i] + (100.0 * h_diff / e_i[i]) / (h_diff / e_i[i] + (h_i[i + 1] - h_prime) / e_i[i + 1])
+    }
+}
+
+// ============================================================================
+// CAM16-UCS - Uniform Color Space
+// ============================================================================
+
+/// CAM16-UCS coordinates
+struct Cam16Ucs {
+    /// J' (lightness)
+    j_prime: f32,
+
+    /// a' (red-green)
+    a_prime: f32,
+
+    /// b' (yellow-blue)
+    b_prime: f32,
+
+    /// M' (colorfulness, optional)
+    m_prime: f32,
+}
+
+impl Cam16Ucs {
+    /// UCS coefficient (c1)
+    const C1: f32 = 0.007;
+
+    /// UCS coefficient (c2)
+    const C2: f32 = 0.0228;
+
+    fn new(j_prime: f32, a_prime: f32, b_prime: f32) -> Self {
+        let m_prime = sqrt(a_prime * a_prime + b_prime * b_prime);
+        Self { j_prime, a_prime, b_prime, m_prime }
+    }
+
+    /// Convert from CAM16 to CAM16-UCS
+    fn from_cam16(cam: &Cam16Color) -> Self {
+        let j_prime = (1.0 + 100.0 * Self::C1) * cam.lightness / (1.0 + Self::C1 * cam.lightness);
+        let m_prime = (1.0 / Self::C2) * log(1.0 + Self::C2 * cam.colorfulness);
+
+        let h_rad = cam.hue_angle * PI / 180.0;
+        let a_prime = m_prime * cos(h_rad);
+        let b_prime = m_prime * sin(h_rad);
+
+        Self { j_prime, a_prime, b_prime, m_prime }
+    }
+
+    /// Convert to CAM16
+    fn to_cam16(&self) -> (f32, f32, f32) {
+        let J = self.j_prime / (1.0 + Self::C1 * (100.0 - self.j_prime));
+        let M = (exp(self.m_prime * Self::C2) - 1.0) / Self::C2;
+        let h = atan2(self.b_prime, self.a_prime) * 180.0 / PI;
+        let h = if h < 0.0 { h + 360.0 } else { h };
+
+        (J, M, h)
+    }
+
+    /// Calculate color difference (Euclidean distance)
+    fn delta_e(&self, other: &Cam16Ucs) -> f32 {
+        let dj = self.j_prime - other.j_prime;
+        let da = self.a_prime - other.a_prime;
+        let db = self.b_prime - other.b_prime;
+
+        sqrt(dj * dj + da * da + db * db)
+    }
+}
+
+// ============================================================================
+// CAM16-SCD - Symmetric Color Difference
+// ============================================================================
+
+struct Cam16Scd {
+    cam16: Cam16,
+}
+
+impl Cam16Scd {
+    const KL: f32 = 1.0;
+    const C1: f32 = 0.007;
+    const C2: f32 = 0.0228;
+
+    fn new(conditions: ViewingConditions) -> Self {
+        Self {
+            cam16: Cam16::new(conditions),
+        }
+    }
+
+    /// Calculate symmetric color difference
+    fn delta_e(&self, xyz1: Vec3, xyz2: Vec3) -> f32 {
+        let cam1 = self.cam16.xyz_to_cam16(xyz1);
+        let cam2 = self.cam16.xyz_to_cam16(xyz2);
+
+        let ucs1 = Cam16Ucs::from_cam16(&cam1);
+        let ucs2 = Cam16Ucs::from_cam16(&cam2);
+
+        ucs1.delta_e(&ucs2)
+    }
+}
+
+// ============================================================================
+// CAM16-LCD - Large Color Difference
+// ============================================================================
+
+struct Cam16Lcd {
+    cam16: Cam16,
+}
+
+impl Cam16Lcd {
+    const KL: f32 = 0.77;
+    const C1: f32 = 0.007;
+    const C2: f32 = 0.0053;
+
+    fn new(conditions: ViewingConditions) -> Self {
+        Self {
+            cam16: Cam16::new(conditions),
+        }
+    }
+
+    /// Convert CAM16 to LCD coordinates
+    fn to_lcd(cam: &Cam16Color) -> (f32, f32, f32) {
+        let j_prime = (1.0 + 100.0 * Self::C1) * cam.lightness / (1.0 + Self::C1 * cam.lightness);
+        let m_prime = (1.0 / Self::C2) * log(1.0 + Self::C2 * cam.colorfulness);
+
+        let h_rad = cam.hue_angle * PI / 180.0;
+        let a_prime = m_prime * cos(h_rad);
+        let b_prime = m_prime * sin(h_rad);
+
+        (j_prime, a_prime, b_prime)
+    }
+
+    /// Calculate large color difference
+    fn delta_e(&self, xyz1: Vec3, xyz2: Vec3) -> f32 {
+        let cam1 = self.cam16.xyz_to_cam16(xyz1);
+        let cam2 = self.cam16.xyz_to_cam16(xyz2);
+
+        let (j1, a1, b1) = Self::to_lcd(&cam1);
+        let (j2, a2, b2) = Self::to_lcd(&cam2);
+
+        let dj = (j1 - j2) / Self::KL;
+        let da = a1 - a2;
+        let db = b1 - b2;
+
+        sqrt(dj * dj + da * da + db * db)
+    }
+}
+
+// ============================================================================
+// CIECAM02 - Legacy Color Appearance Model
+// ============================================================================
+
+/// CIECAM02 color appearance correlates (for compatibility)
+struct Ciecam02Color {
+    lightness: f32,
+    brightness: f32,
+    chroma: f32,
+    colorfulness: f32,
+    saturation: f32,
+    hue_angle: f32,
+    hue_quadrature: f32,
+}
+
+/// CIECAM02 implementation (legacy compatibility)
+struct Ciecam02 {
+    conditions: ViewingConditions,
+    d: f32,
+    n: f32,
+    n_bb: f32,
+    n_cb: f32,
+    z: f32,
+    f_l: f32,
+    a_w: f32,
+    d_rgb: Vec3,
+}
+
+impl Ciecam02 {
+    /// CIECAM02 CAT matrix (Hunt-Pointer-Estevez)
+    const MCAT02: Mat3x3 = Mat3x3::from_rows(
+        Vec3::new(0.7328, 0.4296, -0.1624),
+        Vec3::new(-0.7036, 1.6975, 0.0061),
+        Vec3::new(0.0030, 0.0136, 0.9834)
+    );
+
+    const MCAT02_INV: Mat3x3 = Mat3x3::from_rows(
+        Vec3::new(1.096124, -0.278869, 0.182745),
+        Vec3::new(0.454369, 0.473533, 0.072098),
+        Vec3::new(-0.009628, -0.005698, 1.015326)
+    );
+
+    const MH: Mat3x3 = Mat3x3::from_rows(
+        Vec3::new(0.38971, 0.68898, -0.07868),
+        Vec3::new(-0.22981, 1.18340, 0.04641),
+        Vec3::new(0.00000, 0.00000, 1.00000)
+    );
+
+    fn new(conditions: ViewingConditions) -> Self {
+        let (c, nc, f) = conditions.surround_params();
+
+        let d = f * (1.0 - (1.0 / 3.6) *
+            exp((-conditions.adapting_luminance - 42.0) / 92.0));
+        let d = d.clamp(0.0, 1.0);
+
+        let rgb_w = Self::MCAT02 * conditions.white_point;
+        let d_rgb = Vec3::new(
+            d * (conditions.white_point.y / rgb_w.x) + 1.0 - d,
+            d * (conditions.white_point.y / rgb_w.y) + 1.0 - d,
+            d * (conditions.white_point.y / rgb_w.z) + 1.0 - d
+        );
+
+        let n = conditions.background_luminance;
+        let n_bb = 0.725 * pow(1.0 / n, 0.2);
+        let n_cb = n_bb;
+        let z = 1.48 + sqrt(n);
+
+        let k = 1.0 / (5.0 * conditions.adapting_luminance + 1.0);
+        let k4 = k * k * k * k;
+        let f_l = k4 * conditions.adapting_luminance +
+            0.1 * pow(1.0 - k4, 2.0) * pow(5.0 * conditions.adapting_luminance, 1.0 / 3.0);
+
+        let rgb_c_w = Vec3::new(
+            d_rgb.x * rgb_w.x,
+            d_rgb.y * rgb_w.y,
+            d_rgb.z * rgb_w.z
+        );
+
+        let rgb_p_w = Self::MH * (Self::MCAT02_INV * rgb_c_w);
+        let rgb_a_w = Self::nonlinear_adaptation(rgb_p_w, f_l);
+        let a_w = (2.0 * rgb_a_w.x + rgb_a_w.y + rgb_a_w.z / 20.0 - 0.305) * n_bb;
+
+        Self {
+            conditions,
+            d,
+            n,
+            n_bb,
+            n_cb,
+            z,
+            f_l,
+            a_w,
+            d_rgb,
+        }
+    }
+
+    fn nonlinear_adaptation(rgb: Vec3, f_l: f32) -> Vec3 {
+        let adapt = |x: f32| -> f32 {
+            let f_l_x = pow(f_l * abs(x) / 100.0, 0.42);
+            let sign = if x >= 0.0 { 1.0 } else { -1.0 };
+            sign * 400.0 * f_l_x / (f_l_x + 27.13) + 0.1
+        };
+
+        Vec3::new(adapt(rgb.x), adapt(rgb.y), adapt(rgb.z))
+    }
+
+    fn xyz_to_ciecam02(&self, xyz: Vec3) -> Ciecam02Color {
+        let (c, nc, _) = self.conditions.surround_params();
+
+        let rgb = Self::MCAT02 * xyz;
+        let rgb_c = Vec3::new(
+            self.d_rgb.x * rgb.x,
+            self.d_rgb.y * rgb.y,
+            self.d_rgb.z * rgb.z
+        );
+
+        let rgb_p = Self::MH * (Self::MCAT02_INV * rgb_c);
+        let rgb_a = Self::nonlinear_adaptation(rgb_p, self.f_l);
+
+        let a = rgb_a.x - 12.0 * rgb_a.y / 11.0 + rgb_a.z / 11.0;
+        let b = (rgb_a.x + rgb_a.y - 2.0 * rgb_a.z) / 9.0;
+
+        let h = atan2(b, a) * 180.0 / PI;
+        let h = if h < 0.0 { h + 360.0 } else { h };
+
+        let h_rad = h * PI / 180.0;
+        let e_t = 0.25 * (cos(h_rad + 2.0) + 3.8);
+
+        let A = (2.0 * rgb_a.x + rgb_a.y + rgb_a.z / 20.0 - 0.305) * self.n_bb;
+
+        let J = 100.0 * pow(A / self.a_w, c * self.z);
+        let Q = (4.0 / c) * sqrt(J / 100.0) * (self.a_w + 4.0) * pow(self.f_l, 0.25);
+
+        let t = (50000.0 / 13.0 * nc * self.n_cb * e_t * sqrt(a * a + b * b)) /
+            (rgb_a.x + rgb_a.y + 21.0 * rgb_a.z / 20.0);
+        let C = pow(t, 0.9) * sqrt(J / 100.0) * pow(1.64 - pow(0.29, self.n), 0.73);
+        let M = C * pow(self.f_l, 0.25);
+        let s = 100.0 * sqrt(M / Q);
+
+        Ciecam02Color {
+            lightness: J,
+            brightness: Q,
+            chroma: C,
+            colorfulness: M,
+            saturation: s,
+            hue_angle: h,
+            hue_quadrature: 0.0,
+        }
+    }
+}
+
+// ============================================================================
+// ZCAM - Advanced Color Appearance Model
+// ============================================================================
+
+/// ZCAM color appearance correlates
+struct ZcamColor {
+    /// Lightness (Jz)
+    lightness: f32,
+
+    /// Brightness (Qz)
+    brightness: f32,
+
+    /// Chroma (Cz)
+    chroma: f32,
+
+    /// Colorfulness (Mz)
+    colorfulness: f32,
+
+    /// Saturation (Sz)
+    saturation: f32,
+
+    /// Hue angle (hz)
+    hue_angle: f32,
+
+    /// Vividness (Vz)
+    vividness: f32,
+
+    /// Blackness (Kz)
+    blackness: f32,
+
+    /// Whiteness (Wz)
+    whiteness: f32,
+}
+
+/// ZCAM implementation (based on JzAzBz)
+struct Zcam {
+    conditions: ViewingConditions,
+
+    // Pre-computed values
+    f_b: f32,  // Factor for brightness
+    f_l: f32,  // Luminance adaptation factor
+    i_z_w: f32, // Achromatic response of white
+}
+
+impl Zcam {
+    /// ZCAM constants
+    const B: f32 = 1.15;
+    const G: f32 = 0.66;
+    const D65_Z: f32 = 1.0;
+
+    fn new(conditions: ViewingConditions) -> Self {
+        let f_s = if conditions.adapting_luminance < 2.0 {
+            0.525
+        } else if conditions.adapting_luminance > 4.0 {
+            0.69
+        } else {
+            0.59
+        };
+
+        let f_b = sqrt(conditions.background_luminance / conditions.white_point.y);
+        let f_l = 0.171 * pow(conditions.adapting_luminance, 1.0/3.0) *
+            (1.0 - exp(-48.0 / conditions.adapting_luminance));
+
+        // Calculate achromatic response for white
+        let jzazbz = Self::xyz_to_jzazbz(conditions.white_point);
+        let i_z_w = jzazbz.x;
+
+        Self {
+            conditions,
+            f_b,
+            f_l,
+            i_z_w,
+        }
+    }
+
+    /// Convert XYZ to JzAzBz
+    fn xyz_to_jzazbz(xyz: Vec3) -> Vec3 {
+        let d = -0.56;
+        let d0 = 1.6295499532821566e-11;
+
+        let xp = Self::B * xyz.x - (Self::B - 1.0) * xyz.z;
+        let yp = Self::G * xyz.y - (Self::G - 1.0) * xyz.x;
+
+        // XYZ' to LMS
+        let l = 0.41478972 * xp + 0.579999 * yp + 0.0146480 * xyz.z;
+        let m = -0.20151000 * xp + 1.120649 * yp + 0.0531008 * xyz.z;
+        let s = -0.01660080 * xp + 0.264800 * yp + 0.6684799 * xyz.z;
+
+        // Perceptual Quantizer
+        let pq = |x: f32| -> f32 {
+            let c1 = 0.8359375;
+            let c2 = 18.8515625;
+            let c3 = 18.6875;
+            let n = 0.15930175781;
+            let p = 134.034375;
+
+            let xn = pow((x / 10000.0).max(0.0), n);
+            pow((c1 + c2 * xn) / (1.0 + c3 * xn), p)
+        };
+
+        let lp = pq(l);
+        let mp = pq(m);
+        let sp = pq(s);
+
+        // Izazbz
+        let iz = 0.5 * (lp + mp);
+        let az = 3.524000 * lp - 4.066708 * mp + 0.542708 * sp;
+        let bz = 0.199076 * lp + 1.096799 * mp - 1.295875 * sp;
+
+        let jz = ((1.0 + d) * iz) / (1.0 + d * iz) - d0;
+
+        Vec3::new(jz, az, bz)
+    }
+
+    /// Convert JzAzBz to XYZ
+    fn jzazbz_to_xyz(jzazbz: Vec3) -> Vec3 {
+        let d = -0.56;
+        let d0 = 1.6295499532821566e-11;
+
+        let jz = jzazbz.x + d0;
+        let iz = jz / (1.0 + d - d * jz);
+
+        let l_p = iz + 0.1386050 * jzazbz.y + 0.0580473 * jzazbz.z;
+        let m_p = iz - 0.1386050 * jzazbz.y - 0.0580473 * jzazbz.z;
+        let s_p = iz - 0.0960192 * jzazbz.y - 0.8118919 * jzazbz.z;
+
+        // Inverse PQ
+        let inv_pq = |x: f32| -> f32 {
+            let c1 = 0.8359375;
+            let c2 = 18.8515625;
+            let c3 = 18.6875;
+            let n = 0.15930175781;
+            let p = 134.034375;
+
+            let xp = pow(x.max(0.0), 1.0 / p);
+            10000.0 * pow(((c1 - xp) / (c3 * xp - c2)).max(0.0), 1.0 / n)
+        };
+
+        let l = inv_pq(l_p);
+        let m = inv_pq(m_p);
+        let s = inv_pq(s_p);
+
+        // LMS to XYZ'
+        let xp = 1.9242264 * l - 1.0047923 * m + 0.0376514 * s;
+        let yp = 0.3503167 * l + 0.7264811 * m - 0.0653844 * s;
+        let zp = -0.0909828 * l - 0.3127282 * m + 1.5227666 * s;
+
+        // XYZ' to XYZ
+        let x = (xp + (Self::B - 1.0) * zp) / Self::B;
+        let y = (yp + (Self::G - 1.0) * x) / Self::G;
+
+        Vec3::new(x, y, zp)
+    }
+
+    /// Convert XYZ to ZCAM
+    fn xyz_to_zcam(&self, xyz: Vec3) -> ZcamColor {
+        let jzazbz = Self::xyz_to_jzazbz(xyz);
+
+        let hz = atan2(jzazbz.z, jzazbz.y) * 180.0 / PI;
+        let hz = if hz < 0.0 { hz + 360.0 } else { hz };
+
+        let ez = 1.015 + cos((89.038 + hz) * PI / 180.0);
+
+        let Mz = 100.0 * pow(jzazbz.y * jzazbz.y + jzazbz.z * jzazbz.z, 0.37) *
+            pow(ez, 0.068) * pow(self.f_l, 0.2) / pow(self.f_b, 0.1) /
+            pow(Self::xyz_to_jzazbz(self.conditions.white_point).x, 0.78);
+
+        let Jz = 100.0 * jzazbz.x / self.i_z_w;
+
+        let Qz = Jz * pow(self.conditions.adapting_luminance, 0.22) *
+            pow(self.f_l, 0.6);
+
+        let Cz = Mz * pow(self.i_z_w, 0.78);
+
+        let Sz = 100.0 * pow(self.f_l, 0.6) * sqrt(Mz / Qz.max(0.001));
+
+        let Vz = sqrt((Jz - 58.0).powi(2) + 3.4 * Cz.powi(2));
+        let Kz = 100.0 - 0.8 * sqrt(Jz.powi(2) + 8.0 * Cz.powi(2));
+        let Wz = 100.0 - sqrt((100.0 - Jz).powi(2) + Cz.powi(2));
+
+        ZcamColor {
+            lightness: Jz,
+            brightness: Qz,
+            chroma: Cz,
+            colorfulness: Mz,
+            saturation: Sz,
+            hue_angle: hz,
+            vividness: Vz,
+            blackness: Kz,
+            whiteness: Wz,
+        }
+    }
+}
+
+// ============================================================================
+// COLOR HARMONY
+// ============================================================================
+
+/// Color harmony types
+enum HarmonyType {
+    Complementary,
+    Triadic,
+    Tetradic,
+    SplitComplementary,
+    Analogous,
+    Square,
+}
+
+/// Color harmony generator using CAM16
+struct ColorHarmony {
+    cam16: Cam16,
+}
+
+impl ColorHarmony {
+    fn new(conditions: ViewingConditions) -> Self {
+        Self {
+            cam16: Cam16::new(conditions),
+        }
+    }
+
+    /// Generate harmonious colors from base color
+    fn generate(&self, base_xyz: Vec3, harmony: HarmonyType) -> Vec<Vec3> {
+        let base_cam = self.cam16.xyz_to_cam16(base_xyz);
+        let h = base_cam.hue_angle;
+        let J = base_cam.lightness;
+        let C = base_cam.chroma;
+
+        let hue_offsets = match harmony {
+            HarmonyType::Complementary => vec![0.0, 180.0],
+            HarmonyType::Triadic => vec![0.0, 120.0, 240.0],
+            HarmonyType::Tetradic => vec![0.0, 90.0, 180.0, 270.0],
+            HarmonyType::SplitComplementary => vec![0.0, 150.0, 210.0],
+            HarmonyType::Analogous => vec![-30.0, 0.0, 30.0],
+            HarmonyType::Square => vec![0.0, 90.0, 180.0, 270.0],
+        };
+
+        hue_offsets.iter().map(|offset| {
+            let new_h = (h + offset).rem_euclid(360.0);
+            self.cam16.cam16_to_xyz(J, C, new_h)
+        }).collect()
+    }
+
+    /// Generate monochromatic palette
+    fn monochromatic(&self, base_xyz: Vec3, steps: usize) -> Vec<Vec3> {
+        let base_cam = self.cam16.xyz_to_cam16(base_xyz);
+        let h = base_cam.hue_angle;
+        let C = base_cam.chroma;
+
+        (0..steps).map(|i| {
+            let J = 20.0 + (80.0 * i as f32 / (steps - 1) as f32);
+            self.cam16.cam16_to_xyz(J, C, h)
+        }).collect()
+    }
+}
+
+// ============================================================================
+// COLOR PREFERENCE MODELING
+// ============================================================================
+
+/// Color preference predictor based on empirical data
+struct ColorPreference {
+    cam16: Cam16,
+}
+
+impl ColorPreference {
+    fn new(conditions: ViewingConditions) -> Self {
+        Self {
+            cam16: Cam16::new(conditions),
+        }
+    }
+
+    /// Predict preference score (0-1) based on Ou's model
+    fn predict_preference(&self, xyz: Vec3) -> f32 {
+        let cam = self.cam16.xyz_to_cam16(xyz);
+
+        // Preference tends to favor:
+        // - Moderate lightness (J ~ 50-70)
+        // - Moderate to high chroma
+        // - Blue and green hues
+
+        let lightness_factor = 1.0 - abs(cam.lightness - 60.0) / 60.0;
+        let chroma_factor = (cam.chroma / 50.0).min(1.0);
+
+        // Hue preference (peaks at blue ~240° and red ~0°)
+        let h_rad = cam.hue_angle * PI / 180.0;
+        let hue_factor = 0.5 + 0.3 * cos(h_rad - 240.0 * PI / 180.0) +
+            0.2 * cos(h_rad);
+
+        (lightness_factor * 0.3 + chroma_factor * 0.4 + hue_factor * 0.3).clamp(0.0, 1.0)
+    }
+
+    /// Predict color emotion/association
+    fn predict_emotion(&self, xyz: Vec3) -> ColorEmotion {
+        let cam = self.cam16.xyz_to_cam16(xyz);
+
+        // Map to emotion space based on lightness, chroma, and hue
+        let warm_cool = cos(cam.hue_angle * PI / 180.0);  // -1 = cool (blue), 1 = warm (red)
+        let active_passive = (cam.chroma / 50.0 - 0.5).clamp(-1.0, 1.0);
+        let light_heavy = (cam.lightness / 50.0 - 1.0).clamp(-1.0, 1.0);
+
+        ColorEmotion {
+            warm_cool,
+            active_passive,
+            light_heavy,
+        }
+    }
+}
+
+/// Color emotion dimensions
+struct ColorEmotion {
+    /// Warm-cool dimension (-1 = cool, 1 = warm)
+    warm_cool: f32,
+
+    /// Active-passive dimension (-1 = passive, 1 = active)
+    active_passive: f32,
+
+    /// Light-heavy dimension (-1 = heavy, 1 = light)
+    light_heavy: f32,
+}
+
+// ============================================================================
+// HUNT EFFECT COMPENSATION
+// ============================================================================
+
+/// Hunt effect: colorfulness increases with luminance
+struct HuntEffect {
+    reference_luminance: f32,
+}
+
+impl HuntEffect {
+    fn new(reference_luminance: f32) -> Self {
+        Self { reference_luminance }
+    }
+
+    /// Compensate for Hunt effect when adapting between luminance levels
+    fn compensate(&self, cam: &Cam16Color, target_luminance: f32) -> Cam16Color {
+        let ratio = (target_luminance / self.reference_luminance).sqrt();
+
+        Cam16Color::new(
+            cam.lightness,
+            cam.brightness * ratio,
+            cam.chroma / ratio,  // Reduce chroma when going to lower luminance
+            cam.colorfulness / ratio,
+            cam.saturation,
+            cam.hue_angle,
+            cam.hue_quadrature,
+            cam.a,
+            cam.b
+        )
+    }
+}
+
+// ============================================================================
+// STEVENS EFFECT COMPENSATION
+// ============================================================================
+
+/// Stevens effect: contrast increases with luminance
+struct StevensEffect {
+    reference_luminance: f32,
+}
+
+impl StevensEffect {
+    fn new(reference_luminance: f32) -> Self {
+        Self { reference_luminance }
+    }
+
+    /// Compensate for Stevens effect
+    fn compensate(&self, cam: &Cam16Color, target_luminance: f32) -> Cam16Color {
+        let beta = 0.4 * log(target_luminance / self.reference_luminance) + 1.0;
+
+        // Adjust lightness contrast
+        let adjusted_j = 50.0 + (cam.lightness - 50.0) * beta;
+
+        Cam16Color::new(
+            adjusted_j.clamp(0.0, 100.0),
+            cam.brightness,
+            cam.chroma,
+            cam.colorfulness,
+            cam.saturation,
+            cam.hue_angle,
+            cam.hue_quadrature,
+            cam.a,
+            cam.b
+        )
+    }
+}
+
+// ============================================================================
+// ABNEY EFFECT COMPENSATION
+// ============================================================================
+
+/// Abney effect: hue shift when adding white
+struct AbneyEffect {
+    cam16: Cam16,
+}
+
+impl AbneyEffect {
+    fn new(conditions: ViewingConditions) -> Self {
+        Self {
+            cam16: Cam16::new(conditions),
+        }
+    }
+
+    /// Predict hue shift when desaturating
+    fn predict_hue_shift(&self, original_hue: f32, target_chroma: f32, original_chroma: f32) -> f32 {
+        // Empirical model for Abney effect
+        let chroma_ratio = target_chroma / original_chroma.max(0.001);
+
+        // Hue shift depends on original hue (some hues shift more than others)
+        let sensitivity = match original_hue as i32 {
+            0..=60 => 0.1,    // Red-yellow
+            61..=120 => 0.05, // Yellow-green
+            121..=180 => 0.08,// Green-cyan
+            181..=240 => 0.12,// Cyan-blue
+            241..=300 => 0.15,// Blue-magenta
+            _ => 0.1,         // Magenta-red
+        };
+
+        (1.0 - chroma_ratio) * sensitivity * 30.0  // Max 30° shift
+    }
+
+    /// Compensate for Abney effect during desaturation
+    fn compensate_desaturation(&self, xyz: Vec3, target_chroma: f32) -> Vec3 {
+        let cam = self.cam16.xyz_to_cam16(xyz);
+        let hue_shift = self.predict_hue_shift(cam.hue_angle, target_chroma, cam.chroma);
+
+        let compensated_hue = (cam.hue_angle - hue_shift).rem_euclid(360.0);
+
+        self.cam16.cam16_to_xyz(cam.lightness, target_chroma, compensated_hue)
+    }
+}
+
+// ============================================================================
+// BEZOLD-BRÜCKE EFFECT
+// ============================================================================
+
+/// Bezold-Brücke effect: hue shift with luminance change
+struct BezoldBruckeEffect;
+
+impl BezoldBruckeEffect {
+    /// Predict hue shift based on luminance change
+    fn predict_hue_shift(hue: f32, luminance_ratio: f32) -> f32 {
+        // At higher luminance, most hues shift toward yellow or blue
+        // "Invariant hues" at approximately 478nm (blue), 503nm (green), 572nm (yellow)
+
+        let log_ratio = log(luminance_ratio);
+
+        // Approximate hue angle to wavelength mapping
+        let shift = match hue as i32 {
+            0..=30 => log_ratio * 3.0,      // Red shifts toward yellow
+            31..=60 => log_ratio * 1.5,     // Orange shifts toward yellow
+            61..=90 => log_ratio * 0.5,     // Yellow (near invariant)
+            91..=150 => log_ratio * -2.0,   // Green shifts toward yellow/blue
+            151..=210 => log_ratio * 0.3,   // Cyan (near invariant)
+            211..=270 => log_ratio * 0.2,   // Blue (near invariant)
+            271..=330 => log_ratio * 2.0,   // Magenta shifts toward blue
+            _ => log_ratio * 3.0,           // Red shifts toward yellow
+        };
+
+        shift.clamp(-15.0, 15.0)
+    }
+
+    /// Compensate for Bezold-Brücke effect
+    fn compensate(cam: &Cam16Color, luminance_ratio: f32) -> Cam16Color {
+        let hue_shift = Self::predict_hue_shift(cam.hue_angle, luminance_ratio);
+        let compensated_hue = (cam.hue_angle - hue_shift).rem_euclid(360.0);
+
+        Cam16Color::new(
+            cam.lightness,
+            cam.brightness,
+            cam.chroma,
+            cam.colorfulness,
+            cam.saturation,
+            compensated_hue,
+            cam.hue_quadrature,
+            cam.a,
+            cam.b
+        )
+    }
+}
+
+// ============================================================================
+// HELMHOLTZ-KOHLRAUSCH EFFECT
+// ============================================================================
+
+/// Helmholtz-Kohlrausch effect: chromatic colors appear brighter
+struct HelmholtzKohlrauschEffect;
+
+impl HelmholtzKohlrauschEffect {
+    /// VAC (Visual Adaptation Correction) coefficient based on hue
+    fn vac_coefficient(hue_angle: f32) -> f32 {
+        let h_rad = hue_angle * PI / 180.0;
+
+        // Empirical VAC function
+        0.24 * (0.5 * (1.0 + cos(h_rad - 1.179)) + 0.5 * (1.0 + cos(2.0 * (h_rad - 2.177))))
+    }
+
+    /// Calculate lightness correction for H-K effect
+    fn lightness_correction(cam: &Cam16Color) -> f32 {
+        let vac = Self::vac_coefficient(cam.hue_angle);
+        vac * cam.chroma * pow(cam.lightness / 100.0, 0.5)
+    }
+
+    /// Predict perceived lightness including H-K effect
+    fn perceived_lightness(cam: &Cam16Color) -> f32 {
+        cam.lightness + Self::lightness_correction(cam)
+    }
+
+    /// Compensate for H-K effect (reduce chroma lightening)
+    fn compensate(cam: &Cam16Color) -> Cam16Color {
+        let correction = Self::lightness_correction(cam);
+
+        Cam16Color::new(
+            (cam.lightness - correction * 0.5).clamp(0.0, 100.0),
+            cam.brightness,
+            cam.chroma,
+            cam.colorfulness,
+            cam.saturation,
+            cam.hue_angle,
+            cam.hue_quadrature,
+            cam.a,
+            cam.b
+        )
+    }
+}
+
+// ============================================================================
+// COLOR APPEARANCE TRANSFORMS
+// ============================================================================
+
+/// Cross-media color appearance transform
+struct CrossMediaAppearance {
+    source_cam: Cam16,
+    target_cam: Cam16,
+}
+
+impl CrossMediaAppearance {
+    fn new(source_conditions: ViewingConditions, target_conditions: ViewingConditions) -> Self {
+        Self {
+            source_cam: Cam16::new(source_conditions),
+            target_cam: Cam16::new(target_conditions),
+        }
+    }
+
+    /// Transform color from source to target viewing conditions
+    fn transform(&self, xyz: Vec3) -> Vec3 {
+        // Convert to appearance correlates in source conditions
+        let cam = self.source_cam.xyz_to_cam16(xyz);
+
+        // Reconstruct in target conditions (appearance matching)
+        self.target_cam.cam16_to_xyz(cam.lightness, cam.chroma, cam.hue_angle)
+    }
+
+    /// Transform with chromatic adaptation
+    fn transform_with_adaptation(&self, xyz: Vec3, adaptation_degree: f32) -> Vec3 {
+        let cam = self.source_cam.xyz_to_cam16(xyz);
+
+        // Partial adaptation
+        let target_xyz = self.target_cam.cam16_to_xyz(cam.lightness, cam.chroma, cam.hue_angle);
+
+        Vec3::new(
+            xyz.x * (1.0 - adaptation_degree) + target_xyz.x * adaptation_degree,
+            xyz.y * (1.0 - adaptation_degree) + target_xyz.y * adaptation_degree,
+            xyz.z * (1.0 - adaptation_degree) + target_xyz.z * adaptation_degree
+        )
+    }
+}
+
+/// Image appearance transform for display-to-print
+struct ImageAppearanceTransform {
+    display_cam: Cam16,
+    print_cam: Cam16,
+
+    /// Surround effect compensation
+    surround_compensation: f32,
+}
+
+impl ImageAppearanceTransform {
+    fn new() -> Self {
+        let display = ViewingConditions::standard();
+
+        // Print viewing: lower adapting luminance, slightly dim surround
+        let print = ViewingConditions {
+            adapting_luminance: 32.0,
+            background_luminance: 0.2,
+            white_point: Vec3::new(96.422, 100.0, 82.521),  // D50 for print
+            surround: Surround::Average,
+            discounting: 1.0,
+        };
+
+        Self {
+            display_cam: Cam16::new(display),
+            print_cam: Cam16::new(print),
+            surround_compensation: 1.0,
+        }
+    }
+
+    /// Transform display color for print reproduction
+    fn display_to_print(&self, xyz: Vec3) -> Vec3 {
+        let cam = self.display_cam.xyz_to_cam16(xyz);
+
+        // Adjust for viewing condition differences
+        let adjusted_j = cam.lightness * 1.05;  // Slight lightness boost for print
+        let adjusted_c = cam.chroma * 0.9;      // Reduce chroma for print gamut
+
+        self.print_cam.cam16_to_xyz(adjusted_j, adjusted_c, cam.hue_angle)
+    }
+}
+
+// ============================================================================
+// WGSL SHADERS
+// ============================================================================
+
+const CAM16_SHADER: &str = r#"
+// CAM16 Color Appearance Model - WGSL Implementation
+
+struct ViewingConditions {
+    adapting_luminance: f32,
+    background_luminance: f32,
+    white_point: vec3<f32>,
+    surround_c: f32,
+    surround_nc: f32,
+    surround_f: f32,
+    d: f32,
+    f_l: f32,
+    n: f32,
+    n_bb: f32,
+    z: f32,
+    a_w: f32,
+}
+
+struct Cam16Params {
+    conditions: ViewingConditions,
+    d_rgb: vec3<f32>,
+}
+
+@group(0) @binding(0) var<uniform> params: Cam16Params;
+@group(0) @binding(1) var<storage, read> input_xyz: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read_write> output_cam16: array<vec4<f32>>;
+
+// CAT16 matrix
+const M16 = mat3x3<f32>(
+    vec3<f32>(0.401288, 0.650173, -0.051461),
+    vec3<f32>(-0.250268, 1.204414, 0.045854),
+    vec3<f32>(-0.002079, 0.048952, 0.953127)
+);
+
+fn post_adaptation(rgb: vec3<f32>, f_l: f32) -> vec3<f32> {
+    let fl_rgb = pow(f_l * abs(rgb) / 100.0, vec3<f32>(0.42));
+    let signs = sign(rgb);
+    return signs * 400.0 * fl_rgb / (fl_rgb + 27.13) + 0.1;
+}
+
+fn xyz_to_cam16_jch(xyz: vec3<f32>) -> vec3<f32> {
+    // Chromatic adaptation
+    let rgb = M16 * xyz;
+    let rgb_c = params.d_rgb * rgb;
+
+    // Post-adaptation
+    let rgb_a = post_adaptation(rgb_c, params.conditions.f_l);
+
+    // Opponent colors
+    let a = rgb_a.x - 12.0 * rgb_a.y / 11.0 + rgb_a.z / 11.0;
+    let b = (rgb_a.x + rgb_a.y - 2.0 * rgb_a.z) / 9.0;
+
+    // Hue angle
+    var h = atan2(b, a) * 180.0 / 3.14159265;
+    if (h < 0.0) { h += 360.0; }
+
+    let h_rad = h * 3.14159265 / 180.0;
+    let e_t = 0.25 * (cos(h_rad + 2.0) + 3.8);
+
+    // Achromatic response
+    let A = (2.0 * rgb_a.x + rgb_a.y + rgb_a.z / 20.0 - 0.305) * params.conditions.n_bb;
+
+    // Lightness
+    let J = 100.0 * pow(A / params.conditions.a_w, params.conditions.surround_c * params.conditions.z);
+
+    // Chroma
+    let t = (50000.0 / 13.0 * params.conditions.surround_nc * params.conditions.n_bb * e_t *
+        sqrt(a * a + b * b)) / (rgb_a.x + rgb_a.y + 21.0 * rgb_a.z / 20.0);
+    let C = pow(t, 0.9) * sqrt(J / 100.0) * pow(1.64 - pow(0.29, params.conditions.n), 0.73);
+
+    return vec3<f32>(J, C, h);
+}
+
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let idx = global_id.x;
+    if (idx >= arrayLength(&input_xyz)) { return; }
+
+    let xyz = input_xyz[idx].xyz;
+    let jch = xyz_to_cam16_jch(xyz);
+
+    output_cam16[idx] = vec4<f32>(jch, 1.0);
+}
+"#;
+
+const CAM16_UCS_SHADER: &str = r#"
+// CAM16-UCS Uniform Color Space - WGSL Implementation
+
+const C1: f32 = 0.007;
+const C2: f32 = 0.0228;
+
+struct Cam16UcsParams {
+    mode: u32,  // 0 = SCD, 1 = LCD, 2 = UCS
+}
+
+@group(0) @binding(0) var<uniform> params: Cam16UcsParams;
+@group(0) @binding(1) var<storage, read> input_jmh: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read_write> output_ucs: array<vec4<f32>>;
+
+fn cam16_to_ucs(J: f32, M: f32, h: f32) -> vec3<f32> {
+    var c1 = C1;
+    var c2 = C2;
+
+    // Adjust coefficients based on mode
+    if (params.mode == 1u) {  // LCD
+        c2 = 0.0053;
+    }
+
+    let j_prime = (1.0 + 100.0 * c1) * J / (1.0 + c1 * J);
+    let m_prime = (1.0 / c2) * log(1.0 + c2 * M);
+
+    let h_rad = h * 3.14159265 / 180.0;
+    let a_prime = m_prime * cos(h_rad);
+    let b_prime = m_prime * sin(h_rad);
+
+    return vec3<f32>(j_prime, a_prime, b_prime);
+}
+
+fn delta_e_ucs(ucs1: vec3<f32>, ucs2: vec3<f32>) -> f32 {
+    let diff = ucs1 - ucs2;
+    return sqrt(dot(diff, diff));
+}
+
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let idx = global_id.x;
+    if (idx >= arrayLength(&input_jmh)) { return; }
+
+    let jmh = input_jmh[idx];
+    let ucs = cam16_to_ucs(jmh.x, jmh.y, jmh.z);
+
+    output_ucs[idx] = vec4<f32>(ucs, jmh.w);
+}
+"#;
+
+const ZCAM_SHADER: &str = r#"
+// ZCAM Color Appearance Model - WGSL Implementation
+
+const B: f32 = 1.15;
+const G: f32 = 0.66;
+
+struct ZcamParams {
+    adapting_luminance: f32,
+    background_luminance: f32,
+    f_l: f32,
+    f_b: f32,
+    i_z_w: f32,
+}
+
+@group(0) @binding(0) var<uniform> params: ZcamParams;
+@group(0) @binding(1) var<storage, read> input_xyz: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read_write> output_zcam: array<vec4<f32>>;
+
+fn pq_forward(x: f32) -> f32 {
+    let c1 = 0.8359375;
+    let c2 = 18.8515625;
+    let c3 = 18.6875;
+    let n = 0.15930175781;
+    let p = 134.034375;
+
+    let xn = pow(max(x / 10000.0, 0.0), n);
+    return pow((c1 + c2 * xn) / (1.0 + c3 * xn), p);
+}
+
+fn xyz_to_jzazbz(xyz: vec3<f32>) -> vec3<f32> {
+    let d = -0.56;
+    let d0 = 1.6295499532821566e-11;
+
+    let xp = B * xyz.x - (B - 1.0) * xyz.z;
+    let yp = G * xyz.y - (G - 1.0) * xyz.x;
+
+    // XYZ' to LMS
+    let l = 0.41478972 * xp + 0.579999 * yp + 0.0146480 * xyz.z;
+    let m = -0.20151000 * xp + 1.120649 * yp + 0.0531008 * xyz.z;
+    let s = -0.01660080 * xp + 0.264800 * yp + 0.6684799 * xyz.z;
+
+    let lp = pq_forward(l);
+    let mp = pq_forward(m);
+    let sp = pq_forward(s);
+
+    let iz = 0.5 * (lp + mp);
+    let az = 3.524000 * lp - 4.066708 * mp + 0.542708 * sp;
+    let bz = 0.199076 * lp + 1.096799 * mp - 1.295875 * sp;
+
+    let jz = ((1.0 + d) * iz) / (1.0 + d * iz) - d0;
+
+    return vec3<f32>(jz, az, bz);
+}
+
+fn jzazbz_to_zcam(jzazbz: vec3<f32>) -> vec4<f32> {
+    var hz = atan2(jzazbz.z, jzazbz.y) * 180.0 / 3.14159265;
+    if (hz < 0.0) { hz += 360.0; }
+
+    let ez = 1.015 + cos((89.038 + hz) * 3.14159265 / 180.0);
+
+    let Mz = 100.0 * pow(jzazbz.y * jzazbz.y + jzazbz.z * jzazbz.z, 0.37) *
+        pow(ez, 0.068) * pow(params.f_l, 0.2) / pow(params.f_b, 0.1) /
+        pow(params.i_z_w, 0.78);
+
+    let Jz = 100.0 * jzazbz.x / params.i_z_w;
+    let Qz = Jz * pow(params.adapting_luminance, 0.22) * pow(params.f_l, 0.6);
+    let Cz = Mz * pow(params.i_z_w, 0.78);
+
+    return vec4<f32>(Jz, Cz, hz, Mz);
+}
+
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let idx = global_id.x;
+    if (idx >= arrayLength(&input_xyz)) { return; }
+
+    let xyz = input_xyz[idx].xyz;
+    let jzazbz = xyz_to_jzazbz(xyz);
+    let zcam = jzazbz_to_zcam(jzazbz);
+
+    output_zcam[idx] = zcam;
+}
+"#;
+
+const COLOR_HARMONY_SHADER: &str = r#"
+// Color Harmony Generation - WGSL Implementation
+
+struct HarmonyParams {
+    harmony_type: u32,  // 0=complementary, 1=triadic, 2=tetradic, 3=split, 4=analogous
+    base_hue: f32,
+    base_j: f32,
+    base_c: f32,
+}
+
+@group(0) @binding(0) var<uniform> params: HarmonyParams;
+@group(0) @binding(1) var<storage, read_write> output_colors: array<vec4<f32>>;
+
+fn get_hue_offsets(harmony_type: u32) -> array<f32, 4> {
+    var offsets: array<f32, 4>;
+
+    switch (harmony_type) {
+        case 0u: {  // Complementary
+            offsets = array<f32, 4>(0.0, 180.0, 0.0, 0.0);
+        }
+        case 1u: {  // Triadic
+            offsets = array<f32, 4>(0.0, 120.0, 240.0, 0.0);
+        }
+        case 2u: {  // Tetradic
+            offsets = array<f32, 4>(0.0, 90.0, 180.0, 270.0);
+        }
+        case 3u: {  // Split complementary
+            offsets = array<f32, 4>(0.0, 150.0, 210.0, 0.0);
+        }
+        case 4u: {  // Analogous
+            offsets = array<f32, 4>(-30.0, 0.0, 30.0, 0.0);
+        }
+        default: {
+            offsets = array<f32, 4>(0.0, 0.0, 0.0, 0.0);
+        }
+    }
+
+    return offsets;
+}
+
+fn get_num_colors(harmony_type: u32) -> u32 {
+    switch (harmony_type) {
+        case 0u: { return 2u; }  // Complementary
+        case 1u: { return 3u; }  // Triadic
+        case 2u: { return 4u; }  // Tetradic
+        case 3u: { return 3u; }  // Split
+        case 4u: { return 3u; }  // Analogous
+        default: { return 1u; }
+    }
+}
+
+@compute @workgroup_size(1)
+fn main() {
+    let offsets = get_hue_offsets(params.harmony_type);
+    let num_colors = get_num_colors(params.harmony_type);
+
+    for (var i = 0u; i < num_colors; i++) {
+        var h = params.base_hue + offsets[i];
+        if (h < 0.0) { h += 360.0; }
+        if (h >= 360.0) { h -= 360.0; }
+
+        // Output JCh as placeholder (actual conversion to RGB needs CAM16 inverse)
+        output_colors[i] = vec4<f32>(params.base_j, params.base_c, h, 1.0);
+    }
+}
+"#;
+
+// ============================================================================
+// UNIT TESTS
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const EPSILON: f32 = 0.01;
+
+    fn approx_eq(a: f32, b: f32) -> bool {
+        (a - b).abs() < EPSILON
+    }
+
+    #[test]
+    fn test_viewing_conditions() {
+        let standard = ViewingConditions::standard();
+        assert_eq!(standard.adapting_luminance, 64.0);
+        assert_eq!(standard.background_luminance, 0.2);
+
+        let (c, nc, f) = standard.surround_params();
+        assert!(approx_eq(c, 0.69));
+        assert!(approx_eq(nc, 1.0));
+        assert!(approx_eq(f, 1.0));
+    }
+
+    #[test]
+    fn test_cam16_d65_white() {
+        let cam16 = Cam16::new(ViewingConditions::standard());
+        let d65 = Vec3::new(95.047, 100.0, 108.883);
+
+        let cam = cam16.xyz_to_cam16(d65);
+
+        // White should have J ≈ 100, C ≈ 0
+        assert!(approx_eq(cam.lightness, 100.0));
+        assert!(cam.chroma < 1.0);  // Nearly achromatic
+    }
+
+    #[test]
+    fn test_cam16_roundtrip() {
+        let cam16 = Cam16::new(ViewingConditions::standard());
+
+        // Test with a colored sample
+        let original = Vec3::new(41.24, 21.26, 1.93);  // sRGB red
+
+        let cam = cam16.xyz_to_cam16(original);
+        let roundtrip = cam16.cam16_to_xyz(cam.lightness, cam.chroma, cam.hue_angle);
+
+        assert!(approx_eq(original.x, roundtrip.x));
+        assert!(approx_eq(original.y, roundtrip.y));
+        assert!(approx_eq(original.z, roundtrip.z));
+    }
+
+    #[test]
+    fn test_cam16_red_hue() {
+        let cam16 = Cam16::new(ViewingConditions::standard());
+        let red = Vec3::new(41.24, 21.26, 1.93);  // sRGB red
+
+        let cam = cam16.xyz_to_cam16(red);
+
+        // Red should have hue around 27° (CAM16 unique red)
+        assert!(cam.hue_angle > 20.0 && cam.hue_angle < 35.0);
+        assert!(cam.chroma > 50.0);  // Highly chromatic
+    }
+
+    #[test]
+    fn test_cam16_ucs_delta_e() {
+        let cam16 = Cam16::new(ViewingConditions::standard());
+
+        let xyz1 = Vec3::new(41.24, 21.26, 1.93);  // Red
+        let xyz2 = Vec3::new(35.76, 71.52, 11.92); // Green
+
+        let cam1 = cam16.xyz_to_cam16(xyz1);
+        let cam2 = cam16.xyz_to_cam16(xyz2);
+
+        let ucs1 = Cam16Ucs::from_cam16(&cam1);
+        let ucs2 = Cam16Ucs::from_cam16(&cam2);
+
+        let delta_e = ucs1.delta_e(&ucs2);
+
+        // Red and green should have large color difference
+        assert!(delta_e > 50.0);
+    }
+
+    #[test]
+    fn test_cam16_identical_colors() {
+        let cam16 = Cam16::new(ViewingConditions::standard());
+
+        let xyz = Vec3::new(50.0, 50.0, 50.0);
+
+        let cam1 = cam16.xyz_to_cam16(xyz);
+        let cam2 = cam16.xyz_to_cam16(xyz);
+
+        let ucs1 = Cam16Ucs::from_cam16(&cam1);
+        let ucs2 = Cam16Ucs::from_cam16(&cam2);
+
+        let delta_e = ucs1.delta_e(&ucs2);
+
+        assert!(delta_e < 0.001);
+    }
+
+    #[test]
+    fn test_zcam_xyz_jzazbz_roundtrip() {
+        let xyz = Vec3::new(50.0, 50.0, 50.0);
+
+        let jzazbz = Zcam::xyz_to_jzazbz(xyz);
+        let roundtrip = Zcam::jzazbz_to_xyz(jzazbz);
+
+        assert!(approx_eq(xyz.x, roundtrip.x));
+        assert!(approx_eq(xyz.y, roundtrip.y));
+        assert!(approx_eq(xyz.z, roundtrip.z));
+    }
+
+    #[test]
+    fn test_color_harmony_complementary() {
+        let harmony = ColorHarmony::new(ViewingConditions::standard());
+        let base = Vec3::new(41.24, 21.26, 1.93);  // Red
+
+        let colors = harmony.generate(base, HarmonyType::Complementary);
+
+        assert_eq!(colors.len(), 2);
+    }
+
+    #[test]
+    fn test_color_harmony_triadic() {
+        let harmony = ColorHarmony::new(ViewingConditions::standard());
+        let base = Vec3::new(41.24, 21.26, 1.93);
+
+        let colors = harmony.generate(base, HarmonyType::Triadic);
+
+        assert_eq!(colors.len(), 3);
+    }
+
+    #[test]
+    fn test_hunt_effect() {
+        let hunt = HuntEffect::new(100.0);
+
+        let cam = Cam16Color::new(50.0, 100.0, 40.0, 30.0, 60.0, 30.0, 100.0, 0.5, 0.5);
+        let compensated = hunt.compensate(&cam, 400.0);  // 4x luminance
+
+        // Colorfulness should increase, chroma should decrease for lower luminance target
+        // Going to higher luminance, colorfulness stays same (ratio = 2)
+        assert!(compensated.chroma < cam.chroma);
+    }
+
+    #[test]
+    fn test_helmholtz_kohlrausch_correction() {
+        let cam = Cam16Color::new(50.0, 100.0, 60.0, 45.0, 70.0, 240.0, 300.0, 0.0, 0.0);
+
+        let perceived_l = HelmholtzKohlrauschEffect::perceived_lightness(&cam);
+
+        // Chromatic colors should appear brighter (higher perceived lightness)
+        assert!(perceived_l > cam.lightness);
+    }
+
+    #[test]
+    fn test_bezold_brucke_invariant_hue() {
+        // Blue hue (around 240°) should have minimal shift
+        let shift = BezoldBruckeEffect::predict_hue_shift(240.0, 2.0);
+
+        assert!(shift.abs() < 5.0);  // Small shift for invariant hue
+    }
+
+    #[test]
+    fn test_cross_media_appearance() {
+        let source = ViewingConditions::standard();
+        let target = ViewingConditions::cinema();
+
+        let transform = CrossMediaAppearance::new(source, target);
+
+        let xyz = Vec3::new(50.0, 50.0, 50.0);
+        let transformed = transform.transform(xyz);
+
+        // Transformed color should be different (different viewing conditions)
+        assert!(!approx_eq(xyz.x, transformed.x) ||
+                !approx_eq(xyz.y, transformed.y) ||
+                !approx_eq(xyz.z, transformed.z));
+    }
+
+    #[test]
+    fn test_color_preference() {
+        let pref = ColorPreference::new(ViewingConditions::standard());
+
+        // Blue color (typically preferred)
+        let blue = Vec3::new(18.05, 7.22, 95.05);
+        let blue_pref = pref.predict_preference(blue);
+
+        // Muddy brown (typically less preferred)
+        let brown = Vec3::new(10.0, 8.0, 3.0);
+        let brown_pref = pref.predict_preference(brown);
+
+        // Blue should generally have higher preference than muddy brown
+        // (This is a simplified model, so we just check reasonable range)
+        assert!(blue_pref > 0.0 && blue_pref <= 1.0);
+        assert!(brown_pref > 0.0 && brown_pref <= 1.0);
+    }
+
+    #[test]
+    fn test_color_emotion() {
+        let pref = ColorPreference::new(ViewingConditions::standard());
+
+        // Red should be warm
+        let red = Vec3::new(41.24, 21.26, 1.93);
+        let red_emotion = pref.predict_emotion(red);
+        assert!(red_emotion.warm_cool > 0.0);
+
+        // Blue should be cool
+        let blue = Vec3::new(18.05, 7.22, 95.05);
+        let blue_emotion = pref.predict_emotion(blue);
+        assert!(blue_emotion.warm_cool < 0.0);
+    }
+
+    #[test]
+    fn test_ciecam02_basic() {
+        let ciecam02 = Ciecam02::new(ViewingConditions::standard());
+
+        let xyz = Vec3::new(50.0, 50.0, 50.0);
+        let cam = ciecam02.xyz_to_ciecam02(xyz);
+
+        // Gray should have low chroma
+        assert!(cam.chroma < 5.0);
+    }
+}

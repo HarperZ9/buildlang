@@ -1,0 +1,61 @@
+Foundation Unit Tests
+=====================
+
+[Math]
+  math_basic: OK
+  math_constants: OK
+  math_powers: OK
+  math_trig: OK
+  math_hyperbolic: OK
+  math_rounding: OK
+  math_interpolation: OK
+  math_special: OK
+  math_predicates: OK
+  math_numeric_utils: OK
+  math_vec3: OK
+  math_mat4: OK
+
+[Collections]
+  collections_vec: OK
+  collections_vec_sort: OK
+  collections_vec_iter: OK
+  collections_hashmap: OK
+  collections_hashset: OK
+  collections_vecdeque: OK
+  collections_binaryheap: OK
+  collections_btreemap: OK
+
+[Text]
+  text_string_ext: OK
+  text_case: OK
+  text_similarity: OK
+
+[Random]
+  random_determinism: OK
+  random_bounds: OK
+  random_fill_bytes: OK
+
+[Error]
+  error_simple: OK
+  error_coded: OK
+  error_context: OK
+  error_backtrace: OK
+
+[Serialization]
+  json_value: OK
+  json_parse: OK
+
+[Encoding]
+  encoding_hex: OK
+  encoding_base64: OK
+  encoding_base32: OK
+
+[Cross-Feature]
+  enum_match: OK
+  struct_methods: OK
+  tuple_destructuring: OK
+  closures_iterators: OK
+  loops: OK
+
+=====================
+All foundation tests passed!

@@ -1,0 +1,11 @@
+module test_self
+
+pub struct Baz {
+    y: f32,
+}
+
+impl Baz {
+    pub fn new() -> Baz {
+        Baz { y: 1.0 }
+    }
+}

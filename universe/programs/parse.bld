@@ -1,0 +1,1050 @@
+// =============================================================================
+// qparse - BuildLang Parser written in BuildLang
+// =============================================================================
+// Fourth self-hosting tool. Reads .bld source, tokenizes it, then parses
+// the token stream into an AST and prints it as an indented tree.
+//
+// Usage:
+//   qparse file.bld              parse and print AST
+//   qparse --stats file.bld      print stats (fn count, struct count, etc.)
+//   cat code.bld | qparse        from stdin
+//   qparse --help                   usage
+//
+// Handles: fn, struct, enum, impl, mod, const, use, let, if/else, while,
+//          return, expressions (binary, unary, calls, field access, literals).
+// =============================================================================
+
+include!("stdlib/chars.bld");
+include!("stdlib/tokenizer.bld");
+
+
+// ===========================================================================
+// PARSER
+// ===========================================================================
+// Reads the token stream produced by the tokenizer above and prints an
+// indented AST. No explicit AST data-structure is built; we print as we go
+// (streaming parser-printer). This keeps the code small.
+// ===========================================================================
+
+struct Parser {
+    pool: String,
+    tk: Vec<i32>,
+    ts: Vec<i32>,
+    tl: Vec<i32>,
+    count: i32,
+    pos: i32,
+    indent: i32,
+    // stats
+    fn_count: i32,
+    struct_count: i32,
+    enum_count: i32,
+    impl_count: i32,
+    let_count: i32,
+    line_count: i32,
+}
+
+fn parser_new(t: &Tok) -> Parser {
+    Parser {
+        pool: t.pool,
+        tk: t.t_types, ts: t.t_starts, tl: t.t_lens,
+        count: t.count,
+        pos: 0,
+        indent: 0,
+        fn_count: 0,
+        struct_count: 0,
+        enum_count: 0,
+        impl_count: 0,
+        let_count: 0,
+        line_count: 0,
+    }
+}
+
+// --- Token access helpers ---
+fn pk(p: &Parser) -> i32 {
+    if p.pos >= p.count { return 0; }
+    vec_get(p.tk, p.pos)
+}
+
+fn pk_at(p: &Parser, off: i32) -> i32 {
+    let i = p.pos + off;
+    if i >= p.count { return 0; }
+    vec_get(p.tk, i)
+}
+
+fn ptxt(p: &Parser) -> String {
+    if p.pos >= p.count { return ""; }
+    let s = vec_get(p.ts, p.pos);
+    let l = vec_get(p.tl, p.pos);
+    if l == 0 { return ""; }
+    p.pool.substring(s, l)
+}
+
+fn ptxt_at(p: &Parser, off: i32) -> String {
+    let i = p.pos + off;
+    if i >= p.count { return ""; }
+    let s = vec_get(p.ts, i);
+    let l = vec_get(p.tl, i);
+    if l == 0 { return ""; }
+    p.pool.substring(s, l)
+}
+
+fn adv(p: &mut Parser) {
+    if p.pos < p.count { p.pos = p.pos + 1; }
+}
+
+fn expect_kind(p: &mut Parser, kind: i32) -> bool {
+    if pk(p) == kind { adv(p); return true; }
+    false
+}
+
+fn expect_text(p: &mut Parser, text: String) -> bool {
+    if ptxt(p) == text { adv(p); return true; }
+    false
+}
+
+fn at_end(p: &Parser) -> bool { p.pos >= p.count }
+
+// --- Output helpers ---
+fn make_indent(n: i32) -> String {
+    let mut out = "";
+    let mut i: i32 = 0;
+    while i < n {
+        out = out + "  ";
+        i = i + 1;
+    }
+    out
+}
+
+fn emit_line(p: &Parser, text: String) ~ Console {
+    let prefix = make_indent(p.indent);
+    println!("{}{}", prefix, text);
+}
+
+// ===========================================================================
+// Skip helpers - skip balanced braces / parens when we can't fully parse
+// ===========================================================================
+fn skip_balanced_braces(p: &mut Parser) {
+    if pk(p) != TK_LBRACE() { return; }
+    adv(p);
+    let mut depth: i32 = 1;
+    let mut go = true;
+    while go {
+        if at_end(p) { go = false; }
+        else if pk(p) == TK_LBRACE() { depth = depth + 1; adv(p); }
+        else if pk(p) == TK_RBRACE() {
+            depth = depth - 1;
+            adv(p);
+            if depth == 0 { go = false; }
+        }
+        else { adv(p); }
+    }
+}
+
+fn skip_to_semi(p: &mut Parser) {
+    let mut go = true;
+    while go {
+        if at_end(p) { go = false; }
+        else if pk(p) == TK_SEMI() { adv(p); go = false; }
+        else { adv(p); }
+    }
+}
+
+// ===========================================================================
+// Type parsing (simplified - just collects text for display)
+// ===========================================================================
+fn parse_type_str(p: &mut Parser) -> String {
+    let mut result = "";
+    // Handle &, &mut
+    if pk(p) == TK_BIT_AND() {
+        result = result + "&";
+        adv(p);
+        if ptxt(p) == "mut" { result = result + "mut "; adv(p); }
+    }
+    // Main type name
+    if pk(p) == TK_IDENT() || pk(p) == TK_KEYWORD() {
+        result = result + ptxt(p);
+        adv(p);
+    }
+    // Handle :: paths
+    let mut go = true;
+    while go {
+        if pk(p) == TK_COLONCOLON() {
+            result = result + "::";
+            adv(p);
+            if pk(p) == TK_IDENT() || pk(p) == TK_KEYWORD() {
+                result = result + ptxt(p);
+                adv(p);
+            }
+        } else { go = false; }
+    }
+    // Handle <T> generics (simplified)
+    if pk(p) == TK_LT() {
+        result = result + "<";
+        adv(p);
+        let mut depth: i32 = 1;
+        let mut go2 = true;
+        while go2 {
+            if at_end(p) { go2 = false; }
+            else if pk(p) == TK_LT() {
+                result = result + ptxt(p);
+                adv(p);
+                depth = depth + 1;
+            } else if pk(p) == TK_GT() {
+                depth = depth - 1;
+                if depth == 0 {
+                    result = result + ">";
+                    adv(p);
+                    go2 = false;
+                } else {
+                    result = result + ptxt(p);
+                    adv(p);
+                }
+            } else {
+                result = result + ptxt(p);
+                adv(p);
+            }
+        }
+    }
+    result
+}
+
+// ===========================================================================
+// Expression parsing (simplified - output descriptive text)
+// ===========================================================================
+
+// Forward-declare-style: we use parse_expr which calls parse_primary etc.
+// BuildLang allows forward calls within the same file.
+
+fn parse_expr_str(p: &mut Parser) -> String {
+    let left = parse_comparison_str(p);
+    // Logical: && ||
+    let mut result = left;
+    let mut go = true;
+    while go {
+        if pk(p) == TK_AND() {
+            adv(p);
+            let right = parse_comparison_str(p);
+            result = result + " && " + right;
+        } else if pk(p) == TK_OR() {
+            adv(p);
+            let right = parse_comparison_str(p);
+            result = result + " || " + right;
+        } else { go = false; }
+    }
+    result
+}
+
+fn parse_comparison_str(p: &mut Parser) -> String {
+    let left = parse_add_str(p);
+    let mut result = left;
+    let k = pk(p);
+    if k == TK_EQ() { adv(p); let r = parse_add_str(p); result = result + " == " + r; }
+    else if k == TK_NEQ() { adv(p); let r = parse_add_str(p); result = result + " != " + r; }
+    else if k == TK_LT() { adv(p); let r = parse_add_str(p); result = result + " < " + r; }
+    else if k == TK_GT() { adv(p); let r = parse_add_str(p); result = result + " > " + r; }
+    else if k == TK_LE() { adv(p); let r = parse_add_str(p); result = result + " <= " + r; }
+    else if k == TK_GE() { adv(p); let r = parse_add_str(p); result = result + " >= " + r; }
+    result
+}
+
+fn parse_add_str(p: &mut Parser) -> String {
+    let left = parse_mul_str(p);
+    let mut result = left;
+    let mut go = true;
+    while go {
+        let k = pk(p);
+        if k == TK_PLUS() { adv(p); let r = parse_mul_str(p); result = result + " + " + r; }
+        else if k == TK_MINUS() { adv(p); let r = parse_mul_str(p); result = result + " - " + r; }
+        else { go = false; }
+    }
+    result
+}
+
+fn parse_mul_str(p: &mut Parser) -> String {
+    let left = parse_unary_str(p);
+    let mut result = left;
+    let mut go = true;
+    while go {
+        let k = pk(p);
+        if k == TK_STAR() { adv(p); let r = parse_unary_str(p); result = result + " * " + r; }
+        else if k == TK_SLASH() { adv(p); let r = parse_unary_str(p); result = result + " / " + r; }
+        else if k == TK_PERCENT() { adv(p); let r = parse_unary_str(p); result = result + " % " + r; }
+        else { go = false; }
+    }
+    result
+}
+
+fn parse_unary_str(p: &mut Parser) -> String {
+    if pk(p) == TK_MINUS() { adv(p); let v = parse_unary_str(p); return "-" + v; }
+    if pk(p) == TK_NOT() { adv(p); let v = parse_unary_str(p); return "!" + v; }
+    // Handle &, &mut
+    if pk(p) == TK_BIT_AND() {
+        adv(p);
+        if ptxt(p) == "mut" { adv(p); let v = parse_unary_str(p); return "&mut " + v; }
+        let v = parse_unary_str(p);
+        return "&" + v;
+    }
+    parse_postfix_str(p)
+}
+
+fn parse_postfix_str(p: &mut Parser) -> String {
+    let mut result = parse_primary_str(p);
+    let mut go = true;
+    while go {
+        if pk(p) == TK_DOT() {
+            adv(p);
+            if pk(p) == TK_IDENT() || pk(p) == TK_KEYWORD() {
+                let field = ptxt(p);
+                adv(p);
+                if pk(p) == TK_LPAREN() {
+                    // Method call: obj.method(args)
+                    adv(p);
+                    let args = parse_arg_list_str(p);
+                    expect_kind(p, TK_RPAREN());
+                    result = result + "." + field + "(" + args + ")";
+                } else {
+                    // Field access
+                    result = result + "." + field;
+                }
+            } else { go = false; }
+        } else if pk(p) == TK_LPAREN() {
+            // Function call: f(args)
+            adv(p);
+            let args = parse_arg_list_str(p);
+            expect_kind(p, TK_RPAREN());
+            result = result + "(" + args + ")";
+        } else if pk(p) == TK_LBRACK() {
+            // Index: a[i]
+            adv(p);
+            let idx = parse_expr_str(p);
+            expect_kind(p, TK_RBRACK());
+            result = result + "[" + idx + "]";
+        } else if pk(p) == TK_NOT() {
+            // Macro-style call: println!(...) or vec![...]
+            adv(p);
+            if pk(p) == TK_LPAREN() {
+                adv(p);
+                let args = parse_arg_list_str(p);
+                expect_kind(p, TK_RPAREN());
+                result = result + "!(" + args + ")";
+            } else if pk(p) == TK_LBRACK() {
+                adv(p);
+                let args = parse_arg_list_str(p);
+                expect_kind(p, TK_RBRACK());
+                result = result + "![" + args + "]";
+            }
+        } else { go = false; }
+    }
+    result
+}
+
+fn parse_arg_list_str(p: &mut Parser) -> String {
+    let mut result = "";
+    let mut first = true;
+    let mut go = true;
+    while go {
+        if at_end(p) || pk(p) == TK_RPAREN() || pk(p) == TK_RBRACK() { go = false; }
+        else {
+            if !first { result = result + ", "; }
+            first = false;
+            let arg = parse_expr_str(p);
+            result = result + arg;
+            if pk(p) == TK_COMMA() { adv(p); }
+            else { go = false; }
+        }
+    }
+    result
+}
+
+fn parse_primary_str(p: &mut Parser) -> String {
+    let k = pk(p);
+    // Parenthesized expression
+    if k == TK_LPAREN() {
+        adv(p);
+        let inner = parse_expr_str(p);
+        expect_kind(p, TK_RPAREN());
+        return "(" + inner + ")";
+    }
+    // Literals
+    if k == TK_INT_LIT() || k == TK_FLOAT_LIT() {
+        let v = ptxt(p); adv(p); return v;
+    }
+    if k == TK_STR_LIT() {
+        let v = ptxt(p); adv(p); return v;
+    }
+    if k == TK_CHAR_LIT() {
+        let v = ptxt(p); adv(p); return v;
+    }
+    // Boolean / keyword literals
+    if k == TK_KEYWORD() {
+        let txt = ptxt(p);
+        if txt == "true" || txt == "false" { adv(p); return txt; }
+        // if-expression inline
+        if txt == "if" { return parse_if_expr_str(p); }
+        // vec![]
+        if txt == "self" || txt == "Self" { adv(p); return txt; }
+    }
+    // Identifier (possibly with :: path or struct literal)
+    if k == TK_IDENT() || k == TK_KEYWORD() {
+        let name = ptxt(p);
+        adv(p);
+        // Path: Foo::Bar
+        let mut path = name;
+        let mut go = true;
+        while go {
+            if pk(p) == TK_COLONCOLON() {
+                adv(p);
+                if pk(p) == TK_IDENT() || pk(p) == TK_KEYWORD() {
+                    path = path + "::" + ptxt(p);
+                    adv(p);
+                }
+            } else { go = false; }
+        }
+        // Struct literal: Name { field: val, ... }
+        if pk(p) == TK_LBRACE() {
+            // Could be struct literal — peek to see if next is ident: or }
+            let n1 = pk_at(p, 1);
+            let n2 = pk_at(p, 2);
+            if n1 == TK_RBRACE() || (n1 == TK_IDENT() && n2 == TK_COLON()) ||
+               (n1 == TK_KEYWORD() && n2 == TK_COLON()) {
+                adv(p); // skip {
+                let mut fields = "";
+                let mut ffirst = true;
+                let mut go2 = true;
+                while go2 {
+                    if at_end(p) || pk(p) == TK_RBRACE() { go2 = false; }
+                    else {
+                        if !ffirst { fields = fields + ", "; }
+                        ffirst = false;
+                        let fname = ptxt(p); adv(p);
+                        expect_kind(p, TK_COLON());
+                        let fval = parse_expr_str(p);
+                        fields = fields + fname + ": " + fval;
+                        if pk(p) == TK_COMMA() { adv(p); }
+                        else { go2 = false; }
+                    }
+                }
+                expect_kind(p, TK_RBRACE());
+                return path + " { " + fields + " }";
+            }
+        }
+        return path;
+    }
+    // vec![] macro
+    if k == TK_IDENT() {
+        let txt = ptxt(p);
+        if txt == "vec" {
+            adv(p);
+            if pk(p) == TK_NOT() {
+                adv(p);
+                if pk(p) == TK_LBRACK() {
+                    adv(p);
+                    let args = parse_arg_list_str(p);
+                    expect_kind(p, TK_RBRACK());
+                    return "vec![" + args + "]";
+                }
+            }
+            return txt;
+        }
+    }
+    // Fallback: consume and return
+    if !at_end(p) {
+        let v = ptxt(p); adv(p); return v;
+    }
+    ""
+}
+
+fn parse_if_expr_str(p: &mut Parser) -> String {
+    // "if" already peeked but not consumed
+    adv(p); // consume "if"
+    let cond = parse_expr_str(p);
+    // skip block
+    let mut result = "if " + cond + " { ... }";
+    if pk(p) == TK_LBRACE() { skip_balanced_braces(p); }
+    if ptxt(p) == "else" {
+        adv(p);
+        if pk(p) == TK_LBRACE() { skip_balanced_braces(p); }
+        result = result + " else { ... }";
+    }
+    result
+}
+
+// ===========================================================================
+// Statement parsing (prints AST lines)
+// ===========================================================================
+
+fn parse_block(p: &mut Parser, stats_only: bool) ~ Console {
+    if !expect_kind(p, TK_LBRACE()) { return; }
+    let mut go = true;
+    while go {
+        if at_end(p) || pk(p) == TK_RBRACE() { go = false; }
+        else { parse_statement(p, stats_only); }
+    }
+    expect_kind(p, TK_RBRACE());
+}
+
+fn parse_statement(p: &mut Parser, stats_only: bool) ~ Console {
+    let k = pk(p);
+    let txt = ptxt(p);
+
+    // Let binding
+    if k == TK_KEYWORD() && txt == "let" {
+        p.let_count = p.let_count + 1;
+        adv(p); // skip "let"
+        let mut mutable = false;
+        if ptxt(p) == "mut" { mutable = true; adv(p); }
+        let name = ptxt(p);
+        adv(p); // skip name
+        // Optional type annotation
+        let mut ty = "";
+        if pk(p) == TK_COLON() { adv(p); ty = parse_type_str(p); }
+        // = initializer
+        let mut init = "";
+        if pk(p) == TK_ASSIGN() {
+            adv(p);
+            init = parse_expr_str(p);
+        }
+        if pk(p) == TK_SEMI() { adv(p); }
+        if !stats_only {
+            let mut line = "let ";
+            if mutable { line = line + "mut "; }
+            line = line + name;
+            if ty != "" { line = line + ": " + ty; }
+            if init != "" { line = line + " = " + init; }
+            emit_line(p, line);
+        }
+        return;
+    }
+
+    // If statement
+    if k == TK_KEYWORD() && txt == "if" {
+        adv(p); // skip "if"
+        let cond = parse_expr_str(p);
+        if !stats_only { emit_line(p, "if " + cond); }
+        p.indent = p.indent + 1;
+        parse_block(p, stats_only);
+        p.indent = p.indent - 1;
+        // else / else if
+        let mut go = true;
+        while go {
+            if ptxt(p) == "else" {
+                adv(p);
+                if ptxt(p) == "if" {
+                    adv(p);
+                    let cond2 = parse_expr_str(p);
+                    if !stats_only { emit_line(p, "else if " + cond2); }
+                    p.indent = p.indent + 1;
+                    parse_block(p, stats_only);
+                    p.indent = p.indent - 1;
+                } else {
+                    if !stats_only { emit_line(p, "else"); }
+                    p.indent = p.indent + 1;
+                    parse_block(p, stats_only);
+                    p.indent = p.indent - 1;
+                    go = false;
+                }
+            } else { go = false; }
+        }
+        return;
+    }
+
+    // While loop
+    if k == TK_KEYWORD() && txt == "while" {
+        adv(p);
+        let cond = parse_expr_str(p);
+        if !stats_only { emit_line(p, "while " + cond); }
+        p.indent = p.indent + 1;
+        parse_block(p, stats_only);
+        p.indent = p.indent - 1;
+        return;
+    }
+
+    // For loop
+    if k == TK_KEYWORD() && txt == "for" {
+        adv(p);
+        let var_name = ptxt(p); adv(p);
+        expect_text(p, "in");
+        let iter_expr = parse_expr_str(p);
+        if !stats_only { emit_line(p, "for " + var_name + " in " + iter_expr); }
+        p.indent = p.indent + 1;
+        parse_block(p, stats_only);
+        p.indent = p.indent - 1;
+        return;
+    }
+
+    // Loop
+    if k == TK_KEYWORD() && txt == "loop" {
+        adv(p);
+        if !stats_only { emit_line(p, "loop"); }
+        p.indent = p.indent + 1;
+        parse_block(p, stats_only);
+        p.indent = p.indent - 1;
+        return;
+    }
+
+    // Return
+    if k == TK_KEYWORD() && txt == "return" {
+        adv(p);
+        if pk(p) == TK_SEMI() {
+            adv(p);
+            if !stats_only { emit_line(p, "return"); }
+        } else {
+            let val = parse_expr_str(p);
+            if pk(p) == TK_SEMI() { adv(p); }
+            if !stats_only { emit_line(p, "return " + val); }
+        }
+        return;
+    }
+
+    // Break / Continue
+    if k == TK_KEYWORD() && (txt == "break" || txt == "continue") {
+        adv(p);
+        if pk(p) == TK_SEMI() { adv(p); }
+        if !stats_only { emit_line(p, txt); }
+        return;
+    }
+
+    // Expression statement (assignments, calls, etc.)
+    let expr = parse_expr_str(p);
+    // Check for assignment operators
+    let ak = pk(p);
+    if ak == TK_ASSIGN() {
+        adv(p);
+        let rhs = parse_expr_str(p);
+        if pk(p) == TK_SEMI() { adv(p); }
+        if !stats_only { emit_line(p, expr + " = " + rhs); }
+        return;
+    }
+    // Compound assignment: += -= *= /=
+    if ak == 30 { adv(p); let rhs = parse_expr_str(p); if pk(p) == TK_SEMI() { adv(p); } if !stats_only { emit_line(p, expr + " += " + rhs); } return; }
+    if ak == 31 { adv(p); let rhs = parse_expr_str(p); if pk(p) == TK_SEMI() { adv(p); } if !stats_only { emit_line(p, expr + " -= " + rhs); } return; }
+    if ak == 32 { adv(p); let rhs = parse_expr_str(p); if pk(p) == TK_SEMI() { adv(p); } if !stats_only { emit_line(p, expr + " *= " + rhs); } return; }
+    if ak == 33 { adv(p); let rhs = parse_expr_str(p); if pk(p) == TK_SEMI() { adv(p); } if !stats_only { emit_line(p, expr + " /= " + rhs); } return; }
+
+    if pk(p) == TK_SEMI() { adv(p); }
+    if expr != "" {
+        if !stats_only { emit_line(p, expr); }
+    }
+}
+
+// ===========================================================================
+// Top-level item parsing
+// ===========================================================================
+
+fn parse_params(p: &mut Parser) -> String {
+    let mut result = "";
+    let mut first = true;
+    let mut go = true;
+    while go {
+        if at_end(p) || pk(p) == TK_RPAREN() { go = false; }
+        else {
+            if !first { result = result + ", "; }
+            first = false;
+            // Handle &self, &mut self, self, mut
+            if pk(p) == TK_BIT_AND() {
+                adv(p);
+                if ptxt(p) == "mut" {
+                    adv(p);
+                    if ptxt(p) == "self" { adv(p); result = result + "&mut self"; }
+                    else {
+                        let pname = ptxt(p); adv(p);
+                        expect_kind(p, TK_COLON());
+                        let pty = parse_type_str(p);
+                        result = result + "&mut " + pname + ": " + pty;
+                    }
+                } else if ptxt(p) == "self" {
+                    adv(p);
+                    result = result + "&self";
+                } else {
+                    let pname = ptxt(p); adv(p);
+                    expect_kind(p, TK_COLON());
+                    let pty = parse_type_str(p);
+                    result = result + "&" + pname + ": " + pty;
+                }
+            } else if ptxt(p) == "mut" {
+                adv(p);
+                let pname = ptxt(p); adv(p);
+                expect_kind(p, TK_COLON());
+                let pty = parse_type_str(p);
+                result = result + "mut " + pname + ": " + pty;
+            } else if ptxt(p) == "self" {
+                adv(p);
+                result = result + "self";
+            } else {
+                let pname = ptxt(p); adv(p);
+                expect_kind(p, TK_COLON());
+                let pty = parse_type_str(p);
+                result = result + pname + ": " + pty;
+            }
+            if pk(p) == TK_COMMA() { adv(p); }
+            else { go = false; }
+        }
+    }
+    result
+}
+
+fn parse_function(p: &mut Parser, stats_only: bool) ~ Console {
+    p.fn_count = p.fn_count + 1;
+    // "fn" already consumed. Parse name, params, return type, body.
+    let name = ptxt(p);
+    adv(p); // skip name
+    // Params
+    expect_kind(p, TK_LPAREN());
+    let params = parse_params(p);
+    expect_kind(p, TK_RPAREN());
+    // Return type
+    let mut ret = "";
+    if pk(p) == TK_ARROW() {
+        adv(p);
+        ret = parse_type_str(p);
+    }
+    // Print header
+    if !stats_only {
+        let mut header = "fn " + name + "(" + params + ")";
+        if ret != "" { header = header + " -> " + ret; }
+        emit_line(p, header);
+    }
+    // Body
+    if pk(p) == TK_LBRACE() {
+        p.indent = p.indent + 1;
+        parse_block(p, stats_only);
+        p.indent = p.indent - 1;
+    }
+}
+
+fn parse_struct(p: &mut Parser, stats_only: bool) ~ Console {
+    p.struct_count = p.struct_count + 1;
+    // "struct" already consumed
+    let name = ptxt(p);
+    adv(p); // skip name
+    if !stats_only { emit_line(p, "struct " + name); }
+    // Fields: { name: Type, ... }
+    if pk(p) == TK_LBRACE() {
+        adv(p);
+        p.indent = p.indent + 1;
+        let mut go = true;
+        while go {
+            if at_end(p) || pk(p) == TK_RBRACE() { go = false; }
+            else {
+                let fname = ptxt(p); adv(p);
+                expect_kind(p, TK_COLON());
+                let fty = parse_type_str(p);
+                if !stats_only { emit_line(p, fname + ": " + fty); }
+                if pk(p) == TK_COMMA() { adv(p); }
+            }
+        }
+        expect_kind(p, TK_RBRACE());
+        p.indent = p.indent - 1;
+    }
+}
+
+fn parse_enum(p: &mut Parser, stats_only: bool) ~ Console {
+    p.enum_count = p.enum_count + 1;
+    let name = ptxt(p);
+    adv(p);
+    if !stats_only { emit_line(p, "enum " + name); }
+    if pk(p) == TK_LBRACE() {
+        adv(p);
+        p.indent = p.indent + 1;
+        let mut go = true;
+        while go {
+            if at_end(p) || pk(p) == TK_RBRACE() { go = false; }
+            else {
+                let vname = ptxt(p); adv(p);
+                if pk(p) == TK_LPAREN() {
+                    adv(p);
+                    let vty = parse_type_str(p);
+                    expect_kind(p, TK_RPAREN());
+                    if !stats_only { emit_line(p, vname + "(" + vty + ")"); }
+                } else if pk(p) == TK_LBRACE() {
+                    // Struct variant
+                    if !stats_only { emit_line(p, vname + " { ... }"); }
+                    skip_balanced_braces(p);
+                } else {
+                    if !stats_only { emit_line(p, vname); }
+                }
+                if pk(p) == TK_COMMA() { adv(p); }
+            }
+        }
+        expect_kind(p, TK_RBRACE());
+        p.indent = p.indent - 1;
+    }
+}
+
+fn parse_impl(p: &mut Parser, stats_only: bool) ~ Console {
+    p.impl_count = p.impl_count + 1;
+    let type_name = parse_type_str(p);
+    if !stats_only { emit_line(p, "impl " + type_name); }
+    if pk(p) == TK_LBRACE() {
+        adv(p);
+        p.indent = p.indent + 1;
+        let mut go = true;
+        while go {
+            if at_end(p) || pk(p) == TK_RBRACE() { go = false; }
+            else {
+                let itxt = ptxt(p);
+                // Skip pub keyword
+                if itxt == "pub" { adv(p); }
+                let itxt2 = ptxt(p);
+                if itxt2 == "fn" {
+                    adv(p); // consume "fn"
+                    parse_function(p, stats_only);
+                } else {
+                    // Skip unknown item
+                    adv(p);
+                }
+            }
+        }
+        expect_kind(p, TK_RBRACE());
+        p.indent = p.indent - 1;
+    }
+}
+
+fn parse_use(p: &mut Parser, stats_only: bool) ~ Console {
+    // "use" already consumed. Collect path to semicolon.
+    let mut path = "";
+    let mut go = true;
+    while go {
+        if at_end(p) || pk(p) == TK_SEMI() { go = false; }
+        else { path = path + ptxt(p); adv(p); }
+    }
+    if pk(p) == TK_SEMI() { adv(p); }
+    if !stats_only { emit_line(p, "use " + path); }
+}
+
+fn parse_const(p: &mut Parser, stats_only: bool) ~ Console {
+    // "const" already consumed
+    let name = ptxt(p); adv(p);
+    let mut ty = "";
+    if pk(p) == TK_COLON() { adv(p); ty = parse_type_str(p); }
+    let mut val = "";
+    if pk(p) == TK_ASSIGN() {
+        adv(p);
+        val = parse_expr_str(p);
+    }
+    if pk(p) == TK_SEMI() { adv(p); }
+    if !stats_only {
+        let mut line = "const " + name;
+        if ty != "" { line = line + ": " + ty; }
+        if val != "" { line = line + " = " + val; }
+        emit_line(p, line);
+    }
+}
+
+fn parse_mod(p: &mut Parser, stats_only: bool) ~ Console {
+    // "mod" already consumed
+    let name = ptxt(p); adv(p);
+    if !stats_only { emit_line(p, "mod " + name); }
+    if pk(p) == TK_LBRACE() {
+        p.indent = p.indent + 1;
+        adv(p);
+        let mut go = true;
+        while go {
+            if at_end(p) || pk(p) == TK_RBRACE() { go = false; }
+            else { parse_item(p, stats_only); }
+        }
+        expect_kind(p, TK_RBRACE());
+        p.indent = p.indent - 1;
+    } else if pk(p) == TK_SEMI() { adv(p); }
+}
+
+fn parse_item(p: &mut Parser, stats_only: bool) ~ Console {
+    let k = pk(p);
+    let txt = ptxt(p);
+
+    // Skip "pub" modifier
+    if k == TK_KEYWORD() && txt == "pub" {
+        adv(p);
+        // Refresh after consuming pub
+        let k2 = pk(p);
+        let txt2 = ptxt(p);
+        if k2 == TK_KEYWORD() && txt2 == "fn" { adv(p); parse_function(p, stats_only); return; }
+        if k2 == TK_KEYWORD() && txt2 == "struct" { adv(p); parse_struct(p, stats_only); return; }
+        if k2 == TK_KEYWORD() && txt2 == "enum" { adv(p); parse_enum(p, stats_only); return; }
+        if k2 == TK_KEYWORD() && txt2 == "mod" { adv(p); parse_mod(p, stats_only); return; }
+        if k2 == TK_KEYWORD() && txt2 == "const" { adv(p); parse_const(p, stats_only); return; }
+        if k2 == TK_KEYWORD() && txt2 == "use" { adv(p); parse_use(p, stats_only); return; }
+        if k2 == TK_KEYWORD() && txt2 == "trait" {
+            adv(p);
+            let tname = ptxt(p); adv(p);
+            if !stats_only { emit_line(p, "trait " + tname); }
+            if pk(p) == TK_LBRACE() { skip_balanced_braces(p); }
+            return;
+        }
+        if k2 == TK_KEYWORD() && txt2 == "type" {
+            adv(p);
+            // type alias
+            let mut line = "";
+            let mut go = true;
+            while go {
+                if at_end(p) || pk(p) == TK_SEMI() { go = false; }
+                else { line = line + ptxt(p) + " "; adv(p); }
+            }
+            if pk(p) == TK_SEMI() { adv(p); }
+            if !stats_only { emit_line(p, "type " + line); }
+            return;
+        }
+        // Unknown pub item - skip to next item
+        if pk(p) == TK_LBRACE() { skip_balanced_braces(p); }
+        else { skip_to_semi(p); }
+        return;
+    }
+
+    if k == TK_KEYWORD() && txt == "fn" { adv(p); parse_function(p, stats_only); return; }
+    if k == TK_KEYWORD() && txt == "struct" { adv(p); parse_struct(p, stats_only); return; }
+    if k == TK_KEYWORD() && txt == "enum" { adv(p); parse_enum(p, stats_only); return; }
+    if k == TK_KEYWORD() && txt == "impl" { adv(p); parse_impl(p, stats_only); return; }
+    if k == TK_KEYWORD() && txt == "mod" { adv(p); parse_mod(p, stats_only); return; }
+    if k == TK_KEYWORD() && txt == "const" { adv(p); parse_const(p, stats_only); return; }
+    if k == TK_KEYWORD() && txt == "use" { adv(p); parse_use(p, stats_only); return; }
+    if k == TK_KEYWORD() && txt == "trait" {
+        adv(p);
+        let tname = ptxt(p); adv(p);
+        if !stats_only { emit_line(p, "trait " + tname); }
+        if pk(p) == TK_LBRACE() { skip_balanced_braces(p); }
+        return;
+    }
+    if k == TK_KEYWORD() && txt == "type" {
+        adv(p);
+        let mut line = "";
+        let mut go = true;
+        while go {
+            if at_end(p) || pk(p) == TK_SEMI() { go = false; }
+            else { line = line + ptxt(p) + " "; adv(p); }
+        }
+        if pk(p) == TK_SEMI() { adv(p); }
+        if !stats_only { emit_line(p, "type " + line); }
+        return;
+    }
+
+    // Attribute: #[...]
+    if k == 51 {
+        adv(p);
+        if pk(p) == TK_LBRACK() {
+            adv(p);
+            let mut go = true;
+            while go {
+                if at_end(p) || pk(p) == TK_RBRACK() { go = false; }
+                else { adv(p); }
+            }
+            expect_kind(p, TK_RBRACK());
+        }
+        return;
+    }
+
+    // Unknown: skip one token to avoid infinite loop
+    if !at_end(p) { adv(p); }
+}
+
+fn parse_module(p: &mut Parser, stats_only: bool) ~ Console {
+    let mut go = true;
+    while go {
+        if at_end(p) { go = false; }
+        else { parse_item(p, stats_only); }
+    }
+}
+
+// ===========================================================================
+// Stats mode
+// ===========================================================================
+fn print_stats(p: &Parser, source: String, filename: String) ~ Console {
+    // Count lines
+    let slen = source.len();
+    let mut lines: i32 = 1;
+    let mut i: i32 = 0;
+    while i < slen {
+        let c = source.char_at(i);
+        if c == "\n" { lines = lines + 1; }
+        i = i + 1;
+    }
+    println!("File: {}", filename);
+    println!("  Lines:    {}", lines);
+    println!("  Tokens:   {}", p.count);
+    println!("  Functions: {}", p.fn_count);
+    println!("  Structs:  {}", p.struct_count);
+    println!("  Enums:    {}", p.enum_count);
+    println!("  Impls:    {}", p.impl_count);
+    println!("  Lets:     {}", p.let_count);
+}
+
+// ===========================================================================
+// Help
+// ===========================================================================
+fn print_help() ~ Console {
+    println!("qparse - BuildLang parser (self-hosting compiler step 2)");
+    println!("");
+    println!("Usage:");
+    println!("  qparse FILE              parse and print AST");
+    println!("  qparse --stats FILE      print file statistics");
+    println!("  cat file | qparse        parse from stdin");
+    println!("  qparse --help            display this help and exit");
+    println!("");
+    println!("Parses .bld source into an indented AST tree.");
+    println!("Handles: fn, struct, enum, impl, mod, const, use,");
+    println!("         let, if/else, while, for, return, expressions.");
+}
+
+// ===========================================================================
+// Main
+// ===========================================================================
+fn main() ~ Console + Environment + FileSystem + Process {
+    let nargs = args_count();
+
+    let mut mode: i32 = 0;  // 0=ast, 1=stats
+    let mut filename = "";
+    let mut has_file = false;
+
+    let mut i: i32 = 1;
+    while i < nargs {
+        let arg = args_get(i);
+        if arg == "--help" || arg == "-h" {
+            print_help();
+            process_exit(0);
+        } else if arg == "--stats" || arg == "-s" {
+            mode = 1;
+        } else if arg.starts_with("-") {
+            println!("qparse: unknown option '{}'", arg);
+            process_exit(2);
+        } else {
+            filename = arg;
+            has_file = true;
+        }
+        i = i + 1;
+    }
+
+    // Read input
+    let input = if has_file {
+        let exists = file_exists(filename);
+        if !exists {
+            println!("qparse: {}: No such file or directory", filename);
+            process_exit(2);
+        }
+        read_file(filename)
+    } else {
+        let piped = stdin_is_pipe();
+        if !piped {
+            print_help();
+            process_exit(0);
+        }
+        read_all()
+    };
+
+    if input.len() == 0 { process_exit(0); }
+
+    // Tokenize
+    let mut t = tok_new(input);
+    tokenize(&mut t);
+
+    // Parse
+    let mut p = parser_new(&t);
+
+    if mode == 1 {
+        // Stats mode: parse silently to count items
+        parse_module(&mut p, true);
+        let display_name = if has_file { filename } else { "<stdin>" };
+        print_stats(&p, input, display_name);
+    } else {
+        // AST mode
+        parse_module(&mut p, false);
+    }
+}

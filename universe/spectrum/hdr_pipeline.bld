@@ -1,0 +1,2251 @@
+// BUILD Spectrum - HDR Pipeline
+// High Dynamic Range color processing, transfer functions, and metadata handling
+// Implements PQ (ST.2084), HLG, HDR10, HDR10+, and Dolby Vision support
+
+use core::simd;
+use core::mem;
+use std::collections::HashMap;
+
+// ============================================================================
+// HDR CONSTANTS
+// ============================================================================
+
+/// Reference peak luminance for PQ (10,000 cd/m²)
+const PQ_PEAK_LUMINANCE: f32 = 10000.0;
+
+/// Reference black level for PQ
+const PQ_BLACK_LEVEL: f32 = 0.0001;
+
+/// PQ EOTF constants (SMPTE ST.2084)
+const PQ_M1: f32 = 0.1593017578125;     // 2610/16384
+const PQ_M2: f32 = 78.84375;            // 2523/32 * 128
+const PQ_C1: f32 = 0.8359375;           // 3424/4096
+const PQ_C2: f32 = 18.8515625;          // 2413/128
+const PQ_C3: f32 = 18.6875;             // 2392/128
+
+/// HLG constants (BT.2100)
+const HLG_A: f32 = 0.17883277;
+const HLG_B: f32 = 0.28466892;  // 1 - 4 * HLG_A
+const HLG_C: f32 = 0.55991073;  // 0.5 - HLG_A * ln(4 * HLG_A)
+
+/// System gamma for HLG (typically 1.2)
+const HLG_SYSTEM_GAMMA: f32 = 1.2;
+
+/// Reference white for SDR (100 cd/m²)
+const SDR_WHITE_LEVEL: f32 = 100.0;
+
+/// Standard HDR white level (203 cd/m²)
+const HDR_REFERENCE_WHITE: f32 = 203.0;
+
+/// Maximum luminance for Rec.2020 (1000 cd/m²)
+const REC2020_MAX_LUMINANCE: f32 = 1000.0;
+
+// ============================================================================
+// HDR TRANSFER FUNCTION TYPES
+// ============================================================================
+
+/// HDR transfer function enumeration
+enum HdrTransferFunction {
+    /// Linear (no encoding)
+    Linear,
+    /// Perceptual Quantizer (SMPTE ST.2084)
+    PQ,
+    /// Hybrid Log-Gamma (ARIB STD-B67)
+    HLG,
+    /// Philips/HDR10+ Parametric curve
+    ParametricST2094,
+    /// sRGB (for SDR compatibility)
+    Srgb,
+    /// BT.1886 (for SDR compatibility)
+    Bt1886,
+    /// Gamma 2.2
+    Gamma22,
+    /// Gamma 2.4
+    Gamma24,
+    /// Custom gamma with configurable value
+    CustomGamma(f32),
+}
+
+/// HDR color primaries
+enum HdrColorPrimaries {
+    /// BT.709 (SDR)
+    Bt709,
+    /// BT.2020 (Wide Color Gamut)
+    Bt2020,
+    /// DCI-P3 (Digital Cinema)
+    DciP3,
+    /// Display P3 (Apple)
+    DisplayP3,
+    /// Adobe RGB
+    AdobeRgb,
+    /// ACES AP0
+    AcesAp0,
+    /// ACES AP1
+    AcesAp1,
+}
+
+/// HDR content type classification
+enum HdrContentType {
+    /// Unknown content
+    Unknown,
+    /// Standard Dynamic Range
+    Sdr,
+    /// HDR10 (static metadata)
+    Hdr10,
+    /// HDR10+ (dynamic metadata)
+    Hdr10Plus,
+    /// Dolby Vision
+    DolbyVision,
+    /// HLG broadcast
+    Hlg,
+    /// Advanced HDR by Technicolor
+    AdvancedHdr,
+    /// SL-HDR1
+    SlHdr1,
+}
+
+// ============================================================================
+// HDR METADATA STRUCTURES
+// ============================================================================
+
+/// Static HDR metadata (SMPTE ST.2086)
+struct StaticHdrMetadata {
+    /// Display primaries - red (x, y in 0.00002 units)
+    display_primaries_red: (u16, u16),
+    /// Display primaries - green
+    display_primaries_green: (u16, u16),
+    /// Display primaries - blue
+    display_primaries_blue: (u16, u16),
+    /// White point (x, y in 0.00002 units)
+    white_point: (u16, u16),
+    /// Maximum display mastering luminance (cd/m²)
+    max_display_mastering_luminance: u32,
+    /// Minimum display mastering luminance (0.0001 cd/m² units)
+    min_display_mastering_luminance: u32,
+    /// Maximum Content Light Level (cd/m²)
+    max_cll: u16,
+    /// Maximum Frame-Average Light Level (cd/m²)
+    max_fall: u16,
+}
+
+impl StaticHdrMetadata {
+    /// Create default HDR10 metadata for BT.2020 mastering display
+    fn default_hdr10() -> Self {
+        Self {
+            // BT.2020 primaries
+            display_primaries_red: (35400, 14600),   // (0.708, 0.292)
+            display_primaries_green: (8500, 39850),  // (0.170, 0.797)
+            display_primaries_blue: (6550, 2300),    // (0.131, 0.046)
+            white_point: (15635, 16450),              // D65 (0.3127, 0.3290)
+            max_display_mastering_luminance: 1000,
+            min_display_mastering_luminance: 50,      // 0.005 cd/m²
+            max_cll: 1000,
+            max_fall: 400,
+        }
+    }
+
+    /// Create metadata for DCI-P3 mastering display
+    fn dci_p3_mastering() -> Self {
+        Self {
+            // DCI-P3 primaries
+            display_primaries_red: (34000, 16000),   // (0.680, 0.320)
+            display_primaries_green: (13250, 34500), // (0.265, 0.690)
+            display_primaries_blue: (7500, 3000),    // (0.150, 0.060)
+            white_point: (15635, 16450),              // D65
+            max_display_mastering_luminance: 4000,
+            min_display_mastering_luminance: 5,       // 0.0005 cd/m²
+            max_cll: 4000,
+            max_fall: 1000,
+        }
+    }
+
+    /// Get display primaries as floating point coordinates
+    fn get_primaries_f32(&self) -> ((f32, f32), (f32, f32), (f32, f32)) {
+        let scale = 0.00002;
+        (
+            (self.display_primaries_red.0 as f32 * scale,
+             self.display_primaries_red.1 as f32 * scale),
+            (self.display_primaries_green.0 as f32 * scale,
+             self.display_primaries_green.1 as f32 * scale),
+            (self.display_primaries_blue.0 as f32 * scale,
+             self.display_primaries_blue.1 as f32 * scale),
+        )
+    }
+
+    /// Get white point as floating point coordinates
+    fn get_white_point_f32(&self) -> (f32, f32) {
+        let scale = 0.00002;
+        (self.white_point.0 as f32 * scale,
+         self.white_point.1 as f32 * scale)
+    }
+
+    /// Get mastering display luminance range
+    fn get_luminance_range(&self) -> (f32, f32) {
+        (self.min_display_mastering_luminance as f32 * 0.0001,
+         self.max_display_mastering_luminance as f32)
+    }
+}
+
+/// Dynamic HDR metadata for a single frame/scene
+struct DynamicHdrMetadata {
+    /// Target system display maximum luminance (cd/m²)
+    targeted_system_display_max_luminance: u32,
+    /// Base flag (indicates base layer)
+    base_flag: bool,
+    /// Application version
+    application_version: u8,
+    /// Number of distribution windows
+    num_windows: u8,
+    /// Tone mapping parameters per window
+    tone_mapping_params: Vec<ToneMappingParams>,
+    /// Color saturation adjustments
+    color_saturation_params: Option<ColorSaturationParams>,
+}
+
+/// Tone mapping parameters (ST.2094-40 / HDR10+)
+struct ToneMappingParams {
+    /// Window upper left corner (x, y)
+    window_upper_left: (u16, u16),
+    /// Window lower right corner (x, y)
+    window_lower_right: (u16, u16),
+    /// Center of ellipse (x, y)
+    center_of_ellipse: (u16, u16),
+    /// Rotation angle (0.0039 degree units)
+    rotation_angle: u8,
+    /// Semi-major axis internal/external ellipse
+    semimajor_axis: (u16, u16),
+    /// Semi-minor axis internal/external ellipse
+    semiminor_axis: (u16, u16),
+    /// Overlap process option
+    overlap_process_option: bool,
+    /// Maximum source content light level (cd/m²)
+    maxscl: [u32; 3],
+    /// Average maxRGB value (cd/m²)
+    average_maxrgb: u32,
+    /// Distribution values (percentile, luminance pairs)
+    distribution_values: Vec<(u8, u32)>,
+    /// Fraction bright pixels (0.001 units)
+    fraction_bright_pixels: u16,
+    /// Knee point x (0.001 units)
+    knee_point_x: u16,
+    /// Knee point y (0.001 units)
+    knee_point_y: u16,
+    /// Bezier curve anchors
+    bezier_curve_anchors: Vec<u16>,
+}
+
+/// Color saturation parameters for HDR10+
+struct ColorSaturationParams {
+    /// Saturation gain at minimum luminance
+    color_saturation_weight: f32,
+}
+
+/// Dolby Vision RPU (Reference Processing Unit) metadata
+struct DolbyVisionRpu {
+    /// RPU type
+    rpu_type: u8,
+    /// RPU format
+    rpu_format: u16,
+    /// VDR RPU profile
+    vdr_rpu_profile: u8,
+    /// VDR RPU level
+    vdr_rpu_level: u8,
+    /// VDR sequence info present flag
+    vdr_seq_info_present: bool,
+    /// Chroma resampling explicit filter flag
+    chroma_resampling_explicit_filter: bool,
+    /// Coefficient data type
+    coefficient_data_type: u8,
+    /// Coefficient log2 denominator
+    coefficient_log2_denom: u8,
+    /// VDR RPU ID
+    vdr_rpu_id: u8,
+    /// Mapping curves
+    mapping_curves: Vec<DolbyMappingCurve>,
+    /// NLQ (non-linear quantization) parameters
+    nlq_params: Option<DolbyNlqParams>,
+}
+
+/// Dolby Vision mapping curve
+struct DolbyMappingCurve {
+    /// Mapping type (polynomial, MMR, etc.)
+    mapping_type: u8,
+    /// Polynomial order
+    poly_order: u8,
+    /// Polynomial coefficients
+    poly_coefficients: Vec<f32>,
+    /// MMR order (if MMR type)
+    mmr_order: u8,
+    /// MMR coefficients
+    mmr_coefficients: Vec<f32>,
+}
+
+/// Dolby Vision NLQ parameters
+struct DolbyNlqParams {
+    /// NLQ offset
+    nlq_offset: f32,
+    /// Linear deadzone slope
+    linear_deadzone_slope: f32,
+    /// Linear deadzone threshold
+    linear_deadzone_threshold: f32,
+}
+
+// ============================================================================
+// PQ (PERCEPTUAL QUANTIZER) TRANSFER FUNCTIONS
+// ============================================================================
+
+/// PQ EOTF: Convert PQ-encoded value to linear luminance
+/// Input: PQ signal [0, 1]
+/// Output: Luminance [0, 10000] cd/m²
+fn pq_eotf(pq: f32) -> f32 {
+    if pq <= 0.0 {
+        return 0.0;
+    }
+
+    let pq_pow_m2_inv = pq.powf(1.0 / PQ_M2);
+    let numerator = (pq_pow_m2_inv - PQ_C1).max(0.0);
+    let denominator = PQ_C2 - PQ_C3 * pq_pow_m2_inv;
+
+    if denominator <= 0.0 {
+        return 0.0;
+    }
+
+    let linear = (numerator / denominator).powf(1.0 / PQ_M1);
+    linear * PQ_PEAK_LUMINANCE
+}
+
+/// PQ inverse EOTF (OETF): Convert linear luminance to PQ-encoded value
+/// Input: Luminance [0, 10000] cd/m²
+/// Output: PQ signal [0, 1]
+fn pq_oetf(luminance: f32) -> f32 {
+    if luminance <= 0.0 {
+        return 0.0;
+    }
+
+    let normalized = (luminance / PQ_PEAK_LUMINANCE).clamp(0.0, 1.0);
+    let y_m1 = normalized.powf(PQ_M1);
+
+    let numerator = PQ_C1 + PQ_C2 * y_m1;
+    let denominator = 1.0 + PQ_C3 * y_m1;
+
+    (numerator / denominator).powf(PQ_M2)
+}
+
+/// PQ EOTF for RGB triplet
+fn pq_eotf_rgb(rgb: (f32, f32, f32)) -> (f32, f32, f32) {
+    (pq_eotf(rgb.0), pq_eotf(rgb.1), pq_eotf(rgb.2))
+}
+
+/// PQ OETF for RGB triplet
+fn pq_oetf_rgb(rgb: (f32, f32, f32)) -> (f32, f32, f32) {
+    (pq_oetf(rgb.0), pq_oetf(rgb.1), pq_oetf(rgb.2))
+}
+
+/// SIMD-optimized PQ EOTF for 4 values
+fn pq_eotf_simd4(pq: [f32; 4]) -> [f32; 4] {
+    let mut result = [0.0f32; 4];
+
+    for i in 0..4 {
+        result[i] = pq_eotf(pq[i]);
+    }
+
+    result
+}
+
+/// SIMD-optimized PQ OETF for 4 values
+fn pq_oetf_simd4(luminance: [f32; 4]) -> [f32; 4] {
+    let mut result = [0.0f32; 4];
+
+    for i in 0..4 {
+        result[i] = pq_oetf(luminance[i]);
+    }
+
+    result
+}
+
+// ============================================================================
+// HLG (HYBRID LOG-GAMMA) TRANSFER FUNCTIONS
+// ============================================================================
+
+/// HLG OETF: Convert linear to HLG-encoded
+/// Input: Linear scene light [0, 1]
+/// Output: HLG signal [0, 1]
+fn hlg_oetf(linear: f32) -> f32 {
+    if linear <= 0.0 {
+        return 0.0;
+    }
+
+    if linear <= 1.0 / 12.0 {
+        (3.0 * linear).sqrt()
+    } else {
+        HLG_A * (12.0 * linear - HLG_B).ln() + HLG_C
+    }
+}
+
+/// HLG inverse OETF (EOTF): Convert HLG-encoded to linear
+/// Input: HLG signal [0, 1]
+/// Output: Linear scene light [0, 1]
+fn hlg_eotf(hlg: f32) -> f32 {
+    if hlg <= 0.0 {
+        return 0.0;
+    }
+
+    if hlg <= 0.5 {
+        (hlg * hlg) / 3.0
+    } else {
+        ((hlg - HLG_C) / HLG_A).exp() / 12.0 + HLG_B / 12.0
+    }
+}
+
+/// HLG OOTF (Opto-Optical Transfer Function)
+/// Converts scene light to display light with system gamma
+fn hlg_ootf(scene_light: f32, peak_luminance: f32, gamma: f32) -> f32 {
+    let y_s = 0.2627 * scene_light + 0.6780 * scene_light + 0.0593 * scene_light;
+    let y_s_gamma = y_s.powf(gamma - 1.0);
+    scene_light * y_s_gamma * peak_luminance
+}
+
+/// HLG OOTF for RGB with proper luminance weighting
+fn hlg_ootf_rgb(rgb: (f32, f32, f32), peak_luminance: f32, gamma: f32) -> (f32, f32, f32) {
+    let y_s = 0.2627 * rgb.0 + 0.6780 * rgb.1 + 0.0593 * rgb.2;
+    let y_s_gamma = y_s.powf(gamma - 1.0);
+    let scale = y_s_gamma * peak_luminance;
+
+    (rgb.0 * scale, rgb.1 * scale, rgb.2 * scale)
+}
+
+/// HLG inverse OOTF
+fn hlg_inverse_ootf(display_light: f32, peak_luminance: f32, gamma: f32) -> f32 {
+    let y_d = 0.2627 * display_light + 0.6780 * display_light + 0.0593 * display_light;
+    let y_d_inv_gamma = (y_d / peak_luminance).powf((1.0 - gamma) / gamma);
+    (display_light / peak_luminance) * y_d_inv_gamma
+}
+
+/// HLG complete display-referred EOTF (includes OOTF)
+fn hlg_display_eotf(hlg: f32, peak_luminance: f32, gamma: f32) -> f32 {
+    let scene_light = hlg_eotf(hlg);
+    hlg_ootf(scene_light, peak_luminance, gamma)
+}
+
+/// HLG OETF for RGB
+fn hlg_oetf_rgb(rgb: (f32, f32, f32)) -> (f32, f32, f32) {
+    (hlg_oetf(rgb.0), hlg_oetf(rgb.1), hlg_oetf(rgb.2))
+}
+
+/// HLG EOTF for RGB
+fn hlg_eotf_rgb(rgb: (f32, f32, f32)) -> (f32, f32, f32) {
+    (hlg_eotf(rgb.0), hlg_eotf(rgb.1), hlg_eotf(rgb.2))
+}
+
+// ============================================================================
+// HDR10 / HDR10+ PROCESSING
+// ============================================================================
+
+/// HDR10 static metadata processor
+struct Hdr10Processor {
+    /// Static metadata
+    metadata: StaticHdrMetadata,
+    /// Target display peak luminance
+    target_peak_luminance: f32,
+    /// Target display min luminance
+    target_min_luminance: f32,
+}
+
+impl Hdr10Processor {
+    /// Create processor with metadata
+    fn new(metadata: StaticHdrMetadata, target_peak: f32, target_min: f32) -> Self {
+        Self {
+            metadata,
+            target_peak_luminance: target_peak,
+            target_min_luminance: target_min,
+        }
+    }
+
+    /// Apply tone mapping based on static metadata
+    fn apply_tonemap(&self, luminance: f32) -> f32 {
+        let (min_master, max_master) = self.metadata.get_luminance_range();
+
+        // Normalize to mastering range
+        let normalized = (luminance - min_master) / (max_master - min_master);
+
+        // Apply simple Reinhard-style tonemap with knee
+        let knee_start = 0.5;
+        let mapped = if normalized <= knee_start {
+            normalized
+        } else {
+            let excess = normalized - knee_start;
+            let compressed = excess / (1.0 + excess);
+            knee_start + compressed * (1.0 - knee_start)
+        };
+
+        // Scale to target display
+        mapped * (self.target_peak_luminance - self.target_min_luminance)
+            + self.target_min_luminance
+    }
+
+    /// Process HDR10 frame
+    fn process_frame(&self, pixels: &mut [(f32, f32, f32)]) {
+        for pixel in pixels.iter_mut() {
+            // Convert from PQ to linear luminance
+            let linear = pq_eotf_rgb(*pixel);
+
+            // Calculate luminance for tone mapping
+            let y = 0.2627 * linear.0 + 0.6780 * linear.1 + 0.0593 * linear.2;
+
+            // Apply tone mapping
+            let mapped_y = self.apply_tonemap(y);
+            let scale = if y > 0.0 { mapped_y / y } else { 1.0 };
+
+            // Scale RGB maintaining color ratios
+            let mapped = (linear.0 * scale, linear.1 * scale, linear.2 * scale);
+
+            // Convert back to PQ
+            *pixel = pq_oetf_rgb(mapped);
+        }
+    }
+}
+
+/// HDR10+ dynamic metadata processor
+struct Hdr10PlusProcessor {
+    /// Static metadata (base layer)
+    static_metadata: StaticHdrMetadata,
+    /// Dynamic metadata for current scene
+    dynamic_metadata: Option<DynamicHdrMetadata>,
+    /// Target display capabilities
+    target_peak_luminance: f32,
+}
+
+impl Hdr10PlusProcessor {
+    /// Create HDR10+ processor
+    fn new(static_meta: StaticHdrMetadata, target_peak: f32) -> Self {
+        Self {
+            static_metadata: static_meta,
+            dynamic_metadata: None,
+            target_peak_luminance: target_peak,
+        }
+    }
+
+    /// Update dynamic metadata for new scene
+    fn update_dynamic_metadata(&mut self, metadata: DynamicHdrMetadata) {
+        self.dynamic_metadata = Some(metadata);
+    }
+
+    /// Evaluate Bezier curve for tone mapping
+    fn evaluate_bezier(&self, params: &ToneMappingParams, t: f32) -> f32 {
+        if params.bezier_curve_anchors.is_empty() {
+            return t;
+        }
+
+        // De Casteljau's algorithm for Bezier evaluation
+        let knee_x = params.knee_point_x as f32 / 1000.0;
+        let knee_y = params.knee_point_y as f32 / 1000.0;
+
+        if t <= knee_x {
+            // Linear segment
+            return t * (knee_y / knee_x);
+        }
+
+        // Bezier segment
+        let normalized_t = (t - knee_x) / (1.0 - knee_x);
+        let mut points: Vec<f32> = vec![knee_y];
+
+        for anchor in &params.bezier_curve_anchors {
+            points.push(*anchor as f32 / 1000.0);
+        }
+        points.push(1.0);
+
+        // Evaluate Bezier
+        let n = points.len() - 1;
+        let mut result = 0.0;
+
+        for (i, point) in points.iter().enumerate() {
+            let binomial = Self::binomial_coefficient(n, i);
+            let term = binomial as f32
+                * (1.0 - normalized_t).powi((n - i) as i32)
+                * normalized_t.powi(i as i32);
+            result += term * point;
+        }
+
+        result
+    }
+
+    /// Calculate binomial coefficient
+    fn binomial_coefficient(n: usize, k: usize) -> usize {
+        if k > n {
+            return 0;
+        }
+        let mut result = 1;
+        for i in 0..k {
+            result = result * (n - i) / (i + 1);
+        }
+        result
+    }
+
+    /// Apply HDR10+ tone mapping
+    fn apply_tonemap(&self, luminance: f32) -> f32 {
+        let dynamic = match &self.dynamic_metadata {
+            Some(d) => d,
+            None => return luminance.min(self.target_peak_luminance),
+        };
+
+        if dynamic.tone_mapping_params.is_empty() {
+            return luminance.min(self.target_peak_luminance);
+        }
+
+        let params = &dynamic.tone_mapping_params[0];
+
+        // Get maxSCL (max source content light)
+        let max_scl = params.maxscl.iter().max().copied().unwrap_or(1000) as f32;
+
+        // Normalize luminance
+        let normalized = (luminance / max_scl).clamp(0.0, 1.0);
+
+        // Apply Bezier curve
+        let mapped = self.evaluate_bezier(params, normalized);
+
+        // Scale to target display
+        mapped * self.target_peak_luminance
+    }
+
+    /// Process frame with HDR10+ metadata
+    fn process_frame(&self, pixels: &mut [(f32, f32, f32)]) {
+        for pixel in pixels.iter_mut() {
+            let linear = pq_eotf_rgb(*pixel);
+            let y = 0.2627 * linear.0 + 0.6780 * linear.1 + 0.0593 * linear.2;
+            let mapped_y = self.apply_tonemap(y);
+            let scale = if y > 0.0 { mapped_y / y } else { 1.0 };
+            let mapped = (linear.0 * scale, linear.1 * scale, linear.2 * scale);
+            *pixel = pq_oetf_rgb(mapped);
+        }
+    }
+}
+
+// ============================================================================
+// DOLBY VISION PROCESSING
+// ============================================================================
+
+/// Dolby Vision profile types
+enum DolbyVisionProfile {
+    /// Profile 4: HDR10 compatible, MEL (Minimum Enhancement Layer)
+    Profile4,
+    /// Profile 5: IPTPQc2 base, HDR10 backward compatible
+    Profile5,
+    /// Profile 7: Dual-layer enhancement
+    Profile7,
+    /// Profile 8: HDR10 base, single-layer RPU
+    Profile8,
+}
+
+/// Dolby Vision processor
+struct DolbyVisionProcessor {
+    /// Current RPU metadata
+    rpu: Option<DolbyVisionRpu>,
+    /// Profile in use
+    profile: DolbyVisionProfile,
+    /// Target display peak luminance
+    target_peak_luminance: f32,
+    /// Cross-talk matrix (3x3)
+    crosstalk_matrix: [[f32; 3]; 3],
+}
+
+impl DolbyVisionProcessor {
+    /// Create Dolby Vision processor
+    fn new(profile: DolbyVisionProfile, target_peak: f32) -> Self {
+        Self {
+            rpu: None,
+            profile,
+            target_peak_luminance: target_peak,
+            crosstalk_matrix: [
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+            ],
+        }
+    }
+
+    /// Update RPU for current frame
+    fn update_rpu(&mut self, rpu: DolbyVisionRpu) {
+        self.rpu = Some(rpu);
+    }
+
+    /// Apply polynomial mapping
+    fn apply_polynomial(&self, curve: &DolbyMappingCurve, value: f32) -> f32 {
+        let mut result = 0.0;
+        let mut power = 1.0;
+
+        for coeff in &curve.poly_coefficients {
+            result += coeff * power;
+            power *= value;
+        }
+
+        result
+    }
+
+    /// Apply MMR (Multi-channel Multi-Regression) mapping
+    fn apply_mmr(&self, curve: &DolbyMappingCurve, rgb: (f32, f32, f32)) -> f32 {
+        if curve.mmr_coefficients.is_empty() {
+            return rgb.0;
+        }
+
+        let mut result = curve.mmr_coefficients[0];
+        let mut idx = 1;
+
+        // Linear terms
+        if idx < curve.mmr_coefficients.len() {
+            result += curve.mmr_coefficients[idx] * rgb.0; idx += 1;
+        }
+        if idx < curve.mmr_coefficients.len() {
+            result += curve.mmr_coefficients[idx] * rgb.1; idx += 1;
+        }
+        if idx < curve.mmr_coefficients.len() {
+            result += curve.mmr_coefficients[idx] * rgb.2; idx += 1;
+        }
+
+        // Quadratic terms (if order >= 2)
+        if curve.mmr_order >= 2 {
+            if idx < curve.mmr_coefficients.len() {
+                result += curve.mmr_coefficients[idx] * rgb.0 * rgb.0; idx += 1;
+            }
+            if idx < curve.mmr_coefficients.len() {
+                result += curve.mmr_coefficients[idx] * rgb.1 * rgb.1; idx += 1;
+            }
+            if idx < curve.mmr_coefficients.len() {
+                result += curve.mmr_coefficients[idx] * rgb.2 * rgb.2; idx += 1;
+            }
+            if idx < curve.mmr_coefficients.len() {
+                result += curve.mmr_coefficients[idx] * rgb.0 * rgb.1; idx += 1;
+            }
+            if idx < curve.mmr_coefficients.len() {
+                result += curve.mmr_coefficients[idx] * rgb.0 * rgb.2; idx += 1;
+            }
+            if idx < curve.mmr_coefficients.len() {
+                result += curve.mmr_coefficients[idx] * rgb.1 * rgb.2; idx += 1;
+            }
+        }
+
+        result
+    }
+
+    /// Apply NLQ (Non-Linear Quantization)
+    fn apply_nlq(&self, value: f32) -> f32 {
+        let nlq = match &self.rpu {
+            Some(rpu) => match &rpu.nlq_params {
+                Some(p) => p,
+                None => return value,
+            },
+            None => return value,
+        };
+
+        let adjusted = value + nlq.nlq_offset;
+
+        if adjusted.abs() <= nlq.linear_deadzone_threshold {
+            adjusted * nlq.linear_deadzone_slope
+        } else {
+            adjusted
+        }
+    }
+
+    /// Process single pixel through Dolby Vision pipeline
+    fn process_pixel(&self, rgb: (f32, f32, f32)) -> (f32, f32, f32) {
+        let rpu = match &self.rpu {
+            Some(r) => r,
+            None => return rgb,
+        };
+
+        // Apply crosstalk cancellation
+        let r = self.crosstalk_matrix[0][0] * rgb.0
+              + self.crosstalk_matrix[0][1] * rgb.1
+              + self.crosstalk_matrix[0][2] * rgb.2;
+        let g = self.crosstalk_matrix[1][0] * rgb.0
+              + self.crosstalk_matrix[1][1] * rgb.1
+              + self.crosstalk_matrix[1][2] * rgb.2;
+        let b = self.crosstalk_matrix[2][0] * rgb.0
+              + self.crosstalk_matrix[2][1] * rgb.1
+              + self.crosstalk_matrix[2][2] * rgb.2;
+
+        // Apply mapping curves
+        let mut result = (r, g, b);
+
+        for (i, curve) in rpu.mapping_curves.iter().enumerate() {
+            let channel = match i % 3 {
+                0 => result.0,
+                1 => result.1,
+                _ => result.2,
+            };
+
+            let mapped = match curve.mapping_type {
+                0 => self.apply_polynomial(curve, channel),
+                1 => self.apply_mmr(curve, result),
+                _ => channel,
+            };
+
+            match i % 3 {
+                0 => result.0 = mapped,
+                1 => result.1 = mapped,
+                _ => result.2 = mapped,
+            }
+        }
+
+        // Apply NLQ if present
+        result.0 = self.apply_nlq(result.0);
+        result.1 = self.apply_nlq(result.1);
+        result.2 = self.apply_nlq(result.2);
+
+        result
+    }
+
+    /// Process frame with Dolby Vision
+    fn process_frame(&self, pixels: &mut [(f32, f32, f32)]) {
+        for pixel in pixels.iter_mut() {
+            *pixel = self.process_pixel(*pixel);
+        }
+    }
+}
+
+// ============================================================================
+// HDR LUMINANCE ANALYSIS
+// ============================================================================
+
+/// HDR frame luminance analyzer
+struct HdrLuminanceAnalyzer {
+    /// Histogram bins for luminance distribution
+    histogram_bins: usize,
+    /// Maximum luminance to track
+    max_luminance: f32,
+}
+
+/// Frame luminance analysis results
+struct FrameLuminanceAnalysis {
+    /// Maximum pixel luminance (MaxCLL candidate)
+    max_luminance: f32,
+    /// Average luminance
+    average_luminance: f32,
+    /// 99th percentile luminance
+    percentile_99: f32,
+    /// 95th percentile luminance
+    percentile_95: f32,
+    /// Median luminance
+    median_luminance: f32,
+    /// Luminance histogram
+    histogram: Vec<u32>,
+}
+
+impl HdrLuminanceAnalyzer {
+    /// Create analyzer
+    fn new(bins: usize, max_lum: f32) -> Self {
+        Self {
+            histogram_bins: bins,
+            max_luminance: max_lum,
+        }
+    }
+
+    /// Analyze frame luminance distribution
+    fn analyze_frame(&self, pixels: &[(f32, f32, f32)]) -> FrameLuminanceAnalysis {
+        let mut histogram = vec![0u32; self.histogram_bins];
+        let mut max_lum = 0.0f32;
+        let mut sum_lum = 0.0f64;
+        let mut luminances: Vec<f32> = Vec::with_capacity(pixels.len());
+
+        for pixel in pixels {
+            // Convert from PQ to linear
+            let linear = pq_eotf_rgb(*pixel);
+
+            // Calculate luminance (BT.2020)
+            let y = 0.2627 * linear.0 + 0.6780 * linear.1 + 0.0593 * linear.2;
+
+            luminances.push(y);
+            max_lum = max_lum.max(y);
+            sum_lum += y as f64;
+
+            // Update histogram
+            let bin = ((y / self.max_luminance) * (self.histogram_bins - 1) as f32)
+                .clamp(0.0, (self.histogram_bins - 1) as f32) as usize;
+            histogram[bin] += 1;
+        }
+
+        // Sort for percentile calculation
+        luminances.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+        let count = luminances.len();
+        let median = if count > 0 { luminances[count / 2] } else { 0.0 };
+        let p95 = if count > 0 { luminances[(count as f32 * 0.95) as usize] } else { 0.0 };
+        let p99 = if count > 0 { luminances[(count as f32 * 0.99) as usize] } else { 0.0 };
+        let avg = if count > 0 { (sum_lum / count as f64) as f32 } else { 0.0 };
+
+        FrameLuminanceAnalysis {
+            max_luminance: max_lum,
+            average_luminance: avg,
+            percentile_99: p99,
+            percentile_95: p95,
+            median_luminance: median,
+            histogram,
+        }
+    }
+
+    /// Calculate MaxFALL from multiple frame analyses
+    fn calculate_max_fall(analyses: &[FrameLuminanceAnalysis]) -> f32 {
+        analyses.iter()
+            .map(|a| a.average_luminance)
+            .fold(0.0f32, |max, avg| max.max(avg))
+    }
+
+    /// Calculate MaxCLL from multiple frame analyses
+    fn calculate_max_cll(analyses: &[FrameLuminanceAnalysis]) -> f32 {
+        analyses.iter()
+            .map(|a| a.max_luminance)
+            .fold(0.0f32, |max, m| max.max(m))
+    }
+}
+
+// ============================================================================
+// HDR TO SDR CONVERSION
+// ============================================================================
+
+/// HDR to SDR tone mapping operator
+enum HdrToSdrOperator {
+    /// Simple Reinhard
+    Reinhard,
+    /// Reinhard with extended white point
+    ReinhardExtended { white_point: f32 },
+    /// ACES Filmic
+    AcesFilmic,
+    /// Hable/Uncharted 2
+    Hable,
+    /// BT.2390 EETF (Electrical-to-Electrical Transfer Function)
+    Bt2390 {
+        source_peak: f32,
+        target_peak: f32,
+    },
+    /// BT.2446 Method A
+    Bt2446A,
+    /// Custom knee function
+    CustomKnee {
+        knee_start: f32,
+        knee_power: f32,
+        max_output: f32,
+    },
+}
+
+/// HDR to SDR converter
+struct HdrToSdrConverter {
+    /// Tone mapping operator
+    operator: HdrToSdrOperator,
+    /// Source content peak luminance
+    source_peak: f32,
+    /// Target SDR white level
+    target_white: f32,
+    /// Desaturation factor (higher = more desaturation in highlights)
+    desaturation_factor: f32,
+}
+
+impl HdrToSdrConverter {
+    /// Create converter
+    fn new(operator: HdrToSdrOperator, source_peak: f32, target_white: f32) -> Self {
+        Self {
+            operator,
+            source_peak,
+            target_white,
+            desaturation_factor: 0.9,
+        }
+    }
+
+    /// Apply Reinhard tone mapping
+    fn reinhard(&self, luminance: f32) -> f32 {
+        luminance / (1.0 + luminance / self.target_white)
+    }
+
+    /// Apply Reinhard with extended white point
+    fn reinhard_extended(&self, luminance: f32, white_point: f32) -> f32 {
+        let numerator = luminance * (1.0 + luminance / (white_point * white_point));
+        numerator / (1.0 + luminance)
+    }
+
+    /// Apply ACES filmic curve
+    fn aces_filmic(&self, x: f32) -> f32 {
+        let a = 2.51;
+        let b = 0.03;
+        let c = 2.43;
+        let d = 0.59;
+        let e = 0.14;
+
+        ((x * (a * x + b)) / (x * (c * x + d) + e)).clamp(0.0, 1.0)
+    }
+
+    /// Apply Hable/Uncharted 2 curve
+    fn hable_curve(&self, x: f32) -> f32 {
+        let a = 0.15;
+        let b = 0.50;
+        let c = 0.10;
+        let d = 0.20;
+        let e = 0.02;
+        let f = 0.30;
+
+        ((x * (a * x + c * b) + d * e) / (x * (a * x + b) + d * f)) - e / f
+    }
+
+    /// Apply Hable with white point normalization
+    fn hable(&self, luminance: f32) -> f32 {
+        let white_scale = 1.0 / self.hable_curve(self.source_peak / self.target_white);
+        self.hable_curve(luminance / self.target_white) * white_scale
+    }
+
+    /// Apply BT.2390 EETF
+    fn bt2390(&self, luminance: f32, source_peak: f32, target_peak: f32) -> f32 {
+        // Normalize to PQ
+        let e1 = pq_oetf(luminance);
+        let e_source = pq_oetf(source_peak);
+        let e_target = pq_oetf(target_peak);
+
+        // Apply hermite spline
+        let ks = 1.5 * e_target - 0.5;
+        let b = e_target;
+
+        let t = (e1 - ks) / (e_source - ks);
+        let t = t.clamp(0.0, 1.0);
+
+        let e2 = if e1 < ks {
+            e1
+        } else {
+            // Hermite spline
+            let t2 = t * t;
+            let t3 = t2 * t;
+
+            (2.0 * t3 - 3.0 * t2 + 1.0) * ks +
+            (t3 - 2.0 * t2 + t) * (e_source - ks) +
+            (-2.0 * t3 + 3.0 * t2) * b
+        };
+
+        pq_eotf(e2)
+    }
+
+    /// Apply BT.2446 Method A (scene-referred)
+    fn bt2446a(&self, luminance: f32) -> f32 {
+        let y_hdr = luminance / 1000.0; // Normalize to 0-1 for 1000 nit content
+
+        let rho = 1.0 + 32.0 * (y_hdr.max(0.0001)).powf(1.0 / 2.4);
+        let y_sdr = (rho.ln() / (1.0 + 32.0f32.ln())) * self.target_white;
+
+        y_sdr.clamp(0.0, self.target_white)
+    }
+
+    /// Apply custom knee function
+    fn custom_knee(&self, luminance: f32, knee_start: f32, knee_power: f32, max_out: f32) -> f32 {
+        if luminance <= knee_start {
+            luminance
+        } else {
+            let excess = luminance - knee_start;
+            let compressed = (excess / (max_out - knee_start)).powf(knee_power);
+            knee_start + compressed * (max_out - knee_start)
+        }
+    }
+
+    /// Apply tone mapping to luminance value
+    fn tonemap_luminance(&self, luminance: f32) -> f32 {
+        match &self.operator {
+            HdrToSdrOperator::Reinhard => self.reinhard(luminance),
+            HdrToSdrOperator::ReinhardExtended { white_point } => {
+                self.reinhard_extended(luminance, *white_point)
+            }
+            HdrToSdrOperator::AcesFilmic => {
+                self.aces_filmic(luminance / self.source_peak) * self.target_white
+            }
+            HdrToSdrOperator::Hable => {
+                self.hable(luminance) * self.target_white
+            }
+            HdrToSdrOperator::Bt2390 { source_peak, target_peak } => {
+                self.bt2390(luminance, *source_peak, *target_peak)
+            }
+            HdrToSdrOperator::Bt2446A => self.bt2446a(luminance),
+            HdrToSdrOperator::CustomKnee { knee_start, knee_power, max_output } => {
+                self.custom_knee(luminance, *knee_start, *knee_power, *max_output)
+            }
+        }
+    }
+
+    /// Apply highlight desaturation
+    fn desaturate_highlights(&self, rgb: (f32, f32, f32), luminance: f32) -> (f32, f32, f32) {
+        let threshold = self.target_white * 0.5;
+
+        if luminance <= threshold {
+            return rgb;
+        }
+
+        // Calculate desaturation amount based on luminance
+        let t = ((luminance - threshold) / (self.source_peak - threshold))
+            .clamp(0.0, 1.0);
+        let desat = t * self.desaturation_factor;
+
+        // Lerp towards luminance (grayscale)
+        let gray = (luminance, luminance, luminance);
+        (
+            rgb.0 * (1.0 - desat) + gray.0 * desat,
+            rgb.1 * (1.0 - desat) + gray.1 * desat,
+            rgb.2 * (1.0 - desat) + gray.2 * desat,
+        )
+    }
+
+    /// Convert HDR pixel to SDR
+    fn convert_pixel(&self, pq_rgb: (f32, f32, f32)) -> (f32, f32, f32) {
+        // Decode PQ to linear luminance
+        let linear = pq_eotf_rgb(pq_rgb);
+
+        // Calculate luminance
+        let y = 0.2627 * linear.0 + 0.6780 * linear.1 + 0.0593 * linear.2;
+
+        // Apply desaturation before tone mapping
+        let desaturated = self.desaturate_highlights(linear, y);
+
+        // Recalculate luminance
+        let y_desat = 0.2627 * desaturated.0 + 0.6780 * desaturated.1 + 0.0593 * desaturated.2;
+
+        // Apply tone mapping
+        let mapped_y = self.tonemap_luminance(y_desat);
+
+        // Scale RGB proportionally
+        let scale = if y_desat > 0.0 { mapped_y / y_desat } else { 1.0 };
+
+        let sdr = (
+            (desaturated.0 * scale / self.target_white).clamp(0.0, 1.0),
+            (desaturated.1 * scale / self.target_white).clamp(0.0, 1.0),
+            (desaturated.2 * scale / self.target_white).clamp(0.0, 1.0),
+        );
+
+        // Apply sRGB OETF for SDR output
+        (
+            Self::srgb_oetf(sdr.0),
+            Self::srgb_oetf(sdr.1),
+            Self::srgb_oetf(sdr.2),
+        )
+    }
+
+    /// sRGB OETF
+    fn srgb_oetf(linear: f32) -> f32 {
+        if linear <= 0.0031308 {
+            linear * 12.92
+        } else {
+            1.055 * linear.powf(1.0 / 2.4) - 0.055
+        }
+    }
+
+    /// Convert full frame
+    fn convert_frame(&self, hdr_pixels: &[(f32, f32, f32)]) -> Vec<(f32, f32, f32)> {
+        hdr_pixels.iter()
+            .map(|p| self.convert_pixel(*p))
+            .collect()
+    }
+}
+
+// ============================================================================
+// SDR TO HDR CONVERSION (INVERSE TONE MAPPING)
+// ============================================================================
+
+/// SDR to HDR inverse tone mapping operator
+enum SdrToHdrOperator {
+    /// Simple expansion
+    LinearExpansion { gain: f32 },
+    /// Highlight expansion with sigmoid
+    SigmoidExpansion { knee: f32, shoulder: f32 },
+    /// Perceptual expansion based on display model
+    PerceptualExpansion,
+    /// AI/ML-based expansion (placeholder for neural network)
+    NeuralExpansion,
+}
+
+/// SDR to HDR converter (inverse tone mapping)
+struct SdrToHdrConverter {
+    /// Operator type
+    operator: SdrToHdrOperator,
+    /// Target HDR peak luminance
+    target_peak: f32,
+    /// SDR white level assumption
+    sdr_white: f32,
+    /// Highlight boost factor
+    highlight_boost: f32,
+}
+
+impl SdrToHdrConverter {
+    /// Create converter
+    fn new(operator: SdrToHdrOperator, target_peak: f32) -> Self {
+        Self {
+            operator,
+            target_peak,
+            sdr_white: SDR_WHITE_LEVEL,
+            highlight_boost: 1.5,
+        }
+    }
+
+    /// sRGB EOTF
+    fn srgb_eotf(encoded: f32) -> f32 {
+        if encoded <= 0.04045 {
+            encoded / 12.92
+        } else {
+            ((encoded + 0.055) / 1.055).powf(2.4)
+        }
+    }
+
+    /// Apply linear expansion
+    fn linear_expansion(&self, luminance: f32, gain: f32) -> f32 {
+        (luminance * gain).min(self.target_peak)
+    }
+
+    /// Apply sigmoid expansion
+    fn sigmoid_expansion(&self, luminance: f32, knee: f32, shoulder: f32) -> f32 {
+        let normalized = luminance / self.sdr_white;
+
+        if normalized <= knee {
+            // Linear region
+            normalized * self.target_peak / self.sdr_white * shoulder
+        } else {
+            // Expansion region with sigmoid
+            let t = (normalized - knee) / (1.0 - knee);
+            let expanded = knee + (1.0 - knee) * (1.0 - (-t * self.highlight_boost).exp());
+            expanded * self.target_peak
+        }
+    }
+
+    /// Apply perceptual expansion
+    fn perceptual_expansion(&self, luminance: f32) -> f32 {
+        // Based on human perception model
+        let normalized = luminance / self.sdr_white;
+
+        // Stevens' power law approximation for brightness perception
+        let perceived = normalized.powf(0.5);
+
+        // Inverse mapping to HDR range
+        let hdr_linear = perceived.powf(1.0 / 0.42);
+
+        (hdr_linear * self.target_peak).min(self.target_peak)
+    }
+
+    /// Expand luminance to HDR
+    fn expand_luminance(&self, luminance: f32) -> f32 {
+        match &self.operator {
+            SdrToHdrOperator::LinearExpansion { gain } => {
+                self.linear_expansion(luminance, *gain)
+            }
+            SdrToHdrOperator::SigmoidExpansion { knee, shoulder } => {
+                self.sigmoid_expansion(luminance, *knee, *shoulder)
+            }
+            SdrToHdrOperator::PerceptualExpansion => {
+                self.perceptual_expansion(luminance)
+            }
+            SdrToHdrOperator::NeuralExpansion => {
+                // Placeholder - would invoke neural network
+                self.perceptual_expansion(luminance)
+            }
+        }
+    }
+
+    /// Enhance local contrast for HDR
+    fn enhance_local_contrast(&self, rgb: (f32, f32, f32), luminance: f32) -> (f32, f32, f32) {
+        // Simple highlight boost
+        let boost_threshold = self.sdr_white * 0.7;
+
+        if luminance > boost_threshold {
+            let t = (luminance - boost_threshold) / (self.sdr_white - boost_threshold);
+            let boost = 1.0 + t * (self.highlight_boost - 1.0);
+
+            (rgb.0 * boost, rgb.1 * boost, rgb.2 * boost)
+        } else {
+            rgb
+        }
+    }
+
+    /// Convert SDR pixel to HDR
+    fn convert_pixel(&self, srgb: (f32, f32, f32)) -> (f32, f32, f32) {
+        // Decode sRGB to linear
+        let linear = (
+            Self::srgb_eotf(srgb.0),
+            Self::srgb_eotf(srgb.1),
+            Self::srgb_eotf(srgb.2),
+        );
+
+        // Scale to SDR nits
+        let sdr_nits = (
+            linear.0 * self.sdr_white,
+            linear.1 * self.sdr_white,
+            linear.2 * self.sdr_white,
+        );
+
+        // Calculate luminance
+        let y = 0.2627 * sdr_nits.0 + 0.6780 * sdr_nits.1 + 0.0593 * sdr_nits.2;
+
+        // Enhance local contrast
+        let enhanced = self.enhance_local_contrast(sdr_nits, y);
+        let y_enhanced = 0.2627 * enhanced.0 + 0.6780 * enhanced.1 + 0.0593 * enhanced.2;
+
+        // Apply inverse tone mapping
+        let expanded_y = self.expand_luminance(y_enhanced);
+
+        // Scale RGB proportionally
+        let scale = if y_enhanced > 0.0 { expanded_y / y_enhanced } else { 1.0 };
+
+        let hdr = (
+            enhanced.0 * scale,
+            enhanced.1 * scale,
+            enhanced.2 * scale,
+        );
+
+        // Encode to PQ
+        pq_oetf_rgb(hdr)
+    }
+
+    /// Convert full frame
+    fn convert_frame(&self, sdr_pixels: &[(f32, f32, f32)]) -> Vec<(f32, f32, f32)> {
+        sdr_pixels.iter()
+            .map(|p| self.convert_pixel(*p))
+            .collect()
+    }
+}
+
+// ============================================================================
+// HDR DISPLAY MAPPING
+// ============================================================================
+
+/// Target display characteristics
+struct DisplayCharacteristics {
+    /// Peak luminance (cd/m²)
+    peak_luminance: f32,
+    /// Black level (cd/m²)
+    black_level: f32,
+    /// Color primaries
+    primaries: HdrColorPrimaries,
+    /// Transfer function
+    transfer_function: HdrTransferFunction,
+    /// HDR capability
+    hdr_capable: bool,
+    /// EOTF type for non-HDR
+    eotf_gamma: f32,
+}
+
+impl DisplayCharacteristics {
+    /// Create SDR display profile
+    fn sdr_display() -> Self {
+        Self {
+            peak_luminance: 100.0,
+            black_level: 0.1,
+            primaries: HdrColorPrimaries::Bt709,
+            transfer_function: HdrTransferFunction::Srgb,
+            hdr_capable: false,
+            eotf_gamma: 2.2,
+        }
+    }
+
+    /// Create HDR10 display profile
+    fn hdr10_display(peak_nits: f32) -> Self {
+        Self {
+            peak_luminance: peak_nits,
+            black_level: 0.005,
+            primaries: HdrColorPrimaries::Bt2020,
+            transfer_function: HdrTransferFunction::PQ,
+            hdr_capable: true,
+            eotf_gamma: 1.0,
+        }
+    }
+
+    /// Create HLG display profile
+    fn hlg_display(peak_nits: f32) -> Self {
+        Self {
+            peak_luminance: peak_nits,
+            black_level: 0.01,
+            primaries: HdrColorPrimaries::Bt2020,
+            transfer_function: HdrTransferFunction::HLG,
+            hdr_capable: true,
+            eotf_gamma: HLG_SYSTEM_GAMMA,
+        }
+    }
+
+    /// Get dynamic range in stops
+    fn dynamic_range_stops(&self) -> f32 {
+        (self.peak_luminance / self.black_level).log2()
+    }
+
+    /// Get contrast ratio
+    fn contrast_ratio(&self) -> f32 {
+        self.peak_luminance / self.black_level
+    }
+}
+
+/// HDR display mapper
+struct HdrDisplayMapper {
+    /// Source content characteristics
+    source: DisplayCharacteristics,
+    /// Target display characteristics
+    target: DisplayCharacteristics,
+    /// Tone mapping curve type
+    tone_map_curve: HdrToSdrOperator,
+}
+
+impl HdrDisplayMapper {
+    /// Create display mapper
+    fn new(source: DisplayCharacteristics, target: DisplayCharacteristics) -> Self {
+        // Choose appropriate tone mapping based on capabilities
+        let curve = if target.hdr_capable {
+            if target.peak_luminance >= source.peak_luminance {
+                HdrToSdrOperator::Reinhard // No compression needed
+            } else {
+                HdrToSdrOperator::Bt2390 {
+                    source_peak: source.peak_luminance,
+                    target_peak: target.peak_luminance,
+                }
+            }
+        } else {
+            HdrToSdrOperator::Bt2446A
+        };
+
+        Self {
+            source,
+            target,
+            tone_map_curve: curve,
+        }
+    }
+
+    /// Check if tone mapping is required
+    fn requires_tonemapping(&self) -> bool {
+        self.source.peak_luminance > self.target.peak_luminance
+    }
+
+    /// Map HDR content to display
+    fn map_to_display(&self, linear_rgb: (f32, f32, f32)) -> (f32, f32, f32) {
+        // Apply any necessary gamut mapping first
+        let gamut_mapped = self.gamut_map(linear_rgb);
+
+        // Apply tone mapping if needed
+        let tone_mapped = if self.requires_tonemapping() {
+            self.apply_tonemapping(gamut_mapped)
+        } else {
+            gamut_mapped
+        };
+
+        // Apply target transfer function
+        self.apply_target_transfer(tone_mapped)
+    }
+
+    /// Simple gamut mapping (clip for now)
+    fn gamut_map(&self, rgb: (f32, f32, f32)) -> (f32, f32, f32) {
+        // TODO: Implement proper gamut mapping (compression, clipping, etc.)
+        (rgb.0.max(0.0), rgb.1.max(0.0), rgb.2.max(0.0))
+    }
+
+    /// Apply tone mapping
+    fn apply_tonemapping(&self, rgb: (f32, f32, f32)) -> (f32, f32, f32) {
+        let converter = HdrToSdrConverter::new(
+            self.tone_map_curve.clone(),
+            self.source.peak_luminance,
+            self.target.peak_luminance,
+        );
+
+        let y = 0.2627 * rgb.0 + 0.6780 * rgb.1 + 0.0593 * rgb.2;
+        let mapped_y = converter.tonemap_luminance(y);
+        let scale = if y > 0.0 { mapped_y / y } else { 1.0 };
+
+        (rgb.0 * scale, rgb.1 * scale, rgb.2 * scale)
+    }
+
+    /// Apply target transfer function
+    fn apply_target_transfer(&self, rgb: (f32, f32, f32)) -> (f32, f32, f32) {
+        match self.target.transfer_function {
+            HdrTransferFunction::PQ => pq_oetf_rgb(rgb),
+            HdrTransferFunction::HLG => hlg_oetf_rgb((
+                rgb.0 / self.target.peak_luminance,
+                rgb.1 / self.target.peak_luminance,
+                rgb.2 / self.target.peak_luminance,
+            )),
+            HdrTransferFunction::Srgb => (
+                HdrToSdrConverter::srgb_oetf(rgb.0 / self.target.peak_luminance),
+                HdrToSdrConverter::srgb_oetf(rgb.1 / self.target.peak_luminance),
+                HdrToSdrConverter::srgb_oetf(rgb.2 / self.target.peak_luminance),
+            ),
+            HdrTransferFunction::Gamma22 => (
+                (rgb.0 / self.target.peak_luminance).powf(1.0 / 2.2),
+                (rgb.1 / self.target.peak_luminance).powf(1.0 / 2.2),
+                (rgb.2 / self.target.peak_luminance).powf(1.0 / 2.2),
+            ),
+            HdrTransferFunction::Linear => rgb,
+            _ => rgb,
+        }
+    }
+}
+
+// ============================================================================
+// HDR COMPOSITING
+// ============================================================================
+
+/// HDR compositing blend mode
+enum HdrBlendMode {
+    /// Normal alpha blend
+    Normal,
+    /// Additive (for light sources)
+    Add,
+    /// Screen (for glows)
+    Screen,
+    /// Soft light
+    SoftLight,
+    /// Linear light
+    LinearLight,
+    /// HDR multiply
+    HdrMultiply,
+}
+
+/// HDR compositor for layered content
+struct HdrCompositor {
+    /// Working color space peak luminance
+    working_peak: f32,
+    /// Background layer (base)
+    background: Vec<(f32, f32, f32, f32)>,
+    /// Width
+    width: usize,
+    /// Height
+    height: usize,
+}
+
+impl HdrCompositor {
+    /// Create compositor
+    fn new(width: usize, height: usize, peak: f32) -> Self {
+        Self {
+            working_peak: peak,
+            background: vec![(0.0, 0.0, 0.0, 0.0); width * height],
+            width,
+            height,
+        }
+    }
+
+    /// Set background layer
+    fn set_background(&mut self, pixels: Vec<(f32, f32, f32, f32)>) {
+        self.background = pixels;
+    }
+
+    /// Composite layer on top with blend mode
+    fn composite_layer(
+        &mut self,
+        layer: &[(f32, f32, f32, f32)],
+        mode: HdrBlendMode,
+        opacity: f32,
+    ) {
+        for (i, (bg, fg)) in self.background.iter_mut().zip(layer.iter()).enumerate() {
+            let blended = self.blend_pixels(*bg, *fg, &mode);
+
+            // Apply opacity and alpha composite
+            let fg_alpha = fg.3 * opacity;
+            let one_minus_alpha = 1.0 - fg_alpha;
+
+            *bg = (
+                blended.0 * fg_alpha + bg.0 * one_minus_alpha,
+                blended.1 * fg_alpha + bg.1 * one_minus_alpha,
+                blended.2 * fg_alpha + bg.2 * one_minus_alpha,
+                fg_alpha + bg.3 * one_minus_alpha,
+            );
+        }
+    }
+
+    /// Blend two pixels according to mode
+    fn blend_pixels(
+        &self,
+        bg: (f32, f32, f32, f32),
+        fg: (f32, f32, f32, f32),
+        mode: &HdrBlendMode,
+    ) -> (f32, f32, f32, f32) {
+        match mode {
+            HdrBlendMode::Normal => fg,
+
+            HdrBlendMode::Add => (
+                bg.0 + fg.0,
+                bg.1 + fg.1,
+                bg.2 + fg.2,
+                fg.3,
+            ),
+
+            HdrBlendMode::Screen => (
+                bg.0 + fg.0 - bg.0 * fg.0 / self.working_peak,
+                bg.1 + fg.1 - bg.1 * fg.1 / self.working_peak,
+                bg.2 + fg.2 - bg.2 * fg.2 / self.working_peak,
+                fg.3,
+            ),
+
+            HdrBlendMode::SoftLight => {
+                let blend = |b: f32, f: f32| -> f32 {
+                    let normalized_f = f / self.working_peak;
+                    if normalized_f <= 0.5 {
+                        b - (1.0 - 2.0 * normalized_f) * b * (1.0 - b / self.working_peak)
+                    } else {
+                        let d = if b / self.working_peak <= 0.25 {
+                            ((16.0 * b / self.working_peak - 12.0) * b / self.working_peak + 4.0) * b / self.working_peak
+                        } else {
+                            (b / self.working_peak).sqrt()
+                        };
+                        b + (2.0 * normalized_f - 1.0) * (d * self.working_peak - b)
+                    }
+                };
+                (blend(bg.0, fg.0), blend(bg.1, fg.1), blend(bg.2, fg.2), fg.3)
+            }
+
+            HdrBlendMode::LinearLight => (
+                (bg.0 + 2.0 * fg.0 - self.working_peak).clamp(0.0, self.working_peak * 2.0),
+                (bg.1 + 2.0 * fg.1 - self.working_peak).clamp(0.0, self.working_peak * 2.0),
+                (bg.2 + 2.0 * fg.2 - self.working_peak).clamp(0.0, self.working_peak * 2.0),
+                fg.3,
+            ),
+
+            HdrBlendMode::HdrMultiply => (
+                bg.0 * fg.0 / self.working_peak,
+                bg.1 * fg.1 / self.working_peak,
+                bg.2 * fg.2 / self.working_peak,
+                fg.3,
+            ),
+        }
+    }
+
+    /// Get final composited result
+    fn get_result(&self) -> &[(f32, f32, f32, f32)] {
+        &self.background
+    }
+
+    /// Add HDR highlight/glow effect
+    fn add_hdr_glow(
+        &mut self,
+        threshold: f32,
+        intensity: f32,
+        blur_radius: usize,
+    ) {
+        // Extract highlights above threshold
+        let mut highlights: Vec<(f32, f32, f32)> = self.background.iter()
+            .map(|p| {
+                let y = 0.2627 * p.0 + 0.6780 * p.1 + 0.0593 * p.2;
+                if y > threshold {
+                    let excess = (y - threshold) / (self.working_peak - threshold);
+                    (p.0 * excess, p.1 * excess, p.2 * excess)
+                } else {
+                    (0.0, 0.0, 0.0)
+                }
+            })
+            .collect();
+
+        // Apply simple box blur
+        for _ in 0..3 {
+            highlights = self.blur_pass(&highlights, blur_radius);
+        }
+
+        // Add back to image
+        for (bg, glow) in self.background.iter_mut().zip(highlights.iter()) {
+            bg.0 += glow.0 * intensity;
+            bg.1 += glow.1 * intensity;
+            bg.2 += glow.2 * intensity;
+        }
+    }
+
+    /// Simple blur pass
+    fn blur_pass(&self, input: &[(f32, f32, f32)], radius: usize) -> Vec<(f32, f32, f32)> {
+        let mut output = vec![(0.0, 0.0, 0.0); input.len()];
+        let kernel_size = (radius * 2 + 1) as f32;
+
+        for y in 0..self.height {
+            for x in 0..self.width {
+                let mut sum = (0.0, 0.0, 0.0);
+                let mut count = 0.0;
+
+                for ky in y.saturating_sub(radius)..=(y + radius).min(self.height - 1) {
+                    for kx in x.saturating_sub(radius)..=(x + radius).min(self.width - 1) {
+                        let idx = ky * self.width + kx;
+                        sum.0 += input[idx].0;
+                        sum.1 += input[idx].1;
+                        sum.2 += input[idx].2;
+                        count += 1.0;
+                    }
+                }
+
+                let idx = y * self.width + x;
+                output[idx] = (sum.0 / count, sum.1 / count, sum.2 / count);
+            }
+        }
+
+        output
+    }
+}
+
+// ============================================================================
+// HDR VIDEO PROCESSING
+// ============================================================================
+
+/// HDR video frame metadata
+struct HdrFrameInfo {
+    /// Frame number
+    frame_number: u64,
+    /// Presentation timestamp (PTS)
+    pts: i64,
+    /// Duration
+    duration: i64,
+    /// Static metadata (if changed from previous)
+    static_metadata: Option<StaticHdrMetadata>,
+    /// Dynamic metadata
+    dynamic_metadata: Option<DynamicHdrMetadata>,
+    /// Dolby Vision RPU
+    dolby_vision_rpu: Option<DolbyVisionRpu>,
+    /// Content type detected
+    content_type: HdrContentType,
+}
+
+/// HDR video processor
+struct HdrVideoProcessor {
+    /// HDR10 processor
+    hdr10_processor: Option<Hdr10Processor>,
+    /// HDR10+ processor
+    hdr10plus_processor: Option<Hdr10PlusProcessor>,
+    /// Dolby Vision processor
+    dolby_processor: Option<DolbyVisionProcessor>,
+    /// Luminance analyzer
+    analyzer: HdrLuminanceAnalyzer,
+    /// Frame history for temporal processing
+    frame_analyses: Vec<FrameLuminanceAnalysis>,
+    /// Maximum frames to keep
+    max_history: usize,
+}
+
+impl HdrVideoProcessor {
+    /// Create video processor
+    fn new(target_display: DisplayCharacteristics) -> Self {
+        Self {
+            hdr10_processor: Some(Hdr10Processor::new(
+                StaticHdrMetadata::default_hdr10(),
+                target_display.peak_luminance,
+                target_display.black_level,
+            )),
+            hdr10plus_processor: Some(Hdr10PlusProcessor::new(
+                StaticHdrMetadata::default_hdr10(),
+                target_display.peak_luminance,
+            )),
+            dolby_processor: Some(DolbyVisionProcessor::new(
+                DolbyVisionProfile::Profile8,
+                target_display.peak_luminance,
+            )),
+            analyzer: HdrLuminanceAnalyzer::new(1024, 10000.0),
+            frame_analyses: Vec::new(),
+            max_history: 60,
+        }
+    }
+
+    /// Process single frame
+    fn process_frame(
+        &mut self,
+        pixels: &mut [(f32, f32, f32)],
+        info: &HdrFrameInfo,
+    ) {
+        // Analyze frame luminance
+        let analysis = self.analyzer.analyze_frame(pixels);
+
+        // Store analysis
+        self.frame_analyses.push(analysis);
+        if self.frame_analyses.len() > self.max_history {
+            self.frame_analyses.remove(0);
+        }
+
+        // Process based on content type
+        match info.content_type {
+            HdrContentType::Hdr10 => {
+                if let Some(proc) = &self.hdr10_processor {
+                    proc.process_frame(pixels);
+                }
+            }
+            HdrContentType::Hdr10Plus => {
+                if let Some(proc) = &mut self.hdr10plus_processor {
+                    if let Some(dynamic) = &info.dynamic_metadata {
+                        proc.update_dynamic_metadata(dynamic.clone());
+                    }
+                    proc.process_frame(pixels);
+                }
+            }
+            HdrContentType::DolbyVision => {
+                if let Some(proc) = &mut self.dolby_processor {
+                    if let Some(rpu) = &info.dolby_vision_rpu {
+                        proc.update_rpu(rpu.clone());
+                    }
+                    proc.process_frame(pixels);
+                }
+            }
+            _ => {
+                // Default HDR10 processing
+                if let Some(proc) = &self.hdr10_processor {
+                    proc.process_frame(pixels);
+                }
+            }
+        }
+    }
+
+    /// Get MaxCLL across processed frames
+    fn get_content_max_cll(&self) -> f32 {
+        HdrLuminanceAnalyzer::calculate_max_cll(&self.frame_analyses)
+    }
+
+    /// Get MaxFALL across processed frames
+    fn get_content_max_fall(&self) -> f32 {
+        HdrLuminanceAnalyzer::calculate_max_fall(&self.frame_analyses)
+    }
+
+    /// Generate static metadata from analysis
+    fn generate_static_metadata(&self) -> StaticHdrMetadata {
+        let max_cll = self.get_content_max_cll();
+        let max_fall = self.get_content_max_fall();
+
+        StaticHdrMetadata {
+            display_primaries_red: (35400, 14600),
+            display_primaries_green: (8500, 39850),
+            display_primaries_blue: (6550, 2300),
+            white_point: (15635, 16450),
+            max_display_mastering_luminance: max_cll.ceil() as u32,
+            min_display_mastering_luminance: 50,
+            max_cll: max_cll.ceil() as u16,
+            max_fall: max_fall.ceil() as u16,
+        }
+    }
+}
+
+// ============================================================================
+// PQ / HLG CONVERSION
+// ============================================================================
+
+/// Convert between PQ and HLG
+struct PqHlgConverter {
+    /// HLG system gamma
+    hlg_gamma: f32,
+    /// HLG peak luminance
+    hlg_peak: f32,
+}
+
+impl PqHlgConverter {
+    /// Create converter
+    fn new(hlg_gamma: f32, hlg_peak: f32) -> Self {
+        Self { hlg_gamma, hlg_peak }
+    }
+
+    /// Convert PQ to HLG
+    fn pq_to_hlg(&self, pq_rgb: (f32, f32, f32)) -> (f32, f32, f32) {
+        // Decode PQ to display light
+        let linear = pq_eotf_rgb(pq_rgb);
+
+        // Calculate scene light via inverse OOTF
+        let y_d = 0.2627 * linear.0 + 0.6780 * linear.1 + 0.0593 * linear.2;
+        let scale = if y_d > 0.0 {
+            (y_d / self.hlg_peak).powf((1.0 - self.hlg_gamma) / self.hlg_gamma)
+        } else {
+            1.0
+        };
+
+        let scene_light = (
+            linear.0 / self.hlg_peak * scale,
+            linear.1 / self.hlg_peak * scale,
+            linear.2 / self.hlg_peak * scale,
+        );
+
+        // Encode to HLG
+        hlg_oetf_rgb(scene_light)
+    }
+
+    /// Convert HLG to PQ
+    fn hlg_to_pq(&self, hlg_rgb: (f32, f32, f32)) -> (f32, f32, f32) {
+        // Decode HLG to scene light
+        let scene_light = hlg_eotf_rgb(hlg_rgb);
+
+        // Apply OOTF to get display light
+        let display_light = hlg_ootf_rgb(scene_light, self.hlg_peak, self.hlg_gamma);
+
+        // Encode to PQ
+        pq_oetf_rgb(display_light)
+    }
+}
+
+// ============================================================================
+// WGSL SHADERS FOR HDR
+// ============================================================================
+
+/// HDR shader collection
+const HDR_SHADERS: &str = r#"
+// HDR Transfer Functions Shader Module
+
+// PQ Constants
+const PQ_M1: f32 = 0.1593017578125;
+const PQ_M2: f32 = 78.84375;
+const PQ_C1: f32 = 0.8359375;
+const PQ_C2: f32 = 18.8515625;
+const PQ_C3: f32 = 18.6875;
+const PQ_PEAK: f32 = 10000.0;
+
+// HLG Constants
+const HLG_A: f32 = 0.17883277;
+const HLG_B: f32 = 0.28466892;
+const HLG_C: f32 = 0.55991073;
+
+// PQ EOTF - Decode PQ to linear
+fn pq_eotf(pq: f32) -> f32 {
+    if (pq <= 0.0) {
+        return 0.0;
+    }
+
+    let pq_pow = pow(pq, 1.0 / PQ_M2);
+    let num = max(pq_pow - PQ_C1, 0.0);
+    let den = PQ_C2 - PQ_C3 * pq_pow;
+
+    if (den <= 0.0) {
+        return 0.0;
+    }
+
+    return pow(num / den, 1.0 / PQ_M1) * PQ_PEAK;
+}
+
+// PQ OETF - Encode linear to PQ
+fn pq_oetf(luminance: f32) -> f32 {
+    if (luminance <= 0.0) {
+        return 0.0;
+    }
+
+    let normalized = clamp(luminance / PQ_PEAK, 0.0, 1.0);
+    let y_m1 = pow(normalized, PQ_M1);
+
+    let num = PQ_C1 + PQ_C2 * y_m1;
+    let den = 1.0 + PQ_C3 * y_m1;
+
+    return pow(num / den, PQ_M2);
+}
+
+fn pq_eotf_rgb(rgb: vec3<f32>) -> vec3<f32> {
+    return vec3<f32>(
+        pq_eotf(rgb.r),
+        pq_eotf(rgb.g),
+        pq_eotf(rgb.b)
+    );
+}
+
+fn pq_oetf_rgb(rgb: vec3<f32>) -> vec3<f32> {
+    return vec3<f32>(
+        pq_oetf(rgb.r),
+        pq_oetf(rgb.g),
+        pq_oetf(rgb.b)
+    );
+}
+
+// HLG OETF - Encode linear to HLG
+fn hlg_oetf(linear: f32) -> f32 {
+    if (linear <= 0.0) {
+        return 0.0;
+    }
+
+    if (linear <= 1.0 / 12.0) {
+        return sqrt(3.0 * linear);
+    } else {
+        return HLG_A * log(12.0 * linear - HLG_B) + HLG_C;
+    }
+}
+
+// HLG EOTF - Decode HLG to linear
+fn hlg_eotf(hlg: f32) -> f32 {
+    if (hlg <= 0.0) {
+        return 0.0;
+    }
+
+    if (hlg <= 0.5) {
+        return (hlg * hlg) / 3.0;
+    } else {
+        return exp((hlg - HLG_C) / HLG_A) / 12.0 + HLG_B / 12.0;
+    }
+}
+
+// BT.2020 luminance
+fn bt2020_luminance(rgb: vec3<f32>) -> f32 {
+    return 0.2627 * rgb.r + 0.6780 * rgb.g + 0.0593 * rgb.b;
+}
+
+// Reinhard tonemap
+fn tonemap_reinhard(luminance: f32, white_point: f32) -> f32 {
+    return luminance / (1.0 + luminance / white_point);
+}
+
+// ACES Filmic tonemap
+fn tonemap_aces(x: f32) -> f32 {
+    let a = 2.51;
+    let b = 0.03;
+    let c = 2.43;
+    let d = 0.59;
+    let e = 0.14;
+
+    return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
+}
+
+// Full HDR tonemap shader
+@group(0) @binding(0) var input_texture: texture_2d<f32>;
+@group(0) @binding(1) var output_texture: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(2) var<uniform> params: HdrParams;
+
+struct HdrParams {
+    target_peak: f32,
+    source_peak: f32,
+    knee_start: f32,
+    tonemap_type: u32, // 0=reinhard, 1=aces, 2=bt2390
+};
+
+@compute @workgroup_size(8, 8, 1)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let dims = textureDimensions(input_texture);
+    if (global_id.x >= dims.x || global_id.y >= dims.y) {
+        return;
+    }
+
+    let coords = vec2<i32>(global_id.xy);
+    var color = textureLoad(input_texture, coords, 0);
+
+    // Decode PQ to linear
+    var linear = pq_eotf_rgb(color.rgb);
+
+    // Calculate luminance
+    let y = bt2020_luminance(linear);
+
+    // Apply tonemap
+    var mapped_y: f32;
+    switch (params.tonemap_type) {
+        case 0u: {
+            mapped_y = tonemap_reinhard(y, params.target_peak);
+        }
+        case 1u: {
+            mapped_y = tonemap_aces(y / params.source_peak) * params.target_peak;
+        }
+        default: {
+            mapped_y = y; // passthrough
+        }
+    }
+
+    // Scale RGB proportionally
+    let scale = select(1.0, mapped_y / y, y > 0.0);
+    linear = linear * scale;
+
+    // Encode back to PQ
+    let output = vec4<f32>(pq_oetf_rgb(linear), color.a);
+
+    textureStore(output_texture, coords, output);
+}
+"#;
+
+/// HDR highlight extraction shader
+const HDR_BLOOM_EXTRACT_SHADER: &str = r#"
+@group(0) @binding(0) var input_texture: texture_2d<f32>;
+@group(0) @binding(1) var output_texture: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(2) var<uniform> params: BloomParams;
+
+struct BloomParams {
+    threshold: f32,
+    soft_knee: f32,
+    intensity: f32,
+    _pad: f32,
+};
+
+@compute @workgroup_size(8, 8, 1)
+fn extract_highlights(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let dims = textureDimensions(input_texture);
+    if (global_id.x >= dims.x || global_id.y >= dims.y) {
+        return;
+    }
+
+    let coords = vec2<i32>(global_id.xy);
+    var color = textureLoad(input_texture, coords, 0);
+
+    // Decode PQ to linear
+    let linear = pq_eotf_rgb(color.rgb);
+
+    // Calculate luminance
+    let y = 0.2627 * linear.r + 0.6780 * linear.g + 0.0593 * linear.b;
+
+    // Soft threshold
+    let soft = y - params.threshold + params.soft_knee;
+    let soft_clamped = clamp(soft, 0.0, 2.0 * params.soft_knee);
+    let contrib = soft_clamped * soft_clamped / (4.0 * params.soft_knee + 0.0001);
+
+    let factor = select(contrib / y, 0.0, y <= params.threshold - params.soft_knee);
+    let factor_final = select(factor, (y - params.threshold) / y, y > params.threshold + params.soft_knee);
+
+    var highlights = linear * factor_final * params.intensity;
+
+    // Encode to PQ for storage
+    let output = vec4<f32>(pq_oetf_rgb(highlights), color.a);
+
+    textureStore(output_texture, coords, output);
+}
+"#;
+
+// ============================================================================
+// UNIT TESTS
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const EPSILON: f32 = 0.0001;
+
+    fn approx_eq(a: f32, b: f32) -> bool {
+        (a - b).abs() < EPSILON
+    }
+
+    #[test]
+    fn test_pq_roundtrip() {
+        let test_values = [0.0, 0.1, 1.0, 10.0, 100.0, 1000.0, 5000.0, 10000.0];
+
+        for &value in &test_values {
+            let encoded = pq_oetf(value);
+            let decoded = pq_eotf(encoded);
+            assert!(
+                (value - decoded).abs() < value * 0.01 + EPSILON,
+                "PQ roundtrip failed for {}: got {}",
+                value,
+                decoded
+            );
+        }
+    }
+
+    #[test]
+    fn test_hlg_roundtrip() {
+        let test_values = [0.0, 0.01, 0.1, 0.5, 0.75, 1.0];
+
+        for &value in &test_values {
+            let encoded = hlg_oetf(value);
+            let decoded = hlg_eotf(encoded);
+            assert!(
+                approx_eq(value, decoded),
+                "HLG roundtrip failed for {}: got {}",
+                value,
+                decoded
+            );
+        }
+    }
+
+    #[test]
+    fn test_pq_known_values() {
+        // PQ(0) should be 0
+        assert!(approx_eq(pq_oetf(0.0), 0.0));
+
+        // PQ(100) should be approximately 0.508
+        let pq_100 = pq_oetf(100.0);
+        assert!(
+            (pq_100 - 0.508).abs() < 0.01,
+            "PQ(100) = {}, expected ~0.508",
+            pq_100
+        );
+
+        // PQ(10000) should be 1.0
+        assert!(
+            approx_eq(pq_oetf(10000.0), 1.0),
+            "PQ(10000) should be 1.0"
+        );
+    }
+
+    #[test]
+    fn test_static_metadata() {
+        let meta = StaticHdrMetadata::default_hdr10();
+
+        let (red, green, blue) = meta.get_primaries_f32();
+        assert!((red.0 - 0.708).abs() < 0.01);
+        assert!((green.1 - 0.797).abs() < 0.01);
+
+        let wp = meta.get_white_point_f32();
+        assert!((wp.0 - 0.3127).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_luminance_analyzer() {
+        let analyzer = HdrLuminanceAnalyzer::new(256, 1000.0);
+
+        // Create test pixels (in PQ space)
+        let test_pixels: Vec<(f32, f32, f32)> = vec![
+            pq_oetf_rgb((100.0, 100.0, 100.0)),
+            pq_oetf_rgb((200.0, 200.0, 200.0)),
+            pq_oetf_rgb((500.0, 500.0, 500.0)),
+        ];
+
+        let analysis = analyzer.analyze_frame(&test_pixels);
+
+        assert!(analysis.max_luminance > 0.0);
+        assert!(analysis.average_luminance > 0.0);
+    }
+
+    #[test]
+    fn test_hdr_to_sdr() {
+        let converter = HdrToSdrConverter::new(
+            HdrToSdrOperator::Reinhard,
+            1000.0,
+            100.0,
+        );
+
+        // Test that bright values get compressed
+        let bright = pq_oetf_rgb((500.0, 500.0, 500.0));
+        let sdr = converter.convert_pixel(bright);
+
+        // SDR values should be in [0, 1]
+        assert!(sdr.0 >= 0.0 && sdr.0 <= 1.0);
+        assert!(sdr.1 >= 0.0 && sdr.1 <= 1.0);
+        assert!(sdr.2 >= 0.0 && sdr.2 <= 1.0);
+    }
+
+    #[test]
+    fn test_sdr_to_hdr() {
+        let converter = SdrToHdrConverter::new(
+            SdrToHdrOperator::SigmoidExpansion {
+                knee: 0.5,
+                shoulder: 1.0,
+            },
+            1000.0,
+        );
+
+        let sdr = (0.5, 0.5, 0.5);
+        let hdr = converter.convert_pixel(sdr);
+
+        // HDR values should be PQ encoded
+        assert!(hdr.0 >= 0.0);
+        assert!(hdr.1 >= 0.0);
+        assert!(hdr.2 >= 0.0);
+    }
+
+    #[test]
+    fn test_pq_hlg_conversion() {
+        let converter = PqHlgConverter::new(1.2, 1000.0);
+
+        // Test roundtrip
+        let original_pq = pq_oetf_rgb((400.0, 400.0, 400.0));
+        let hlg = converter.pq_to_hlg(original_pq);
+        let back_to_pq = converter.hlg_to_pq(hlg);
+
+        // Should be approximately equal (some precision loss expected)
+        let original_linear = pq_eotf_rgb(original_pq);
+        let roundtrip_linear = pq_eotf_rgb(back_to_pq);
+
+        assert!(
+            (original_linear.0 - roundtrip_linear.0).abs() < original_linear.0 * 0.1,
+            "PQ-HLG-PQ roundtrip error too large"
+        );
+    }
+
+    #[test]
+    fn test_display_characteristics() {
+        let sdr = DisplayCharacteristics::sdr_display();
+        assert!(!sdr.hdr_capable);
+        assert!(approx_eq(sdr.peak_luminance, 100.0));
+
+        let hdr = DisplayCharacteristics::hdr10_display(1000.0);
+        assert!(hdr.hdr_capable);
+        assert!(approx_eq(hdr.peak_luminance, 1000.0));
+
+        // Dynamic range should be reasonable
+        assert!(hdr.dynamic_range_stops() > 15.0);
+    }
+
+    #[test]
+    fn test_compositor() {
+        let mut compositor = HdrCompositor::new(4, 4, 1000.0);
+
+        let bg = vec![(100.0, 100.0, 100.0, 1.0); 16];
+        let fg = vec![(200.0, 0.0, 0.0, 0.5); 16];
+
+        compositor.set_background(bg);
+        compositor.composite_layer(&fg, HdrBlendMode::Normal, 1.0);
+
+        let result = compositor.get_result();
+
+        // Check that compositing occurred
+        assert!(result[0].0 > 100.0); // Red should increase
+        assert!(result[0].1 < 100.0); // Green should decrease (alpha blend)
+    }
+}

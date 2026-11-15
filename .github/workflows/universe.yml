@@ -1,0 +1,138 @@
+name: universe
+
+# universe/ is the Build Universe tree: BuildLang modules and example programs, a hobby OS
+# kernel, and the frametrace tracer. It moved here from HarperZ9/build-universe.
+#
+#   check      builds buildc from this checkout and runs `buildc check` on every .bld file
+#              under universe/. The files the compiler refuses are listed in
+#              universe/CHECK-FAILS.txt. The job fails when a file fails that is not listed,
+#              or when a listed file passes, so the list stays true. A change to compiler/
+#              runs it too.
+#   structure  the old repository's validation: module folders present, art receipts match.
+#   organism   universe/tools/verify_organism.py on Windows with MSVC: the frametrace Rust
+#              tests, its C ABI demo and its D3D11 hook build. The components that need a
+#              built buildc are reported as skipped in the job summary; `check` covers the
+#              .bld files instead.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "universe/**"
+      - "compiler/**"
+      - ".github/workflows/universe.yml"
+  push:
+    branches: [main]
+    paths:
+      - "universe/**"
+      - "compiler/**"
+      - ".github/workflows/universe.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: universe-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: buildc check on every universe .bld file
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: compiler
+
+      - name: Build buildc
+        working-directory: compiler
+        run: cargo build --release --locked
+
+      - name: Check every .bld file and compare with CHECK-FAILS.txt
+        env:
+          BUILDLANG_STDLIB: ${{ github.workspace }}/stdlib
+        run: |
+          set -o pipefail
+          bash universe/check.sh compiler/target/release/buildc | tee "$RUNNER_TEMP/universe-check.txt"
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### buildc check over universe/"
+            echo '```'
+            cat "$RUNNER_TEMP/universe-check.txt" 2>/dev/null || echo "the check did not run"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  structure:
+    name: Module folders and art receipts
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+    defaults:
+      run:
+        working-directory: universe
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Module folders
+        run: |
+          for module in foundation spectrum photon oracle axiom lumina prism programs buildos calibrate; do
+            if [ ! -d "$module" ]; then
+              echo "missing module folder: $module"
+              exit 1
+            fi
+            echo "ok: $module/"
+          done
+
+      - name: Art receipt digests
+        run: python3 scripts/check_art_receipts.py
+
+  organism:
+    name: Verify organism components (Windows, MSVC)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Verify organism
+        shell: bash
+        run: |
+          set -o pipefail
+          python universe/tools/verify_organism.py --json | tee "$RUNNER_TEMP/organism.json"
+
+      - name: Summary
+        if: always()
+        shell: bash
+        run: |
+          python - "$RUNNER_TEMP/organism.json" >> "$GITHUB_STEP_SUMMARY" <<'PY'
+          import json, sys
+          try:
+              data = json.load(open(sys.argv[1], encoding="utf-8"))
+          except (OSError, ValueError) as exc:
+              print(f"### organism\nno result file: {exc!r}")
+              raise SystemExit(0)
+          print("### organism components")
+          print(f"{data['passed']} passed, {data['failed']} failed, {data['skipped']} skipped\n")
+          print("| component | result |")
+          print("|---|---|")
+          for c in data["components"]:
+              print(f"| {c['name']} | {c['status']} |")
+          PY

@@ -1,0 +1,398 @@
+// ═══════════════════════════════════════════════════════════════════════════════
+// Calibrate Automatic Calibration Runner
+// ═══════════════════════════════════════════════════════════════════════════════
+// Copyright © 2024-2025 Zain Dana Harper. All Rights Reserved.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+use std::io::{File, Write};
+use std::path::Path;
+use std::env;
+use std::time::Instant;
+
+use crate::{
+    MultiMonitorCalibrator,
+    NeuralUXCalibrator,
+    LuminaTitan,
+    DisplayProfile,
+    MonitorInfo,
+    ColorMatchSettings,
+    ICCProfileGenerator,
+    EdidParser,
+    LUT3D,
+};
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CALIBRATION RUNNER
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Automatic calibration result for a single monitor
+pub struct CalibrationResult {
+    pub monitor: MonitorInfo,
+    pub profile: DisplayProfile,
+    pub lut: LUT3D,
+    pub icc_data: Vec<u8>,
+    pub icc_path: String,
+    pub elapsed_ms: u64,
+    pub success: bool,
+    pub message: String,
+}
+
+/// Multi-monitor calibration session
+pub struct CalibrationSession {
+    calibrator: MultiMonitorCalibrator,
+    neural_calibrator: NeuralUXCalibrator,
+    settings: ColorMatchSettings,
+    results: Vec<CalibrationResult>,
+    output_dir: String,
+}
+
+impl CalibrationSession {
+    /// Create a new calibration session
+    pub fn new() -> Self {
+        let output_dir = Self::get_output_directory();
+
+        CalibrationSession {
+            calibrator: MultiMonitorCalibrator::new(),
+            neural_calibrator: NeuralUXCalibrator::new(),
+            settings: ColorMatchSettings::default(),
+            results: Vec::new(),
+            output_dir,
+        }
+    }
+
+    /// Get the output directory for ICC profiles
+    fn get_output_directory() -> String {
+        #[cfg(windows)]
+        {
+            // Windows color profile directory
+            let system_root = env::var("SystemRoot").unwrap_or("C:\\Windows".to_string());
+            format!("{}\\System32\\spool\\drivers\\color", system_root)
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            // macOS user color profile directory
+            let home = env::var("HOME").unwrap_or("/tmp".to_string());
+            format!("{}/Library/ColorSync/Profiles", home)
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            // Linux user color profile directory
+            let home = env::var("HOME").unwrap_or("/tmp".to_string());
+            format!("{}/.local/share/icc", home)
+        }
+    }
+
+    /// Configure calibration settings
+    pub fn with_settings(mut self, settings: ColorMatchSettings) -> Self {
+        self.settings = settings;
+        self
+    }
+
+    /// Set target white point in Kelvin
+    pub fn target_white_point(mut self, kelvin: f64) -> Self {
+        self.settings.target_white_point = kelvin;
+        self
+    }
+
+    /// Set target luminance in cd/m²
+    pub fn target_luminance(mut self, nits: f64) -> Self {
+        self.settings.target_luminance = nits;
+        self
+    }
+
+    /// Set target gamma
+    pub fn target_gamma(mut self, gamma: f64) -> Self {
+        self.settings.target_gamma = gamma;
+        self
+    }
+
+    /// Run automatic calibration on all connected monitors
+    pub fn run(&mut self) -> &Vec<CalibrationResult> ~ Console {
+        println!("═══════════════════════════════════════════════════════════════");
+        println!("  Calibrate Automatic Display Calibration");
+        println!("  NeuralUX AI-Powered Sensorless Calibration");
+        println!("═══════════════════════════════════════════════════════════════");
+        println!();
+
+        // Step 1: Enumerate monitors
+        println!("[1/4] Discovering connected monitors...");
+        self.calibrator.enumerate_monitors();
+        let monitors = self.calibrator.get_monitors().clone();
+
+        if monitors.is_empty() {
+            println!("  ERROR: No monitors detected!");
+            println!("  Please ensure your displays are connected and powered on.");
+            return &self.results;
+        }
+
+        println!("  Found {} monitor(s):", monitors.len());
+        for (i, monitor) in monitors.iter().enumerate() {
+            let primary_marker = if monitor.primary { " [PRIMARY]" } else { "" };
+            println!("    {}. {} {} ({}x{} @ {:.0}Hz){}",
+                i + 1,
+                monitor.manufacturer,
+                monitor.model,
+                monitor.resolution.0,
+                monitor.resolution.1,
+                monitor.refresh_rate,
+                primary_marker
+            );
+            if monitor.hdr_capable {
+                println!("       HDR: Yes ({:.0} nits peak)", monitor.max_luminance);
+            }
+        }
+        println!();
+
+        // Step 2: Calibration settings
+        println!("[2/4] Calibration targets:");
+        println!("  White Point: {:.0}K (D{})",
+            self.settings.target_white_point,
+            if (self.settings.target_white_point - 6500.0).abs() < 100.0 { "65" }
+            else if (self.settings.target_white_point - 5000.0).abs() < 100.0 { "50" }
+            else { "xx" }
+        );
+        println!("  Luminance:   {:.0} cd/m² ({:.0} nits)",
+            self.settings.target_luminance,
+            self.settings.target_luminance
+        );
+        println!("  Gamma:       {:.1}", self.settings.target_gamma);
+        println!("  Tolerance:   ΔE < {:.1}", self.settings.tolerance_delta_e);
+        println!();
+
+        // Step 3: Calibrate each monitor
+        println!("[3/4] Running NeuralUX calibration...");
+
+        for (i, monitor) in monitors.iter().enumerate() {
+            let start = Instant::now();
+
+            println!();
+            println!("  Monitor {}/{}: {} {}",
+                i + 1,
+                monitors.len(),
+                monitor.manufacturer,
+                monitor.model
+            );
+
+            // Parse EDID if available
+            let profile = if !monitor.edid.is_empty() {
+                println!("    → Parsing EDID data ({} bytes)...", monitor.edid.len());
+                match EdidParser::parse(&monitor.edid) {
+                    Ok(edid_info) => {
+                        println!("    → Using EDID-enhanced profiling...");
+                        self.neural_calibrator.estimate_profile_with_edid(&monitor.model, &edid_info)
+                    }
+                    Err(_) => {
+                        println!("    → EDID parse failed, using model-based profiling...");
+                        self.neural_calibrator.estimate_profile(&monitor.model)
+                    }
+                }
+            } else {
+                println!("    → No EDID available, using AI model prediction...");
+                self.neural_calibrator.estimate_profile(&monitor.model)
+            };
+
+            println!("    → Profile: {}", profile.name);
+            println!("    → Detected primaries:");
+            println!("       Red:   ({:.4}, {:.4})", profile.primaries.red.0, profile.primaries.red.1);
+            println!("       Green: ({:.4}, {:.4})", profile.primaries.green.0, profile.primaries.green.1);
+            println!("       Blue:  ({:.4}, {:.4})", profile.primaries.blue.0, profile.primaries.blue.1);
+
+            // Generate 3D LUT (33x33x33 = 35,937 points)
+            println!("    → Generating 33³ calibration LUT...");
+            let lut = self.neural_calibrator.generate_lut(&profile, 33);
+
+            // Generate ICC profile
+            println!("    → Generating ICC v4 profile...");
+            let icc_data = ICCProfileGenerator::generate(&profile);
+
+            // Save ICC profile
+            let safe_name = format!("{}_{}",
+                monitor.manufacturer.replace(" ", "_"),
+                monitor.model.replace(" ", "_")
+            );
+            let icc_filename = format!("Calibrate_{}_NeuralUX.icc", safe_name);
+            let icc_path = format!("{}\\{}", self.output_dir, icc_filename);
+
+            let save_success = match File::create(&icc_path) {
+                Ok(mut file) => {
+                    match file.write_all(&icc_data) {
+                        Ok(_) => {
+                            println!("    → Saved: {}", icc_filename);
+                            true
+                        }
+                        Err(e) => {
+                            println!("    → Warning: Could not write profile: {}", e);
+                            false
+                        }
+                    }
+                }
+                Err(e) => {
+                    println!("    → Warning: Could not create profile file: {}", e);
+                    println!("      (Run as administrator to install to system directory)");
+                    false
+                }
+            };
+
+            let elapsed = start.elapsed().as_millis() as u64;
+
+            self.results.push(CalibrationResult {
+                monitor: monitor.clone(),
+                profile,
+                lut,
+                icc_data,
+                icc_path: if save_success { icc_path } else { String::new() },
+                elapsed_ms: elapsed,
+                success: true,
+                message: format!("Calibrated in {}ms", elapsed),
+            });
+
+            println!("    ✓ Complete ({:.2}s)", elapsed as f64 / 1000.0);
+        }
+
+        println!();
+
+        // Step 4: Summary
+        println!("[4/4] Calibration Summary");
+        println!("═══════════════════════════════════════════════════════════════");
+
+        let successful = self.results.iter().filter(|r| r.success).count();
+        let total_time: u64 = self.results.iter().map(|r| r.elapsed_ms).sum();
+
+        println!("  Monitors calibrated: {}/{}", successful, self.results.len());
+        println!("  Total time: {:.2}s", total_time as f64 / 1000.0);
+        println!();
+
+        println!("  Generated Profiles:");
+        for result in &self.results {
+            if !result.icc_path.is_empty() {
+                println!("    • {}", result.icc_path);
+            }
+        }
+        println!();
+
+        if successful == self.results.len() {
+            println!("  ✓ All monitors calibrated successfully!");
+            println!();
+            println!("  Next steps:");
+            println!("    1. Open Display Settings → Color Management");
+            println!("    2. Select each monitor and assign its ICC profile");
+            println!("    3. Restart color-managed applications");
+        } else {
+            println!("  ⚠ Some monitors could not be fully calibrated.");
+            println!("    Check the warnings above for details.");
+        }
+
+        println!();
+        println!("═══════════════════════════════════════════════════════════════");
+        println!("  Powered by NeuralUX — Perfect Color Without Hardware");
+        println!("═══════════════════════════════════════════════════════════════");
+
+        &self.results
+    }
+
+    /// Get calibration results
+    pub fn results(&self) -> &Vec<CalibrationResult> {
+        &self.results
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MAIN ENTRY POINT
+// ═══════════════════════════════════════════════════════════════════════════════
+
+pub fn main() -> Result<(), Error> ~ Console {
+    // Default calibration: D65 white point, 120 nits, gamma 2.2
+    let mut session = CalibrationSession::new()
+        .target_white_point(6500.0)  // D65 daylight
+        .target_luminance(120.0)     // Standard office lighting
+        .target_gamma(2.2);          // sRGB gamma
+
+    // Run calibration
+    session.run();
+
+    Ok(())
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CLI INTERFACE
+// ═══════════════════════════════════════════════════════════════════════════════
+
+pub fn cli_main() -> Result<(), Error> ~ Console {
+    let args: Vec<String> = env::args().collect();
+
+    let mut white_point = 6500.0;
+    let mut luminance = 120.0;
+    let mut gamma = 2.2;
+
+    // Parse command line arguments
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--white-point" | "-w" => {
+                if i + 1 < args.len() {
+                    white_point = args[i + 1].parse().unwrap_or(6500.0);
+                    i += 1;
+                }
+            }
+            "--luminance" | "-l" => {
+                if i + 1 < args.len() {
+                    luminance = args[i + 1].parse().unwrap_or(120.0);
+                    i += 1;
+                }
+            }
+            "--gamma" | "-g" => {
+                if i + 1 < args.len() {
+                    gamma = args[i + 1].parse().unwrap_or(2.2);
+                    i += 1;
+                }
+            }
+            "--help" | "-h" => {
+                print_help();
+                return Ok(());
+            }
+            "--version" | "-v" => {
+                println!("Calibrate v2.0.0");
+                println!("NeuralUX Sensorless Display Calibration");
+                return Ok(());
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+
+    let mut session = CalibrationSession::new()
+        .target_white_point(white_point)
+        .target_luminance(luminance)
+        .target_gamma(gamma);
+
+    session.run();
+
+    Ok(())
+}
+
+fn print_help() ~ Console {
+    println!("Calibrate - Automatic Display Calibration");
+    println!();
+    println!("USAGE:");
+    println!("    calibrate [OPTIONS]");
+    println!();
+    println!("OPTIONS:");
+    println!("    -w, --white-point <KELVIN>  Target white point (default: 6500)");
+    println!("    -l, --luminance <NITS>      Target luminance in cd/m² (default: 120)");
+    println!("    -g, --gamma <VALUE>         Target gamma (default: 2.2)");
+    println!("    -h, --help                  Print help information");
+    println!("    -v, --version               Print version information");
+    println!();
+    println!("EXAMPLES:");
+    println!("    calibrate                           # Default D65, 120 nits, gamma 2.2");
+    println!("    calibrate -w 5000                   # Warmer D50 white point");
+    println!("    calibrate -l 80 -g 2.4              # Dim room, movie gamma");
+    println!();
+    println!("PRESETS:");
+    println!("    Photo Editing:   -w 6500 -l 120 -g 2.2  (D65, standard)");
+    println!("    Video Editing:   -w 6500 -l 100 -g 2.4  (Rec.709)");
+    println!("    Print Proofing:  -w 5000 -l 80 -g 1.8   (D50, soft proof)");
+    println!("    Night Mode:      -w 4500 -l 60 -g 2.2   (Warm, dim)");
+}

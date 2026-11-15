@@ -1,0 +1,8 @@
+[package]
+name = "shell"
+version = "0.1.0"
+edition = "2021"
+authors = ["Zain Dana Harper"]
+description = "BuildOS shell - interactive command interpreter"
+
+[dependencies]

@@ -24,7 +24,7 @@ experimental `#[linear]` attribute for no-cloning values. The `buildc` CLI
 covers build, run, test, repl, fmt, pkg, watch, and doctor, plus a bundled LSP
 server with completion, hover, diagnostics, and go-to-definition.
 
-[Landing page](https://harperz9.github.io/buildlang/) | [Build ecosystem](https://github.com/HarperZ9/build-universe) | [VS Code extension](https://github.com/HarperZ9/buildlang-vscode) | [grammar](https://github.com/HarperZ9/buildlang-tmLanguage)
+[Landing page](https://harperz9.github.io/buildlang/) | [Build Universe](universe/) | [VS Code extension](https://github.com/HarperZ9/buildlang-vscode) | [grammar](https://github.com/HarperZ9/buildlang-tmLanguage)
 
 ## See it work, step by step
 
@@ -281,8 +281,12 @@ and `#[linear]` types are experimental. Release test results are in
 - [DESIGN.md](DESIGN.md) and [ARCHITECTURE.md](ARCHITECTURE.md): pipeline and rationale
 - Build suite: [suite/](suite/) holds build-engine, build-ui, build-finance, build-oracle and
   build-ecosystem, which were separate repositories before November 2026
-- Peers: [build-universe](https://github.com/HarperZ9/build-universe),
-  [buildlang-vscode](https://github.com/HarperZ9/buildlang-vscode),
+- Build Universe: [universe/](universe/) holds the BuildLang modules and example programs for
+  graphics, colour, finance and systems work, a hobby OS kernel and the frametrace tracer. It
+  was the build-universe repository until November 2026. CI runs `buildc check` on each of its
+  267 `.bld` files; [universe/CHECK-FAILS.txt](universe/CHECK-FAILS.txt) lists the 195 the
+  compiler does not accept yet
+- Peers: [buildlang-vscode](https://github.com/HarperZ9/buildlang-vscode),
   [buildlang-tmLanguage](https://github.com/HarperZ9/buildlang-tmLanguage)
 
 <p align="center"><img src=".github/assets/banner.svg" alt="buildlang: A real systems language: typed capability effects, sum and linear types, C FFI, native binaries." width="100%"></p>

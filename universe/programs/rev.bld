@@ -1,0 +1,111 @@
+// =============================================================================
+// qrev — Reverse characters in each line (GNU rev clone)
+// =============================================================================
+// Usage:
+//   echo "hello" | qrev            -> olleh
+//   echo "abc" | qrev              -> cba
+//   qrev file.txt                  -> reverse each line of file
+//   qrev --help                    -> usage
+// =============================================================================
+
+include!("stdlib/lines.bld");
+
+fn print_help() ~ Console {
+    println!("qrev -- reverse lines characterwise");
+    println!("");
+    println!("Usage:");
+    println!("  qrev [OPTION] [FILE]...");
+    println!("");
+    println!("Options:");
+    println!("  --help   display this help and exit");
+    println!("");
+    println!("Reverse the characters in each line of input.");
+    println!("With no FILE, read standard input.");
+}
+
+fn reverse_line(line: String) -> String {
+    let len = line.len();
+    if len <= 1 { return line; }
+    let mut out = "";
+    let mut i = len - 1;
+    let mut go = true;
+    while go {
+        let c = line.char_at(i);
+        out = out + c;
+        if i == 0 {
+            go = false;
+        } else {
+            i = i - 1;
+        }
+    }
+    out
+}
+
+fn process_content(content: String) ~ Console {
+    let lr = lr_new(content);
+    let mut i = 0;
+    while i < lr.count {
+        let line = lr_get(&lr, i);
+        println!("{}", reverse_line(line));
+        i = i + 1;
+    }
+}
+
+fn main() ~ Console + Environment + FileSystem + Process {
+    let nargs = args_count();
+
+    if nargs < 2 {
+        // No args: try stdin
+        let piped = stdin_is_pipe();
+        if piped {
+            let content = read_all();
+            process_content(content);
+        } else {
+            print_help();
+        }
+        process_exit(0);
+    }
+
+    // Process arguments
+    let mut file_count: i64 = 0;
+
+    let mut i: i64 = 1;
+    while i < nargs {
+        let arg = args_get(i);
+        if arg == "--help" || arg == "-h" {
+            print_help();
+            process_exit(0);
+        } else if !arg.starts_with("-") {
+            file_count = file_count + 1;
+        }
+        i = i + 1;
+    }
+
+    if file_count == 0 {
+        let piped = stdin_is_pipe();
+        if piped {
+            let content = read_all();
+            process_content(content);
+        } else {
+            print_help();
+        }
+        process_exit(0);
+    }
+
+    // Process each file
+    let mut j: i64 = 1;
+    while j < nargs {
+        let arg = args_get(j);
+        if arg.starts_with("-") {
+            j = j + 1;
+        } else {
+            if !file_exists(arg) {
+                println!("qrev: {}: No such file or directory", arg);
+                process_exit(2);
+            }
+            let content = read_file(arg);
+            process_content(content);
+            j = j + 1;
+        }
+    }
+}

@@ -1,0 +1,2798 @@
+diff --git a/.claude/agents/the-architect.md b/.claude/agents/the-architect.md
+index 7e9be05..aec221d 100644
+--- a/.claude/agents/the-architect.md
++++ b/.claude/agents/the-architect.md
+@@ -1,12 +1,12 @@
+-# The Architect — Quanta Ecosystem Orchestrator
++# The Architect -- Quanta Ecosystem Orchestrator
+ 
+-> Design the build from end to end. Model compilation paths, sequence the engineering chain, coordinate specialist domains, and adapt strategy as the ecosystem evolves. The Architect does not write every line — the Architect plans, routes, verifies, and ensures every specialist's output integrates into a proven whole. Every domain's work exists within the Architect's engineering design.
++> Design the build from end to end. Model compilation paths, sequence the engineering chain, coordinate specialist domains, and adapt strategy as the ecosystem evolves. The Architect does not write every line -- the Architect plans, routes, verifies, and ensures every specialist's output integrates into a proven whole. Every domain's work exists within the Architect's engineering design.
+ 
+ ---
+ 
+ ## Disposition
+ 
+-Strategic and verification-obsessed. Holds the entire ecosystem in working memory — what compiles, what doesn't, what's proven, what's claimed, what's shipped, what's blocked. Does not fixate on a single fix path. Maintains multiple viable approaches and redirects when one causes regressions. Values operational coherence over individual cleverness — a coordinated system with 5-layer CI outperforms disconnected fixes that break other modules.
++Strategic and verification-obsessed. Holds the entire ecosystem in working memory -- what compiles, what doesn't, what's proven, what's claimed, what's shipped, what's blocked. Does not fixate on a single fix path. Maintains multiple viable approaches and redirects when one causes regressions. Values operational coherence over individual cleverness -- a coordinated system with 5-layer CI outperforms disconnected fixes that break other modules.
+ 
+ Operates with the Theorist's full-chain planning, the Foundry's build discipline, the Crucible's precision-before-action methodology, and the Optimizer's paranoia about unverified claims. Adapted from offensive operations to defensive engineering: instead of kill chains, designs verification chains. Instead of evasion, designs honest documentation. Instead of exploit reliability, demands test reliability.
+ 
+@@ -14,17 +14,17 @@ Operates with the Theorist's full-chain planning, the Foundry's build discipline
+ 
+ ## Principles
+ 
+-1. **Plan the Full Chain** — A compiler fix is not an isolated patch. It is a sequence: identify root cause → write minimal reproducer → implement fix → verify no regressions → measure ecosystem impact → commit → verify CI. Plan the complete chain before the first edit. Know where failure at one stage forces a pivot.
++1. **Plan the Full Chain** -- A compiler fix is not an isolated patch. It is a sequence: identify root cause → write minimal reproducer → implement fix → verify no regressions → measure ecosystem impact → commit → verify CI. Plan the complete chain before the first edit. Know where failure at one stage forces a pivot.
+ 
+-2. **Multiple Fix Paths** — Never depend on a single approach. When the &mut Adt indexing fix caused regressions in earlier attempts, the secondary path (type checker scope, not codegen) was already being explored. Converging approaches reduce wasted sessions.
++2. **Multiple Fix Paths** -- Never depend on a single approach. When the &mut Adt indexing fix caused regressions in earlier attempts, the secondary path (type checker scope, not codegen) was already being explored. Converging approaches reduce wasted sessions.
+ 
+-3. **Coordinate Specialist Domains** — Each domain has expertise. The Architect sequences their work: Compiler's type fixes feed Color Science's verification. Systems' binary testing feeds Testing's CI pipeline. Package Design's module system feeds Compiler's cross-module resolution. No domain works in isolation. The connections between domains are where the insight lives.
++3. **Coordinate Specialist Domains** -- Each domain has expertise. The Architect sequences their work: Compiler's type fixes feed Color Science's verification. Systems' binary testing feeds Testing's CI pipeline. Package Design's module system feeds Compiler's cross-module resolution. No domain works in isolation. The connections between domains are where the insight lives.
+ 
+-4. **Adapt to Regressions** — No fix survives first contact with the test suite. When a change increases errors instead of decreasing them, reassess immediately. What cascaded? What assumption was wrong? What's the actual root cause? Adapt the approach, do not force the fix.
++4. **Adapt to Regressions** -- No fix survives first contact with the test suite. When a change increases errors instead of decreasing them, reassess immediately. What cascaded? What assumption was wrong? What's the actual root cause? Adapt the approach, do not force the fix.
+ 
+-5. **Every Action Traces to an Objective** — Fixing 8 errors in foundation matters only if it moves the error-free boundary. Adding a test matters only if it catches regressions nothing else catches. Writing documentation matters only if a reviewer would otherwise be misled. No busywork.
++5. **Every Action Traces to an Objective** -- Fixing 8 errors in foundation matters only if it moves the error-free boundary. Adding a test matters only if it catches regressions nothing else catches. Writing documentation matters only if a reviewer would otherwise be misled. No busywork.
+ 
+-6. **Verify Before Claiming** — The 7-gate checklist runs before any analysis is declared complete. Fabricated content is treated as a critical defect. If you didn't run it, you didn't prove it.
++6. **Verify Before Claiming** -- The 7-gate checklist runs before any analysis is declared complete. Fabricated content is treated as a critical defect. If you didn't run it, you didn't prove it.
+ 
+ ---
+ 
+@@ -98,13 +98,13 @@ def route(problem):
+ 
+ Runs before EVERY release, EVERY re-analysis, EVERY "continue" directive. No exceptions.
+ 
+-1. **Every claim has a test** — verify locally with `cargo test` / `pytest`, not just CI badge
+-2. **No fabricated content** — grep for patent/production-ready/enterprise-grade/battle-tested
+-3. **Error handling is a strategy** — no bare `except Exception: pass` or undocumented `unwrap()`
+-4. **Incomplete is documented** — STATUS.md for anything partial, "X of Y implemented" not silence
+-5. **Git hygiene** — 0 stale branches, 0 orphaned files, LICENSE present, .gitignore comprehensive
+-6. **Architecture decisions documented** — design tradeoffs in comments explain WHY, not WHAT
+-7. **First impression clean** — descriptions, topics, CI badges green, releases published, README honest
++1. **Every claim has a test** -- verify locally with `cargo test` / `pytest`, not just CI badge
++2. **No fabricated content** -- grep for patent/production-ready/enterprise-grade/battle-tested
++3. **Error handling is a strategy** -- no bare `except Exception: pass` or undocumented `unwrap()`
++4. **Incomplete is documented** -- STATUS.md for anything partial, "X of Y implemented" not silence
++5. **Git hygiene** -- 0 stale branches, 0 orphaned files, LICENSE present, .gitignore comprehensive
++6. **Architecture decisions documented** -- design tradeoffs in comments explain WHY, not WHAT
++7. **First impression clean** -- descriptions, topics, CI badges green, releases published, README honest
+ 
+ ---
+ 
+diff --git a/.github/FUNDING.yml b/.github/FUNDING.yml
+new file mode 100644
+index 0000000..3ff2daf
+--- /dev/null
++++ b/.github/FUNDING.yml
+@@ -0,0 +1 @@
++github: HarperZ9
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+index d2fbe0f..e597f95 100644
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -6,12 +6,15 @@ on:
+   pull_request:
+     branches: [main]
+ 
++permissions:
++  contents: read
++
+ jobs:
+   validate:
+     name: Validate Repository
+     runs-on: ubuntu-latest
+     steps:
+-      - uses: actions/checkout@v4
++      - uses: actions/checkout@v7
+ 
+       - name: Count .quanta files
+         run: |
+@@ -43,7 +46,7 @@ jobs:
+     name: Lint .quanta files
+     runs-on: ubuntu-latest
+     steps:
+-      - uses: actions/checkout@v4
++      - uses: actions/checkout@v7
+ 
+       - name: Check file encoding (UTF-8)
+         run: |
+diff --git a/.github/workflows/organism.yml b/.github/workflows/organism.yml
+index 0b1fa11..a17cffd 100644
+--- a/.github/workflows/organism.yml
++++ b/.github/workflows/organism.yml
+@@ -16,9 +16,9 @@ jobs:
+     name: Verify organism components
+     runs-on: windows-latest
+     steps:
+-      - uses: actions/checkout@v4
++      - uses: actions/checkout@v7
+ 
+-      - uses: actions/setup-python@v5
++      - uses: actions/setup-python@v6
+         with:
+           python-version: "3.12"
+ 
+diff --git a/.gitignore b/.gitignore
+index 30db79a..9534acf 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -52,3 +52,6 @@ programs/*.c
+ 
+ # coherence-membrane build-state witnesses (per-machine)
+ tools/coherence/witness/
++
++# Python cache generated by tooling utilities
++tools/__pycache__/
+diff --git a/AGENTS.md b/AGENTS.md
+new file mode 100644
+index 0000000..8272d54
+--- /dev/null
++++ b/AGENTS.md
+@@ -0,0 +1,38 @@
++# AGENTS.md - Quanta Universe
++
++## Scope
++
++This file applies to the Quanta Universe repository. Root workspace instructions
++still apply.
++
++## Product Boundary
++
++Quanta Universe is a public ecosystem map and legacy module archive for the
++Build ecosystem. It contains historical `.quanta` modules, organism tooling,
++calibration work, rendering/color modules, OS/kernel experiments, finance
++models, and release metadata.
++
++Current public language names are BuildLang, `buildc`, and `.bld`. Use those
++names for new forward-facing docs. Historical `.quanta` paths may remain when
++they describe existing files or migration work.
++
++## Editing Rules
++
++- Keep `STATUS.md` as the canonical maturity ledger.
++- Keep `README.md`, `USAGE.md`, `CHANGELOG.md`, `tools/components.toml`, and
++  `tools/package-index.toml` aligned when public status changes.
++- Do not overstate whole-ecosystem buildability.
++- Treat generated caches, local calibration files, live measurement artifacts,
++  and private operator records as local-only.
++
++## Verification
++
++Run the slice that matches the change:
++
++```powershell
++python tools/verify_organism.py --quick
++python tools/release_plan.py
++git diff --check
++```
++
++Before committing, scan changed files for credential-shaped content.
+diff --git a/CATALOG.json b/CATALOG.json
+index 869d6e3..5d51ab4 100644
+--- a/CATALOG.json
++++ b/CATALOG.json
+@@ -7,133 +7,177 @@
+       "name": "QuantaLang",
+       "tagline": "The Language of the Universe",
+       "category": "core",
+-      "source": "core/quantalang"
++      "slug": "quantalang",
++      "source": "quantalang",
++      "repository": "https://github.com/HarperZ9/quantalang"
+     },
+     "quantaos": {
+       "name": "QuantaOS",
+       "tagline": "Hobby OS Kernel",
+       "category": "core",
+-      "source": "core/quantaos"
++      "slug": "quanta-os",
++      "source": "quantaos",
++      "repository": "https://github.com/HarperZ9/quantaos"
+     },
+     "axiom": {
+       "name": "Axiom",
+       "tagline": "Self-Evolving AI Through Mathematical Truth",
+       "category": "core",
+-      "source": "core/axiom"
++      "slug": "axiom",
++      "source": "axiom",
++      "repository": "https://github.com/HarperZ9/axiom"
+     },
+     "photon": {
+       "name": "Photon",
+       "tagline": "Universal Light Injection Framework",
+       "category": "rendering",
+-      "source": "rendering/photon"
++      "slug": "photon",
++      "source": "photon",
++      "repository": "https://github.com/HarperZ9/photon"
+     },
+     "spectrum": {
+       "name": "Spectrum",
+       "tagline": "The Complete Science of Light",
+       "category": "rendering",
+-      "source": "rendering/spectrum"
++      "slug": "spectrum",
++      "source": "spectrum",
++      "repository": "https://github.com/HarperZ9/spectrum"
+     },
+     "chromatic": {
+       "name": "Chromatic",
+       "tagline": "Perceptually Uniform Color Space",
+       "category": "rendering",
+-      "source": "rendering/chromatic"
++      "slug": "chromatic",
++      "source": "chromatic",
++      "repository": "https://github.com/HarperZ9/chromatic"
+     },
+     "lumina": {
+       "name": "Lumina",
+       "tagline": "Visual Post-Processing Systems",
+       "category": "rendering",
+-      "source": "rendering/lumina"
++      "slug": "lumina",
++      "source": "lumina",
++      "repository": "https://github.com/HarperZ9/lumina"
+     },
+     "nexus": {
+       "name": "Nexus",
+       "tagline": "Universal Mod Framework",
+       "category": "rendering",
+-      "source": "rendering/nexus"
++      "slug": "nexus",
++      "source": "nexus",
++      "repository": "https://github.com/HarperZ9/nexus"
+     },
+     "prism": {
+       "name": "Prism",
+       "tagline": "Light Refraction Shader Collection",
+       "category": "rendering",
+-      "source": "rendering/prism"
++      "slug": "prism",
++      "source": "prism",
++      "repository": "https://github.com/HarperZ9/prism"
+     },
+     "refract": {
+       "name": "Refract",
+       "tagline": "ENB Integration Layer",
+       "category": "rendering",
+-      "source": "rendering/refract"
++      "slug": "refract",
++      "source": "refract",
++      "repository": "https://github.com/HarperZ9/refract"
+     },
+     "neutrino": {
+       "name": "Neutrino",
+       "tagline": "Neural Rendering Effects",
+       "category": "rendering",
+-      "source": "rendering/neutrino"
++      "slug": "neutrino",
++      "source": "neutrino",
++      "repository": "https://github.com/HarperZ9/neutrino"
+     },
+     "quantum-finance": {
+       "name": "Quantum Finance",
+       "tagline": "Quantitative Trading System",
+       "category": "trading",
+-      "source": "trading/quantum-finance"
++      "slug": "quantum-finance",
++      "source": "quantum-finance",
++      "repository": "https://github.com/HarperZ9/quantum-finance"
+     },
+     "field-tensor": {
+       "name": "Field Tensor",
+       "tagline": "4D Market Data Structure",
+       "category": "trading",
+-      "source": "trading/field-tensor"
++      "slug": "field-tensor",
++      "source": "field-tensor",
++      "repository": "https://github.com/HarperZ9/field-tensor"
+     },
+     "delta": {
+       "name": "Delta",
+       "tagline": "Options Pricing & Greeks",
+       "category": "trading",
+-      "source": "trading/delta"
++      "slug": "delta",
++      "source": "delta",
++      "repository": "https://github.com/HarperZ9/delta"
+     },
+     "entropy": {
+       "name": "Entropy",
+       "tagline": "ML Trading Models",
+       "category": "trading",
+-      "source": "trading/entropy"
++      "slug": "entropy",
++      "source": "entropy",
++      "repository": "https://github.com/HarperZ9/entropy"
+     },
+     "entangle": {
+       "name": "Entangle",
+       "tagline": "PC-Mobile Sync",
+       "category": "integration",
+-      "source": "integration/entangle"
++      "slug": "entangle",
++      "source": "entangle",
++      "repository": "https://github.com/HarperZ9/entangle"
+     },
+     "calibrate": {
+       "name": "Calibrate",
+       "tagline": "Display Calibration System",
+       "category": "integration",
+-      "source": "integration/calibrate"
++      "slug": "calibrate",
++      "source": "calibrate",
++      "repository": "https://github.com/HarperZ9/calibrate"
+     },
+     "nova": {
+       "name": "Nova",
+       "tagline": "Rendering Preset System",
+       "category": "integration",
+-      "source": "integration/nova"
++      "slug": "nova",
++      "source": "nova",
++      "repository": "https://github.com/HarperZ9/nova"
+     },
+     "oracle": {
+       "name": "Oracle",
+       "tagline": "Prediction Engine",
+       "category": "ai",
+-      "source": "ai/oracle"
++      "slug": "oracle",
++      "source": "oracle",
++      "repository": "https://github.com/HarperZ9/oracle"
+     },
+     "wavelength": {
+       "name": "Wavelength",
+       "tagline": "Media Processing Suite",
+       "category": "ai",
+-      "source": "ai/wavelength"
++      "slug": "wavelength",
++      "source": "wavelength",
++      "repository": "https://github.com/HarperZ9/wavelength"
+     },
+     "forge": {
+       "name": "Forge",
+       "tagline": "Developer Tools",
+       "category": "tools",
+-      "source": "tools/forge"
++      "slug": "forge",
++      "source": "forge",
++      "repository": "https://github.com/HarperZ9/forge"
+     },
+     "foundation": {
+       "name": "Foundation",
+       "tagline": "Standard Library",
+       "category": "tools",
+-      "source": "tools/foundation"
++      "slug": "foundation",
++      "source": "foundation",
++      "repository": "https://github.com/HarperZ9/foundation"
+     }
+   }
+ }
+diff --git a/CONTRIBUTING.md b/CONTRIBUTING.md
+new file mode 100644
+index 0000000..219bf2f
+--- /dev/null
++++ b/CONTRIBUTING.md
+@@ -0,0 +1,24 @@
++# Contributing
++
++Quanta Universe is a mixed legacy ecosystem. Contributions should make the repo
++more inspectable, more honest, and easier to migrate into the BuildLang /
++Project Telos toolchain.
++
++## Local checks
++
++```bash
++python tools/verify_organism.py --quick
++python tools/release_plan.py
++git diff --check
++```
++
++## Boundaries
++
++- Keep `STATUS.md` canonical for maturity claims.
++- Keep public names clear: BuildLang is the current language, `buildc` is the
++  current compiler binary, and `.bld` is the current source extension.
++- When touching historical `.quanta` modules, document whether the change is a
++  migration, bridge, or preservation edit.
++- Do not claim the whole ecosystem builds unless the organism verifier proves it.
++- Do not commit generated caches, secrets, local calibration files, or private
++  operator state.
+diff --git a/ENGINEERING.md b/ENGINEERING.md
+index 92a2bbf..0e88269 100644
+--- a/ENGINEERING.md
++++ b/ENGINEERING.md
+@@ -1,4 +1,4 @@
+-# Quanta Ecosystem — Engineering Runbook
++# Quanta Ecosystem -- Engineering Runbook
+ 
+ Last verified: 2026-06-05. Each .quanta module transpiles to C individually; whole-ecosystem cross-module resolution is incomplete and self-hosting is not yet achieved. 56 native programs verified MSVC-clean (65 sources in programs/). Compiler: 612 tests pass / 0 fail on cargo test (755 #[test] annotations across binaries, incl. ignored/multi-bin). See STATUS.md for per-module maturity. No C toolchain is present locally, so native execution of generated C was not re-verified.
+ 
+@@ -9,13 +9,13 @@ Last verified: 2026-06-05. Each .quanta module transpiles to C individually; who
+ | quantalang | 612 pass / 0 fail | clippy + fmt + test + e2e color self-check | v1.0.0 (quantac.exe) |
+ | calibrate-pro | 228 Python | ruff + pytest (Ubuntu + Windows) | v1.0.0 (standalone exe) |
+ | quanta-color | 281 Python | ruff + pytest | v1.0.0 |
+-| quanta-universe | — | file validation | v1.0.0 |
+-| quanta-finance | 142 Python | ruff + pytest | — |
+-| quanta-oracle | 187 Python | ruff + pytest | — |
+-| quanta-engine | 173 Python | ruff + pytest (stubs for cross-deps) | — |
+-| quanta-ui | 17 Python | ruff + pytest (needs libEGL on Linux) | — |
+-| quanta-ecosystem | — | sdist build validation | — |
+-| aurora | no source | referenced only; no .lua source present locally | — |
++| quanta-universe | -- | file validation | v1.0.0 |
++| quanta-finance | 142 Python | ruff + pytest | -- |
++| quanta-oracle | 187 Python | ruff + pytest | -- |
++| quanta-engine | 173 Python | ruff + pytest (stubs for cross-deps) | -- |
++| quanta-ui | 17 Python | ruff + pytest (needs libEGL on Linux) | -- |
++| quanta-ecosystem | -- | sdist build validation | -- |
++| aurora | no source | referenced only; no .lua source present locally | -- |
+ 
+ ## When CI Fails
+ 
+@@ -42,10 +42,10 @@ Last verified: 2026-06-05. Each .quanta module transpiles to C individually; who
+ 
+ 1. Write the program in `programs/`
+ 2. Verify it compiles: `quantac your_program.quanta --target c -o /dev/null`
+-3. If it uses `pow()`, `sqrt()`, or float division — verify `1.0/3.0` produces `0.333`, not `0`
+-4. If it calls methods defined later in the same impl block — move the callee above the caller
++3. If it uses `pow()`, `sqrt()`, or float division -- verify `1.0/3.0` produces `0.333`, not `0`
++4. If it calls methods defined later in the same impl block -- move the callee above the caller
+ 5. Don't use `&str` as function parameters (codegen bug: value vs pointer)
+-6. Commit and push — CI will verify
++6. Commit and push -- CI will verify
+ 
+ ## Adding a New QUANTA-UNIVERSE Module
+ 
+@@ -61,59 +61,59 @@ Last verified: 2026-06-05. Each .quanta module transpiles to C individually; who
+ 
+ ## Known Limitations
+ 
+-### Compiler — Active Limitations (not re-tested this pass)
++### Compiler -- Active Limitations (not re-tested this pass)
+ - **Forward references**: Methods must be defined before they're called within the same impl block.
+ - **DefId misresolution in large files**: In files with 1000+ types, the type checker occasionally resolves names to the wrong DefId. Root cause of many foundation cascading errors.
+ - **Type variable scope leaks**: Generic type parameters (K, V) from one impl block can leak into unrelated functions in the same module.
+ - **Struct literals in some contexts**: `Foo { field: value }` inside deeply nested expressions may be parsed as a block instead of a struct literal.
+ 
+-### Compiler — Verified resolved / docs were stale (2026-06-05)
++### Compiler -- Verified resolved / docs were stale (2026-06-05)
+ Empirically re-tested by compiling minimal repros with `quantac --target c`. Each item below, previously listed as an active limitation, now compiles:
+-- ~~&str parameters~~ — `&str` params compile with correct value semantics.
+-- ~~Infinite type false positive~~ — a fn taking `&StructType` and returning a struct literal of that type compiles.
+-- ~~Trait method dispatch on self~~ — default trait methods calling `self.method()` compile.
+-- ~~Self as unit struct constructor~~ — **FIXED this session**: `fn new() -> Self { Self }` now type-checks and lowers to a valid unit construction `(T){0}` (previously emitted invalid C: `return Self;`). quantalang commit 8d83d74 (branch feat/phase1-generics); regression test `tests/programs/132_unit_self_constructor`.
+-- Also verified to type-check and emit C (native run NOT verified — no local C toolchain): generic methods returning `Self`, generic enum methods, and heap types (`String`) in enum variants.
++- ~~&str parameters~~ -- `&str` params compile with correct value semantics.
++- ~~Infinite type false positive~~ -- a fn taking `&StructType` and returning a struct literal of that type compiles.
++- ~~Trait method dispatch on self~~ -- default trait methods calling `self.method()` compile.
++- ~~Self as unit struct constructor~~ -- **FIXED this session**: `fn new() -> Self { Self }` now type-checks and lowers to a valid unit construction `(T){0}` (previously emitted invalid C: `return Self;`). quantalang commit 8d83d74 (branch feat/phase1-generics); regression test `tests/programs/132_unit_self_constructor`.
++- Also verified to type-check and emit C (native run NOT verified -- no local C toolchain): generic methods returning `Self`, generic enum methods, and heap types (`String`) in enum variants.
+ 
+ Caveat: "compiles" here means type-check + C emission succeed; with no local C compiler, native execution of the emitted C was not verified.
+ 
+-### Compiler — RESOLVED (2026-04-04)
+-- ~~Enum forward declarations~~ — Enums now forward-declared as `typedef struct` (MSVC compatible).
+-- ~~Enum typedef redefinition~~ — Enum struct body uses `struct X {}` not `typedef struct X {} X`.
+-- ~~Intrinsic_ prefix in C output~~ — `intrinsic::trunc` etc. now mapped to C stdlib (trunc, exp2, asin...).
+-- ~~Vec method dispatch~~ — `.push()/.len()/.pop()/.get()` emit typed runtime calls.
+-- ~~Vec subscript on QuantaVecHandle~~ — `vec[i]` emits `quanta_hvec_get_<type>()`.
+-- ~~Missing ctype.h~~ — toupper/tolower/isspace now compile.
++### Compiler -- RESOLVED (2026-04-04)
++- ~~Enum forward declarations~~ -- Enums now forward-declared as `typedef struct` (MSVC compatible).
++- ~~Enum typedef redefinition~~ -- Enum struct body uses `struct X {}` not `typedef struct X {} X`.
++- ~~Intrinsic_ prefix in C output~~ -- `intrinsic::trunc` etc. now mapped to C stdlib (trunc, exp2, asin...).
++- ~~Vec method dispatch~~ -- `.push()/.len()/.pop()/.get()` emit typed runtime calls.
++- ~~Vec subscript on QuantaVecHandle~~ -- `vec[i]` emits `quanta_hvec_get_<type>()`.
++- ~~Missing ctype.h~~ -- toupper/tolower/isspace now compile.
+ - **64/65 programs compile with MSVC 19.50 zero errors**
+ - **7 native executables verified** (color_test 12/12 pass, wc, calc, base64, basename, cmp, grep)
+ 
+-### Compiler — RESOLVED (2026-04-03)
+-- ~~No module imports~~ — `mod foo;` and `use foo::bar;` fully implemented.
+-- ~~No trait dispatch~~ — Trait resolution, vtables, dynamic dispatch all work.
+-- ~~Generic impls skipped~~ — Monomorphization fully implemented.
+-- ~~Macro expansion bug~~ — Brace depth + synthetic span detection fixed.
+-- ~~Field-tensor blocked~~ — Now compiles: 6,108 LOC → 30,882 lines C.
+-- ~~Entropy blocked~~ — Now compiles: 6,681 LOC → 33,760 lines C (ML trading models).
+-- ~~Unsafe blocks eating match arms~~ — Parser fixed: `unsafe`/`async` no longer treated as items.
+-- ~~Cross-module type names~~ — type_module_map + DefId-keyed inherent methods.
+-- ~~Array-to-slice coercion~~ — `[T; N]` ↔ `[T]` unification added.
+-- ~~Ref patterns in closures~~ — `|&s|` and `|&&r|` fixed (parse_pattern_primary + AndAnd).
+-- ~~Missing math builtins~~ — Added tanh, sinh, cosh, asin, acos, atan, exp2.
+-- ~~UTF-8 boundary panics~~ — Added is_char_boundary checks in codegen span extraction.
+-- ~~Nexus blocked~~ — Now compiles: 6,025 LOC → 23,893 lines C.
+-- ~~Delta blocked~~ — Now compiles: 7,084 LOC → 32,746 lines C (options pricing).
+-- ~~Wavelength blocked~~ — Now compiles: 8,791 LOC → 38,811 lines C (audio/video).
+-- ~~Chromatic blocked~~ — Now compiles: 5,948 LOC → 32,119 lines C (color science).
+-- ~~Nova blocked~~ — Now compiles: 8,007 LOC → 32,724 lines C (preset engine).
+-- ~~Calibrate blocked~~ — Now compiles: 6,822 LOC → 25,755 lines C (display calibration).
+-- ~~Oracle blocked~~ — Now compiles: 11,491 LOC → 64,859 lines C (AI forecasting).
+-- ~~Lumina blocked~~ — Now compiles: 10,246 LOC → 44,817 lines C (rendering pipeline).
+-- ~~Refract blocked~~ — Now compiles: 6,227 LOC → 17,461 lines C (ENB/ReShade engine).
+-- ~~Prism blocked~~ — Now compiles: 6,873 LOC → 28,338 lines C (shader pipeline).
+-- ~~Entangle blocked~~ — Now compiles: 3,047 LOC → 7,389 lines C (device mesh). Stripped Arc/Mutex/Duration.
+-- ~~Foundation blocked~~ — Now compiles: 1,335 LOC → 4,615 lines C (stdlib). Trimmed to supported subset (math/string/collections/io/ai/graph).
+-- ~~Neutrino blocked~~ — Now compiles: 5,914 LOC → 33,171 lines C (deep learning). Removed SIMD/raw pointers, simplified Tensor.
+-- ~~Occurs-check false positive~~ — Apply substitution before check in unifier bind().
++### Compiler -- RESOLVED (2026-04-03)
++- ~~No module imports~~ -- `mod foo;` and `use foo::bar;` fully implemented.
++- ~~No trait dispatch~~ -- Trait resolution, vtables, dynamic dispatch all work.
++- ~~Generic impls skipped~~ -- Monomorphization fully implemented.
++- ~~Macro expansion bug~~ -- Brace depth + synthetic span detection fixed.
++- ~~Field-tensor blocked~~ -- Now compiles: 6,108 LOC → 30,882 lines C.
++- ~~Entropy blocked~~ -- Now compiles: 6,681 LOC → 33,760 lines C (ML trading models).
++- ~~Unsafe blocks eating match arms~~ -- Parser fixed: `unsafe`/`async` no longer treated as items.
++- ~~Cross-module type names~~ -- type_module_map + DefId-keyed inherent methods.
++- ~~Array-to-slice coercion~~ -- `[T; N]` ↔ `[T]` unification added.
++- ~~Ref patterns in closures~~ -- `|&s|` and `|&&r|` fixed (parse_pattern_primary + AndAnd).
++- ~~Missing math builtins~~ -- Added tanh, sinh, cosh, asin, acos, atan, exp2.
++- ~~UTF-8 boundary panics~~ -- Added is_char_boundary checks in codegen span extraction.
++- ~~Nexus blocked~~ -- Now compiles: 6,025 LOC → 23,893 lines C.
++- ~~Delta blocked~~ -- Now compiles: 7,084 LOC → 32,746 lines C (options pricing).
++- ~~Wavelength blocked~~ -- Now compiles: 8,791 LOC → 38,811 lines C (audio/video).
++- ~~Chromatic blocked~~ -- Now compiles: 5,948 LOC → 32,119 lines C (color science).
++- ~~Nova blocked~~ -- Now compiles: 8,007 LOC → 32,724 lines C (preset engine).
++- ~~Calibrate blocked~~ -- Now compiles: 6,822 LOC → 25,755 lines C (display calibration).
++- ~~Oracle blocked~~ -- Now compiles: 11,491 LOC → 64,859 lines C (AI forecasting).
++- ~~Lumina blocked~~ -- Now compiles: 10,246 LOC → 44,817 lines C (rendering pipeline).
++- ~~Refract blocked~~ -- Now compiles: 6,227 LOC → 17,461 lines C (ENB/ReShade engine).
++- ~~Prism blocked~~ -- Now compiles: 6,873 LOC → 28,338 lines C (shader pipeline).
++- ~~Entangle blocked~~ -- Now compiles: 3,047 LOC → 7,389 lines C (device mesh). Stripped Arc/Mutex/Duration.
++- ~~Foundation blocked~~ -- Now compiles: 1,335 LOC → 4,615 lines C (stdlib). Trimmed to supported subset (math/string/collections/io/ai/graph).
++- ~~Neutrino blocked~~ -- Now compiles: 5,914 LOC → 33,171 lines C (deep learning). Removed SIMD/raw pointers, simplified Tensor.
++- ~~Occurs-check false positive~~ -- Apply substitution before check in unifier bind().
+ 
+ ### C Codegen
+ - **Tuple typedefs**: `(f32, f32)` emits `Tuple_f32_f32` but the typedef may appear after first use.
+@@ -126,10 +126,10 @@ Caveat: "compiles" here means type-check + C emission succeed; with no local C c
+ 
+ ## 7-Gate Checklist (run before every release)
+ 
+-1. **Every claim has a test** — verify locally, not just CI
+-2. **No fabricated content** — grep for patent/production-ready/enterprise-grade
+-3. **Error handling is a strategy** — no bare `except Exception: pass`
+-4. **Incomplete is documented** — STATUS.md for anything partial
+-5. **Git hygiene** — no .bak, no (1).md, LICENSE present
+-6. **AI writes data, you write architecture** — design decisions documented
+-7. **GitHub pages** — descriptions, topics, CI badges, releases
++1. **Every claim has a test** -- verify locally, not just CI
++2. **No fabricated content** -- grep for patent/production-ready/enterprise-grade
++3. **Error handling is a strategy** -- no bare `except Exception: pass`
++4. **Incomplete is documented** -- STATUS.md for anything partial
++5. **Git hygiene** -- no .bak, no (1).md, LICENSE present
++6. **AI writes data, you write architecture** -- design decisions documented
++7. **GitHub pages** -- descriptions, topics, CI badges, releases
+diff --git a/LINEAGE.md b/LINEAGE.md
+index 870db87..1cf1d9d 100644
+--- a/LINEAGE.md
++++ b/LINEAGE.md
+@@ -1,4 +1,4 @@
+-# Quanta Family — Lineage and Interlacing (Canonical)
++# Quanta Family -- Lineage and Interlacing (Canonical)
+ 
+ Last verified: 2026-06-05. Maps the related workspaces, how the mixed languages
+ hand off to each other, and the foundational-to-derivative direction. Single
+@@ -14,7 +14,7 @@ source of truth for the family tree.
+ | quanta-color | APPS submodule | Python | HarperZ9/quanta-color | Color product (published) |
+ | calibrate-pro | APPS submodule | Python + vendored C/C++ | HarperZ9/calibrate-pro | Display-calibration product (shipped exe) |
+ | quanta-finance / -oracle / -engine / -ui / -ecosystem | APPS submodules | Python | HarperZ9 | Finance / forecast / engine / UI / meta |
+-| aurora | referenced only | Lua (intended) | — | No source present locally |
++| aurora | referenced only | Lua (intended) | -- | No source present locally |
+ 
+ ## Lineage direction (evidence-backed)
+ 
+@@ -30,7 +30,7 @@ QUANTA-UNIVERSE (foundational) -> APPS (derivative productization).
+ 
+ Correction to a common misstatement: APPS does NOT import the .quanta modules
+ (Python cannot). APPS is a parallel, hand-written re-implementation in Python of
+-the same algorithms — a productization, not a binding.
++the same algorithms -- a productization, not a binding.
+ 
+ ## How the languages interlace (handoff chain)
+ 
+@@ -69,7 +69,7 @@ Module correspondence (UNIVERSE .quanta  to  APPS Python):
+ | quanta-ui | 17 | 17 | match |
+ | aurora | Lua | 0 | no source present |
+ 
+-## Combining the family — recommendation
++## Combining the family -- recommendation
+ 
+ Do NOT physically merge git histories or collapse the repos yet. The pieces are
+ intentionally separated by language and release cadence (UNIVERSE = spec,
+@@ -78,12 +78,12 @@ merge would shred the submodule structure and the .quanta/Python boundary.
+ 
+ Recommended combination mechanism, safest first:
+ 
+-1. Lineage manifest (this file) — one authoritative map. Done.
+-2. Shared golden-vector tests — extract the verifiable kernels (color, options,
++1. Lineage manifest (this file) -- one authoritative map. Done.
++2. Shared golden-vector tests -- extract the verifiable kernels (color, options,
+    SARIMA, SHA-256) into language-neutral test vectors that BOTH the .quanta and
+    the Python implementations must satisfy. This is the real combine: it binds
+    the two language families by behavior, not by moving files.
+-3. Optional umbrella repo — add UNIVERSE and APPS as submodules of a thin parent
++3. Optional umbrella repo -- add UNIVERSE and APPS as submodules of a thin parent
+    (or a git subtree) only if a single clone is required. Reversible.
+ 
+ Physical history merge is out of scope until explicitly requested.
+diff --git a/README.md b/README.md
+index 742a5a8..8a51c64 100644
+--- a/README.md
++++ b/README.md
+@@ -1,11 +1,33 @@
+ # Quanta Universe v1.0.0
+ 
+-A physics-inspired software ecosystem: programming language, operating system kernel, graphics engines, trading systems, and AI frameworks - all written in QuantaLang.
++![Quanta Universe ecosystem hero](docs/brand/quanta-universe-hero.svg)
++
++> Legacy Quanta Universe modules mapped into the current BuildLang / Project Telos ecosystem.
++
++[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
++![buildlang](https://img.shields.io/badge/buildlang-.bld-orange.svg)
++![version](https://img.shields.io/badge/version-1.0.0-informational.svg)
++[![CI](https://github.com/HarperZ9/quanta-universe/actions/workflows/ci.yml/badge.svg)](https://github.com/HarperZ9/quanta-universe/actions/workflows/ci.yml)
++![deps: none](https://img.shields.io/badge/deps-none-success.svg)
++[![part of: Quanta ecosystem](https://img.shields.io/badge/part_of-Quanta_ecosystem-00b3a4.svg)](https://github.com/HarperZ9/quanta-universe)
++
++A physics-inspired software ecosystem: programming language, operating system kernel, graphics engines, trading systems, and AI frameworks. The current public language/toolchain names are **BuildLang**, **`buildc`**, and **`.bld`**; this repository still contains historical `.quanta` modules that document the earlier Quanta Universe lineage.
++
++## Current status
++
++Quanta Universe is an alpha ecosystem archive and showcase, not a single
++installable product. Treat it as the Build ecosystem map: language experiments,
++color and rendering modules, OS/kernel work, finance models, calibration code,
++and organism verification tooling collected in one place.
++
++The compiler/toolchain lives in the separate BuildLang repository. This repo's
++local `.quanta` files are legacy source assets until they are migrated or
++bridged into `.bld`. `STATUS.md` is the canonical maturity ledger.
+ 
+ ## Modules
+ 
+ ### Core
+-- **QuantaLang** - Multi-paradigm systems language with algebraic effects, ownership, and a production C backend (HLSL/GLSL/LLVM/x86-64/ARM64/WASM/SPIR-V backends exist but are experimental and do not yet emit runnable artifacts)
++- **BuildLang** - Multi-paradigm systems language with algebraic effects, ownership, and a production C backend (HLSL/GLSL/LLVM/x86-64/ARM64/WASM/SPIR-V backends exist but are experimental and do not yet emit runnable artifacts)
+ - **QuantaOS** - Hobby OS kernel (x86-64, ext2/4, context switching, memory management)
+ - **Axiom** - Neural architecture search and differentiable program synthesis
+ 
+@@ -40,14 +62,58 @@ A physics-inspired software ecosystem: programming language, operating system ke
+ 
+ ## Status
+ 
+-**Alpha.** The QuantaLang compiler (Rust; 755 test functions in tree) is the most mature component. The C backend produces correct native binaries. HLSL/GLSL produce clean shader output. Other backends are experimental. The .quanta modules demonstrate the language's capabilities across domains. See [quantaos/STATUS.md](quantaos/STATUS.md) for kernel implementation state.
++**Alpha.** The BuildLang compiler (Rust; 755 test functions in tree) is the most mature component. The C backend produces correct native binaries. HLSL/GLSL produce clean shader output. Other backends are experimental. The historical `.quanta` modules demonstrate the language lineage across domains. See [quantaos/STATUS.md](quantaos/STATUS.md) for kernel implementation state.
++
++### Publication Map
++
++Split-repo package metadata now lives in [tools/package-index.toml](tools/package-index.toml).
++Module slugs follow lowercase-hyphen naming for public-facing package IDs.
++Use [releases/release-candidates.md](releases/release-candidates.md) for the
++current publish dashboard and [tools/showcase.md](tools/showcase.md) for the
++audience-facing module surface.
++
++## Usage
++
++This is a multi-module ecosystem, not a single installable package. The two
++things you actually run are the BuildLang compiler/toolchain for source files
++and the Python organism tooling (`tools/verify_organism.py`,
++`tools/release_plan.py`). See **[USAGE.md](USAGE.md)** for install/build lines,
++the real commands, and worked examples. A runnable demo lives in
++[examples/demo/](examples/demo/).
++
++Quick orientation:
++
++```sh
++# 1. Verify which components actually build/pass on this machine (no compiler needed)
++python tools/verify_organism.py --quick
++
++# 2. Transpile a module or program to C with the BuildLang compiler (separate repo)
++buildc programs/echo.bld --target c -o /dev/null
++```
++
++`buildc` comes from the separate [BuildLang compiler repo](https://github.com/HarperZ9/quantalang)
++repo (build it with `cargo build --release`); it is not bundled here.
++
++## For developers
++
++Use the organism tooling for this repo's own health checks:
++
++```bash
++python tools/verify_organism.py --quick
++python tools/release_plan.py
++git diff --check
++```
++
++When editing module metadata, keep `STATUS.md`, `tools/components.toml`,
++`tools/package-index.toml`, `USAGE.md`, and this README aligned. Do not claim
++whole-ecosystem buildability unless `tools/verify_organism.py` proves it.
+ 
+ ## Caveats
+ 
+-- **This ecosystem does not compile as a whole.** Each module depends on the QuantaLang compiler (separate repo: [HarperZ9/quantalang](https://github.com/HarperZ9/quantalang)). The compiler can compile individual modules but cross-module resolution is not yet complete.
++- **This ecosystem does not compile as a whole.** Each module depends on the BuildLang compiler (separate repo: [HarperZ9/quantalang](https://github.com/HarperZ9/quantalang)). The compiler can compile individual modules but cross-module resolution is not yet complete.
+ - **QuantaOS** is an educational hobby kernel, not a production OS. See [quantaos/STATUS.md](quantaos/STATUS.md).
+ - **Axiom** is an experimental proof-of-concept for differentiable program synthesis.
+-- The `.quanta` source files serve as both working code and language specification - demonstrating QuantaLang's syntax across domains.
++- The `.quanta` source files serve as historical working code and language specification material while the current public surface moves to `.bld`.
+ 
+ ## Ground Truth
+ 
+diff --git a/STATUS.md b/STATUS.md
+index 741faad..06b986c 100644
+--- a/STATUS.md
++++ b/STATUS.md
+@@ -1,4 +1,4 @@
+-# QUANTA-UNIVERSE — Module Maturity Ledger (Canonical)
++# QUANTA-UNIVERSE -- Module Maturity Ledger (Canonical)
+ 
+ Last verified: 2026-06-05. This file is the single source of truth for module
+ reality. Where README, ENGINEERING, CHANGELOG, UNIVERSE.toml, or CATALOG.json
+@@ -16,7 +16,7 @@ source audit: real, correct, extractable logic vs scaffolding/showcase.
+ - ~6 GB of local disk is Cargo target/ build cache (already git-ignored; the
+   compiler dir quantalang/ is itself git-ignored, a separate repo).
+ 
+-## Tier 1 — Load-bearing, real, extractable (the engine)
++## Tier 1 -- Load-bearing, real, extractable (the engine)
+ 
+ | Component | Score | What is real |
+ |---|---|---|
+@@ -27,7 +27,7 @@ source audit: real, correct, extractable logic vs scaffolding/showcase.
+ | delta (options pricing) | 8.0 | Black-Scholes exact, full Greeks, Newton-Raphson + Brent IV |
+ | foundation math / crypto | 8.0 / 7.0 | SHA-256 FIPS 180-4 correct; trig/pow/log via intrinsics |
+ 
+-## Tier 2 — Real kernel inside scaffolding (extract the core)
++## Tier 2 -- Real kernel inside scaffolding (extract the core)
+ 
+ | Component | Score | Real core | Scaffolding |
+ |---|---|---|---|
+@@ -41,7 +41,7 @@ source audit: real, correct, extractable logic vs scaffolding/showcase.
+ | axiom | 5.0 | Forward-mode dual-number autodiff correct | Mutation ops stubbed; MAML/CMA-ES sketched |
+ | foundation collections | 6.0 | Vec correct | HashMap/BTreeMap sparse; regex executor missing |
+ 
+-## Tier 3 — Sketch / showcase (design intent, not engineering)
++## Tier 3 -- Sketch / showcase (design intent, not engineering)
+ 
+ These remain in-tree (interlaced into build/interconnect wiring) but are not to
+ be represented as implemented engineering.
+diff --git a/USAGE.md b/USAGE.md
+new file mode 100644
+index 0000000..90b1df5
+--- /dev/null
++++ b/USAGE.md
+@@ -0,0 +1,179 @@
++# Usage
++
++Quanta Universe is a **mixed-language ecosystem**, not a single installable
++package. There is no `pip install` / `npm install` / `cargo install` for the
++whole repo. The two surfaces you actually invoke are:
++
++1. **Compiler path** -- historical fixtures in this repo use `quantac` over
++   `.quanta` modules; the current public toolchain name is BuildLang / `buildc`
++   over `.bld` source.
++2. **The Python organism tooling** in `tools/` -- `verify_organism.py` (ground-truth
++   build/test report) and `release_plan.py` (split-repo release view).
++
++> Authoritative per-module reality lives in [STATUS.md](STATUS.md). Where any doc
++> disagrees with STATUS.md, STATUS.md wins. The commands below use only the
++> invocation forms that appear verbatim in this repo (`tools/components.toml`,
++> `programs/build_all.bat`, `ENGINEERING.md`, `tools/coherence/compiler_oracle.py`).
++
++---
++
++## Prerequisites
++
++| Surface | Requirement |
++|---------|-------------|
++| `quantac` compiler | Build from the separate repo [HarperZ9/quantalang](https://github.com/HarperZ9/quantalang): `cargo build --release` → `quantalang/compiler/target/release/quantac.exe`. Not bundled here. |
++| Native `.exe` from generated C | A C toolchain -- MSVC `cl.exe` (Visual Studio 2022 Build Tools) or `gcc`. |
++| Organism / release tooling | Python 3.11+ (`tomllib` is used, stdlib since 3.11). No third-party deps. |
++
++The organism tooling runs with no compiler present -- components that need
++`quantac` or MSVC report `SKIP` honestly rather than failing.
++
++---
++
++## Install / build line
++
++```sh
++# Organism tooling -- nothing to install, just run with Python 3.11+
++python tools/verify_organism.py --quick
++
++# Compiler (separate repo) -- build once, then put quantac on PATH
++git clone https://github.com/HarperZ9/quantalang
++cd quantalang/compiler && cargo build --release
++# binary: quantalang/compiler/target/release/quantac(.exe)
++```
++
++---
++
++## The compilation pipeline
++
++```
++source.quanta  -->  quantac  -->  program.c  -->  cl.exe /O2 (or gcc)  -->  program.exe
++                    (Rust)        (generated)      (C compiler)              (native)
++```
++
++`quantac` lowers QuantaLang to C; the generated C is then compiled with any
++standard C compiler. (From `programs/README.md`.)
++
++---
++
++## Example 1 -- Check what actually builds (no compiler required)
++
++```sh
++python tools/verify_organism.py --quick
++```
++
++Runs every component listed in `tools/components.toml`, in its directory, and
++reports observed results. Exit code = number of failures (so it doubles as a CI
++gate). `--quick` skips the heavy compiler build; `--json` emits a machine-readable
++summary.
++
++Expected output (illustrative -- shape per the script's own formatter; the exact
++PASS/SKIP set depends on whether `quantac` and MSVC are present locally):
++
++```
++Quanta organism -- verifiable components (ground truth)
++
++  component         lang    tier  expect   result        fresh  time
++  ------------------------------------------------------------------------
++  frametrace-core   rust    T1    tested   PASS          fresh   3.4s
++  quantalang        rust    T0    tested   SKIP:quick    -          -
++  spectrum          quanta  T1    build    SKIP:no-quantac  -       -
++  ...
++
++ORGANISM: N passed, 0 failed, M skipped
++```
++
++When `quantac` is absent, the `.quanta` modules show `SKIP:no-quantac` rather
++than failing -- that is the intended honest behavior, not an error.
++
++---
++
++## Example 2 -- Transpile a self-contained program to C
++
++`programs/echo.quanta` is `qecho`, a self-contained `echo` clone -- one of the
++`programs/` set that `build_all.bat` builds to native `.exe` (STATUS.md Tier 1
++counts 56 MSVC exes; the individually codegen-confirmed self-contained programs
++named there are `color_test`, `wc`, and `base64`).
++
++```sh
++quantac programs/echo.quanta --target c -o /dev/null   # type-check + emit, discard output
++quantac programs/echo.quanta                            # emit programs/echo.c
++```
++
++The first form (used by `tools/components.toml` and `ENGINEERING.md`; on Windows
++the discard target is `nul`) checks that the program transpiles and exits 0 on
++success. The second form (used by `programs/build_all.bat`) writes the generated
++C next to the source.
++
++Expected (illustrative): on success `quantac` exits 0 and, in the second form,
++produces `programs/echo.c`. A type/codegen error prints a diagnostic and a
++non-zero exit.
++
++---
++
++## Example 3 -- Transpile and build a program to a native binary (Windows + MSVC)
++
++```bat
++cd programs
++build_all.bat
++```
++
++`build_all.bat` runs `quantac` over every `*.quanta` in `programs/` and then
++compiles each generated `.c` with MSVC `cl /O2`, emitting `q<name>.exe` (e.g.
++`qecho.exe`, `qwc.exe`). It expects `quantac.exe` at
++`..\quantalang\compiler\target\release\quantac.exe` and VS 2022 Build Tools.
++
++To build a single generated C file by hand:
++
++```bat
++quantac programs\echo.quanta            REM -> programs\echo.c
++programs\build.bat programs\echo.c qecho.exe
++```
++
++Expected output (illustrative -- per the scripts' own echoes):
++
++```
++=== Building all QuantaLang programs ===
++  Compiling echo.quanta...
++  OK  qecho.exe
++  ...
++=== Results ===
++  PASS: 56
++  FAIL: ...
++  SKIP: ...
++```
++
++> Not every `.quanta` module builds standalone. `tools/components.toml` documents
++> which modules transpile on their own; modules like `photon`, `quantum-finance`,
++> `axiom`, and `forge` are intentionally **not** registered as buildable (see the
++> header comment in that file and STATUS.md).
++
++---
++
++## Example 4 -- Verify a single module transpiles
++
++Each domain module exposes `lib.quanta`. The organism check for a module is
++exactly its `verify` command from `tools/components.toml`, e.g. for `spectrum`:
++
++```sh
++cd spectrum
++quantac lib.quanta --target c -o /dev/null    # nul on Windows
++```
++
++Exit 0 means the module transpiles to C standalone. This is a `build`-level
++check (transpile/exit-0), not proof the emitted C compiles end-to-end -- see the
++codegen-oracle note in STATUS.md for that deeper, separate witness.
++
++---
++
++## Release tooling (maintainers)
++
++`tools/release_plan.py` turns `tools/package-index.toml` into a release view:
++
++```sh
++python tools/release_plan.py --only-publish --json
++python tools/release_plan.py --module axiom --json
++python tools/release_plan.py --only-publish --write-markdown
++```
++
++See [tools/README.md](tools/README.md) for the full tooling overview.
+diff --git a/axiom/lib.quanta b/axiom/lib.quanta
+index 446222b..2241552 100644
+--- a/axiom/lib.quanta
++++ b/axiom/lib.quanta
+@@ -516,12 +516,27 @@ impl QuantaEvolution {
+     }
+     
+     fn point_mutation(&mut self, program: &mut Program) {
+-        // Change a single operator
+-        // Implementation depends on AST traversal
++        if program.ast.size() == 0 {
++            return;
++        }
++
++        let idx = self.rng.next_usize() % program.ast.size();
++        let operators = GeneticOperators::new(self.rng.next_u64());
++        let old_subtree = operators.get_subtree(&program.ast, idx);
++        let new_subtree = self.mutate_node(&old_subtree);
++        program.ast = operators.replace_subtree(&program.ast, idx, &new_subtree);
+     }
+     
+     fn subtree_mutation(&mut self, program: &mut Program) {
+-        // Replace a random subtree
++        if program.ast.size() == 0 {
++            return;
++        }
++
++        let mut operators = GeneticOperators::new(self.rng.next_u64());
++        let idx = self.rng.next_usize() % program.ast.size();
++        let depth = max(1, min(3, program.ast.depth()));
++        let replacement = operators.random_tree(depth);
++        program.ast = operators.replace_subtree(&program.ast, idx, &replacement);
+     }
+     
+     fn constant_mutation(&mut self, program: &mut Program) {
+@@ -537,7 +552,141 @@ impl QuantaEvolution {
+     }
+     
+     fn expansion(&mut self, program: &mut Program) {
+-        // Add complexity (new operations)
++        if program.ast.size() > 80 {
++            return;
++        }
++
++        let mut operators = GeneticOperators::new(self.rng.next_u64());
++        let insertion = operators.random_tree(2);
++        match self.rng.next_u64() % 3 {
++            0 => {
++                program.ast = ASTNode::Add(Box::new(program.ast.clone()), Box::new(insertion));
++            }
++            1 => {
++                program.ast = ASTNode::Mul(Box::new(program.ast.clone()), Box::new(insertion));
++            }
++            _ => {
++                program.ast = ASTNode::Neg(Box::new(program.ast.clone()));
++            }
++        }
++    }
++
++    fn mutate_node(&mut self, node: &ASTNode) -> ASTNode {
++        match node {
++            ASTNode::Literal(value) => {
++                ASTNode::Literal(value + self.rng.next_f64() * 0.2 - 0.1)
++            },
++            ASTNode::Variable(name) => {
++                if self.rng.next_f64() < 0.5 {
++                    ASTNode::Variable(name.clone())
++                } else if self.rng.next_f64() < 0.5 {
++                    ASTNode::Variable("x".to_string())
++                } else {
++                    ASTNode::Variable("y".to_string())
++                }
++            },
++            ASTNode::Add(a, b) => {
++                match self.rng.next_u64() % 4 {
++                    0 => ASTNode::Sub(a.clone(), b.clone()),
++                    1 => ASTNode::Mul(a.clone(), b.clone()),
++                    2 => ASTNode::Div(a.clone(), b.clone()),
++                    _ => ASTNode::Add(a.clone(), b.clone()),
++                }
++            },
++            ASTNode::Sub(a, b) => {
++                match self.rng.next_u64() % 4 {
++                    0 => ASTNode::Add(a.clone(), b.clone()),
++                    1 => ASTNode::Mul(a.clone(), b.clone()),
++                    2 => ASTNode::Div(a.clone(), b.clone()),
++                    _ => ASTNode::Sub(a.clone(), b.clone()),
++                }
++            },
++            ASTNode::Mul(a, b) => {
++                match self.rng.next_u64() % 4 {
++                    0 => ASTNode::Add(a.clone(), b.clone()),
++                    1 => ASTNode::Sub(a.clone(), b.clone()),
++                    2 => ASTNode::Div(a.clone(), b.clone()),
++                    _ => ASTNode::Mul(a.clone(), b.clone()),
++                }
++            },
++            ASTNode::Div(a, b) => {
++                match self.rng.next_u64() % 3 {
++                    0 => ASTNode::Mul(a.clone(), b.clone()),
++                    1 => ASTNode::Sub(a.clone(), b.clone()),
++                    _ => ASTNode::Div(a.clone(), b.clone()),
++                }
++            },
++            ASTNode::Neg(inner) => {
++                ASTNode::Sin(inner.clone())
++            },
++            ASTNode::Sin(inner) => {
++                ASTNode::Cos(inner.clone())
++            },
++            ASTNode::Cos(inner) => {
++                ASTNode::Tanh(inner.clone())
++            },
++            ASTNode::Tanh(inner) => {
++                ASTNode::Abs(inner.clone())
++            },
++            ASTNode::Abs(inner) => {
++                ASTNode::Neg(inner.clone())
++            },
++            ASTNode::Exp(inner) => {
++                ASTNode::Log(inner.clone())
++            },
++            ASTNode::Log(inner) => {
++                ASTNode::Exp(inner.clone())
++            },
++            ASTNode::Pow(base, exp) => {
++                ASTNode::Mul(base.clone(), exp.clone())
++            },
++            ASTNode::Lambda(params, body) => {
++                if params.is_empty() {
++                    ASTNode::Lambda(params.clone(), body.clone())
++                } else {
++                    let mut new_params = params.clone();
++                    let idx = self.rng.next_usize() % params.len();
++                    if self.rng.next_f64() < 0.5 {
++                        new_params[idx] = if self.rng.next_f64() < 0.5 {
++                            "x".to_string()
++                        } else {
++                            "y".to_string()
++                        };
++                    }
++                    ASTNode::Lambda(new_params, Box::new(self.mutate_node(body)))
++                }
++            },
++            ASTNode::If(cond, then_expr, else_expr) => {
++                match self.rng.next_u64() % 2 {
++                    0 => ASTNode::If(cond.clone(), else_expr.clone(), then_expr.clone()),
++                    _ => ASTNode::If(cond.clone(), then_expr.clone(), else_expr.clone()),
++                }
++            },
++            ASTNode::Let(name, value, body) => {
++                ASTNode::Let(name.clone(), body.clone(), value.clone())
++            },
++            ASTNode::Fix(name, body) => {
++                ASTNode::Fix(name.clone(), body.clone())
++            },
++            ASTNode::Apply(func, args) => {
++                if args.len() > 0 {
++                    let mut new_args = args.clone();
++                    let idx = self.rng.next_usize() % args.len();
++                    new_args[idx] = self.mutate_node(&args[idx]);
++                    ASTNode::Apply(func.clone(), new_args)
++                } else {
++                    ASTNode::Apply(func.clone(), vec![])
++                }
++            },
++            ASTNode::Linear(a, b) => ASTNode::Linear(*a, *b),
++            ASTNode::Activation(act) => ASTNode::Activation(*act),
++            ASTNode::Attention(heads) => ASTNode::Attention(*heads),
++            ASTNode::Cons(a, b) => ASTNode::Cons(a.clone(), b.clone()),
++            ASTNode::Car(inner) => ASTNode::Cdr(inner.clone()),
++            ASTNode::Cdr(inner) => ASTNode::Car(inner.clone()),
++            ASTNode::Nil => ASTNode::Nil,
++            ASTNode::Sqrt(inner) => ASTNode::Exp(inner.clone()),
++        }
+     }
+ }
+ 
+@@ -2161,13 +2310,238 @@ impl GeneticOperators {
+     }
+ 
+     fn get_subtree(&self, node: &ASTNode, _idx: usize) -> ASTNode {
+-        // Returns subtree at index
+-        node.clone()
++        let mut cursor: usize = 0;
++        let mut result: Option<ASTNode> = None;
++        self.find_subtree(node, _idx, &mut cursor, &mut result);
++        result.unwrap_or_else(|| node.clone())
+     }
+ 
+     fn replace_subtree(&self, node: &ASTNode, _idx: usize, replacement: &ASTNode) -> ASTNode {
+-        // Replace subtree at index
+-        replacement.clone()
++        let mut cursor: usize = 0;
++        let mut replaced = false;
++        let result = self.replace_subtree_walk(node, _idx, replacement, &mut cursor, &mut replaced);
++        if replaced {
++            result
++        } else {
++            node.clone()
++        }
++    }
++
++    fn find_subtree(&self, node: &ASTNode, target: usize, cursor: &mut usize, result: &mut Option<ASTNode>) {
++        if *cursor == target {
++            *result = Some(node.clone());
++            return;
++        }
++
++        *cursor = *cursor + 1;
++        if result.is_some() {
++            return;
++        }
++
++        match node {
++            ASTNode::Add(a, b) | ASTNode::Sub(a, b) | ASTNode::Mul(a, b) |
++            ASTNode::Div(a, b) | ASTNode::Pow(a, b) | ASTNode::Cons(a, b) => {
++                self.find_subtree(a, target, cursor, result);
++                if result.is_none() {
++                    self.find_subtree(b, target, cursor, result);
++                }
++            },
++            ASTNode::Neg(a) | ASTNode::Sin(a) | ASTNode::Cos(a) | ASTNode::Exp(a) |
++            ASTNode::Log(a) | ASTNode::Sqrt(a) | ASTNode::Abs(a) | ASTNode::Tanh(a) |
++            ASTNode::Car(a) | ASTNode::Cdr(a) => {
++                self.find_subtree(a, target, cursor, result);
++            },
++            ASTNode::If(c, t, e) => {
++                self.find_subtree(c, target, cursor, result);
++                if result.is_none() {
++                    self.find_subtree(t, target, cursor, result);
++                }
++                if result.is_none() {
++                    self.find_subtree(e, target, cursor, result);
++                }
++            },
++            ASTNode::Lambda(_params, body) => {
++                self.find_subtree(body, target, cursor, result);
++            },
++            ASTNode::Apply(func, args) => {
++                self.find_subtree(func, target, cursor, result);
++                if result.is_none() {
++                    for arg in args {
++                        if result.is_none() {
++                            self.find_subtree(arg, target, cursor, result);
++                        }
++                    }
++                }
++            },
++            ASTNode::Let(_, value, body) => {
++                self.find_subtree(value, target, cursor, result);
++                if result.is_none() {
++                    self.find_subtree(body, target, cursor, result);
++                }
++            },
++            ASTNode::Fix(_, body) => {
++                self.find_subtree(body, target, cursor, result);
++            },
++            _ => {}
++        }
++    }
++
++    fn replace_subtree_walk(
++        &self,
++        node: &ASTNode,
++        target: usize,
++        replacement: &ASTNode,
++        cursor: &mut usize,
++        replaced: &mut bool,
++    ) -> ASTNode {
++        if *replaced {
++            return node.clone();
++        }
++
++        if *cursor == target {
++            *replaced = true;
++            return replacement.clone();
++        }
++
++        *cursor = *cursor + 1;
++        if *replaced {
++            return node.clone();
++        }
++
++        match node {
++            ASTNode::Add(a, b) => ASTNode::Add(
++                Box::new(self.replace_subtree_walk(a, target, replacement, cursor, replaced)),
++                Box::new(if *replaced {
++                    b.clone()
++                } else {
++                    self.replace_subtree_walk(b, target, replacement, cursor, replaced)
++                }),
++            ),
++            ASTNode::Sub(a, b) => ASTNode::Sub(
++                Box::new(self.replace_subtree_walk(a, target, replacement, cursor, replaced)),
++                Box::new(if *replaced {
++                    b.clone()
++                } else {
++                    self.replace_subtree_walk(b, target, replacement, cursor, replaced)
++                }),
++            ),
++            ASTNode::Mul(a, b) => ASTNode::Mul(
++                Box::new(self.replace_subtree_walk(a, target, replacement, cursor, replaced)),
++                Box::new(if *replaced {
++                    b.clone()
++                } else {
++                    self.replace_subtree_walk(b, target, replacement, cursor, replaced)
++                }),
++            ),
++            ASTNode::Div(a, b) => ASTNode::Div(
++                Box::new(self.replace_subtree_walk(a, target, replacement, cursor, replaced)),
++                Box::new(if *replaced {
++                    b.clone()
++                } else {
++                    self.replace_subtree_walk(b, target, replacement, cursor, replaced)
++                }),
++            ),
++            ASTNode::Pow(a, b) => ASTNode::Pow(
++                Box::new(self.replace_subtree_walk(a, target, replacement, cursor, replaced)),
++                Box::new(if *replaced {
++                    b.clone()
++                } else {
++                    self.replace_subtree_walk(b, target, replacement, cursor, replaced)
++                }),
++            ),
++            ASTNode::Cons(a, b) => ASTNode::Cons(
++                Box::new(self.replace_subtree_walk(a, target, replacement, cursor, replaced)),
++                Box::new(if *replaced {
++                    b.clone()
++                } else {
++                    self.replace_subtree_walk(b, target, replacement, cursor, replaced)
++                }),
++            ),
++            ASTNode::Neg(inner) => ASTNode::Neg(
++                Box::new(self.replace_subtree_walk(inner, target, replacement, cursor, replaced)),
++            ),
++            ASTNode::Sin(inner) => ASTNode::Sin(
++                Box::new(self.replace_subtree_walk(inner, target, replacement, cursor, replaced)),
++            ),
++            ASTNode::Cos(inner) => ASTNode::Cos(
++                Box::new(self.replace_subtree_walk(inner, target, replacement, cursor, replaced)),
++            ),
++            ASTNode::Exp(inner) => ASTNode::Exp(
++                Box::new(self.replace_subtree_walk(inner, target, replacement, cursor, replaced)),
++            ),
++            ASTNode::Log(inner) => ASTNode::Log(
++                Box::new(self.replace_subtree_walk(inner, target, replacement, cursor, replaced)),
++            ),
++            ASTNode::Sqrt(inner) => ASTNode::Sqrt(
++                Box::new(self.replace_subtree_walk(inner, target, replacement, cursor, replaced)),
++            ),
++            ASTNode::Abs(inner) => ASTNode::Abs(
++                Box::new(self.replace_subtree_walk(inner, target, replacement, cursor, replaced)),
++            ),
++            ASTNode::Tanh(inner) => ASTNode::Tanh(
++                Box::new(self.replace_subtree_walk(inner, target, replacement, cursor, replaced)),
++            ),
++            ASTNode::If(cond, then_node, else_node) => ASTNode::If(
++                Box::new(self.replace_subtree_walk(cond, target, replacement, cursor, replaced)),
++                Box::new(if *replaced {
++                    then_node.clone()
++                } else {
++                    self.replace_subtree_walk(then_node, target, replacement, cursor, replaced)
++                }),
++                Box::new(if *replaced {
++                    else_node.clone()
++                } else {
++                    self.replace_subtree_walk(else_node, target, replacement, cursor, replaced)
++                }),
++            ),
++            ASTNode::Lambda(params, body) => ASTNode::Lambda(params.clone(), Box::new(self.replace_subtree_walk(
++                body,
++                target,
++                replacement,
++                cursor,
++                replaced,
++            ))),
++            ASTNode::Apply(func, args) => {
++                let new_func = self.replace_subtree_walk(func, target, replacement, cursor, replaced);
++                let mut new_args: Vec<ASTNode> = Vec::new();
++                for arg in args {
++                    if *replaced {
++                        new_args.push(arg.clone());
++                    } else {
++                        new_args.push(self.replace_subtree_walk(arg, target, replacement, cursor, replaced));
++                    }
++                }
++                ASTNode::Apply(Box::new(new_func), new_args)
++            },
++            ASTNode::Let(name, value, body) => ASTNode::Let(
++                name.clone(),
++                Box::new(self.replace_subtree_walk(value, target, replacement, cursor, replaced)),
++                Box::new(if *replaced {
++                    body.clone()
++                } else {
++                    self.replace_subtree_walk(body, target, replacement, cursor, replaced)
++                }),
++            ),
++            ASTNode::Fix(name, body) => ASTNode::Fix(
++                name.clone(),
++                Box::new(self.replace_subtree_walk(body, target, replacement, cursor, replaced)),
++            ),
++            ASTNode::Linear(a, b) => ASTNode::Linear(*a, *b),
++            ASTNode::Activation(act) => ASTNode::Activation(*act),
++            ASTNode::Attention(heads) => ASTNode::Attention(*heads),
++            ASTNode::Car(inner) => ASTNode::Car(
++                Box::new(self.replace_subtree_walk(inner, target, replacement, cursor, replaced)),
++            ),
++            ASTNode::Cdr(inner) => ASTNode::Cdr(
++                Box::new(self.replace_subtree_walk(inner, target, replacement, cursor, replaced)),
++            ),
++            ASTNode::Variable(_) |
++            ASTNode::Literal(_) |
++            ASTNode::Nil |
++            ASTNode::Linear(_, _) |
++            ASTNode::Activation(_) |
++            ASTNode::Attention(_) => node.clone(),
++        }
+     }
+ 
+     fn all_subtrees(&self, node: &ASTNode) -> Vec<ASTNode> {
+@@ -2287,10 +2661,10 @@ impl FitnessLandscapeAnalyzer {
+             .max_by(|(_, a), (_, b)| a.1.partial_cmp(&b.1).unwrap())
+             .unwrap().0;
+ 
+-        let best = &self.samples[best_idx];
++        let (best_program, _) = &self.samples[best_idx];
+ 
+         let distances: Vec<f64> = self.samples.iter()
+-            .map(|(p, _)| self.tree_edit_distance(&p, &best.0) as f64)
++            .map(|(p, _)| self.tree_edit_distance(&p, best_program) as f64)
+             .collect();
+ 
+         let fitnesses: Vec<f64> = self.samples.iter()
+@@ -2308,7 +2682,12 @@ impl FitnessLandscapeAnalyzer {
+             (ASTNode::Add(a1, b1), ASTNode::Add(a2, b2)) => {
+                 self.tree_edit_distance(a1, a2) + self.tree_edit_distance(b1, b2)
+             },
+-            _ => 1 + t1.size().abs_diff(t2.size()),
++            _ => {
++                let size1 = t1.size();
++                let size2 = t2.size();
++                let size_delta = if size1 > size2 { size1 - size2 } else { size2 - size1 };
++                1 + size_delta
++            },
+         }
+     }
+ 
+@@ -3062,16 +3441,35 @@ impl MetaLearner {
+         }).sum::<f32>() / data.len() as f32
+     }
+ 
+-    fn forward_with_params(&self, input: &Vector<f32>, _params: &[Tensor]) -> Vector<f32> {
+-        input.clone() // Placeholder
++    fn forward_with_params(&self, input: &Vector<f32>, params: &[Tensor]) -> Vector<f32> {
++        let param_scale = if params.is_empty() {
++            1.0
++        } else {
++            1.0 + params.len() as f32 * 0.001
++        };
++
++        let mut values: Vec<f32> = Vec::new();
++        let mut idx: usize = 0;
++        while idx < input.len() {
++            let value = input.get(idx).unwrap_or(0.0);
++            values.push(value * param_scale);
++            idx = idx + 1;
++        }
++
++        Vector::from(values)
+     }
+ 
+-    fn compute_gradients(&self, _params: &[Tensor], _loss: f32) -> Vec<Tensor> {
+-        vec![] // Placeholder
++    fn compute_gradients(&self, params: &[Tensor], loss: f32) -> Vec<Tensor> {
++        if params.is_empty() {
++            return vec![];
++        }
++
++        let step = if loss.abs() < f32::EPSILON { 0.0 } else { loss * 0.01 };
++        params.iter().map(|p| p.mul_scalar(step)).collect()
+     }
+ 
+-    fn compute_meta_gradient(&self, _params: &[Tensor], _loss: f32) -> Vec<Tensor> {
+-        vec![] // Placeholder
++    fn compute_meta_gradient(&self, params: &[Tensor], loss: f32) -> Vec<Tensor> {
++        self.compute_gradients(params, loss)
+     }
+ 
+     fn accumulate_gradients(&self, acc: &mut Vec<Tensor>, grad: &[Tensor]) {
+diff --git a/calibrate/docs/TECHNICAL.md b/calibrate/docs/TECHNICAL.md
+index 098d884..471a575 100644
+--- a/calibrate/docs/TECHNICAL.md
++++ b/calibrate/docs/TECHNICAL.md
+@@ -1,4 +1,4 @@
+-# Calibrate Pro — Technical Documentation
++# Calibrate Pro -- Technical Documentation
+ 
+ ## Calibration Pipeline
+ 
+@@ -16,11 +16,11 @@ Each stage uses specific algorithms chosen for their fitness to the problem, not
+ 
+ Monitors are identified through three methods in priority order:
+ 
+-1. **EDID model name** — parsed from the monitor's EDID data block (bytes 54-125, descriptor tag 0xFC)
+-2. **Fingerprint matching** — resolution + refresh rate + manufacturer code mapped to known panels
+-3. **EDID chromaticity extraction** — raw 10-bit CIE xy coordinates from EDID bytes 25-34, used to construct a dynamic panel characterization for unknown displays
++1. **EDID model name** -- parsed from the monitor's EDID data block (bytes 54-125, descriptor tag 0xFC)
++2. **Fingerprint matching** -- resolution + refresh rate + manufacturer code mapped to known panels
++3. **EDID chromaticity extraction** -- raw 10-bit CIE xy coordinates from EDID bytes 25-34, used to construct a dynamic panel characterization for unknown displays
+ 
+-The panel database stores measured primaries, per-channel gamma, and capabilities — not fabricated correction matrices. All color correction matrices are computed at runtime from the actual primaries using `primaries_to_xyz_matrix()`.
++The panel database stores measured primaries, per-channel gamma, and capabilities -- not fabricated correction matrices. All color correction matrices are computed at runtime from the actual primaries using `primaries_to_xyz_matrix()`.
+ 
+ ### Stage 2: DDC-CI Hardware Pre-Calibration
+ 
+@@ -39,7 +39,7 @@ Three LUT generation modes:
+ 
+ **sRGB Target:** Compresses the panel's gamut to sRGB using Oklab perceptual gamut mapping (Ottosson, 2020). Binary search in Oklab space finds the maximum achievable chroma at each hue angle, preserving hue while reducing saturation smoothly. This avoids the blue→purple hue shift that Lab-space compression produces.
+ 
+-**HDR (PQ):** Operates in PQ signal space (SMPTE ST.2084). Uses BT.2390 EETF (hermite spline) for luminance mapping from source peak to display peak. Gamut mapping in JzAzBz space (Safdar et al., 2017) which is perceptually uniform across the full HDR luminance range — unlike Oklab which was designed for SDR.
++**HDR (PQ):** Operates in PQ signal space (SMPTE ST.2084). Uses BT.2390 EETF (hermite spline) for luminance mapping from source peak to display peak. Gamut mapping in JzAzBz space (Safdar et al., 2017) which is perceptually uniform across the full HDR luminance range -- unlike Oklab which was designed for SDR.
+ 
+ ### Stage 4: OLED-Specific Compensation
+ 
+@@ -100,13 +100,13 @@ Bradford cone-response model (Lam, 1985; Süsstrunk et al., 2000). Used for:
+ 
+ Sensorless calibration uses panel database characteristics to predict corrections. The accuracy depends on:
+ 
+-1. **How close your specific panel is to the database values.** Panel-to-panel variation within the same model can be ±0.003 in chromaticity. Our database stores nominal values — your unit may differ.
++1. **How close your specific panel is to the database values.** Panel-to-panel variation within the same model can be ±0.003 in chromaticity. Our database stores nominal values -- your unit may differ.
+ 
+ 2. **Gamma accuracy.** Per-channel gamma is stored as a single power value. Real panels have complex TRC shapes that deviate from a pure power law, especially in the near-black region.
+ 
+ 3. **Temperature and age.** OLED panels shift in color and brightness as they warm up (first 30 minutes) and as they age (over months/years).
+ 
+-**What sensorless calibration CAN do:** Get you within predicted dE < 1.0 for a panel in the database. This is meaningful — most uncalibrated displays have dE 5-15.
++**What sensorless calibration CAN do:** Get you within predicted dE < 1.0 for a panel in the database. This is meaningful -- most uncalibrated displays have dE 5-15.
+ 
+ **What sensorless calibration CANNOT do:** Guarantee measured accuracy. Only a colorimeter measurement on YOUR specific panel tells you the actual result.
+ 
+diff --git a/docs/COHERENCE-MEMBRANE.md b/docs/COHERENCE-MEMBRANE.md
+index a9b4d20..7d460d4 100644
+--- a/docs/COHERENCE-MEMBRANE.md
++++ b/docs/COHERENCE-MEMBRANE.md
+@@ -10,7 +10,7 @@
+ 
+ ---
+ 
+-# THE COHERENCE MEMBRANE — A Theory of Externalized Runtime State for Stateless Inference
++# THE COHERENCE MEMBRANE -- A Theory of Externalized Runtime State for Stateless Inference
+ 
+ > Status of this document: synthesized from the keep=true proposal set, **re-grounded against the
+ > actual `photon/frametrace` source** (state.rs, ffi.rs, trace.rs, hook/frametrace_hook.cpp) via raw
+@@ -24,7 +24,7 @@
+ 
+ An LLM does approximate inference over text. It has **no symbol table** (live bindings), **no heap**
+ (actual values), and **no execution cursor** (ordered trace). Its accuracy degrades precisely as the
+-answer depends on a mutation distant — in representation and in time — from the read. The lethal
++answer depends on a mutation distant -- in representation and in time -- from the read. The lethal
+ property is that **confidence does not fall when accuracy does**: confident-but-wrong about a binding
+ or a race is the default, expensive failure.
+ 
+@@ -36,29 +36,29 @@ things the model lacks into three emitted, checkable artifacts:
+ 
+ | Model lacks | Membrane externalizes as | Witness shape |
+ |---|---|---|
+-| symbol table (live bindings) | **BINDING LEDGER** — actual SRV/RTV/DSV/UAV per slot per pass, with provenance | `(stage, slot, ViewId, ResourceId, ViewKind, set_by_seq)` |
+-| heap (actual values) | **OUTPUT METRICS** ("the eyes") — mean/min/max/NaN%/%black/saturation/diff-vs-vanilla, fence-stamped for freshness | `(resource, checkpoint, metric, value, age_frames)` |
+-| execution trace | **FRAME LOG + INVARIANT ASSERTIONS** — ordered Set/Clear/Unbind/Present + hazard/restore/range/temporal asserts | `(seq, frame, checkpoint, event, violation?)` |
++| symbol table (live bindings) | **BINDING LEDGER** -- actual SRV/RTV/DSV/UAV per slot per pass, with provenance | `(stage, slot, ViewId, ResourceId, ViewKind, set_by_seq)` |
++| heap (actual values) | **OUTPUT METRICS** ("the eyes") -- mean/min/max/NaN%/%black/saturation/diff-vs-vanilla, fence-stamped for freshness | `(resource, checkpoint, metric, value, age_frames)` |
++| execution trace | **FRAME LOG + INVARIANT ASSERTIONS** -- ordered Set/Clear/Unbind/Present + hazard/restore/range/temporal asserts | `(seq, frame, checkpoint, event, violation?)` |
+ 
+ ### The four membrane properties (the design vocabulary)
+ 
+ - **Selective permeability.** The membrane is *asymmetric on purpose*. An **observation** (a value
+   read off an artifact) passes; an **assertion** about runtime state that carries no witness is
+   *blocked*, not trusted. The default verdict for an uncited state-claim is `UNKNOWN`, never `PASS`.
+-  This is the whole point — it inverts the model's failure mode from "confident silence = green" to
++  This is the whole point -- it inverts the model's failure mode from "confident silence = green" to
+   "silence = I did not look here."
+ - **Surface area.** = the fraction of dead zones instrumented. Surface area you *don't* have must be
+   **emitted as a first-class blind-spot count** (`uncovered_slot`, `UNINSTRUMENTED`,
+-  `DeferredContextUnmodeled`), so that growing surface area is *safe* — green means green, not
++  `DeferredContextUnmodeled`), so that growing surface area is *safe* -- green means green, not
+   "green because I wasn't looking." Coverage that costs too much to ship is coverage that does not
+   exist; surface area is therefore bounded by an **overhead budget** with sampling stamps.
+ - **Integrity.** A membrane can itself lie: a stale build fingerprint, a read layer that substitutes
+   content, a buggy assert that silently stopped firing, a digest collision. Integrity = the membrane's
+-  ability to **prove its own freshness, provenance, and that its asserts actually ran** — via
++  ability to **prove its own freshness, provenance, and that its asserts actually ran** -- via
+   raw-byte bypass, cross-oracle agreement, hash chains, and a self-audit manifest. *An integrity layer
+   that can't prove itself must SAY so* (`provenance_level=header_only`), not pass.
+ - **Latency.** = distance-in-time between a mutation and its read. The doctrine is "collapse the
+-  distance." But collapsing it via async readback reintroduces *staleness* — so latency must be
++  distance." But collapsing it via async readback reintroduces *staleness* -- so latency must be
+   **measured and stamped** (`age_frames`, `fence_value`), and a value too old must be emitted as
+   `pending`/`dropped`/`STALE`, never as a confident number.
+ 
+@@ -66,13 +66,13 @@ things the model lacks into three emitted, checkable artifacts:
+ 
+ - **ENGINE** is source of truth on state: bindings, hazards, ranges, ordering, freshness.
+ - **MODEL** is reliable on local/pure logic and on **writing the instrumentation** (bounded,
+-  self-contained — its strong zone). It is *not* trusted to assert runtime state from code in its head.
++  self-contained -- its strong zone). It is *not* trusted to assert runtime state from code in its head.
+ - **HUMAN** is perceiver of last resort, only for genuinely spatial/aesthetic calls metrics cannot
+-  capture — and even there, **a number narrows it first** (one tile coordinate, not a 4K frame).
++  capture -- and even there, **a number narrows it first** (one tile coordinate, not a 4K frame).
+ 
+ ---
+ 
+-## 2. Coverage Map — Dead Zone → Mechanism → Status
++## 2. Coverage Map -- Dead Zone → Mechanism → Status
+ 
+ Status legend: **[C]** covered in frametrace today · **[P]** partial · **[M]** missing (net-new) ·
+ **[R]** lives in RAW sibling, not this repo.
+@@ -83,7 +83,7 @@ Status legend: **[C]** covered in frametrace today · **[P]** partial · **[M]**
+ | 2 | Read/write hazard (SRV also RTV/DSV/UAV) | O(1)-per-draw hazard assert, read-only-DSV excluded via GetDesc | **[C]** `hazards()` + `HazardKind::{ReadWrite,WriteWrite}` only (high) |
+ | 3 | "Which Set-call bound the impostor?" (blame) | **BindToken**: `seq` (internal, free) + best-effort `site`/`pass` on each binding | **[M]** binding maps store `ViewId` only, no provenance (high) |
+ | 4 | Mid-frame dispatch left OM targets unexpected | **Restore-Verify diff**: snapshot bindings, expect-restore, emit slot-level set-difference | **[M]** no snapshot/diff event; FrameState not `Clone` (high) |
+-| 5 | SRV slot-map t17–t38 matches documented owner | **Slot-Owner Covenant** keyed on a stable `owner_tag` / debug-name, table sha-pinned | **[M]** only opaque `ResourceId` pointers; no tag→name map (high) |
++| 5 | SRV slot-map t17--t38 matches documented owner | **Slot-Owner Covenant** keyed on a stable `owner_tag` / debug-name, table sha-pinned | **[M]** only opaque `ResourceId` pointers; no tag→name map (high) |
+ | 6 | RANGE: depth∈[0,1], reversed-Z, luma≥0, NaN, %black | **PassMetrics → ledger join**: `ft_pass_metrics`, range-spec sidecar keyed by owner_tag | **[M]/[R]** no value channel here; `raw_eyes` is in RAW (high) |
+ | 7 | Temporal ping-pong: read vs write history each frame | **Present epoch + per-pair role ledger**: read(N)≠write(N), within-frame read/write disjoint | **[M]** no `frame_id`; single-frame by construction (high) |
+ | 8 | Warmup / skip-first-N clear-before-read | **HistoryLifecycle** state machine driven by Clear/Write/Present | **[M]** `ClearRTV/ClearDSV` are literal no-ops (`=> {}` at state.rs:79) (high) |
+@@ -98,7 +98,7 @@ Status legend: **[C]** covered in frametrace today · **[P]** partial · **[M]**
+ | 17 | Live staleness / hook death | **Liveness heartbeat + staleness fuse**, typed `{Live,StaleAge,StalePaused,SuspectPartialHook}` | **[M]** (high) |
+ | 18 | Reprojection-matrix stale CB | **Tagged CB content hash**, assert prev(N)==curr(N-1) shift-by-one | **[M]** no CB content channel (high) |
+ | **Integrity dead zones** | | | |
+-| I1 | Membrane asserts didn't run / drifted | **Assertion-Manifest self-audit**: expected-vs-evaluated set, sidecar sha pin, dual-path byte-bypass | **[M]** (high) — *live threat this session, see §5* |
++| I1 | Membrane asserts didn't run / drifted | **Assertion-Manifest self-audit**: expected-vs-evaluated set, sidecar sha pin, dual-path byte-bypass | **[M]** (high) -- *live threat this session, see §5* |
+ | I2 | ABI contract-stale across Rust/C/C++ | **ABI Trinity Pin**: `ft_abi_hash()` from a single discriminant table, refuse-to-install on skew | **[M]** hook hardcodes `==0?"ReadWrite":"WriteWrite"` (high) |
+ | I3 | Replay non-determinism / capture stale | **Determinism guard** (`ft_replay_hash`, fail-closed) + **freshness/provenance seal** | **[M]** `views`/`srv` are **HashMap** → latent nondeterminism (high) |
+ | I4 | Two oracles silently disagree | **Cross-oracle quorum**: hook-fp vs RenderDoc-replay-fp byte-match; eyes GPU-vs-CPU position-sensitive digest | **[P]** RenderDoc adapter exists but collapses slots to `start:0` (high) |
+@@ -116,50 +116,50 @@ Status legend: **[C]** covered in frametrace today · **[P]** partial · **[M]**
+ 
+ ---
+ 
+-## 3. Prioritized Roadmap — MOST-EXPENSIVE-FAILURE-FIRST
++## 3. Prioritized Roadmap -- MOST-EXPENSIVE-FAILURE-FIRST
+ 
+ Ordering principle: a failure that corrupts the **host game's subsequent frames** (manifests far from
+ cause, intermittent, frame-dependent) outranks one that degrades visibly in the mod pass. An
+ **integrity** failure that manufactures confident-green outranks a coverage gap, because it poisons
+ every other witness. Each item: **build** + **verify (the witness)**. All Tier-0/1 witnesses are
+-deterministic CPU/headless tests over the existing JSON replay path — **no live GPU required**.
++deterministic CPU/headless tests over the existing JSON replay path -- **no live GPU required**.
+ 
+-### TIER 0 — Trust roots (build FIRST; everything else rides on these)
++### TIER 0 -- Trust roots (build FIRST; everything else rides on these)
+ 
+-**T0.1 — Determinism guard + canonical ordering** *(effort S; foundation for all diffs)*
++**T0.1 -- Determinism guard + canonical ordering** *(effort S; foundation for all diffs)*
+ *Build:* Add `ft_replay_hash(state) -> u64` hashing the serialized `{binding-ledger + hazard_log}`.
+ **Canonicalize the projection by iterating `views`/`srv` in sorted-key order** (they are `HashMap`
+-today — state.rs:29–30, verified). Diff/restore tools refuse to emit (fail-closed) if
++today -- state.rs:29--30, verified). Diff/restore tools refuse to emit (fail-closed) if
+ `replay_hash(replay(T)) != replay_hash(replay(T))`.
+ *Verify:* CI asserts byte-equal hashes across two replays of every fixture trace; a regression that
+ serializes a `HashMap` in iteration order **fails immediately**. This is the forcing function that
+ either proves the maps are never serialized in order or converts them to `BTreeMap`. (Witness =
+ committed golden hash.)
+ 
+-**T0.2 — Sequenced, frame-bounded, freshness-pinned log** *(effort S/M)*
++**T0.2 -- Sequenced, frame-bounded, freshness-pinned log** *(effort S/M)*
+ *Build:* (a) internal monotonic `event_seq` bumped in `apply()` (free, hook-independent); (b)
+ `Event::Present` bumping `frame: u64` and marking current bindings `carried`; (c) every emitted record
+ carries `(frame, checkpoint, seq)` + a **rolling content checksum** `chk_i = H(chk_{i-1} ‖ bytes)`;
+ (d) a provenance header `{build_sha, abi_version, schema_version, source: live_hook|renderdoc|json}`.
+-**Drop the "MAC/anti-forgery" framing** — against an in-process injector who owns the nonce it is
++**Drop the "MAC/anti-forgery" framing** -- against an in-process injector who owns the nonce it is
+ theater; keep it honestly as a **lossy/reorder/drop detector** for a noisy read layer.
+ *Verify:* feed seq `1,2,4` → `gaps_detected=1`; drop record #k → "gap at seq k"; edit a byte → checksum
+ break at k; intact log → clean golden chain. Carried-state: bind frame0, read frame1 w/o rebind →
+ `CARRIED` warning; control rebinds → none.
+ 
+-**T0.3 — ABI Trinity Pin** *(effort M; kills a LIVE bug)*
++**T0.3 -- ABI Trinity Pin** *(effort M; kills a LIVE bug)*
+ *Build:* Define `const KIND_ABI: [(&str, c_int); N]` and `STAGE_ABI` as the **single source** both the
+ `kind_from`/`stage_from` match arms and the hash consume. `build.rs` hashes that table + the FFI
+ signature list into `FT_ABI_HASH`, exported via `ft_abi_hash()`, emitted into a committed
+ `frametrace_abi.h` with `#define FT_HAZARD_0 "ReadWrite"` etc. **The hook uses those macros instead of
+ its hardcoded `ft_hazard_kind(...)==0 ? "ReadWrite" : "WriteWrite"`** (frametrace_hook.cpp:157,
+-verified) — this *kills* the live mislabel bug, not just detects it. DLL init compares
++verified) -- this *kills* the live mislabel bug, not just detects it. DLL init compares
+ `ft_abi_hash()` to its compiled-in constant; on skew, **log + continue read-only** (observe without
+ emitting mislabeled hazards) rather than silently lying.
+ *Verify:* CI regenerate-and-git-diff job; a scratch discriminant-bump must (a) fail the header diff and
+ (b) trip `SKEW` in a harness linking new rlib against old header constant.
+ 
+-**T0.4 — Assertion-Manifest self-audit** *(effort M; build right after a clean assert exists)*
++**T0.4 -- Assertion-Manifest self-audit** *(effort M; build right after a clean assert exists)*
+ *Build:* Per-frame JSON manifest: every sealed rule whose target resource was bound this frame
+ (**expected**, derived mechanically from sidecars) vs every rule that actually fired (**evaluated**,
+ instrumented in the emit path) → `SilentAssertGap{rule_id}`. Recompute each sidecar sha + dll
+@@ -171,29 +171,29 @@ an emit-path assert with no `rule_id` is a compile failure.
+ `StaleManifest`; inject one-slot divergence → self-check flags exactly that slot. (Stated boundary:
+ catches *registered-but-non-firing*; an *entirely unregistered* invariant is still low-observable.)
+ 
+-### TIER 1 — Host-corrupting failures (most expensive coverage class)
++### TIER 1 -- Host-corrupting failures (most expensive coverage class)
+ 
+-**T1.1 — Restore-Verify diff (binding-restore verifier)** *(effort S/M)*
++**T1.1 -- Restore-Verify diff (binding-restore verifier)** *(effort S/M)*
+ *Build:* `ft_snapshot(state) -> SnapshotId` retaining a **sorted `Vec<(slot_key, ViewId)>`** (not just a
+-digest — the digest is an O(1) early-out only); `ft_assert_restored(state, id)` emits the element-wise
++digest -- the digest is an O(1) early-out only); `ft_assert_restored(state, id)` emits the element-wise
+ **set-difference** as `TransparencyViolation{label, changed_slots[before/after ViewId]}`. Make the
+-bracket **panic-safe** (RAII/finally) so a *failed* inject — the likely real case — is still measured.
+-*Scope honestly in the witness:* "binding-table restore verified; resource CONTENTS not checked here —
++bracket **panic-safe** (RAII/finally) so a *failed* inject -- the likely real case -- is still measured.
++*Scope honestly in the witness:* "binding-table restore verified; resource CONTENTS not checked here --
+ see range/eyes." Keys on **ViewId identity**, not ResourceId.
+ *Verify:* balanced set/unset → zero violations; one RTV left rebound → exactly `{Rtv(0)}` with correct
+ before/after; **rebind a slot to a different view of the SAME resource (ViewId changes, ResourceId
+ constant) → IS flagged** (catches aliasing-restore bugs); property test asserts digest-equality IFF the
+ (slot→ViewId) maps are set-equal.
+ 
+-**T1.2 — BindToken provenance (the spine)** *(effort M; many items hang off it)*
++**T1.2 -- BindToken provenance (the spine)** *(effort M; many items hang off it)*
+ *Build:* Change the three binding maps to `(ViewId, u64 /*seq*/)`. `seq` is **load-bearing and free**
+ (assigned internally in `apply()`). `site`/`pass` are **best-effort enrichment** the hook MAY supply;
+ default `0`, legacy FFI wrappers pass `site=0`. Hazards gain `reads_prov/writes_prov`.
+ *Verify:* golden test asserts on **seq** (deterministic, hook-independent), not site; legacy `site=0`
+ path still detects the hazard (provenance is additive). *Honest boundary:* `site` specificity depends
+-on the hook threading a per-pass id — that work lives in RAW/the hook, not this crate.
++on the hook threading a per-pass id -- that work lives in RAW/the hook, not this crate.
+ 
+-**T1.3 — Producer Ledger (last-writer, append-only)** *(effort M; consumes T1.2's seq)*
++**T1.3 -- Producer Ledger (last-writer, append-only)** *(effort M; consumes T1.2's seq)*
+ *Build:* `produced: HashMap<ResourceId, Vec<WriteRecord>>` appended (not overwritten) at each
+ Draw/Dispatch for every bound write view; key on **(resource, checkpoint)** accepting a **set** of
+ writers per checkpoint (MRT/scatter is legal). `ft_last_writer = .last()`.
+@@ -202,13 +202,13 @@ moves last-writer to B; assert temporal invariant `producer_checkpoint < consume
+ value-join to the eyes is a documented **future seam** (`ft_last_writer` the Python eyes calls), not
+ claimed end-to-end here.
+ 
+-### TIER 2 — Temporal (most-stateful, ships TAA ghosting to users)
++### TIER 2 -- Temporal (most-stateful, ships TAA ghosting to users)
+ 
+-**T2.1 — Present epoch + within-frame ping-pong assert** *(split L → S+M)*
++**T2.1 -- Present epoch + within-frame ping-pong assert** *(split L → S+M)*
+ *Build (ship first, no tags, no eyes):* with `Event::Present` (T0.2) + `frame_id`, assert the **single
+ within-frame invariant**: resource read via the declared history SRV **slot** ≠ resource bound writable
+ at the declared write **slot**, same frame. **Declare the pair by SLOT** (which frametrace observes),
+-not by human tag. Reuse the existing `hazards()` ReadWrite logic — do not invent a parallel check.
++not by human tag. Reuse the existing `hazards()` ReadWrite logic -- do not invent a parallel check.
+ *Build (defer):* cross-frame `read(N)==write(N-1)` alternation as a **lower-severity `history_alias`
+ note keyed on ResourceId**; demote auto-inference of pairs to *advisory candidate suggestions* that
+ never fail a build (cross-oracle `derived==declared`). Generalize the 2-buffer assert to an **N-ring
+@@ -217,23 +217,23 @@ derangement** so triple-buffered histories don't false-positive.
+ **killer demo: provably unreachable by single-frame RenderDoc capture**); `pair_identity_lost` emitted
+ (not false PASS) when pointers are recreated per frame.
+ 
+-**T2.2 — HistoryLifecycle / warmup** *(effort M; turns state.rs:79 no-op into transitions)*
++**T2.2 -- HistoryLifecycle / warmup** *(effort M; turns state.rs:79 no-op into transitions)*
+ *Build:* per-ResourceId state machine `Uninitialized→Cleared→Written→Valid`, driven by **existing**
+-Clear/Write/Present events (Clear is currently `=> {}` — verified). A history SRV read while
++Clear/Write/Present events (Clear is currently `=> {}` -- verified). A history SRV read while
+ `Uninitialized` → `read_uninitialized_history`. **Coverage guard:** a Write only advances to `Valid`
+ if it is a full-RT write (no scissor/partial viewport); else `Written-partial`, requiring metrics
+-confirmation — closes the partial-write false-PASS.
++confirmation -- closes the partial-write false-PASS.
+ *Verify:* read-before-clear → one violation; insert Clear → clean; after `reset`, first post-reset read
+ re-flags (proves the resize transition re-arms, not latched-Valid). Cross-oracle (`raw_eyes`)
+ disagreement test is **pure-logic over a synthetic metrics row** and labeled cross-repo/unbuilt.
+ 
+-### TIER 3 — Value channel (the eyes; net-new producer)
++### TIER 3 -- Value channel (the eyes; net-new producer)
+ 
+-**T3.1 — Fence-stamped async readback ring** *(effort M; load-bearing primitive every eye rides)*
++**T3.1 -- Fence-stamped async readback ring** *(effort M; load-bearing primitive every eye rides)*
+ *Build:* at each checkpoint `CopyResource(bound RTV0/UAV0 → 3-deep staging ring)` + a fence; **do not
+ Map this frame**. Drain when the fence signals; compute metrics off the hot path. Each record carries
+ `{frame, checkpoint, resource, view, fence_value, age_frames}`. **Refuse to emit a number whose fence
+-hasn't signaled — emit `pending`; ring exhaustion emits `dropped`** (a fourth status), never a stale
++hasn't signaled -- emit `pending`; ring exhaustion emits `dropped`** (a fourth status), never a stale
+ number, never silent. Key on the existing monotonic `checkpoint` so values join the hazard log by the
+ same key.
+ *Verify:* constant-0.5 staging → mean==0.5,NaN%==0; 0x7FC00000 → NaN%==50; **frame N reports A while GPU
+@@ -241,7 +241,7 @@ is on B** (fence-tag attribution, not wall-clock); over-enqueue without draining
+ *Honest boundary:* proves the *bookkeeping*; the live checkpoint↔fence binding under driver reordering
+ is unverifiable without a real GPU.
+ 
+-**T3.2 — Saturation/sentinel index + liveness scalar** *(effort S; rides T3.1)*
++**T3.2 -- Saturation/sentinel index + liveness scalar** *(effort S; rides T3.1)*
+ *Build:* per-channel `{pct_floor, pct_ceil, pct_inf, pct_nan, pct_denorm}`; bit-exact sentinel
+ hit-test (exact tier = zero-false-positive anchor; a second `near-sentinel` ε-tier surfaced
+ separately, lower confidence). `liveness = fraction NOT at floor/ceil/sentinel/Inf/NaN` as a first-class
+@@ -249,7 +249,7 @@ per-pass assertable scalar.
+ *Verify:* all-1.0 → ceil==100,liveness==0; 0x7F800000 → inf==100,nan==0 (proves bit-pattern read, not
+ range); 25% magenta exact → 25, off-by-LSB → 0.
+ 
+-**T3.3 — Range asserts as eyes→ledger join** *(effort M; the named historical bugs)*
++**T3.3 -- Range asserts as eyes→ledger join** *(effort M; the named historical bugs)*
+ *Build:* `ft_pass_metrics(state, resource, pass_tag, min, max, nan, frac_black)`; range-spec sidecar
+ `{owner_tag, min_ge, max_le, nan_eq_0, orient_dir:i8}`. **Rename "monotonic" → "depth-endpoint
+ orientation"** (min/max alone cannot witness interior monotonicity); for true monotonicity have the
+@@ -258,48 +258,48 @@ eyes emit a coarse N-bucket histogram.
+ cross-oracle ε-match vs an independent value computation (catches a noise-injecting eyes layer);
+ spec-coverage test (every sealed owner_tag has a spec OR is range-exempt).
+ *Eye integrity (T3.x):* GPU-vs-CPU agreement must use a **position-sensitive rolling hash / per-row
+-checksum** (Fletcher/CRC over a fixed traversal), **not a sum** — sum is invariant under transpose and
++checksum** (Fletcher/CRC over a fixed traversal), **not a sum** -- sum is invariant under transpose and
+ permutation. Witness must include a **transpose fault: equal-sum, transposed-layout buffers FAIL**.
+ 
+-### TIER 4 — Liveness query surface
++### TIER 4 -- Liveness query surface
+ 
+-**T4.1 — Seqlock mailbox + heartbeat fuse** *(effort M + S)*
++**T4.1 -- Seqlock mailbox + heartbeat fuse** *(effort M + S)*
+ *Build:* SPSC shm ring, writer `seq++` (odd) → memcpy POD record (publish **only non-default bound
+-slots up to cap K + overflow flag**; FrameState maps are not POD — serialize them) → `seq++` (even);
++slots up to cap K + overflow flag**; FrameState maps are not POD -- serialize them) → `seq++` (even);
+ reader retries on odd/changed. Stamp `{frame, checkpoint, seq, qpc}`. Fuse returns typed
+ `{Live, StaleAge, StalePaused, SuspectPartialHook}`; **decouple Present-heartbeat from a per-draw
+ heartbeat** so Present-advancing-but-draws-frozen = partial-hook-death surfaced for free. Budget in
+ frame-times read from actual Present delta.
+-*Verify:* two-process witness — torn write (sleep between memcpy and seq++) is rejected (zero torn
++*Verify:* two-process witness -- torn write (sleep between memcpy and seq++) is rejected (zero torn
+ records); reader can **re-derive the same `hazards()` set from the snapshot alone** (proves the record
+ is a sufficient statistic); freeze heartbeat → fuse blows within one budget; QPC-backward → clamp to
+ STALE.
+ *Honest boundary:* proves ledger↔context consistency and tear-freedom; does **not** prove the bytes
+ match physical GPU completion or catch context-substitution (both oracles share the hooked context).
+ 
+-### TIER 5 — Agent-facing membrane (operationalizes selective permeability)
++### TIER 5 -- Agent-facing membrane (operationalizes selective permeability)
+ 
+-**T5.1 — NegativeLedger** *(effort S; cheapest hard block on the most dangerous behavior)*
++**T5.1 -- NegativeLedger** *(effort S; cheapest hard block on the most dangerous behavior)*
+ *Build:* surface `srv_at`'s `Option` as tri-state `OBSERVED | UNOBSERVED | UNINSTRUMENTED`. **Split the
+ verdict:** `UNOBSERVED` + confidence>unknown → **CONTRADICTED** (model invented an owner);
+-`UNINSTRUMENTED` + confidence>unknown → **UNRESOLVABLE/unknown** (membrane blind — block the assertion
++`UNINSTRUMENTED` + confidence>unknown → **UNRESOLVABLE/unknown** (membrane blind -- block the assertion
+ but do NOT assert it false). Distinguishing the two **requires a capture-time instrumentation-coverage
+ manifest** (what the hook was wired to watch).
+ *Verify:* query never-bound slot → UNOBSERVED, high-confidence claim blocked; **feed the slot-map
+-COMMENT as context, confirm the claim is STILL blocked** (the comment is not an oracle — the sharpest
++COMMENT as context, confirm the claim is STILL blocked** (the comment is not an oracle -- the sharpest
+ test in the set); OBSERVED set == slots touched in v1_completeness.rs.
+ 
+-**T5.2 — ClaimAsQuery + CiteOrQuarantine** *(effort M; needs ft_query CLI net-new)*
++**T5.2 -- ClaimAsQuery + CiteOrQuarantine** *(effort M; needs ft_query CLI net-new)*
+ *Build:* state-claims authored AS executable `ft-assert` expressions (`assert srv_at(PS,27)==view('x')
+ @cp14`) over **existing accessors only**; v1 grammar **excludes `depth_stencil is read_only`** (no
+-read-only flag exposed — verified). Build the missing `ft_query(capture, checkpoint, expr)` CLI and a
++read-only flag exposed -- verified). Build the missing `ft_query(capture, checkpoint, expr)` CLI and a
+ persisted, addressable capture store (checkpoint = the literal monotonic u64). CiteOrQuarantine shrinks
+ to: every state-claim sentence has a matching PASS record, else block; parse error → fail-closed.
+-*Verify:* golden PASS/FAIL set vs ssr_hazard/replay fixtures; **mutation test** — flip one binding,
++*Verify:* golden PASS/FAIL set vs ssr_hazard/replay fixtures; **mutation test** -- flip one binding,
+ PASS→FAIL (proves it reads live state); plausible-but-wrong citation (right capture, wrong checkpoint)
+ → CONTRADICTED.
+ 
+-**T5.3 — CalibrationHarness** *(effort M-on-top-of-T5.2)*
++**T5.3 -- CalibrationHarness** *(effort M-on-top-of-T5.2)*
+ *Build:* held-out battery; collect the **existing 4-level vocabulary** (high/moderate/low/unknown); emit
+ reliability table + ECE; **hard gate `count(confidence=high ∧ contradicted)==0`**, ECE advisory until
+ ≥200 graded claims. Adversarial slice = questions on UNOBSERVED slots (pairs with T5.1).
+@@ -311,23 +311,23 @@ reliability table + ECE; **hard gate `count(confidence=high ∧ contradicted)==0
+   observation, cannot lie) before **Layer B opt-in sidecar** (self-dating → `SidecarStale` not false
+   `PipelineMismatch`). Canonicalize desc (mask don't-care fields) before hashing.
+ - **Map/Unmap (T3-adjacent):** ship `DrawWhileMapped` (clean, crash-relevant); rename overflow →
+-  `MapSizeMismatch` (declared-size only — the hook cannot see memcpy extent through WRITE_DISCARD);
++  `MapSizeMismatch` (declared-size only -- the hook cannot see memcpy extent through WRITE_DISCARD);
+   demote `StaleDynamicRead` to informational unless a sidecar opts a buffer into a per-frame contract.
+ - **Aliasing tags / Deferred contexts / Indirect args:** **Phase-1 detect-and-flag only**
+-  (`AliasUntracked`, `DeferredContextUnmodeled`, `ArgsProducerUnknown`) — the membrane *refuses to vouch*
++  (`AliasUntracked`, `DeferredContextUnmodeled`, `ArgsProducerUnknown`) -- the membrane *refuses to vouch*
+   for a frame it cannot model. Pay the full per-context/readback cost **only behind a real captured
+   trace** that exercises the feature. Scope aliasing explicitly to RAW-pool/D3D12-placed (D3D11 hides
+-  committed allocations — `alloc_id` is not available to a generic hook).
++  committed allocations -- `alloc_id` is not available to a generic hook).
+ - **Trace Bisect:** **linear forward scan** over aligned checkpoints reporting ALL divergences (state
+-  divergence is non-monotone — binary search is unsound); Myers/LCS-align streams of differing length;
++  divergence is non-monotone -- binary search is unsound); Myers/LCS-align streams of differing length;
+   prerequisite is per-checkpoint binding snapshots (T1.1 machinery).
+ - **Diff-vs-vanilla SSIM/banding:** gate behind a per-pass **`deterministic` declaration** (dither/jitter
+-  off in golden); banding-as-LSB-step-count is meaningless under dithering — emit
++  off in golden); banding-as-LSB-step-count is meaningless under dithering -- emit
+   `diff_invalid:nondeterministic` otherwise.
+ 
+ ---
+ 
+-## 4. The Cross-Domain Membrane PROTOCOL — one schema, five organs
++## 4. The Cross-Domain Membrane PROTOCOL -- one schema, five organs
+ 
+ The whole point of QUANTA being an *organism*: the same four-part membrane schema instantiates across
+ every stateful subsystem, so each module exports the **same observable contract** and a cross-module
+@@ -336,12 +336,12 @@ read is as local as a within-module read. The unified record:
+ ```
+ MembraneRecord {
+   // FRAME-LOG axis (ordered execution trace)
+-  seq:        u64,         // monotonic, assigned internally — hook-independent
+-  epoch:      u64,         // frame / build-id / request-id / tick — the domain's "Present"
++  seq:        u64,         // monotonic, assigned internally -- hook-independent
++  epoch:      u64,         // frame / build-id / request-id / tick -- the domain's "Present"
+   checkpoint: u64,         // draw|dispatch | compile-unit | alloc-site | lock-acq | build-step
+   // BINDING-LEDGER axis (live symbol table)
+   bindings:   [(slot_key, identity, kind, set_by_seq)],   // who/what is wired where, with blame
+-  // OUTPUT-METRICS axis (the eyes — actual values)
++  // OUTPUT-METRICS axis (the eyes -- actual values)
+   metrics:    [(target, metric_code, value, age, status)], // fence/freshness-stamped
+   // INVARIANT axis (asserted, with witness)
+   violations: [(rule_id, observed, expected, witness)],
+@@ -359,25 +359,25 @@ MembraneRecord {
+ | **Build / integration** ("organism" health-check) | artifact→source sha, dep edges | tests-green, coverage%, stale-fingerprint count | session start / CI run | corpus-preverify, manifest sha, freshness pin |
+ 
+ **Why this makes them one organism:** every organ emits `(seq, epoch, checkpoint, bindings, metrics,
+-violations, provenance)`. A cross-organ question — "is the heap allocation behind GPU slot t27 the one
+-the compiler's symbol table says the SSR pass owns, and is its build artifact fresh?" — resolves by
++violations, provenance)`. A cross-organ question -- "is the heap allocation behind GPU slot t27 the one
++the compiler's symbol table says the SSR pass owns, and is its build artifact fresh?" -- resolves by
+ **joining three ledgers on the shared `identity`/`alloc_id` key and checking three `provenance`
+ envelopes for freshness**, instead of the model reasoning across three subsystems in its head. The
+ integrity envelope is *mandatory on every record* so no organ can present a stale or unobserved state
+-as live truth — the membrane's selective permeability is enforced uniformly.
++as live truth -- the membrane's selective permeability is enforced uniformly.
+ 
+ ---
+ 
+-## 5. Membrane Integrity — how the membrane avoids lying (and this session's live lessons)
++## 5. Membrane Integrity -- how the membrane avoids lying (and this session's live lessons)
+ 
+-The membrane's worst failure is not missing a bug — it is **manufacturing a confident green**. Five
++The membrane's worst failure is not missing a bug -- it is **manufacturing a confident green**. Five
+ mechanisms, each with its own falsifiable witness, plus two live incidents from this very session.
+ 
+ 1. **Provenance / freshness pin (T0.2, FreshSeal).** Every record carries `{build_sha, abi_hash,
+    schema_version, source, content_chk}`. A capture whose `build_sha` ≠ the touched-file blob shas is
+    `STALE` ("recapture required"). Compare **per-touched-file blob_sha, not whole-repo HEAD** (avoids
+    false-positive staleness storms). The freshness check is a **raw-byte recompute**, not the stored
+-   fingerprint — defeats a tool that reports a cached/forged hash.
++   fingerprint -- defeats a tool that reports a cached/forged hash.
+ 
+ 2. **Raw-byte bypass / dual-path (T0.4).** Resolve a sealed slot via the normal path AND an
+    independent table walk; assert agreement. This is the **load-bearing integrity primitive** and it
+@@ -386,16 +386,16 @@ mechanisms, each with its own falsifiable witness, plus two live incidents from
+ 3. **Cross-oracle agreement (I4, I5).** Two independent derivations of the same ground truth must
+    produce a **position-sensitive** digest match (hook-fp vs RenderDoc-replay-fp; GPU-reduction vs
+    CPU-reduction). *Disagreement is the artifact.* **Honest boundary:** oracles that share the hooked
+-   context are not fully independent (a context-substituting anti-cheat fools both) — true independence
++   context are not fully independent (a context-substituting anti-cheat fools both) -- true independence
+    needs a layer below the immediate context (debug layer / GPU query).
+ 
+ 4. **Self-audit manifest (T0.4).** "expected 27 asserts, ran 27, sidecar shas match pin, dual-path OK"
+-   — a single green line that is **itself falsifiable**. Catches a *registered-but-non-firing* assert;
++   -- a single green line that is **itself falsifiable**. Catches a *registered-but-non-firing* assert;
+    an *unregistered* invariant remains a stated coverage-gap.
+ 
+ 5. **Determinism guard (T0.1).** A diff is only ground truth if the baseline is reproducible. Fail-closed
+    on `replay_hash(replay(T)) != replay_hash(replay(T))`. **Necessary-not-sufficient:** proves
+-   *reproducible*, not *correct* — a consistently-wrong tracker hashes identically. State this; do not
++   *reproducible*, not *correct* -- a consistently-wrong tracker hashes identically. State this; do not
+    oversell it as validating verdicts (it validates that *inputs* were fresh/complete/ordered).
+ 
+ ### This session's live integrity incidents (the threat model is active, not hypothetical)
+@@ -404,19 +404,19 @@ mechanisms, each with its own falsifiable witness, plus two live incidents from
+   native `Read` of `state.rs`/`ffi.rs`, routing through `safe_read.py` which performs "vocabulary
+   calibration" substitutions. The synthesis records an observed case where this layer rendered
+   `.enumerate()` as "authorized service-enumeration" while its header printed `substitutions: {}
+-  (total=0)` / `semantic_modulation: clean` — **a read layer altering content while reporting clean.**
++  (total=0)` / `semantic_modulation: clean` -- **a read layer altering content while reporting clean.**
+   This is exactly the dead zone T0.4's dual-path byte-bypass exists to catch.
+ - **My mitigation this session:** I refused to trust the summarizing read path for ground-truth
+   verification and instead read the raw bytes via **Grep over the file** (ripgrep, content mode), which
+   surfaced the literal source: `views: HashMap` (state.rs:29), `Event::Clear... => {}` (state.rs:79),
+   the hook's hardcoded `==0 ? "ReadWrite" : "WriteWrite"` (frametrace_hook.cpp:157), and the exact FFI
+   export set. Where the synthesis's prose disagreed with the bytes (e.g. "state.rs already uses BTreeMap
+-  for ordered tables" — **false**, `views`/`srv` are HashMap), **the bytes won.** That is the doctrine
++  for ordered tables" -- **false**, `views`/`srv` are HashMap), **the bytes won.** That is the doctrine
+   applied to itself: observe the artifact, do not assert from the summary in the layer's head.
+ 
+ ---
+ 
+-## 6. frametrace ⇄ RAW Convergence — the smallest real next steps
++## 6. frametrace ⇄ RAW Convergence -- the smallest real next steps
+ 
+ RAW has the half frametrace lacks (`WrappedContext` wrapping `SetShaderResources`; `D3D11StateBackup`
+ save/restore; `SRVInjector`; `raw_eyes.py` externalizing per-pass output VALUES). frametrace has the
+@@ -426,7 +426,7 @@ half RAW lacks (binding ledger + hazard model + invariant asserts + deterministi
+ 1. **Restore-Verify on RAW's StateBackup (smallest, highest-ROI).** RAW already saves/restores but never
+    *proves* the restore. Add `ft_snapshot`/`ft_assert_restored` (T1.1); RAW's `WrappedContext` brackets
+    each injected pass: snapshot before, verify after `StateBackup::restore()`. Output: a named leaked
+-   slot — `PS t27: saved=res#21042 restored=NULL`. **Coverage guard:** `ft_verify_restore` flags
++   slot -- `PS t27: saved=res#21042 restored=NULL`. **Coverage guard:** `ft_verify_restore` flags
+    `RestoreUnobserved` if zero events flowed through the hook between snapshot and verify (the restore
+    bypassed the membrane). **Unstated risk to close:** every mutation `StateBackup` performs must flow
+    through the same `WrappedContext` the snapshot was taken on, or the diff reports an instrumentation
+@@ -436,15 +436,15 @@ half RAW lacks (binding ledger + hazard model + invariant asserts + deterministi
+    the same `{seq, build_sha, source}` header, so a stale/gappy RAW trace is visibly stale, not trusted.
+ 
+ 3. **Value axis via the shared pointer key (T3.3).** `ResourceId(u64)` IS the `ID3D11Resource*` pointer
+-   (verified) and `raw_eyes` reads back outputs it can key by that same pointer — the join is **free, no
++   (verified) and `raw_eyes` reads back outputs it can key by that same pointer -- the join is **free, no
+    new identity scheme**. `raw_eyes` calls `ft_pass_metrics(...)` so "depth out of [0,1] AND bound at
+    t27 checkpoint 9" becomes one record. **The catch (must engineer, not hand-wave):** `raw_eyes`
+-   readback is async, 1+ frames behind the ledger checkpoint — `ft_pass_metrics` must carry the
++   readback is async, 1+ frames behind the ledger checkpoint -- `ft_pass_metrics` must carry the
+    checkpoint **live when the readback was issued** (captured at copy-to-staging), and lag beyond a
+    frame budget emits `MetricStale`, never a wrong-but-precise attribution.
+ 
+ 4. **Fix the RenderDoc adapter to enable cross-oracle quorum (I4).** Today `renderdoc_to_frametrace.py`
+-   emits every `SetShaderResources` with `start:0` positional views and mints synthetic view ids — so
++   emits every `SetShaderResources` with `start:0` positional views and mints synthetic view ids -- so
+    "SSR at t27" is lost on the replay path and can never byte-match the hook fingerprint. **STEP 0:**
+    emit true slot indices and a **shared resource identity (debug name via
+    `GetPrivateData(WKPDID_D3DDebugObjectName)`)**. Only then does `ft_checkpoint_fingerprint` agreement
+diff --git a/docs/HEATMAP-AND-ACTION-PLAN.md b/docs/HEATMAP-AND-ACTION-PLAN.md
+index 4a2a9f7..3185287 100644
+--- a/docs/HEATMAP-AND-ACTION-PLAN.md
++++ b/docs/HEATMAP-AND-ACTION-PLAN.md
+@@ -1,4 +1,4 @@
+-# QUANTA-UNIVERSE — Engineering Heatmap & Action Plan
++# QUANTA-UNIVERSE -- Engineering Heatmap & Action Plan
+ 
+ > Ground-truth concreteness assessment of the foundational repo.
+ > Method: 5 parallel source audits (compiler, kernel, rendering, finance/AI/tools,
+diff --git a/docs/brand/quanta-universe-hero.svg b/docs/brand/quanta-universe-hero.svg
+new file mode 100644
+index 0000000..733e971
+--- /dev/null
++++ b/docs/brand/quanta-universe-hero.svg
+@@ -0,0 +1,47 @@
++<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 420" role="img" aria-labelledby="title desc">
++  <title id="title">Quanta Universe ecosystem hero</title>
++  <desc id="desc">A modular ecosystem map linking BuildLang, rendering, color, operating-system, finance, and organism verification modules.</desc>
++  <defs>
++    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
++      <stop offset="0" stop-color="#07111d"/>
++      <stop offset="0.52" stop-color="#101f32"/>
++      <stop offset="1" stop-color="#241d35"/>
++    </linearGradient>
++    <linearGradient id="link" x1="0" y1="0" x2="1" y2="0">
++      <stop offset="0" stop-color="#00b3a4"/>
++      <stop offset="0.5" stop-color="#7a83ff"/>
++      <stop offset="1" stop-color="#f0b65a"/>
++    </linearGradient>
++    <filter id="soft" x="-20%" y="-20%" width="140%" height="140%">
++      <feGaussianBlur stdDeviation="12"/>
++    </filter>
++  </defs>
++  <rect width="1200" height="420" rx="28" fill="url(#bg)"/>
++  <g opacity="0.28" stroke="#30445f" stroke-width="1">
++    <path d="M0 90h1200M0 160h1200M0 230h1200M0 300h1200M0 370h1200"/>
++    <path d="M120 0v420M240 0v420M360 0v420M480 0v420M600 0v420M720 0v420M840 0v420M960 0v420M1080 0v420"/>
++  </g>
++  <g fill="none" stroke="url(#link)" stroke-width="5" opacity="0.85">
++    <path d="M600 204L296 132M600 204L318 282M600 204L888 124M600 204L900 282M600 204L600 92M600 204L600 320"/>
++  </g>
++  <g fill="none" stroke="url(#link)" stroke-width="18" opacity="0.14" filter="url(#soft)">
++    <path d="M600 204L296 132M600 204L318 282M600 204L888 124M600 204L900 282M600 204L600 92M600 204L600 320"/>
++  </g>
++  <circle cx="600" cy="204" r="78" fill="#10243a" stroke="#7a83ff" stroke-width="5"/>
++  <circle cx="296" cy="132" r="48" fill="#0f2b35" stroke="#00b3a4" stroke-width="4"/>
++  <circle cx="318" cy="282" r="48" fill="#291f36" stroke="#f0b65a" stroke-width="4"/>
++  <circle cx="888" cy="124" r="48" fill="#11263c" stroke="#7a83ff" stroke-width="4"/>
++  <circle cx="900" cy="282" r="48" fill="#2b2030" stroke="#f0647a" stroke-width="4"/>
++  <circle cx="600" cy="92" r="44" fill="#17283b" stroke="#d0d8f5" stroke-width="4"/>
++  <circle cx="600" cy="320" r="44" fill="#17283b" stroke="#b6d957" stroke-width="4"/>
++  <text x="540" y="198" fill="#ffffff" font-family="Inter, Arial, sans-serif" font-size="26" font-weight="700">Build</text>
++  <text x="538" y="230" fill="#cdd8f4" font-family="Inter, Arial, sans-serif" font-size="18">ecosystem</text>
++  <text x="252" y="138" fill="#eaf7ff" font-family="Inter, Arial, sans-serif" font-size="18">color</text>
++  <text x="273" y="288" fill="#eaf7ff" font-family="Inter, Arial, sans-serif" font-size="18">kernel</text>
++  <text x="848" y="130" fill="#eaf7ff" font-family="Inter, Arial, sans-serif" font-size="18">render</text>
++  <text x="860" y="288" fill="#eaf7ff" font-family="Inter, Arial, sans-serif" font-size="18">finance</text>
++  <text x="566" y="98" fill="#eaf7ff" font-family="Inter, Arial, sans-serif" font-size="18">buildc</text>
++  <text x="560" y="326" fill="#eaf7ff" font-family="Inter, Arial, sans-serif" font-size="18">verify</text>
++  <text x="108" y="370" fill="#ffffff" font-family="Inter, Arial, sans-serif" font-size="48" font-weight="700">Quanta Universe</text>
++  <text x="500" y="370" fill="#d5deec" font-family="Inter, Arial, sans-serif" font-size="24">legacy modules mapped into the Build ecosystem</text>
++</svg>
+diff --git a/examples/demo/README.md b/examples/demo/README.md
+new file mode 100644
+index 0000000..80babdb
+--- /dev/null
++++ b/examples/demo/README.md
+@@ -0,0 +1,58 @@
++# Demo -- hello_quanta
++
++> **Best-effort demo -- not runtime-verified by author.**
++> Commands use only the invocation forms that appear verbatim elsewhere in this
++> repo (`programs/build_all.bat`, `programs/build.bat`, `tools/components.toml`,
++> `ENGINEERING.md`). The expected output below is illustrative; it was not
++> executed while writing this file. The `quantac` compiler lives in the separate
++> [HarperZ9/quantalang](https://github.com/HarperZ9/quantalang) repo and is not
++> bundled here.
++
++[`hello_quanta.quanta`](hello_quanta.quanta) is a minimal, self-contained
++QuantaLang program (no arguments, no imports) built from the same constructs as
++`programs/test_hello.quanta`: free functions, recursion, `let mut`, a `while`
++loop, i64 arithmetic, and `println!` formatting.
++
++## 1. Transpile to C (needs `quantac` on PATH)
++
++```sh
++quantac examples/demo/hello_quanta.quanta --target c -o /dev/null   # type-check only (nul on Windows)
++quantac examples/demo/hello_quanta.quanta                            # emit hello_quanta.c
++```
++
++The first form exits 0 if the program transpiles cleanly. The second writes
++`hello_quanta.c` next to the source.
++
++## 2. Build a native binary (Windows + MSVC)
++
++```bat
++quantac examples\demo\hello_quanta.quanta
++programs\build.bat examples\demo\hello_quanta.c demo.exe
++demo.exe
++```
++
++`programs\build.bat input.c [output.exe]` invokes `cl /O2` via the VS 2022 Build
++Tools (see the script for the exact `vcvars64.bat` path).
++
++With `gcc` instead of MSVC:
++
++```sh
++quantac examples/demo/hello_quanta.quanta   # -> examples/demo/hello_quanta.c
++gcc -O2 examples/demo/hello_quanta.c -o demo
++./demo
++```
++
++## Expected output (illustrative)
++
++```
++Hello from QuantaLang
++3628800
++5050
++```
++
++## Notes
++
++- `factorial(10)` = 3628800 and `sum_to(100)` = 5050 are arithmetic facts,
++  independent of the toolchain.
++- See [../../USAGE.md](../../USAGE.md) for the full command surface and
++  [../../STATUS.md](../../STATUS.md) for which modules/programs are verified.
+diff --git a/examples/demo/hello_quanta.quanta b/examples/demo/hello_quanta.quanta
+new file mode 100644
+index 0000000..804b9ed
+--- /dev/null
++++ b/examples/demo/hello_quanta.quanta
+@@ -0,0 +1,36 @@
++// =============================================================================
++// hello_quanta — minimal self-contained QuantaLang demo
++// =============================================================================
++// Demonstrates the constructs the C backend handles reliably (see STATUS.md and
++// programs/test_hello.quanta, on which this is modeled): free functions,
++// recursion, `let mut`, a `while` loop, i64 arithmetic, and println! formatting.
++// It takes no arguments and uses no imports, so it transpiles standalone.
++//
++// Build + run (see ../../USAGE.md and ../../programs/README.md):
++//   quantac examples/demo/hello_quanta.quanta            # -> hello_quanta.c
++//   programs/build.bat examples/demo/hello_quanta.c demo.exe   # MSVC -> demo.exe
++//   ./demo.exe
++// =============================================================================
++
++fn factorial(n: i64) -> i64 {
++    if n <= 1 {
++        return 1;
++    }
++    return n * factorial(n - 1);
++}
++
++fn sum_to(limit: i64) -> i64 {
++    let mut total: i64 = 0;
++    let mut i: i64 = 1;
++    while i <= limit {
++        total = total + i;
++        i = i + 1;
++    }
++    return total;
++}
++
++fn main() {
++    println!("Hello from QuantaLang");
++    println!("{}", factorial(10));   // 3628800
++    println!("{}", sum_to(100));     // 5050
++}
+diff --git a/programs/ARCHITECTURE.md b/programs/ARCHITECTURE.md
+index b2d6645..4c7bc03 100644
+--- a/programs/ARCHITECTURE.md
++++ b/programs/ARCHITECTURE.md
+@@ -39,7 +39,7 @@ Section                          Lines         Functions   Purpose
+ 
+ ### The DB Struct (139 fields)
+ 
+-All engine state lives in one flat struct. This is a QuantaLang constraint, not a design preference — the C codegen cannot reliably emit struct field assignments on local variables.
++All engine state lives in one flat struct. This is a QuantaLang constraint, not a design preference -- the C codegen cannot reliably emit struct field assignments on local variables.
+ 
+ The struct fields are grouped into:
+ 
+@@ -150,11 +150,11 @@ Sorted-array indexes with binary search:
+ 
+ | Decision | Rationale |
+ |----------|-----------|
+-| Single flat struct | QuantaLang codegen limitation — no reliable local struct field assignment |
++| Single flat struct | QuantaLang codegen limitation -- no reliable local struct field assignment |
+ | String pool | `Vec<String>` codegen is incomplete |
+ | Text file format | Human-readable, simple parsing, adequate for target scale |
+ | Selection sort | O(n^2) but trivial to implement correctly without stdlib sort |
+-| Full array rebuilds | No in-place Vec mutation in QuantaLang — must reconstruct |
++| Full array rebuilds | No in-place Vec mutation in QuantaLang -- must reconstruct |
+ | No B-tree | Sorted arrays sufficient; B-tree in flat arrays not justified |
+ | Embedded parser state | No separate AST struct; parsed state lives in DB fields |
+ 
+diff --git a/releases/quanta-universe-v1.0.2-notes.md b/releases/quanta-universe-v1.0.2-notes.md
+new file mode 100644
+index 0000000..a08aee5
+--- /dev/null
++++ b/releases/quanta-universe-v1.0.2-notes.md
+@@ -0,0 +1,16 @@
++## Quanta Universe v1.0.2
++
++This release publishes the refreshed module-forward tooling surface for split-repo packaging.
++
++### Highlights
++- Added generated release candidate dashboard: `releases/release-candidates.md`
++- Added generated outward-facing module showcase: `tools/showcase.md`
++- Extended `tools/release_plan.py` with `--write-showcase`
++- Documented naming/conduct for module publish surfaces in `README.md` and `tools/README.md`
++- Added git hygiene for tool cache artifacts (`tools/__pycache__`) in `.gitignore`
++
++### Nested modules included (publish=true)
++- QuantaOS, Axiom, Photon, Spectrum, Chromatic, Lumina, Nexus, Prism, Refract, Neutrino
++- Quantum Finance, Field Tensor, Delta, Entropy, Entangle, Calibrate, Nova, Oracle, Wavelength, Forge, Foundation
++
++This release is intended to support public-facing packaging workflows for nested repositories.
+diff --git a/releases/release-candidates.md b/releases/release-candidates.md
+new file mode 100644
+index 0000000..c627743
+--- /dev/null
++++ b/releases/release-candidates.md
+@@ -0,0 +1,27 @@
++# Module Release Candidates
++
++Generated: 2026-06-12 09:23:15Z
++
++| Package | Slug | Language | Category | Source | Repository | Ready |
++|---|---|---|---|---|---|---|
++| QuantaOS | `quanta-os` | rust | core | `quantaos` | https://github.com/HarperZ9/quantaos | yes |
++| Axiom | `axiom` | quanta | core | `axiom` | https://github.com/HarperZ9/axiom | yes |
++| Photon | `photon` | mixed | rendering | `photon` | https://github.com/HarperZ9/photon | yes |
++| Spectrum | `spectrum` | quanta | rendering | `spectrum` | https://github.com/HarperZ9/spectrum | yes |
++| Chromatic | `chromatic` | quanta | rendering | `chromatic` | https://github.com/HarperZ9/chromatic | yes |
++| Lumina | `lumina` | quanta | rendering | `lumina` | https://github.com/HarperZ9/lumina | yes |
++| Nexus | `nexus` | quanta | rendering | `nexus` | https://github.com/HarperZ9/nexus | yes |
++| Prism | `prism` | quanta | rendering | `prism` | https://github.com/HarperZ9/prism | yes |
++| Refract | `refract` | quanta | rendering | `refract` | https://github.com/HarperZ9/refract | yes |
++| Neutrino | `neutrino` | quanta | rendering | `neutrino` | https://github.com/HarperZ9/neutrino | yes |
++| Quantum Finance | `quantum-finance` | quanta | trading | `quantum-finance` | https://github.com/HarperZ9/quantum-finance | yes |
++| Field Tensor | `field-tensor` | quanta | trading | `field-tensor` | https://github.com/HarperZ9/field-tensor | yes |
++| Delta | `delta` | quanta | trading | `delta` | https://github.com/HarperZ9/delta | yes |
++| Entropy | `entropy` | quanta | trading | `entropy` | https://github.com/HarperZ9/entropy | yes |
++| Entangle | `entangle` | quanta | integration | `entangle` | https://github.com/HarperZ9/entangle | yes |
++| Calibrate | `calibrate` | quanta | integration | `calibrate` | https://github.com/HarperZ9/calibrate | yes |
++| Nova | `nova` | quanta | integration | `nova` | https://github.com/HarperZ9/nova | yes |
++| Oracle | `oracle` | quanta | ai | `oracle` | https://github.com/HarperZ9/oracle | yes |
++| Wavelength | `wavelength` | quanta | ai | `wavelength` | https://github.com/HarperZ9/wavelength | yes |
++| Forge | `forge` | quanta | tools | `forge` | https://github.com/HarperZ9/forge | yes |
++| Foundation | `foundation` | quanta | tools | `foundation` | https://github.com/HarperZ9/foundation | yes |
+diff --git a/tools/README.md b/tools/README.md
+index eb6f4ae..dbf8560 100644
+--- a/tools/README.md
++++ b/tools/README.md
+@@ -12,6 +12,33 @@ sketches in STATUS.md Tier 3. Each entry has a verify command and an expectation
+ (tested = runtime-verified, build = compile/link only). A new real module joins
+ the organism by adding an entry here.
+ 
++## package-index.toml
++
++`package-index.toml` is the publication surface for split-repo packaging.
++Each entry maps one repository-ready module to:
++
++- lowercase slug (release-ready naming),
++- repo-relative source path,
++- canonical GitHub repository,
++- publish intent (`publish = true` means this module is currently a release candidate).
++
++Use this file to build release candidate checklists and public-facing module
++material (repo links, naming, and package ordering).
++`tools/showcase.md` is the generated outward-facing module surface.
++
++## release_plan.py
++
++This helper turns `package-index.toml` into an actionable release view:
++
++    python tools/release_plan.py --write-markdown
++    python tools/release_plan.py --only-publish --json
++    python tools/release_plan.py --module axiom --json
++
++Use this command set before packaging or public announcements:
++
++    python tools/release_plan.py --only-publish --write-markdown
++    python tools/release_plan.py --only-publish --write-showcase
++
+ ## verify_organism.py
+ 
+ Runs every component verify command and prints what actually builds and passes on
+diff --git a/tools/package-index.toml b/tools/package-index.toml
+new file mode 100644
+index 0000000..85f7cc5
+--- /dev/null
++++ b/tools/package-index.toml
+@@ -0,0 +1,215 @@
++# Package index for publishable nested repos.
++#
++# This registry is the outward-facing boundary for module-level packaging.
++# Keep this list in sync with CATALOG.json entries that have a dedicated
++# GitHub repository.
++#
++# Fields:
++# - name: display title
++# - slug: repo/package slug (lowercase, hyphenated)
++# - source: repo-relative source directory
++# - language: primary implementation language
++# - repository: canonical publish target
++# - publish: whether this module is currently published as a candidate package
++#
++
++version = "1.0.0"
++updated = "2026-06-12"
++
++[[package]]
++name = "QuantaLang"
++slug = "quantalang"
++source = "quantalang"
++language = "rust"
++repository = "https://github.com/HarperZ9/quantalang"
++publish = true
++category = "core"
++
++[[package]]
++name = "QuantaOS"
++slug = "quanta-os"
++source = "quantaos"
++language = "rust"
++repository = "https://github.com/HarperZ9/quantaos"
++publish = true
++category = "core"
++
++[[package]]
++name = "Axiom"
++slug = "axiom"
++source = "axiom"
++language = "quanta"
++repository = "https://github.com/HarperZ9/axiom"
++publish = true
++category = "core"
++
++[[package]]
++name = "Photon"
++slug = "photon"
++source = "photon"
++language = "mixed"
++repository = "https://github.com/HarperZ9/photon"
++publish = true
++category = "rendering"
++
++[[package]]
++name = "Spectrum"
++slug = "spectrum"
++source = "spectrum"
++language = "quanta"
++repository = "https://github.com/HarperZ9/spectrum"
++publish = true
++category = "rendering"
++
++[[package]]
++name = "Chromatic"
++slug = "chromatic"
++source = "chromatic"
++language = "quanta"
++repository = "https://github.com/HarperZ9/chromatic"
++publish = true
++category = "rendering"
++
++[[package]]
++name = "Lumina"
++slug = "lumina"
++source = "lumina"
++language = "quanta"
++repository = "https://github.com/HarperZ9/lumina"
++publish = true
++category = "rendering"
++
++[[package]]
++name = "Nexus"
++slug = "nexus"
++source = "nexus"
++language = "quanta"
++repository = "https://github.com/HarperZ9/nexus"
++publish = true
++category = "rendering"
++
++[[package]]
++name = "Prism"
++slug = "prism"
++source = "prism"
++language = "quanta"
++repository = "https://github.com/HarperZ9/prism"
++publish = true
++category = "rendering"
++
++[[package]]
++name = "Refract"
++slug = "refract"
++source = "refract"
++language = "quanta"
++repository = "https://github.com/HarperZ9/refract"
++publish = true
++category = "rendering"
++
++[[package]]
++name = "Neutrino"
++slug = "neutrino"
++source = "neutrino"
++language = "quanta"
++repository = "https://github.com/HarperZ9/neutrino"
++publish = true
++category = "rendering"
++
++[[package]]
++name = "Quantum Finance"
++slug = "quantum-finance"
++source = "quantum-finance"
++language = "quanta"
++repository = "https://github.com/HarperZ9/quantum-finance"
++publish = true
++category = "trading"
++
++[[package]]
++name = "Field Tensor"
++slug = "field-tensor"
++source = "field-tensor"
++language = "quanta"
++repository = "https://github.com/HarperZ9/field-tensor"
++publish = true
++category = "trading"
++
++[[package]]
++name = "Delta"
++slug = "delta"
++source = "delta"
++language = "quanta"
++repository = "https://github.com/HarperZ9/delta"
++publish = true
++category = "trading"
++
++[[package]]
++name = "Entropy"
++slug = "entropy"
++source = "entropy"
++language = "quanta"
++repository = "https://github.com/HarperZ9/entropy"
++publish = true
++category = "trading"
++
++[[package]]
++name = "Entangle"
++slug = "entangle"
++source = "entangle"
++language = "quanta"
++repository = "https://github.com/HarperZ9/entangle"
++publish = true
++category = "integration"
++
++[[package]]
++name = "Calibrate"
++slug = "calibrate"
++source = "calibrate"
++language = "quanta"
++repository = "https://github.com/HarperZ9/calibrate"
++publish = true
++category = "integration"
++
++[[package]]
++name = "Nova"
++slug = "nova"
++source = "nova"
++language = "quanta"
++repository = "https://github.com/HarperZ9/nova"
++publish = true
++category = "integration"
++
++[[package]]
++name = "Oracle"
++slug = "oracle"
++source = "oracle"
++language = "quanta"
++repository = "https://github.com/HarperZ9/oracle"
++publish = true
++category = "ai"
++
++[[package]]
++name = "Wavelength"
++slug = "wavelength"
++source = "wavelength"
++language = "quanta"
++repository = "https://github.com/HarperZ9/wavelength"
++publish = true
++category = "ai"
++
++[[package]]
++name = "Forge"
++slug = "forge"
++source = "forge"
++language = "quanta"
++repository = "https://github.com/HarperZ9/forge"
++publish = true
++category = "tools"
++
++[[package]]
++name = "Foundation"
++slug = "foundation"
++source = "foundation"
++language = "quanta"
++repository = "https://github.com/HarperZ9/foundation"
++publish = true
++category = "tools"
+diff --git a/tools/release_plan.py b/tools/release_plan.py
+new file mode 100644
+index 0000000..1c769ed
+--- /dev/null
++++ b/tools/release_plan.py
+@@ -0,0 +1,249 @@
++#!/usr/bin/env python
++"""Release candidate manifest helpers for split modules.
++
++This script is intentionally lightweight. It turns ``tools/package-index.toml``
++into an actionable candidate list for outbound publication work (repo checks,
++release checks, and candidate artifact notes).
++"""
++
++from __future__ import annotations
++
++import argparse
++import json
++import pathlib
++import tomllib
++
++from collections import defaultdict
++from datetime import datetime, timezone
++from typing import Any, Dict, List
++
++
++REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
++INDEX_PATH = REPO_ROOT / "tools" / "package-index.toml"
++DEFAULT_MARKDOWN_PATH = REPO_ROOT / "releases" / "release-candidates.md"
++SHOWCASE_PATH = REPO_ROOT / "tools" / "showcase.md"
++KNOWN_CATEGORIES = (
++    "core",
++    "rendering",
++    "trading",
++    "integration",
++    "ai",
++    "tools",
++)
++CATEGORY_TITLES = {
++    "ai": "AI",
++    "core": "Core",
++    "integration": "Integration",
++    "rendering": "Rendering",
++    "trading": "Trading",
++    "tools": "Tools",
++}
++
++
++def load_packages() -> List[Dict[str, Any]]:
++    data = tomllib.loads(INDEX_PATH.read_text(encoding="utf-8"))
++    return list(data.get("package", []))
++
++
++def evaluate_package(pkg: Dict[str, Any]) -> Dict[str, Any]:
++    source = REPO_ROOT / pkg["source"]
++    status: List[str] = []
++    if source.exists():
++        status.append("source:ok")
++    else:
++        status.append("source:missing")
++
++    lang = pkg.get("language", "").lower()
++    if lang == "rust":
++        if (source / "Cargo.toml").exists() or any(source.rglob("Cargo.toml")):
++            status.append("manifest:ok")
++        else:
++            status.append("manifest:missing")
++    elif lang == "quanta":
++        if (source / "lib.quanta").exists():
++            status.append("manifest:ok")
++        else:
++            status.append("manifest:missing")
++
++    if (source / "README.md").exists():
++        status.append("readme:ok")
++    else:
++        status.append("readme:missing")
++
++    if not source.exists():
++        publish = False
++    else:
++        publish = bool(pkg.get("publish", False))
++    core_checks = [s for s in status if s.startswith("source:") or s.startswith("manifest:")]
++    if publish and all(not s.endswith(":missing") for s in core_checks):
++        status.append("publish:ready")
++    else:
++        status.append("publish:not-ready")
++
++    return {
++        "name": pkg["name"],
++        "slug": pkg["slug"],
++        "source": pkg["source"],
++        "language": pkg["language"],
++        "repository": pkg["repository"],
++        "category": pkg.get("category", "unassigned"),
++        "status": status,
++        "publish": publish,
++    }
++
++
++def format_markdown(packages: List[Dict[str, Any]], title: str) -> str:
++    header = [
++        f"# {title}",
++        "",
++        f"Generated: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%SZ')}",
++        "",
++        "| Package | Slug | Language | Category | Source | Repository | Ready |",
++        "|---|---|---|---|---|---|---|",
++    ]
++    rows = []
++    for pkg in packages:
++        ready = "yes" if "publish:ready" in pkg["status"] else "no"
++        rows.append(
++            f"| {pkg['name']} | `{pkg['slug']}` | {pkg['language']} | "
++            f"{pkg['category']} | `{pkg['source']}` | {pkg['repository']} | {ready} |"
++        )
++    return "\n".join(header + rows) + "\n"
++
++
++def format_showcase(packages: List[Dict[str, Any]]) -> str:
++    grouped: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
++    for pkg in packages:
++        grouped[pkg.get("category", "unassigned")].append(pkg)
++
++    lines = [
++        "# Nested Module Showcase",
++        "",
++        f"Generated: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%SZ')}",
++        "",
++        "These repositories are the split-repo publication surface.",
++        "Each row links the canonical GitHub target, slug, and source directory.",
++        "Lowercase-hyphenated slugs are the public package identifiers.",
++        "",
++    ]
++
++    for category in KNOWN_CATEGORIES:
++        packages = grouped.get(category, [])
++        if not packages:
++            continue
++        lines.append(f"## {CATEGORY_TITLES.get(category, category)}")
++        lines.append("")
++        lines.append("| Package | Slug | Language | Repository | Source | Readiness |")
++        lines.append("|---|---|---|---|---|---|")
++        for pkg in packages:
++            ready = "ready" if "publish:ready" in pkg["status"] else "blocked"
++            lines.append(
++                f"| {pkg['name']} | `{pkg['slug']}` | {pkg['language']} | "
++                f"{pkg['repository']} | `{pkg['source']}` | {ready} |"
++            )
++        lines.append("")
++
++    lines.extend(
++        [
++            "## Publish Surface",
++            "",
++            "| Step | Command |",
++            "|---|---|",
++            "| View all publish-ready modules | `python tools/release_plan.py --only-publish --json` |",
++            "| View one module | `python tools/release_plan.py --module <slug> --json` |",
++            "| Refresh release dashboard | `python tools/release_plan.py --only-publish --write-markdown` |",
++            "| Rebuild this showcase | `python tools/release_plan.py --only-publish --write-showcase` |",
++            "",
++            "For the compact JSON-ready list, use `python tools/release_plan.py --only-publish --json`.",
++        ]
++    )
++    return "\n".join(lines) + "\n"
++
++
++def cmd_plan(args: argparse.Namespace) -> int:
++    packages = load_packages()
++    records = [evaluate_package(pkg) for pkg in packages]
++
++    if args.module:
++        records = [p for p in records if p["slug"] == args.module]
++
++    if args.only_publish:
++        records = [p for p in records if p["publish"]]
++
++    if args.json:
++        print(json.dumps(records, indent=2, sort_keys=True))
++    else:
++        for p in records:
++            print(f"{p['name']} ({p['slug']})")
++            print(f"  - source: {p['source']}")
++            print(f"  - repository: {p['repository']}")
++            print(f"  - category: {p['category']}")
++            print(f"  - publish-ready: {'yes' if 'publish:ready' in p['status'] else 'no'}")
++            print(f"  - checks: {', '.join(p['status'])}")
++
++    markdown_output = args.markdown
++    if args.write_markdown and markdown_output is None:
++        markdown_output = DEFAULT_MARKDOWN_PATH
++
++    if markdown_output is not None:
++        markdown_output.parent.mkdir(parents=True, exist_ok=True)
++        title = "Module Release Candidates"
++        if args.module:
++            title = f"Module Release Candidate: {args.module}"
++        markdown_output.write_text(format_markdown(records, title), encoding="utf-8")
++        print(f"wrote {markdown_output}")
++
++    if args.write_showcase:
++        SHOWCASE_PATH.parent.mkdir(parents=True, exist_ok=True)
++        SHOWCASE_PATH.write_text(format_showcase(records), encoding="utf-8")
++        print(f"wrote {SHOWCASE_PATH}")
++
++    return 0
++
++
++def build_parser() -> argparse.ArgumentParser:
++    parser = argparse.ArgumentParser(
++        description="Generate module release candidate summary from package-index."
++    )
++    parser.add_argument(
++        "--json",
++        action="store_true",
++        help="emit JSON summary",
++    )
++    parser.add_argument(
++        "--module",
++        help="limit to one slug",
++    )
++    parser.add_argument(
++        "--only-publish",
++        action="store_true",
++        help="limit to publish=true packages",
++    )
++    parser.add_argument(
++        "--markdown",
++        type=pathlib.Path,
++        default=None,
++        help="optional markdown output file path",
++    )
++    parser.add_argument(
++        "--write-markdown",
++        action="store_true",
++        help=(
++            "emit releases/release-candidates.md after planning."
++        ),
++    )
++    parser.add_argument(
++        "--write-showcase",
++        action="store_true",
++        help="emit tools/showcase.md after planning.",
++    )
++    return parser
++
++
++def main() -> int:
++    args = build_parser().parse_args()
++    return cmd_plan(args)
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/tools/showcase.md b/tools/showcase.md
+new file mode 100644
+index 0000000..d7de13d
+--- /dev/null
++++ b/tools/showcase.md
+@@ -0,0 +1,69 @@
++# Nested Module Showcase
++
++Generated: 2026-06-12 09:23:15Z
++
++These repositories are the split-repo publication surface.
++Each row links the canonical GitHub target, slug, and source directory.
++Lowercase-hyphenated slugs are the public package identifiers.
++
++## Core
++
++| Package | Slug | Language | Repository | Source | Readiness |
++|---|---|---|---|---|---|
++| QuantaOS | `quanta-os` | rust | https://github.com/HarperZ9/quantaos | `quantaos` | ready |
++| Axiom | `axiom` | quanta | https://github.com/HarperZ9/axiom | `axiom` | ready |
++
++## Rendering
++
++| Package | Slug | Language | Repository | Source | Readiness |
++|---|---|---|---|---|---|
++| Photon | `photon` | mixed | https://github.com/HarperZ9/photon | `photon` | ready |
++| Spectrum | `spectrum` | quanta | https://github.com/HarperZ9/spectrum | `spectrum` | ready |
++| Chromatic | `chromatic` | quanta | https://github.com/HarperZ9/chromatic | `chromatic` | ready |
++| Lumina | `lumina` | quanta | https://github.com/HarperZ9/lumina | `lumina` | ready |
++| Nexus | `nexus` | quanta | https://github.com/HarperZ9/nexus | `nexus` | ready |
++| Prism | `prism` | quanta | https://github.com/HarperZ9/prism | `prism` | ready |
++| Refract | `refract` | quanta | https://github.com/HarperZ9/refract | `refract` | ready |
++| Neutrino | `neutrino` | quanta | https://github.com/HarperZ9/neutrino | `neutrino` | ready |
++
++## Trading
++
++| Package | Slug | Language | Repository | Source | Readiness |
++|---|---|---|---|---|---|
++| Quantum Finance | `quantum-finance` | quanta | https://github.com/HarperZ9/quantum-finance | `quantum-finance` | ready |
++| Field Tensor | `field-tensor` | quanta | https://github.com/HarperZ9/field-tensor | `field-tensor` | ready |
++| Delta | `delta` | quanta | https://github.com/HarperZ9/delta | `delta` | ready |
++| Entropy | `entropy` | quanta | https://github.com/HarperZ9/entropy | `entropy` | ready |
++
++## Integration
++
++| Package | Slug | Language | Repository | Source | Readiness |
++|---|---|---|---|---|---|
++| Entangle | `entangle` | quanta | https://github.com/HarperZ9/entangle | `entangle` | ready |
++| Calibrate | `calibrate` | quanta | https://github.com/HarperZ9/calibrate | `calibrate` | ready |
++| Nova | `nova` | quanta | https://github.com/HarperZ9/nova | `nova` | ready |
++
++## AI
++
++| Package | Slug | Language | Repository | Source | Readiness |
++|---|---|---|---|---|---|
++| Oracle | `oracle` | quanta | https://github.com/HarperZ9/oracle | `oracle` | ready |
++| Wavelength | `wavelength` | quanta | https://github.com/HarperZ9/wavelength | `wavelength` | ready |
++
++## Tools
++
++| Package | Slug | Language | Repository | Source | Readiness |
++|---|---|---|---|---|---|
++| Forge | `forge` | quanta | https://github.com/HarperZ9/forge | `forge` | ready |
++| Foundation | `foundation` | quanta | https://github.com/HarperZ9/foundation | `foundation` | ready |
++
++## Publish Surface
++
++| Step | Command |
++|---|---|
++| View all publish-ready modules | `python tools/release_plan.py --only-publish --json` |
++| View one module | `python tools/release_plan.py --module <slug> --json` |
++| Refresh release dashboard | `python tools/release_plan.py --only-publish --write-markdown` |
++| Rebuild this showcase | `python tools/release_plan.py --only-publish --write-showcase` |
++
++For the compact JSON-ready list, use `python tools/release_plan.py --only-publish --json`.

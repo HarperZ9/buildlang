@@ -1,0 +1,54 @@
+// Simple test file for BuildLang compiler
+
+fn add(x: i32, y: i32) -> i32 {
+    x + y
+}
+
+fn multiply(x: i32, y: i32) -> i32 {
+    x * y
+}
+
+fn factorial(n: i32) -> i32 {
+    if n <= 1 {
+        1
+    } else {
+        n * factorial(n - 1)
+    }
+}
+
+fn fibonacci(n: i32) -> i32 {
+    if n <= 1 {
+        n
+    } else {
+        fibonacci(n - 1) + fibonacci(n - 2)
+    }
+}
+
+struct Point {
+    x: f64,
+    y: f64,
+}
+
+fn point_new(x: f64, y: f64) -> Point {
+    Point { x, y }
+}
+
+fn point_distance_squared(p1: Point, p2: Point) -> f64 {
+    let dx = p1.x - p2.x;
+    let dy = p1.y - p2.y;
+    dx * dx + dy * dy
+}
+
+fn main() {
+    let a = 5;
+    let b = 3;
+    let sum = add(a, b);
+    let product = multiply(a, b);
+
+    let fact5 = factorial(5);
+    let fib10 = fibonacci(10);
+
+    let p1 = point_new(0.0, 0.0);
+    let p2 = point_new(3.0, 4.0);
+    let dist_sq = point_distance_squared(p1, p2);
+}

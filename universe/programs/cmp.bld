@@ -1,0 +1,200 @@
+// =============================================================================
+// qcmp — Byte-by-byte file comparison written in BuildLang
+// =============================================================================
+// Compares two files byte by byte, reports first difference or lists all.
+//
+// Usage:
+//   qcmp file1 file2              report first difference
+//   qcmp -l file1 file2           list all differences
+//   qcmp -s file1 file2           silent (exit code only: 0=same, 1=differ)
+//   qcmp --help                   usage
+//
+// Output:
+//   file1 file2 differ: byte 42, line 3
+// With -l:
+//   42 0x61 0x62
+//
+// Design: Reads both files into strings, walks character-by-character using
+// .char_at(), tracks byte offset and line number. Uses an ASCII lookup table
+// (same pattern as qhex/qbase64) to convert characters to byte values.
+// =============================================================================
+
+struct Tables {
+    ascii: String,
+    hex_chars: String,
+}
+
+fn tables_new() -> Tables {
+    Tables {
+        ascii: " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~",
+        hex_chars: "0123456789abcdef",
+    }
+}
+
+// --- Byte value from character ---
+fn char_code(t: &Tables, c: String) -> i64 {
+    let idx = t.ascii.index_of(c);
+    if idx < 0 {
+        if c == "\n" { return 10; }
+        if c == "\r" { return 13; }
+        if c == "\t" { return 9; }
+        return 0;
+    }
+    idx + 32
+}
+
+// --- Format byte as 0xHH ---
+fn byte_to_hex(t: &Tables, b: i64) -> String {
+    let hi = t.hex_chars.char_at(b / 16);
+    let lo = t.hex_chars.char_at(b % 16);
+    "0x" + hi + lo
+}
+
+// --- Help ---
+fn print_help() ~ Console {
+    println!("qcmp — byte-by-byte file comparison");
+    println!("");
+    println!("Usage:");
+    println!("  qcmp [OPTION] FILE1 FILE2");
+    println!("");
+    println!("Options:");
+    println!("  -l       list all byte differences");
+    println!("  -s       silent mode (exit code only: 0=same, 1=differ)");
+    println!("  --help   display this help and exit");
+    println!("");
+    println!("Exit codes:");
+    println!("  0  files are identical");
+    println!("  1  files differ");
+    println!("  2  error (missing file, bad usage)");
+}
+
+// --- Main ---
+fn main() ~ Console + Environment + FileSystem + Process {
+    let t = tables_new();
+    let nargs = args_count();
+
+    if nargs < 2 {
+        print_help();
+        process_exit(0);
+    }
+
+    // Parse arguments
+    let mut list_all = false;
+    let mut silent = false;
+    let mut file1 = "";
+    let mut file2 = "";
+    let mut file_count: i64 = 0;
+
+    let mut i: i64 = 1;
+    while i < nargs {
+        let arg = args_get(i);
+
+        if arg == "--help" || arg == "-h" {
+            print_help();
+            process_exit(0);
+        } else if arg == "-l" {
+            list_all = true;
+        } else if arg == "-s" {
+            silent = true;
+        } else if arg.starts_with("-") {
+            // Check combined flags
+            if arg.contains("l") { list_all = true; }
+            if arg.contains("s") { silent = true; }
+        } else {
+            if file_count == 0 {
+                file1 = arg;
+                file_count = 1;
+            } else if file_count == 1 {
+                file2 = arg;
+                file_count = 2;
+            } else {
+                println!("qcmp: too many file arguments");
+                process_exit(2);
+            }
+        }
+
+        i = i + 1;
+    }
+
+    if file_count < 2 {
+        println!("qcmp: missing file operand");
+        println!("Try 'qcmp --help' for usage.");
+        process_exit(2);
+    }
+
+    // Check files exist
+    if !file_exists(file1) {
+        println!("qcmp: {}: No such file or directory", file1);
+        process_exit(2);
+    }
+    if !file_exists(file2) {
+        println!("qcmp: {}: No such file or directory", file2);
+        process_exit(2);
+    }
+
+    // Read files
+    let content1 = read_file(file1);
+    let content2 = read_file(file2);
+    let len1 = content1.len();
+    let len2 = content2.len();
+
+    // Compare byte by byte
+    let min_len = if len1 < len2 { len1 } else { len2 };
+    let mut pos: i64 = 0;
+    let mut line: i64 = 1;
+    let mut found_diff = false;
+
+    while pos < min_len {
+        let c1 = content1.char_at(pos);
+        let c2 = content2.char_at(pos);
+
+        if c1 != c2 {
+            found_diff = true;
+            let byte_pos = pos + 1;
+
+            if silent {
+                // Silent mode: just exit 1
+                process_exit(1);
+            } else if list_all {
+                // List mode: show all differences
+                let b1 = char_code(&t, c1);
+                let b2 = char_code(&t, c2);
+                let h1 = byte_to_hex(&t, b1);
+                let h2 = byte_to_hex(&t, b2);
+                println!("{} {} {}", byte_pos, h1, h2);
+            } else {
+                // Default: report first difference and exit
+                println!("{} {} differ: byte {}, line {}", file1, file2, byte_pos, line);
+                process_exit(1);
+            }
+        }
+
+        // Track line numbers
+        if c1 == "\n" {
+            line = line + 1;
+        }
+
+        pos = pos + 1;
+    }
+
+    // Check if one file is longer than the other
+    if len1 != len2 {
+        if silent {
+            process_exit(1);
+        }
+        if !list_all {
+            let eof_pos = min_len + 1;
+            let shorter = if len1 < len2 { file1 } else { file2 };
+            println!("qcmp: EOF on {} after byte {}", shorter, min_len);
+        }
+        process_exit(1);
+    }
+
+    // If we listed all and found differences
+    if found_diff {
+        process_exit(1);
+    }
+
+    // Files are identical
+    process_exit(0);
+}

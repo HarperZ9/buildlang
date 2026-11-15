@@ -1,0 +1,1869 @@
+// ============================================================================
+// BUILD-UNIVERSE: Oracle Causal Inference Module
+// ============================================================================
+// Copyright © 2024-2025 Zain Dana Harper. All Rights Reserved.
+// Copyright (c) 2024-2025 Zain Dana Harper. All Rights Reserved.
+// ============================================================================
+// Causal inference methods for time series and observational data
+// ============================================================================
+
+use foundation::collections::{Vec, HashMap, HashSet, BinaryHeap};
+use foundation::math::{Matrix, Vector, sqrt, log, exp, abs, min, max, pow};
+use foundation::sync::{Arc, RwLock, Mutex};
+use foundation::io::{Result, Error};
+
+// ============================================================================
+// GRANGER CAUSALITY
+// ============================================================================
+
+/// Granger causality test for time series
+/// Tests if X "Granger-causes" Y (X helps predict Y)
+pub struct GrangerCausality {
+    max_lag: Int,
+    significance_level: Float,
+}
+
+impl GrangerCausality {
+    pub fn new(max_lag: Int) -> Self {
+        Self {
+            max_lag,
+            significance_level: 0.05,
+        }
+    }
+
+    pub fn with_significance(mut self, alpha: Float) -> Self {
+        self.significance_level = alpha;
+        self
+    }
+
+    /// Test if x Granger-causes y
+    pub fn test(&self, x: &[Float], y: &[Float]) -> GrangerResult {
+        let n = min(x.len(), y.len());
+        if n <= self.max_lag as usize + 1 {
+            return GrangerResult::insufficient_data();
+        }
+
+        // Test for each lag
+        let mut results = Vec::new();
+        let mut best_lag = 1;
+        let mut best_f_stat = 0.0;
+
+        for lag in 1..=self.max_lag {
+            let result = self.test_lag(x, y, lag as usize);
+            if result.f_statistic > best_f_stat {
+                best_f_stat = result.f_statistic;
+                best_lag = lag;
+            }
+            results.push(result);
+        }
+
+        // Return result for best lag
+        let best_result = &results[(best_lag - 1) as usize];
+
+        GrangerResult {
+            causes: best_result.p_value < self.significance_level,
+            optimal_lag: best_lag,
+            f_statistic: best_result.f_statistic,
+            p_value: best_result.p_value,
+            lag_results: results,
+        }
+    }
+
+    /// Test for specific lag
+    fn test_lag(&self, x: &[Float], y: &[Float], lag: usize) -> LagResult {
+        let n = min(x.len(), y.len());
+        let effective_n = n - lag;
+
+        if effective_n < 2 * lag + 1 {
+            return LagResult {
+                lag: lag as Int,
+                f_statistic: 0.0,
+                p_value: 1.0,
+                r_squared_restricted: 0.0,
+                r_squared_unrestricted: 0.0,
+            };
+        }
+
+        // Build regression matrices
+        // Restricted model: y_t = sum(a_i * y_{t-i}) + e_t
+        // Unrestricted model: y_t = sum(a_i * y_{t-i}) + sum(b_i * x_{t-i}) + e_t
+
+        let (ssr_r, ssr_u, k_r, k_u) = self.compute_ssr(x, y, lag);
+
+        // F-statistic: ((SSR_r - SSR_u) / (k_u - k_r)) / (SSR_u / (n - k_u))
+        let df1 = (k_u - k_r) as Float;
+        let df2 = (effective_n - k_u) as Float;
+
+        if ssr_u <= 0.0 || df2 <= 0.0 {
+            return LagResult {
+                lag: lag as Int,
+                f_statistic: 0.0,
+                p_value: 1.0,
+                r_squared_restricted: 0.0,
+                r_squared_unrestricted: 0.0,
+            };
+        }
+
+        let f_stat = ((ssr_r - ssr_u) / df1) / (ssr_u / df2);
+
+        // Compute p-value using F-distribution approximation
+        let p_value = self.f_distribution_pvalue(f_stat, df1, df2);
+
+        // Compute R-squared values
+        let tss = self.compute_tss(y, lag);
+        let r2_r = if tss > 0.0 { 1.0 - ssr_r / tss } else { 0.0 };
+        let r2_u = if tss > 0.0 { 1.0 - ssr_u / tss } else { 0.0 };
+
+        LagResult {
+            lag: lag as Int,
+            f_statistic: f_stat,
+            p_value,
+            r_squared_restricted: r2_r,
+            r_squared_unrestricted: r2_u,
+        }
+    }
+
+    /// Compute sum of squared residuals for restricted and unrestricted models
+    fn compute_ssr(&self, x: &[Float], y: &[Float], lag: usize) -> (Float, Float, usize, usize) {
+        let n = min(x.len(), y.len());
+        let effective_n = n - lag;
+
+        // Build design matrices
+        let mut y_response = Vec::with_capacity(effective_n);
+        let mut x_restricted = Matrix::zeros(effective_n, lag);
+        let mut x_unrestricted = Matrix::zeros(effective_n, 2 * lag);
+
+        for t in lag..n {
+            y_response.push(y[t]);
+
+            // Lagged y values
+            for i in 1..=lag {
+                x_restricted[(t - lag, i - 1)] = y[t - i];
+                x_unrestricted[(t - lag, i - 1)] = y[t - i];
+            }
+
+            // Lagged x values (only in unrestricted)
+            for i in 1..=lag {
+                x_unrestricted[(t - lag, lag + i - 1)] = x[t - i];
+            }
+        }
+
+        // Fit restricted model
+        let beta_r = self.ols_fit(&x_restricted, &y_response);
+        let residuals_r = self.compute_residuals(&x_restricted, &y_response, &beta_r);
+        let ssr_r: Float = residuals_r.iter().map(|&r| r * r).sum();
+
+        // Fit unrestricted model
+        let beta_u = self.ols_fit(&x_unrestricted, &y_response);
+        let residuals_u = self.compute_residuals(&x_unrestricted, &y_response, &beta_u);
+        let ssr_u: Float = residuals_u.iter().map(|&r| r * r).sum();
+
+        (ssr_r, ssr_u, lag + 1, 2 * lag + 1)
+    }
+
+    /// OLS fit using normal equations
+    fn ols_fit(&self, x: &Matrix<Float>, y: &[Float]) -> Vec<Float> {
+        let n = x.rows();
+        let p = x.cols();
+
+        if n < p + 1 {
+            return vec![0.0; p];
+        }
+
+        // X'X
+        let mut xtx = Matrix::zeros(p, p);
+        for i in 0..p {
+            for j in 0..p {
+                let mut sum = 0.0;
+                for k in 0..n {
+                    sum += x[(k, i)] * x[(k, j)];
+                }
+                xtx[(i, j)] = sum;
+            }
+        }
+
+        // X'y
+        let mut xty = vec![0.0; p];
+        for i in 0..p {
+            let mut sum = 0.0;
+            for k in 0..n {
+                sum += x[(k, i)] * y[k];
+            }
+            xty[i] = sum;
+        }
+
+        // Solve using Cholesky decomposition
+        self.solve_symmetric(&xtx, &xty)
+    }
+
+    /// Solve symmetric positive definite system
+    fn solve_symmetric(&self, a: &Matrix<Float>, b: &[Float]) -> Vec<Float> {
+        let n = a.rows();
+        let mut l = Matrix::zeros(n, n);
+
+        // Cholesky decomposition: A = L * L'
+        for i in 0..n {
+            for j in 0..=i {
+                let mut sum = a[(i, j)];
+                for k in 0..j {
+                    sum -= l[(i, k)] * l[(j, k)];
+                }
+
+                if i == j {
+                    if sum <= 0.0 {
+                        // Not positive definite, add regularization
+                        l[(i, i)] = sqrt(sum + 1e-6);
+                    } else {
+                        l[(i, i)] = sqrt(sum);
+                    }
+                } else {
+                    l[(i, j)] = if l[(j, j)].abs() > 1e-10 {
+                        sum / l[(j, j)]
+                    } else {
+                        0.0
+                    };
+                }
+            }
+        }
+
+        // Forward substitution: L * z = b
+        let mut z = vec![0.0; n];
+        for i in 0..n {
+            let mut sum = b[i];
+            for j in 0..i {
+                sum -= l[(i, j)] * z[j];
+            }
+            z[i] = if l[(i, i)].abs() > 1e-10 { sum / l[(i, i)] } else { 0.0 };
+        }
+
+        // Backward substitution: L' * x = z
+        let mut x = vec![0.0; n];
+        for i in (0..n).rev() {
+            let mut sum = z[i];
+            for j in (i + 1)..n {
+                sum -= l[(j, i)] * x[j];
+            }
+            x[i] = if l[(i, i)].abs() > 1e-10 { sum / l[(i, i)] } else { 0.0 };
+        }
+
+        x
+    }
+
+    /// Compute residuals
+    fn compute_residuals(&self, x: &Matrix<Float>, y: &[Float], beta: &[Float]) -> Vec<Float> {
+        let n = x.rows();
+        let p = x.cols();
+
+        let mut residuals = Vec::with_capacity(n);
+        for i in 0..n {
+            let mut y_pred = 0.0;
+            for j in 0..p {
+                y_pred += x[(i, j)] * beta[j];
+            }
+            residuals.push(y[i] - y_pred);
+        }
+
+        residuals
+    }
+
+    /// Compute total sum of squares
+    fn compute_tss(&self, y: &[Float], lag: usize) -> Float {
+        let effective_y: Vec<Float> = y.iter().skip(lag).cloned().collect();
+        let n = effective_y.len() as Float;
+        if n <= 0.0 {
+            return 0.0;
+        }
+
+        let mean: Float = effective_y.iter().sum::<Float>() / n;
+        effective_y.iter().map(|&y| (y - mean).powi(2)).sum()
+    }
+
+    /// Approximate F-distribution p-value
+    fn f_distribution_pvalue(&self, f: Float, df1: Float, df2: Float) -> Float {
+        if f <= 0.0 || df1 <= 0.0 || df2 <= 0.0 {
+            return 1.0;
+        }
+
+        // Beta function approximation for F-distribution CDF
+        let x = df2 / (df2 + df1 * f);
+        let a = df2 / 2.0;
+        let b = df1 / 2.0;
+
+        // Incomplete beta function using continued fraction
+        let cdf = self.regularized_beta(x, a, b);
+
+        1.0 - cdf
+    }
+
+    /// Regularized incomplete beta function
+    fn regularized_beta(&self, x: Float, a: Float, b: Float) -> Float {
+        if x <= 0.0 {
+            return 0.0;
+        }
+        if x >= 1.0 {
+            return 1.0;
+        }
+
+        // Use continued fraction representation
+        let max_iter = 100;
+        let eps = 1e-10;
+
+        let qab = a + b;
+        let qap = a + 1.0;
+        let qam = a - 1.0;
+
+        let mut c = 1.0;
+        let mut d = 1.0 - qab * x / qap;
+        if d.abs() < 1e-30 {
+            d = 1e-30;
+        }
+        d = 1.0 / d;
+        let mut h = d;
+
+        for m in 1..=max_iter {
+            let m_f = m as Float;
+
+            // Even step
+            let aa = m_f * (b - m_f) * x / ((qam + 2.0 * m_f) * (a + 2.0 * m_f));
+            d = 1.0 + aa * d;
+            if d.abs() < 1e-30 {
+                d = 1e-30;
+            }
+            c = 1.0 + aa / c;
+            if c.abs() < 1e-30 {
+                c = 1e-30;
+            }
+            d = 1.0 / d;
+            h *= d * c;
+
+            // Odd step
+            let aa = -(a + m_f) * (qab + m_f) * x / ((a + 2.0 * m_f) * (qap + 2.0 * m_f));
+            d = 1.0 + aa * d;
+            if d.abs() < 1e-30 {
+                d = 1e-30;
+            }
+            c = 1.0 + aa / c;
+            if c.abs() < 1e-30 {
+                c = 1e-30;
+            }
+            d = 1.0 / d;
+            let del = d * c;
+            h *= del;
+
+            if (del - 1.0).abs() < eps {
+                break;
+            }
+        }
+
+        let factor = exp(
+            a * log(x) + b * log(1.0 - x) -
+            log(a) - log_beta(a, b)
+        );
+
+        factor * h
+    }
+}
+
+/// Result of Granger causality test
+@derive(Clone, Debug)
+pub struct GrangerResult {
+    pub causes: Bool,
+    pub optimal_lag: Int,
+    pub f_statistic: Float,
+    pub p_value: Float,
+    pub lag_results: Vec<LagResult>,
+}
+
+impl GrangerResult {
+    fn insufficient_data() -> Self {
+        Self {
+            causes: false,
+            optimal_lag: 0,
+            f_statistic: 0.0,
+            p_value: 1.0,
+            lag_results: Vec::new(),
+        }
+    }
+}
+
+/// Result for specific lag
+@derive(Clone, Debug)
+pub struct LagResult {
+    pub lag: Int,
+    pub f_statistic: Float,
+    pub p_value: Float,
+    pub r_squared_restricted: Float,
+    pub r_squared_unrestricted: Float,
+}
+
+// ============================================================================
+// TRANSFER ENTROPY
+// ============================================================================
+
+/// Transfer Entropy for measuring directed information flow
+pub struct TransferEntropy {
+    embedding_dim: Int,
+    delay: Int,
+    k_neighbors: Int,
+}
+
+impl TransferEntropy {
+    pub fn new(embedding_dim: Int) -> Self {
+        Self {
+            embedding_dim,
+            delay: 1,
+            k_neighbors: 4,
+        }
+    }
+
+    pub fn with_delay(mut self, delay: Int) -> Self {
+        self.delay = delay;
+        self
+    }
+
+    /// Compute transfer entropy from X to Y
+    /// TE(X -> Y) measures information transferred from X to Y
+    pub fn compute(&self, x: &[Float], y: &[Float]) -> TransferEntropyResult {
+        let n = min(x.len(), y.len());
+        let k = self.embedding_dim as usize;
+        let tau = self.delay as usize;
+
+        let effective_n = n - k * tau - 1;
+        if effective_n < 10 {
+            return TransferEntropyResult::insufficient_data();
+        }
+
+        // Build embedded vectors
+        let mut y_future = Vec::with_capacity(effective_n);
+        let mut y_past = Vec::with_capacity(effective_n);
+        let mut x_past = Vec::with_capacity(effective_n);
+
+        for t in (k * tau)..(n - 1) {
+            y_future.push(y[t + 1]);
+
+            let mut y_emb = Vec::with_capacity(k);
+            let mut x_emb = Vec::with_capacity(k);
+
+            for i in 0..k {
+                y_emb.push(y[t - i * tau]);
+                x_emb.push(x[t - i * tau]);
+            }
+
+            y_past.push(y_emb);
+            x_past.push(x_emb);
+        }
+
+        // Estimate transfer entropy using KSG estimator
+        let te = self.ksg_estimator(&y_future, &y_past, &x_past);
+
+        // Compute significance using permutation test
+        let (p_value, z_score) = self.permutation_test(&y_future, &y_past, &x_past, te);
+
+        TransferEntropyResult {
+            transfer_entropy: te,
+            normalized_te: te / (self.entropy_rate(&y_future).max(1e-10)),
+            p_value,
+            z_score,
+            significant: p_value < 0.05,
+        }
+    }
+
+    /// KSG (Kraskov-Stögbauer-Grassberger) estimator
+    fn ksg_estimator(
+        &self,
+        y_future: &[Float],
+        y_past: &[Vec<Float>],
+        x_past: &[Vec<Float>]
+    ) -> Float {
+        let n = y_future.len();
+        let k = self.k_neighbors as usize;
+
+        if n <= k {
+            return 0.0;
+        }
+
+        // TE = H(Y_future | Y_past) - H(Y_future | Y_past, X_past)
+        // Using KSG: TE = digamma(k) + <digamma(n_y) + digamma(n_xy) - digamma(n_joint)>
+
+        let mut te_sum = 0.0;
+
+        for i in 0..n {
+            // Find k-th nearest neighbor distance in joint space
+            let epsilon = self.find_kth_distance(i, y_future, y_past, x_past, k);
+
+            // Count neighbors within epsilon in each marginal space
+            let n_y = self.count_neighbors_y(i, y_future, y_past, epsilon);
+            let n_xy = self.count_neighbors_xy(i, y_future, y_past, x_past, epsilon);
+            let n_joint = self.count_neighbors_joint(i, y_future, y_past, x_past, epsilon);
+
+            te_sum += digamma(n_y as Float + 1.0) +
+                      digamma(n_xy as Float + 1.0) -
+                      digamma(n_joint as Float + 1.0);
+        }
+
+        te_sum / n as Float
+    }
+
+    /// Find k-th nearest neighbor distance
+    fn find_kth_distance(
+        &self,
+        idx: usize,
+        y_future: &[Float],
+        y_past: &[Vec<Float>],
+        x_past: &[Vec<Float>],
+        k: usize
+    ) -> Float {
+        let n = y_future.len();
+        let mut distances: Vec<Float> = Vec::with_capacity(n - 1);
+
+        for j in 0..n {
+            if j != idx {
+                let dist = self.joint_distance(
+                    y_future[idx], &y_past[idx], &x_past[idx],
+                    y_future[j], &y_past[j], &x_past[j]
+                );
+                distances.push(dist);
+            }
+        }
+
+        distances.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+        if k > 0 && k <= distances.len() {
+            distances[k - 1]
+        } else if !distances.is_empty() {
+            distances[0]
+        } else {
+            1.0
+        }
+    }
+
+    /// Joint distance (max norm)
+    fn joint_distance(
+        &self,
+        y1: Float, y_past1: &[Float], x_past1: &[Float],
+        y2: Float, y_past2: &[Float], x_past2: &[Float]
+    ) -> Float {
+        let mut max_dist = abs(y1 - y2);
+
+        for i in 0..y_past1.len() {
+            max_dist = max_dist.max(abs(y_past1[i] - y_past2[i]));
+        }
+
+        for i in 0..x_past1.len() {
+            max_dist = max_dist.max(abs(x_past1[i] - x_past2[i]));
+        }
+
+        max_dist
+    }
+
+    /// Count neighbors in (Y_future, Y_past) marginal
+    fn count_neighbors_y(
+        &self,
+        idx: usize,
+        y_future: &[Float],
+        y_past: &[Vec<Float>],
+        epsilon: Float
+    ) -> Int {
+        let n = y_future.len();
+        let mut count = 0;
+
+        for j in 0..n {
+            if j != idx {
+                let mut dist = abs(y_future[idx] - y_future[j]);
+                for k in 0..y_past[idx].len() {
+                    dist = dist.max(abs(y_past[idx][k] - y_past[j][k]));
+                }
+                if dist < epsilon {
+                    count += 1;
+                }
+            }
+        }
+
+        count
+    }
+
+    /// Count neighbors in (Y_future, Y_past, X_past) space
+    fn count_neighbors_xy(
+        &self,
+        idx: usize,
+        y_future: &[Float],
+        y_past: &[Vec<Float>],
+        x_past: &[Vec<Float>],
+        epsilon: Float
+    ) -> Int {
+        let n = y_future.len();
+        let mut count = 0;
+
+        for j in 0..n {
+            if j != idx {
+                let dist = self.joint_distance(
+                    y_future[idx], &y_past[idx], &x_past[idx],
+                    y_future[j], &y_past[j], &x_past[j]
+                );
+                if dist < epsilon {
+                    count += 1;
+                }
+            }
+        }
+
+        count
+    }
+
+    /// Count neighbors in joint space (for Y_past only)
+    fn count_neighbors_joint(
+        &self,
+        idx: usize,
+        y_future: &[Float],
+        y_past: &[Vec<Float>],
+        x_past: &[Vec<Float>],
+        epsilon: Float
+    ) -> Int {
+        let n = y_future.len();
+        let mut count = 0;
+
+        for j in 0..n {
+            if j != idx {
+                let mut dist: Float = 0.0;
+                for k in 0..y_past[idx].len() {
+                    dist = dist.max(abs(y_past[idx][k] - y_past[j][k]));
+                }
+                for k in 0..x_past[idx].len() {
+                    dist = dist.max(abs(x_past[idx][k] - x_past[j][k]));
+                }
+                if dist < epsilon {
+                    count += 1;
+                }
+            }
+        }
+
+        count
+    }
+
+    /// Entropy rate estimation
+    fn entropy_rate(&self, data: &[Float]) -> Float {
+        let n = data.len();
+        if n < 2 {
+            return 0.0;
+        }
+
+        // Simple differential entropy estimate
+        let (_, var) = compute_mean_variance(data);
+        if var <= 0.0 {
+            return 0.0;
+        }
+
+        0.5 * log(2.0 * 3.14159265359 * 2.71828 * var)
+    }
+
+    /// Permutation test for significance
+    fn permutation_test(
+        &self,
+        y_future: &[Float],
+        y_past: &[Vec<Float>],
+        x_past: &[Vec<Float>],
+        observed_te: Float
+    ) -> (Float, Float) {
+        let n_permutations = 100;
+        let n = x_past.len();
+
+        let mut null_distribution = Vec::with_capacity(n_permutations);
+
+        for _ in 0..n_permutations {
+            // Shuffle x_past
+            let mut shuffled_x = x_past.to_vec();
+            for i in (1..n).rev() {
+                let j = (i as Float * pseudo_random()) as usize % (i + 1);
+                shuffled_x.swap(i, j);
+            }
+
+            let null_te = self.ksg_estimator(y_future, y_past, &shuffled_x);
+            null_distribution.push(null_te);
+        }
+
+        // Compute p-value and z-score
+        let count_greater = null_distribution.iter()
+            .filter(|&&te| te >= observed_te)
+            .count();
+
+        let p_value = (count_greater + 1) as Float / (n_permutations + 1) as Float;
+
+        let (null_mean, null_var) = compute_mean_variance(&null_distribution);
+        let z_score = if null_var > 0.0 {
+            (observed_te - null_mean) / sqrt(null_var)
+        } else {
+            0.0
+        };
+
+        (p_value, z_score)
+    }
+}
+
+/// Transfer entropy result
+@derive(Clone, Debug)
+pub struct TransferEntropyResult {
+    pub transfer_entropy: Float,
+    pub normalized_te: Float,
+    pub p_value: Float,
+    pub z_score: Float,
+    pub significant: Bool,
+}
+
+impl TransferEntropyResult {
+    fn insufficient_data() -> Self {
+        Self {
+            transfer_entropy: 0.0,
+            normalized_te: 0.0,
+            p_value: 1.0,
+            z_score: 0.0,
+            significant: false,
+        }
+    }
+}
+
+// ============================================================================
+// CONVERGENT CROSS MAPPING (CCM)
+// ============================================================================
+
+/// Convergent Cross Mapping for detecting causality in nonlinear systems
+pub struct ConvergentCrossMapping {
+    embedding_dim: Int,
+    tau: Int,
+    library_sizes: Vec<Int>,
+}
+
+impl ConvergentCrossMapping {
+    pub fn new(embedding_dim: Int, tau: Int) -> Self {
+        Self {
+            embedding_dim,
+            tau,
+            library_sizes: Vec::new(),
+        }
+    }
+
+    pub fn with_library_sizes(mut self, sizes: Vec<Int>) -> Self {
+        self.library_sizes = sizes;
+        self
+    }
+
+    /// Test if X causes Y using CCM
+    /// Higher correlation at larger library sizes indicates causality
+    pub fn compute(&self, x: &[Float], y: &[Float]) -> CCMResult {
+        let n = min(x.len(), y.len());
+        let e = self.embedding_dim as usize;
+        let tau = self.tau as usize;
+
+        let effective_n = n - (e - 1) * tau;
+        if effective_n < e + 1 {
+            return CCMResult::insufficient_data();
+        }
+
+        // Determine library sizes
+        let lib_sizes = if self.library_sizes.is_empty() {
+            self.default_library_sizes(effective_n)
+        } else {
+            self.library_sizes.clone()
+        };
+
+        // Embed both time series
+        let x_embedded = self.embed(x, e, tau);
+        let y_embedded = self.embed(y, e, tau);
+
+        // Compute cross-map correlations for each library size
+        let mut correlations = Vec::with_capacity(lib_sizes.len());
+
+        for &lib_size in &lib_sizes {
+            let l = lib_size as usize;
+            if l > x_embedded.len() {
+                continue;
+            }
+
+            // Cross-map from Y manifold to predict X
+            let rho = self.cross_map_correlation(&y_embedded, &x_embedded, l);
+            correlations.push((lib_size, rho));
+        }
+
+        // Analyze convergence
+        let (converges, convergence_rate) = self.analyze_convergence(&correlations);
+
+        CCMResult {
+            causes: converges,
+            correlations: correlations.clone(),
+            convergence_rate,
+            final_correlation: correlations.last().map(|&(_, r)| r).unwrap_or(0.0),
+        }
+    }
+
+    /// Embed time series in delay coordinates
+    fn embed(&self, data: &[Float], e: usize, tau: usize) -> Vec<Vec<Float>> {
+        let n = data.len();
+        let effective_n = n - (e - 1) * tau;
+
+        let mut embedded = Vec::with_capacity(effective_n);
+
+        for t in 0..effective_n {
+            let mut point = Vec::with_capacity(e);
+            for i in 0..e {
+                point.push(data[t + i * tau]);
+            }
+            embedded.push(point);
+        }
+
+        embedded
+    }
+
+    /// Compute cross-map correlation
+    fn cross_map_correlation(
+        &self,
+        source_manifold: &[Vec<Float>],
+        target_values: &[Vec<Float>],
+        lib_size: usize
+    ) -> Float {
+        let n = min(source_manifold.len(), target_values.len());
+        let e = self.embedding_dim as usize;
+
+        if lib_size > n || lib_size <= e {
+            return 0.0;
+        }
+
+        // Use first lib_size points as library
+        let library = &source_manifold[0..lib_size];
+        let lib_targets = &target_values[0..lib_size];
+
+        let mut predictions = Vec::new();
+        let mut actuals = Vec::new();
+
+        // Predict remaining points
+        for i in lib_size..n {
+            let query = &source_manifold[i];
+
+            // Find e+1 nearest neighbors in library
+            let neighbors = self.find_neighbors(query, library, e + 1);
+
+            // Compute weights based on distances
+            let min_dist = neighbors[0].1;
+            let weights: Vec<Float> = neighbors.iter()
+                .map(|&(_, d)| exp(-(d / (min_dist + 1e-10))))
+                .collect();
+            let weight_sum: Float = weights.iter().sum();
+
+            // Weighted average prediction (use first coordinate of target)
+            let mut pred = 0.0;
+            for (k, &(idx, _)) in neighbors.iter().enumerate() {
+                pred += weights[k] * lib_targets[idx][0] / weight_sum;
+            }
+
+            predictions.push(pred);
+            actuals.push(target_values[i][0]);
+        }
+
+        // Compute Pearson correlation
+        self.pearson_correlation(&predictions, &actuals)
+    }
+
+    /// Find k nearest neighbors
+    fn find_neighbors(&self, query: &[Float], library: &[Vec<Float>], k: usize) -> Vec<(usize, Float)> {
+        let mut distances: Vec<(usize, Float)> = library.iter()
+            .enumerate()
+            .map(|(i, point)| {
+                let dist = self.euclidean_distance(query, point);
+                (i, dist)
+            })
+            .collect();
+
+        distances.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+
+        distances.into_iter().take(k).collect()
+    }
+
+    /// Euclidean distance
+    fn euclidean_distance(&self, a: &[Float], b: &[Float]) -> Float {
+        let mut sum = 0.0;
+        for i in 0..min(a.len(), b.len()) {
+            sum += (a[i] - b[i]).powi(2);
+        }
+        sqrt(sum)
+    }
+
+    /// Pearson correlation coefficient
+    fn pearson_correlation(&self, x: &[Float], y: &[Float]) -> Float {
+        let n = min(x.len(), y.len());
+        if n < 2 {
+            return 0.0;
+        }
+
+        let n_f = n as Float;
+        let sum_x: Float = x.iter().sum();
+        let sum_y: Float = y.iter().sum();
+        let sum_xy: Float = x.iter().zip(y.iter()).map(|(&a, &b)| a * b).sum();
+        let sum_x2: Float = x.iter().map(|&a| a * a).sum();
+        let sum_y2: Float = y.iter().map(|&b| b * b).sum();
+
+        let num = n_f * sum_xy - sum_x * sum_y;
+        let den = sqrt((n_f * sum_x2 - sum_x * sum_x) * (n_f * sum_y2 - sum_y * sum_y));
+
+        if den > 1e-10 {
+            (num / den).clamp(-1.0, 1.0)
+        } else {
+            0.0
+        }
+    }
+
+    /// Default library sizes
+    fn default_library_sizes(&self, n: usize) -> Vec<Int> {
+        let min_lib = (self.embedding_dim + 1) as usize;
+        let max_lib = n;
+
+        let num_sizes = 10;
+        let step = max(1, (max_lib - min_lib) / num_sizes);
+
+        (0..=num_sizes)
+            .map(|i| (min_lib + i * step).min(max_lib) as Int)
+            .collect()
+    }
+
+    /// Analyze convergence of correlations
+    fn analyze_convergence(&self, correlations: &[(Int, Float)]) -> (Bool, Float) {
+        if correlations.len() < 3 {
+            return (false, 0.0);
+        }
+
+        // Fit linear regression to log(lib_size) vs correlation
+        let log_sizes: Vec<Float> = correlations.iter()
+            .map(|&(l, _)| log(l as Float))
+            .collect();
+        let rhos: Vec<Float> = correlations.iter()
+            .map(|&(_, r)| r)
+            .collect();
+
+        let n = log_sizes.len() as Float;
+        let sum_x: Float = log_sizes.iter().sum();
+        let sum_y: Float = rhos.iter().sum();
+        let sum_xy: Float = log_sizes.iter().zip(rhos.iter())
+            .map(|(&x, &y)| x * y).sum();
+        let sum_x2: Float = log_sizes.iter().map(|&x| x * x).sum();
+
+        let slope = (n * sum_xy - sum_x * sum_y) / (n * sum_x2 - sum_x * sum_x);
+
+        // Convergence if positive slope and final correlation > 0.3
+        let final_rho = correlations.last().map(|&(_, r)| r).unwrap_or(0.0);
+        let converges = slope > 0.0 && final_rho > 0.3;
+
+        (converges, slope)
+    }
+}
+
+/// CCM result
+@derive(Clone, Debug)
+pub struct CCMResult {
+    pub causes: Bool,
+    pub correlations: Vec<(Int, Float)>,
+    pub convergence_rate: Float,
+    pub final_correlation: Float,
+}
+
+impl CCMResult {
+    fn insufficient_data() -> Self {
+        Self {
+            causes: false,
+            correlations: Vec::new(),
+            convergence_rate: 0.0,
+            final_correlation: 0.0,
+        }
+    }
+}
+
+// ============================================================================
+// CAUSAL GRAPH DISCOVERY
+// ============================================================================
+
+/// PC Algorithm for causal graph discovery
+pub struct PCAlgorithm {
+    significance_level: Float,
+    max_condition_set: Int,
+}
+
+impl PCAlgorithm {
+    pub fn new(significance_level: Float) -> Self {
+        Self {
+            significance_level,
+            max_condition_set: 3,
+        }
+    }
+
+    /// Discover causal graph from multivariate time series
+    pub fn discover(&self, data: &Matrix<Float>) -> CausalGraph {
+        let n_vars = data.cols();
+
+        // Start with complete undirected graph
+        let mut adjacency = Matrix::ones(n_vars, n_vars);
+        for i in 0..n_vars {
+            adjacency[(i, i)] = 0.0;  // No self-loops
+        }
+
+        // Store separating sets
+        let mut sep_sets: HashMap<(usize, usize), Vec<usize>> = HashMap::new();
+
+        // Phase 1: Remove edges based on conditional independence
+        for cond_size in 0..=self.max_condition_set as usize {
+            for i in 0..n_vars {
+                for j in (i + 1)..n_vars {
+                    if adjacency[(i, j)] == 0.0 {
+                        continue;
+                    }
+
+                    // Get neighbors
+                    let neighbors: Vec<usize> = (0..n_vars)
+                        .filter(|&k| k != i && k != j && adjacency[(i, k)] != 0.0)
+                        .collect();
+
+                    if neighbors.len() < cond_size {
+                        continue;
+                    }
+
+                    // Test all subsets of size cond_size
+                    for subset in self.combinations(&neighbors, cond_size) {
+                        if self.conditional_independence(data, i, j, &subset) {
+                            adjacency[(i, j)] = 0.0;
+                            adjacency[(j, i)] = 0.0;
+                            sep_sets.insert((i, j), subset.clone());
+                            sep_sets.insert((j, i), subset);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Phase 2: Orient edges (collider detection)
+        let mut directed = adjacency.clone();
+
+        for k in 0..n_vars {
+            let parents: Vec<usize> = (0..n_vars)
+                .filter(|&i| i != k && directed[(i, k)] != 0.0)
+                .collect();
+
+            for i in 0..parents.len() {
+                for j in (i + 1)..parents.len() {
+                    let a = parents[i];
+                    let b = parents[j];
+
+                    // Check if a-b are not adjacent and k is not in sep_set
+                    if directed[(a, b)] == 0.0 && directed[(b, a)] == 0.0 {
+                        let sep = sep_sets.get(&(a, b)).map(|s| s.as_slice()).unwrap_or(&[]);
+                        if !sep.contains(&k) {
+                            // Orient as collider: a -> k <- b
+                            directed[(k, a)] = 0.0;  // Remove edge k -> a
+                            directed[(k, b)] = 0.0;  // Remove edge k -> b
+                        }
+                    }
+                }
+            }
+        }
+
+        // Build causal graph
+        let mut edges = Vec::new();
+        for i in 0..n_vars {
+            for j in 0..n_vars {
+                if i != j && directed[(i, j)] != 0.0 {
+                    if directed[(j, i)] == 0.0 {
+                        // Directed edge i -> j
+                        edges.push(CausalEdge {
+                            source: i,
+                            target: j,
+                            edge_type: EdgeType::Directed,
+                            weight: 1.0,
+                        });
+                    } else {
+                        // Undirected edge (only add once)
+                        if i < j {
+                            edges.push(CausalEdge {
+                                source: i,
+                                target: j,
+                                edge_type: EdgeType::Undirected,
+                                weight: 1.0,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        CausalGraph {
+            n_variables: n_vars,
+            edges,
+            adjacency: directed,
+        }
+    }
+
+    /// Test conditional independence using partial correlation
+    fn conditional_independence(
+        &self,
+        data: &Matrix<Float>,
+        i: usize,
+        j: usize,
+        condition: &[usize]
+    ) -> Bool {
+        let partial_corr = self.partial_correlation(data, i, j, condition);
+        let n = data.rows() as Float;
+        let k = condition.len() as Float;
+
+        // Fisher z-transform test
+        let z = 0.5 * log((1.0 + partial_corr) / (1.0 - partial_corr + 1e-10));
+        let se = 1.0 / sqrt(n - k - 3.0);
+        let z_stat = z.abs() / se;
+
+        // Two-tailed test
+        let p_value = 2.0 * (1.0 - normal_cdf(z_stat));
+
+        p_value > self.significance_level
+    }
+
+    /// Compute partial correlation
+    fn partial_correlation(
+        &self,
+        data: &Matrix<Float>,
+        i: usize,
+        j: usize,
+        condition: &[usize]
+    ) -> Float {
+        if condition.is_empty() {
+            return self.correlation(data, i, j);
+        }
+
+        // Regress i and j on condition variables
+        let residuals_i = self.residualize(data, i, condition);
+        let residuals_j = self.residualize(data, j, condition);
+
+        // Correlation of residuals
+        self.vector_correlation(&residuals_i, &residuals_j)
+    }
+
+    /// Compute correlation between two variables
+    fn correlation(&self, data: &Matrix<Float>, i: usize, j: usize) -> Float {
+        let n = data.rows();
+        let x: Vec<Float> = (0..n).map(|r| data[(r, i)]).collect();
+        let y: Vec<Float> = (0..n).map(|r| data[(r, j)]).collect();
+
+        self.vector_correlation(&x, &y)
+    }
+
+    /// Correlation between two vectors
+    fn vector_correlation(&self, x: &[Float], y: &[Float]) -> Float {
+        let n = min(x.len(), y.len()) as Float;
+        if n < 2.0 {
+            return 0.0;
+        }
+
+        let sum_x: Float = x.iter().sum();
+        let sum_y: Float = y.iter().sum();
+        let sum_xy: Float = x.iter().zip(y.iter()).map(|(&a, &b)| a * b).sum();
+        let sum_x2: Float = x.iter().map(|&a| a * a).sum();
+        let sum_y2: Float = y.iter().map(|&b| b * b).sum();
+
+        let num = n * sum_xy - sum_x * sum_y;
+        let den = sqrt((n * sum_x2 - sum_x * sum_x) * (n * sum_y2 - sum_y * sum_y));
+
+        if den > 1e-10 {
+            (num / den).clamp(-1.0, 1.0)
+        } else {
+            0.0
+        }
+    }
+
+    /// Residualize: regress variable on conditioning set
+    fn residualize(&self, data: &Matrix<Float>, var: usize, condition: &[usize]) -> Vec<Float> {
+        let n = data.rows();
+        let k = condition.len();
+
+        // Build design matrix
+        let mut x = Matrix::zeros(n, k);
+        for (c, &cond_var) in condition.iter().enumerate() {
+            for r in 0..n {
+                x[(r, c)] = data[(r, cond_var)];
+            }
+        }
+
+        // Response
+        let y: Vec<Float> = (0..n).map(|r| data[(r, var)]).collect();
+
+        // Fit OLS
+        let beta = self.ols_fit(&x, &y);
+
+        // Compute residuals
+        let mut residuals = Vec::with_capacity(n);
+        for r in 0..n {
+            let mut pred = 0.0;
+            for c in 0..k {
+                pred += x[(r, c)] * beta[c];
+            }
+            residuals.push(y[r] - pred);
+        }
+
+        residuals
+    }
+
+    /// OLS fit
+    fn ols_fit(&self, x: &Matrix<Float>, y: &[Float]) -> Vec<Float> {
+        let n = x.rows();
+        let p = x.cols();
+
+        if n <= p {
+            return vec![0.0; p];
+        }
+
+        // X'X
+        let mut xtx = Matrix::zeros(p, p);
+        for i in 0..p {
+            for j in 0..p {
+                let mut sum = 0.0;
+                for k in 0..n {
+                    sum += x[(k, i)] * x[(k, j)];
+                }
+                xtx[(i, j)] = sum;
+            }
+        }
+
+        // X'y
+        let mut xty = vec![0.0; p];
+        for i in 0..p {
+            let mut sum = 0.0;
+            for k in 0..n {
+                sum += x[(k, i)] * y[k];
+            }
+            xty[i] = sum;
+        }
+
+        // Regularization
+        for i in 0..p {
+            xtx[(i, i)] += 1e-6;
+        }
+
+        // Simple iterative solver
+        let mut beta = vec![0.0; p];
+        for _ in 0..100 {
+            for i in 0..p {
+                let mut sum = xty[i];
+                for j in 0..p {
+                    if j != i {
+                        sum -= xtx[(i, j)] * beta[j];
+                    }
+                }
+                beta[i] = sum / xtx[(i, i)];
+            }
+        }
+
+        beta
+    }
+
+    /// Generate combinations
+    fn combinations(&self, items: &[usize], k: usize) -> Vec<Vec<usize>> {
+        if k == 0 {
+            return vec![Vec::new()];
+        }
+        if items.len() < k {
+            return Vec::new();
+        }
+
+        let mut result = Vec::new();
+        self.combinations_recursive(items, k, 0, &mut Vec::new(), &mut result);
+        result
+    }
+
+    fn combinations_recursive(
+        &self,
+        items: &[usize],
+        k: usize,
+        start: usize,
+        current: &mut Vec<usize>,
+        result: &mut Vec<Vec<usize>>
+    ) {
+        if current.len() == k {
+            result.push(current.clone());
+            return;
+        }
+
+        for i in start..items.len() {
+            current.push(items[i]);
+            self.combinations_recursive(items, k, i + 1, current, result);
+            current.pop();
+        }
+    }
+}
+
+/// Causal graph structure
+@derive(Clone, Debug)
+pub struct CausalGraph {
+    pub n_variables: usize,
+    pub edges: Vec<CausalEdge>,
+    pub adjacency: Matrix<Float>,
+}
+
+impl CausalGraph {
+    /// Get parents of a variable
+    pub fn parents(&self, var: usize) -> Vec<usize> {
+        self.edges.iter()
+            .filter(|e| e.target == var && e.edge_type == EdgeType::Directed)
+            .map(|e| e.source)
+            .collect()
+    }
+
+    /// Get children of a variable
+    pub fn children(&self, var: usize) -> Vec<usize> {
+        self.edges.iter()
+            .filter(|e| e.source == var && e.edge_type == EdgeType::Directed)
+            .map(|e| e.target)
+            .collect()
+    }
+
+    /// Check if there's a directed path from source to target
+    pub fn has_path(&self, source: usize, target: usize) -> Bool {
+        let mut visited = HashSet::new();
+        self.dfs_path(source, target, &mut visited)
+    }
+
+    fn dfs_path(&self, current: usize, target: usize, visited: &mut HashSet<usize>) -> Bool {
+        if current == target {
+            return true;
+        }
+
+        visited.insert(current);
+
+        for child in self.children(current) {
+            if !visited.contains(&child) {
+                if self.dfs_path(child, target, visited) {
+                    return true;
+                }
+            }
+        }
+
+        false
+    }
+}
+
+/// Causal edge
+@derive(Clone, Debug)]
+pub struct CausalEdge {
+    pub source: usize,
+    pub target: usize,
+    pub edge_type: EdgeType,
+    pub weight: Float,
+}
+
+@derive(Clone, Copy, Debug, PartialEq)]
+pub enum EdgeType {
+    Directed,
+    Undirected,
+    Bidirected,
+}
+
+// ============================================================================
+// INTERVENTION ANALYSIS
+// ============================================================================
+
+/// Do-calculus for intervention effects
+pub struct DoCalculus {
+    graph: CausalGraph,
+}
+
+impl DoCalculus {
+    pub fn new(graph: CausalGraph) -> Self {
+        Self { graph }
+    }
+
+    /// Estimate causal effect of intervention do(X = x) on Y
+    /// Using adjustment formula if valid
+    pub fn estimate_effect(
+        &self,
+        data: &Matrix<Float>,
+        treatment: usize,
+        outcome: usize,
+        treatment_value: Float
+    ) -> InterventionResult {
+        // Find valid adjustment set
+        let adjustment_set = self.find_adjustment_set(treatment, outcome);
+
+        if adjustment_set.is_none() {
+            return InterventionResult {
+                effect: 0.0,
+                confidence_interval: (0.0, 0.0),
+                adjustment_set: Vec::new(),
+                valid: false,
+            };
+        }
+
+        let adjust = adjustment_set.unwrap();
+
+        // Stratified estimation
+        let effect = self.stratified_estimate(data, treatment, outcome, &adjust, treatment_value);
+
+        // Bootstrap confidence interval
+        let ci = self.bootstrap_ci(data, treatment, outcome, &adjust, treatment_value);
+
+        InterventionResult {
+            effect,
+            confidence_interval: ci,
+            adjustment_set: adjust,
+            valid: true,
+        }
+    }
+
+    /// Find valid adjustment set using backdoor criterion
+    fn find_adjustment_set(&self, treatment: usize, outcome: usize) -> Option<Vec<usize>> {
+        // Parents of treatment satisfy backdoor criterion if no descendant of treatment
+        let parents = self.graph.parents(treatment);
+
+        // Filter out descendants of treatment
+        let valid_parents: Vec<usize> = parents.into_iter()
+            .filter(|&p| !self.graph.has_path(treatment, p))
+            .collect();
+
+        if self.blocks_backdoor(&valid_parents, treatment, outcome) {
+            Some(valid_parents)
+        } else {
+            None
+        }
+    }
+
+    /// Check if set blocks all backdoor paths
+    fn blocks_backdoor(&self, set: &[usize], treatment: usize, outcome: usize) -> Bool {
+        // Simplified check: all parents of treatment are in set
+        let parents = self.graph.parents(treatment);
+        parents.iter().all(|p| set.contains(p))
+    }
+
+    /// Stratified estimation of causal effect
+    fn stratified_estimate(
+        &self,
+        data: &Matrix<Float>,
+        treatment: usize,
+        outcome: usize,
+        adjust: &[usize],
+        treatment_value: Float
+    ) -> Float {
+        let n = data.rows();
+
+        if adjust.is_empty() {
+            // Simple mean difference
+            let treated: Vec<Float> = (0..n)
+                .filter(|&i| data[(i, treatment)] >= treatment_value)
+                .map(|i| data[(i, outcome)])
+                .collect();
+
+            let control: Vec<Float> = (0..n)
+                .filter(|&i| data[(i, treatment)] < treatment_value)
+                .map(|i| data[(i, outcome)])
+                .collect();
+
+            let (mean_t, _) = compute_mean_variance(&treated);
+            let (mean_c, _) = compute_mean_variance(&control);
+
+            return mean_t - mean_c;
+        }
+
+        // Regression adjustment
+        // Y = beta_0 + beta_1 * X + sum(beta_i * Z_i) + epsilon
+        let p = 1 + adjust.len();
+        let mut x_mat = Matrix::zeros(n, p);
+        let mut y_vec = Vec::with_capacity(n);
+
+        for i in 0..n {
+            x_mat[(i, 0)] = data[(i, treatment)];
+            for (j, &z) in adjust.iter().enumerate() {
+                x_mat[(i, j + 1)] = data[(i, z)];
+            }
+            y_vec.push(data[(i, outcome)]);
+        }
+
+        let beta = self.ols_fit(&x_mat, &y_vec);
+
+        // Treatment effect is coefficient on treatment
+        beta[0]
+    }
+
+    /// OLS fit
+    fn ols_fit(&self, x: &Matrix<Float>, y: &[Float]) -> Vec<Float> {
+        let n = x.rows();
+        let p = x.cols();
+
+        let mut xtx = Matrix::zeros(p, p);
+        for i in 0..p {
+            for j in 0..p {
+                let mut sum = 0.0;
+                for k in 0..n {
+                    sum += x[(k, i)] * x[(k, j)];
+                }
+                xtx[(i, j)] = sum + if i == j { 1e-6 } else { 0.0 };
+            }
+        }
+
+        let mut xty = vec![0.0; p];
+        for i in 0..p {
+            for k in 0..n {
+                xty[i] += x[(k, i)] * y[k];
+            }
+        }
+
+        // Solve
+        let mut beta = vec![0.0; p];
+        for _ in 0..100 {
+            for i in 0..p {
+                let mut sum = xty[i];
+                for j in 0..p {
+                    if j != i {
+                        sum -= xtx[(i, j)] * beta[j];
+                    }
+                }
+                beta[i] = sum / xtx[(i, i)];
+            }
+        }
+
+        beta
+    }
+
+    /// Bootstrap confidence interval
+    fn bootstrap_ci(
+        &self,
+        data: &Matrix<Float>,
+        treatment: usize,
+        outcome: usize,
+        adjust: &[usize],
+        treatment_value: Float
+    ) -> (Float, Float) {
+        let n_bootstrap = 100;
+        let n = data.rows();
+
+        let mut effects = Vec::with_capacity(n_bootstrap);
+
+        for b in 0..n_bootstrap {
+            // Bootstrap sample
+            let mut boot_data = Matrix::zeros(n, data.cols());
+            for i in 0..n {
+                let idx = ((b * 31 + i * 17) % n) as usize;  // Pseudo-random
+                for j in 0..data.cols() {
+                    boot_data[(i, j)] = data[(idx, j)];
+                }
+            }
+
+            let effect = self.stratified_estimate(&boot_data, treatment, outcome, adjust, treatment_value);
+            effects.push(effect);
+        }
+
+        effects.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+        let lower_idx = (n_bootstrap as Float * 0.025) as usize;
+        let upper_idx = (n_bootstrap as Float * 0.975) as usize;
+
+        (effects[lower_idx], effects[upper_idx.min(n_bootstrap - 1)])
+    }
+}
+
+/// Intervention result
+@derive(Clone, Debug)
+pub struct InterventionResult {
+    pub effect: Float,
+    pub confidence_interval: (Float, Float),
+    pub adjustment_set: Vec<usize>,
+    pub valid: Bool,
+}
+
+// ============================================================================
+// IMPULSE RESPONSE FUNCTION
+// ============================================================================
+
+/// Impulse Response Function for VAR models
+pub struct ImpulseResponse {
+    var_coefficients: Vec<Matrix<Float>>,
+    n_vars: Int,
+    max_horizon: Int,
+}
+
+impl ImpulseResponse {
+    pub fn new(var_coefficients: Vec<Matrix<Float>>, max_horizon: Int) -> Self {
+        let n_vars = if !var_coefficients.is_empty() {
+            var_coefficients[0].rows() as Int
+        } else {
+            0
+        };
+
+        Self {
+            var_coefficients,
+            n_vars,
+            max_horizon,
+        }
+    }
+
+    /// Compute impulse response from shock to variable i affecting variable j
+    pub fn compute(&self, shock_var: Int, response_var: Int) -> Vec<Float> {
+        let k = self.n_vars as usize;
+        let p = self.var_coefficients.len();
+        let h = self.max_horizon as usize;
+
+        if k == 0 || p == 0 {
+            return vec![0.0; h + 1];
+        }
+
+        // Compute companion form
+        let companion = self.companion_form();
+
+        // Compute Phi_h = A^h
+        let mut phi = Matrix::eye(k * p);
+        let mut irf = Vec::with_capacity(h + 1);
+
+        // Initial response (h=0)
+        irf.push(if shock_var == response_var { 1.0 } else { 0.0 });
+
+        for _ in 1..=h {
+            phi = matrix_multiply(&phi, &companion);
+            irf.push(phi[(response_var as usize, shock_var as usize)]);
+        }
+
+        irf
+    }
+
+    /// Compute orthogonalized impulse response using Cholesky
+    pub fn compute_orthogonalized(
+        &self,
+        residual_cov: &Matrix<Float>,
+        shock_var: Int,
+        response_var: Int
+    ) -> Vec<Float> {
+        let k = self.n_vars as usize;
+
+        // Cholesky decomposition of residual covariance
+        let chol = self.cholesky(residual_cov);
+
+        // Structural IRF
+        let structural_irf = self.compute(shock_var, response_var);
+
+        // Scale by Cholesky factor
+        let scale = chol[(response_var as usize, shock_var as usize)];
+
+        structural_irf.iter().map(|&x| x * scale).collect()
+    }
+
+    /// Companion form matrix
+    fn companion_form(&self) -> Matrix<Float> {
+        let k = self.n_vars as usize;
+        let p = self.var_coefficients.len();
+
+        let mut companion = Matrix::zeros(k * p, k * p);
+
+        // Top rows: VAR coefficients
+        for lag in 0..p {
+            for i in 0..k {
+                for j in 0..k {
+                    companion[(i, lag * k + j)] = self.var_coefficients[lag][(i, j)];
+                }
+            }
+        }
+
+        // Identity blocks below
+        for i in 0..(p - 1) {
+            for j in 0..k {
+                companion[(k + i * k + j, i * k + j)] = 1.0;
+            }
+        }
+
+        companion
+    }
+
+    /// Cholesky decomposition
+    fn cholesky(&self, a: &Matrix<Float>) -> Matrix<Float> {
+        let n = a.rows();
+        let mut l = Matrix::zeros(n, n);
+
+        for i in 0..n {
+            for j in 0..=i {
+                let mut sum = a[(i, j)];
+                for k in 0..j {
+                    sum -= l[(i, k)] * l[(j, k)];
+                }
+
+                if i == j {
+                    l[(i, i)] = sqrt(max(sum, 1e-10));
+                } else {
+                    l[(i, j)] = if l[(j, j)].abs() > 1e-10 {
+                        sum / l[(j, j)]
+                    } else {
+                        0.0
+                    };
+                }
+            }
+        }
+
+        l
+    }
+}
+
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+
+/// Compute mean and variance
+fn compute_mean_variance(data: &[Float]) -> (Float, Float) {
+    let n = data.len();
+    if n == 0 {
+        return (0.0, 0.0);
+    }
+
+    let sum: Float = data.iter().sum();
+    let mean = sum / n as Float;
+
+    let var_sum: Float = data.iter().map(|&x| (x - mean).powi(2)).sum();
+    let variance = if n > 1 { var_sum / (n - 1) as Float } else { 0.0 };
+
+    (mean, variance)
+}
+
+/// Digamma function approximation
+fn digamma(x: Float) -> Float {
+    if x <= 0.0 {
+        return 0.0;
+    }
+
+    // Asymptotic expansion for large x
+    if x > 6.0 {
+        let inv = 1.0 / x;
+        let inv2 = inv * inv;
+        return log(x) - 0.5 * inv - inv2 / 12.0 + inv2 * inv2 / 120.0;
+    }
+
+    // Recurrence relation
+    digamma(x + 1.0) - 1.0 / x
+}
+
+/// Log beta function
+fn log_beta(a: Float, b: Float) -> Float {
+    log_gamma(a) + log_gamma(b) - log_gamma(a + b)
+}
+
+/// Log gamma function (Stirling approximation)
+fn log_gamma(x: Float) -> Float {
+    if x <= 0.0 {
+        return 0.0;
+    }
+
+    let c = [
+        76.18009172947146,
+        -86.50532032941677,
+        24.01409824083091,
+        -1.231739572450155,
+        0.1208650973866179e-2,
+        -0.5395239384953e-5,
+    ];
+
+    let y = x;
+    let tmp = x + 5.5;
+    let tmp = tmp - (x + 0.5) * log(tmp);
+
+    let mut ser = 1.000000000190015;
+    for (i, &coef) in c.iter().enumerate() {
+        ser += coef / (y + 1.0 + i as Float);
+    }
+
+    -tmp + log(2.5066282746310005 * ser / x)
+}
+
+/// Standard normal CDF
+fn normal_cdf(x: Float) -> Float {
+    let a1 = 0.254829592;
+    let a2 = -0.284496736;
+    let a3 = 1.421413741;
+    let a4 = -1.453152027;
+    let a5 = 1.061405429;
+    let p = 0.3275911;
+
+    let sign = if x < 0.0 { -1.0 } else { 1.0 };
+    let x = abs(x) / sqrt(2.0);
+
+    let t = 1.0 / (1.0 + p * x);
+    let y = 1.0 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * exp(-x * x);
+
+    0.5 * (1.0 + sign * y)
+}
+
+/// Matrix multiplication
+fn matrix_multiply(a: &Matrix<Float>, b: &Matrix<Float>) -> Matrix<Float> {
+    let m = a.rows();
+    let n = b.cols();
+    let k = a.cols();
+
+    let mut c = Matrix::zeros(m, n);
+
+    for i in 0..m {
+        for j in 0..n {
+            let mut sum = 0.0;
+            for l in 0..k {
+                sum += a[(i, l)] * b[(l, j)];
+            }
+            c[(i, j)] = sum;
+        }
+    }
+
+    c
+}
+
+/// Pseudo-random number (simple LCG)
+static mut SEED: u64 = 12345;
+
+fn pseudo_random() -> Float {
+    unsafe {
+        SEED = SEED.wrapping_mul(1103515245).wrapping_add(12345);
+        ((SEED >> 16) & 0x7FFF) as Float / 32768.0
+    }
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_granger_causality() {
+        // Create causal data: y depends on lagged x
+        let n = 200;
+        let mut x = vec![0.0; n];
+        let mut y = vec![0.0; n];
+
+        for i in 2..n {
+            x[i] = 0.5 * x[i-1] + pseudo_random() - 0.5;
+            y[i] = 0.8 * x[i-1] + 0.2 * y[i-1] + (pseudo_random() - 0.5) * 0.3;
+        }
+
+        let gc = GrangerCausality::new(5);
+        let result = gc.test(&x, &y);
+
+        // x should Granger-cause y
+        assert!(result.p_value < 0.1);
+    }
+
+    #[test]
+    fn test_transfer_entropy() {
+        let te = TransferEntropy::new(2);
+
+        let x = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
+        let y = vec![0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5, 9.5];
+
+        let result = te.compute(&x, &y);
+        assert!(result.transfer_entropy >= 0.0);
+    }
+
+    #[test]
+    fn test_ccm() {
+        let ccm = ConvergentCrossMapping::new(3, 1);
+
+        let mut x = vec![0.0; 100];
+        let mut y = vec![0.0; 100];
+
+        for i in 1..100 {
+            x[i] = 0.5 * x[i-1] + pseudo_random() - 0.5;
+            y[i] = 0.7 * x[i-1] + 0.3 * y[i-1];
+        }
+
+        let result = ccm.compute(&x, &y);
+        assert!(!result.correlations.is_empty());
+    }
+}

@@ -1,0 +1,198 @@
+// =============================================================================
+// qnl -- Number lines (GNU nl clone) written in BuildLang
+// =============================================================================
+// Usage:
+//   nl file.txt                   -- number non-blank lines (default)
+//   nl -ba file.txt               -- number ALL lines including blanks
+//   nl -bt file.txt               -- number non-blank only (default)
+//   nl -s': ' file.txt            -- custom separator (default: TAB)
+//   nl -w 4 file.txt              -- number width (default: 6)
+//   cat file.txt | nl             -- from stdin
+//   nl --help                     -- usage
+//
+// Output format (default):
+//      1\tfirst line
+//      2\tsecond line
+//
+//        (blank — no number)
+//      3\tafter blank
+// =============================================================================
+
+include!("stdlib/lines.bld");
+
+fn print_help() ~ Console {
+    println!("qnl -- number lines of files");
+    println!("");
+    println!("Usage:");
+    println!("  qnl [OPTION]... [FILE]");
+    println!("");
+    println!("Options:");
+    println!("  -ba          number all lines (including blank)");
+    println!("  -bt          number non-blank lines only (default)");
+    println!("  -s SEP       use SEP as separator (default: TAB)");
+    println!("  -w WIDTH     line number width (default: 6)");
+    println!("  --help       display this help and exit");
+    println!("");
+    println!("With no FILE, read standard input.");
+}
+
+// Right-pad a number string to the given width with leading spaces.
+fn format_num(n: i32, width: i32) -> String {
+    let num_str = to_string_i32(n);
+    let nlen = num_str.len();
+    let mut result = "";
+    let pad = width - nlen;
+    let mut p: i32 = 0;
+    while p < pad {
+        result = result + " ";
+        p = p + 1;
+    }
+    result = result + num_str;
+    result
+}
+
+// Build an empty-width string for blank lines (spaces only).
+fn blank_prefix(width: i32, sep: String) -> String {
+    let mut result = "";
+    let mut p: i32 = 0;
+    while p < width {
+        result = result + " ";
+        p = p + 1;
+    }
+    result = result + sep;
+    result
+}
+
+// Check if a line is blank (empty or only whitespace).
+fn is_blank(line: String) -> bool {
+    let llen = line.len();
+    if llen == 0 {
+        return true;
+    }
+    let mut i: i32 = 0;
+    while i < llen {
+        let c = line.char_at(i);
+        if c != " " && c != "\t" && c != "\r" {
+            return false;
+        }
+        i = i + 1;
+    }
+    true
+}
+
+// Strip trailing \r from a line.
+fn strip_cr(line: String) -> String {
+    let llen = line.len();
+    if llen == 0 { return ""; }
+    let last = line.char_at(llen - 1);
+    if last == "\r" {
+        if llen == 1 { return ""; }
+        line.substring(0, llen - 1)
+    } else {
+        line
+    }
+}
+
+// Process content: split into lines, number them, print.
+fn process(content: String, number_all: bool, sep: String, width: i32) ~ Console {
+    let lr = lr_new(content);
+    let mut line_num: i32 = 0;
+
+    let mut i = 0;
+    while i < lr.count {
+        let raw = lr_get(&lr, i);
+        let clean = strip_cr(raw);
+        let blank = is_blank(clean);
+
+        if blank && !number_all {
+            // Print empty line (no number)
+            println!("");
+        } else {
+            line_num = line_num + 1;
+            let num_str = format_num(line_num, width);
+            println!("{}{}{}", num_str, sep, clean);
+        }
+        i = i + 1;
+    }
+}
+
+fn main() ~ Console + Environment + FileSystem + Process {
+    let nargs = args_count();
+
+    let mut number_all = false;
+    let mut sep = "\t";
+    let mut width: i32 = 6;
+    let mut filename = "";
+    let mut has_file = false;
+
+    // Parse arguments
+    let mut i: i32 = 1;
+    while i < nargs {
+        let arg = args_get(i);
+
+        if arg == "--help" || arg == "-h" {
+            print_help();
+            process_exit(0);
+        } else if arg == "-ba" {
+            number_all = true;
+        } else if arg == "-bt" {
+            number_all = false;
+        } else if arg == "-s" {
+            i = i + 1;
+            if i < nargs {
+                sep = args_get(i);
+            }
+        } else if arg.starts_with("-s") {
+            // -s": " form
+            let alen = arg.len();
+            sep = arg.substring(2, alen - 2);
+        } else if arg == "-w" {
+            i = i + 1;
+            if i < nargs {
+                let warg = args_get(i);
+                width = warg.parse_int();
+                if width < 1 {
+                    width = 6;
+                }
+            }
+        } else if arg.starts_with("-w") {
+            let alen = arg.len();
+            let warg = arg.substring(2, alen - 2);
+            width = warg.parse_int();
+            if width < 1 {
+                width = 6;
+            }
+        } else if arg.starts_with("-") {
+            println!("qnl: unknown option '{}'", arg);
+            process_exit(2);
+        } else {
+            filename = arg;
+            has_file = true;
+        }
+
+        i = i + 1;
+    }
+
+    // Read input
+    let input = if has_file {
+        let exists = file_exists(filename);
+        if !exists {
+            println!("qnl: {}: No such file or directory", filename);
+            process_exit(2);
+        }
+        read_file(filename)
+    } else {
+        let piped = stdin_is_pipe();
+        if !piped {
+            print_help();
+            process_exit(0);
+        }
+        read_all()
+    };
+
+    if input.len() == 0 {
+        process_exit(0);
+    }
+
+    process(input, number_all, sep, width);
+}

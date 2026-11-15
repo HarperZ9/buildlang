@@ -1,0 +1,2033 @@
+// ============================================================================
+// BUILD-UNIVERSE: Oracle Feature Engineering Module
+// ============================================================================
+// Copyright © 2024-2025 Zain Dana Harper. All Rights Reserved.
+// Copyright (c) 2024-2025 Zain Dana Harper. All Rights Reserved.
+// ============================================================================
+// Automated feature extraction for time series data
+// ============================================================================
+
+use foundation::collections::{Vec, HashMap, HashSet};
+use foundation::math::{Matrix, Vector, sqrt, log, exp, abs, min, max, pow, floor, ceil, cos, sin};
+use foundation::sync::{Arc, RwLock};
+use foundation::io::{Result, Error};
+
+// ============================================================================
+// FEATURE CATEGORIES
+// ============================================================================
+
+/// Categories of time series features
+@derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum FeatureCategory {
+    Statistical,        // Mean, std, skewness, kurtosis, etc.
+    Temporal,          // Trend, seasonality, autocorrelation
+    Frequency,         // Spectral features, dominant frequencies
+    Entropy,           // Information-theoretic measures
+    Nonlinear,         // Chaos, complexity measures
+    Distribution,      // Quantiles, histogram features
+    Structural,        // Change points, segments
+    Rolling,           // Rolling window statistics
+}
+
+/// Individual feature specification
+@derive(Clone, Debug)]
+pub struct FeatureSpec {
+    pub name: String,
+    pub category: FeatureCategory,
+    pub description: String,
+    pub requires_parameters: Bool,
+}
+
+// ============================================================================
+// FEATURE EXTRACTOR
+// ============================================================================
+
+/// Comprehensive time series feature extractor
+pub struct FeatureExtractor {
+    categories: HashSet<FeatureCategory>,
+    window_sizes: Vec<Int>,
+    lags: Vec<Int>,
+    quantiles: Vec<Float>,
+    n_fft: Int,
+}
+
+impl FeatureExtractor {
+    pub fn new() -> Self {
+        Self {
+            categories: HashSet::from_iter([
+                FeatureCategory::Statistical,
+                FeatureCategory::Temporal,
+                FeatureCategory::Entropy,
+            ]),
+            window_sizes: vec![10, 20, 50],
+            lags: vec![1, 2, 3, 5, 10, 20],
+            quantiles: vec![0.1, 0.25, 0.5, 0.75, 0.9],
+            n_fft: 256,
+        }
+    }
+
+    /// Create with all feature categories
+    pub fn full() -> Self {
+        Self {
+            categories: HashSet::from_iter([
+                FeatureCategory::Statistical,
+                FeatureCategory::Temporal,
+                FeatureCategory::Frequency,
+                FeatureCategory::Entropy,
+                FeatureCategory::Nonlinear,
+                FeatureCategory::Distribution,
+                FeatureCategory::Structural,
+                FeatureCategory::Rolling,
+            ]),
+            window_sizes: vec![5, 10, 20, 50, 100],
+            lags: vec![1, 2, 3, 5, 7, 10, 14, 21, 30],
+            quantiles: vec![0.01, 0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99],
+            n_fft: 512,
+        }
+    }
+
+    /// Enable specific categories
+    pub fn with_categories(mut self, categories: Vec<FeatureCategory>) -> Self {
+        self.categories = HashSet::from_iter(categories);
+        self
+    }
+
+    /// Configure window sizes for rolling features
+    pub fn with_window_sizes(mut self, sizes: Vec<Int>) -> Self {
+        self.window_sizes = sizes;
+        self
+    }
+
+    /// Configure lags for autocorrelation
+    pub fn with_lags(mut self, lags: Vec<Int>) -> Self {
+        self.lags = lags;
+        self
+    }
+
+    /// Extract all configured features
+    pub fn extract(&self, data: &[Float]) -> FeatureSet {
+        let mut features = HashMap::new();
+
+        if self.categories.contains(&FeatureCategory::Statistical) {
+            features.extend(self.extract_statistical(data));
+        }
+
+        if self.categories.contains(&FeatureCategory::Temporal) {
+            features.extend(self.extract_temporal(data));
+        }
+
+        if self.categories.contains(&FeatureCategory::Frequency) {
+            features.extend(self.extract_frequency(data));
+        }
+
+        if self.categories.contains(&FeatureCategory::Entropy) {
+            features.extend(self.extract_entropy(data));
+        }
+
+        if self.categories.contains(&FeatureCategory::Nonlinear) {
+            features.extend(self.extract_nonlinear(data));
+        }
+
+        if self.categories.contains(&FeatureCategory::Distribution) {
+            features.extend(self.extract_distribution(data));
+        }
+
+        if self.categories.contains(&FeatureCategory::Structural) {
+            features.extend(self.extract_structural(data));
+        }
+
+        if self.categories.contains(&FeatureCategory::Rolling) {
+            features.extend(self.extract_rolling(data));
+        }
+
+        FeatureSet {
+            features,
+            n_samples: data.len(),
+        }
+    }
+
+    // ========================================================================
+    // STATISTICAL FEATURES
+    // ========================================================================
+
+    fn extract_statistical(&self, data: &[Float]) -> HashMap<String, Float> {
+        let mut features = HashMap::new();
+        let n = data.len();
+
+        if n == 0 {
+            return features;
+        }
+
+        // Basic statistics
+        let (mean, variance) = compute_mean_variance(data);
+        let std = sqrt(variance);
+
+        features.insert("mean".to_string(), mean);
+        features.insert("std".to_string(), std);
+        features.insert("variance".to_string(), variance);
+        features.insert("min".to_string(), data.iter().cloned().fold(Float::INFINITY, Float::min));
+        features.insert("max".to_string(), data.iter().cloned().fold(Float::NEG_INFINITY, Float::max));
+        features.insert("range".to_string(), features["max"] - features["min"]);
+
+        // Coefficient of variation
+        let cv = if mean.abs() > 1e-10 { std / mean.abs() } else { 0.0 };
+        features.insert("cv".to_string(), cv);
+
+        // Higher moments
+        let skewness = self.compute_skewness(data, mean, std);
+        let kurtosis = self.compute_kurtosis(data, mean, std);
+        features.insert("skewness".to_string(), skewness);
+        features.insert("kurtosis".to_string(), kurtosis);
+        features.insert("excess_kurtosis".to_string(), kurtosis - 3.0);
+
+        // Robust statistics
+        let median = self.compute_quantile(data, 0.5);
+        let mad = self.compute_mad(data, median);
+        features.insert("median".to_string(), median);
+        features.insert("mad".to_string(), mad);
+
+        // IQR
+        let q1 = self.compute_quantile(data, 0.25);
+        let q3 = self.compute_quantile(data, 0.75);
+        features.insert("iqr".to_string(), q3 - q1);
+        features.insert("q1".to_string(), q1);
+        features.insert("q3".to_string(), q3);
+
+        // Mean absolute deviation
+        let mean_abs_dev: Float = data.iter().map(|&x| abs(x - mean)).sum::<Float>() / n as Float;
+        features.insert("mean_abs_deviation".to_string(), mean_abs_dev);
+
+        // Root mean square
+        let rms = sqrt(data.iter().map(|&x| x * x).sum::<Float>() / n as Float);
+        features.insert("rms".to_string(), rms);
+
+        // Geometric mean (for positive data)
+        if data.iter().all(|&x| x > 0.0) {
+            let log_sum: Float = data.iter().map(|&x| log(x)).sum();
+            let geometric_mean = exp(log_sum / n as Float);
+            features.insert("geometric_mean".to_string(), geometric_mean);
+        }
+
+        // Harmonic mean (for positive data)
+        if data.iter().all(|&x| x > 0.0) {
+            let inv_sum: Float = data.iter().map(|&x| 1.0 / x).sum();
+            let harmonic_mean = n as Float / inv_sum;
+            features.insert("harmonic_mean".to_string(), harmonic_mean);
+        }
+
+        // Energy
+        let energy: Float = data.iter().map(|&x| x * x).sum();
+        features.insert("energy".to_string(), energy);
+
+        // Sum of absolute values
+        let abs_sum: Float = data.iter().map(|&x| abs(x)).sum();
+        features.insert("abs_sum".to_string(), abs_sum);
+
+        // Count of unique values (binned)
+        let n_unique = self.count_unique_binned(data, 100);
+        features.insert("n_unique_binned".to_string(), n_unique as Float);
+
+        // Proportion above/below mean
+        let above_mean = data.iter().filter(|&&x| x > mean).count() as Float / n as Float;
+        features.insert("prop_above_mean".to_string(), above_mean);
+
+        // Count peaks and troughs
+        let (n_peaks, n_troughs) = self.count_peaks_troughs(data);
+        features.insert("n_peaks".to_string(), n_peaks as Float);
+        features.insert("n_troughs".to_string(), n_troughs as Float);
+
+        features
+    }
+
+    /// Compute skewness
+    fn compute_skewness(&self, data: &[Float], mean: Float, std: Float) -> Float {
+        if std < 1e-10 || data.len() < 3 {
+            return 0.0;
+        }
+
+        let n = data.len() as Float;
+        let sum: Float = data.iter().map(|&x| pow((x - mean) / std, 3.0)).sum();
+
+        sum / n
+    }
+
+    /// Compute kurtosis
+    fn compute_kurtosis(&self, data: &[Float], mean: Float, std: Float) -> Float {
+        if std < 1e-10 || data.len() < 4 {
+            return 0.0;
+        }
+
+        let n = data.len() as Float;
+        let sum: Float = data.iter().map(|&x| pow((x - mean) / std, 4.0)).sum();
+
+        sum / n
+    }
+
+    /// Compute quantile
+    fn compute_quantile(&self, data: &[Float], p: Float) -> Float {
+        if data.is_empty() {
+            return 0.0;
+        }
+
+        let mut sorted = data.to_vec();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+        let idx = (p * (sorted.len() - 1) as Float) as usize;
+        let frac = p * (sorted.len() - 1) as Float - idx as Float;
+
+        if idx + 1 < sorted.len() {
+            sorted[idx] * (1.0 - frac) + sorted[idx + 1] * frac
+        } else {
+            sorted[idx]
+        }
+    }
+
+    /// Median absolute deviation
+    fn compute_mad(&self, data: &[Float], median: Float) -> Float {
+        let deviations: Vec<Float> = data.iter().map(|&x| abs(x - median)).collect();
+        self.compute_quantile(&deviations, 0.5)
+    }
+
+    /// Count unique values (binned)
+    fn count_unique_binned(&self, data: &[Float], n_bins: Int) -> Int {
+        if data.is_empty() {
+            return 0;
+        }
+
+        let min_val = data.iter().cloned().fold(Float::INFINITY, Float::min);
+        let max_val = data.iter().cloned().fold(Float::NEG_INFINITY, Float::max);
+        let range = max_val - min_val;
+
+        if range < 1e-10 {
+            return 1;
+        }
+
+        let bin_width = range / n_bins as Float;
+        let mut bins = HashSet::new();
+
+        for &x in data {
+            let bin = ((x - min_val) / bin_width) as Int;
+            bins.insert(bin.min(n_bins - 1));
+        }
+
+        bins.len() as Int
+    }
+
+    /// Count peaks and troughs
+    fn count_peaks_troughs(&self, data: &[Float]) -> (Int, Int) {
+        let n = data.len();
+        if n < 3 {
+            return (0, 0);
+        }
+
+        let mut peaks = 0;
+        let mut troughs = 0;
+
+        for i in 1..n-1 {
+            if data[i] > data[i-1] && data[i] > data[i+1] {
+                peaks += 1;
+            }
+            if data[i] < data[i-1] && data[i] < data[i+1] {
+                troughs += 1;
+            }
+        }
+
+        (peaks, troughs)
+    }
+
+    // ========================================================================
+    // TEMPORAL FEATURES
+    // ========================================================================
+
+    fn extract_temporal(&self, data: &[Float]) -> HashMap<String, Float> {
+        let mut features = HashMap::new();
+        let n = data.len();
+
+        if n < 3 {
+            return features;
+        }
+
+        // First difference statistics
+        let diff: Vec<Float> = (1..n).map(|i| data[i] - data[i-1]).collect();
+        let (diff_mean, diff_var) = compute_mean_variance(&diff);
+        features.insert("diff_mean".to_string(), diff_mean);
+        features.insert("diff_std".to_string(), sqrt(diff_var));
+        features.insert("diff_abs_mean".to_string(),
+            diff.iter().map(|&x| abs(x)).sum::<Float>() / diff.len() as Float);
+
+        // Second difference
+        if n > 3 {
+            let diff2: Vec<Float> = (1..diff.len()).map(|i| diff[i] - diff[i-1]).collect();
+            let (diff2_mean, diff2_var) = compute_mean_variance(&diff2);
+            features.insert("diff2_mean".to_string(), diff2_mean);
+            features.insert("diff2_std".to_string(), sqrt(diff2_var));
+        }
+
+        // Trend strength (linear regression R²)
+        let (slope, intercept, r_squared) = self.linear_regression(data);
+        features.insert("trend_slope".to_string(), slope);
+        features.insert("trend_intercept".to_string(), intercept);
+        features.insert("trend_r_squared".to_string(), r_squared);
+
+        // Trend direction
+        features.insert("trend_direction".to_string(), if slope > 0.0 { 1.0 } else { -1.0 });
+
+        // Autocorrelations
+        for &lag in &self.lags {
+            let lag_usize = lag as usize;
+            if lag_usize < n {
+                let acf = self.autocorrelation(data, lag_usize);
+                features.insert(format!("acf_{}", lag), acf);
+            }
+        }
+
+        // Partial autocorrelations
+        for &lag in &self.lags {
+            let lag_usize = lag as usize;
+            if lag_usize < n / 2 {
+                let pacf = self.partial_autocorrelation(data, lag_usize);
+                features.insert(format!("pacf_{}", lag), pacf);
+            }
+        }
+
+        // First zero crossing of ACF
+        let first_zero = self.first_zero_crossing_acf(data);
+        features.insert("acf_first_zero".to_string(), first_zero as Float);
+
+        // Longest positive/negative run
+        let (longest_pos, longest_neg) = self.longest_runs(data);
+        features.insert("longest_positive_run".to_string(), longest_pos as Float);
+        features.insert("longest_negative_run".to_string(), longest_neg as Float);
+
+        // Crossing rate (zero crossings)
+        let crossing_rate = self.zero_crossing_rate(data);
+        features.insert("zero_crossing_rate".to_string(), crossing_rate);
+
+        // Mean crossing rate
+        let (mean, _) = compute_mean_variance(data);
+        let mean_crossing = self.mean_crossing_rate(data, mean);
+        features.insert("mean_crossing_rate".to_string(), mean_crossing);
+
+        // Stationarity indicator (ADF-like statistic)
+        let stationarity = self.stationarity_indicator(data);
+        features.insert("stationarity_indicator".to_string(), stationarity);
+
+        features
+    }
+
+    /// Linear regression
+    fn linear_regression(&self, data: &[Float]) -> (Float, Float, Float) {
+        let n = data.len();
+        if n < 2 {
+            return (0.0, 0.0, 0.0);
+        }
+
+        let n_f = n as Float;
+        let x: Vec<Float> = (0..n).map(|i| i as Float).collect();
+
+        let sum_x: Float = x.iter().sum();
+        let sum_y: Float = data.iter().sum();
+        let sum_xy: Float = x.iter().zip(data.iter()).map(|(&xi, &yi)| xi * yi).sum();
+        let sum_x2: Float = x.iter().map(|&xi| xi * xi).sum();
+
+        let denom = n_f * sum_x2 - sum_x * sum_x;
+        if abs(denom) < 1e-10 {
+            return (0.0, sum_y / n_f, 0.0);
+        }
+
+        let slope = (n_f * sum_xy - sum_x * sum_y) / denom;
+        let intercept = (sum_y - slope * sum_x) / n_f;
+
+        // R-squared
+        let mean_y = sum_y / n_f;
+        let ss_tot: Float = data.iter().map(|&y| (y - mean_y).powi(2)).sum();
+        let ss_res: Float = data.iter().enumerate()
+            .map(|(i, &y)| (y - (slope * i as Float + intercept)).powi(2))
+            .sum();
+
+        let r_squared = if ss_tot > 0.0 { 1.0 - ss_res / ss_tot } else { 0.0 };
+
+        (slope, intercept, r_squared)
+    }
+
+    /// Autocorrelation at lag k
+    fn autocorrelation(&self, data: &[Float], lag: usize) -> Float {
+        let n = data.len();
+        if lag >= n {
+            return 0.0;
+        }
+
+        let (mean, _) = compute_mean_variance(data);
+
+        let mut numer = 0.0;
+        let mut denom = 0.0;
+
+        for i in 0..n {
+            denom += (data[i] - mean).powi(2);
+            if i + lag < n {
+                numer += (data[i] - mean) * (data[i + lag] - mean);
+            }
+        }
+
+        if denom > 1e-10 {
+            numer / denom
+        } else {
+            0.0
+        }
+    }
+
+    /// Partial autocorrelation using Durbin-Levinson
+    fn partial_autocorrelation(&self, data: &[Float], lag: usize) -> Float {
+        if lag == 0 {
+            return 1.0;
+        }
+        if lag == 1 {
+            return self.autocorrelation(data, 1);
+        }
+
+        // Yule-Walker equations using Durbin-Levinson
+        let mut phi = vec![vec![0.0; lag + 1]; lag + 1];
+        let mut r = vec![0.0; lag + 1];
+
+        for k in 0..=lag {
+            r[k] = self.autocorrelation(data, k);
+        }
+
+        phi[1][1] = r[1];
+
+        for k in 2..=lag {
+            let mut numer = r[k];
+            let mut denom = 1.0;
+
+            for j in 1..k {
+                numer -= phi[k-1][j] * r[k - j];
+                denom -= phi[k-1][j] * r[j];
+            }
+
+            phi[k][k] = if denom.abs() > 1e-10 { numer / denom } else { 0.0 };
+
+            for j in 1..k {
+                phi[k][j] = phi[k-1][j] - phi[k][k] * phi[k-1][k - j];
+            }
+        }
+
+        phi[lag][lag]
+    }
+
+    /// First zero crossing of ACF
+    fn first_zero_crossing_acf(&self, data: &[Float]) -> Int {
+        let max_lag = min(data.len() / 2, 100);
+
+        for lag in 1..max_lag {
+            let acf = self.autocorrelation(data, lag);
+            if acf <= 0.0 {
+                return lag as Int;
+            }
+        }
+
+        max_lag as Int
+    }
+
+    /// Longest positive and negative runs
+    fn longest_runs(&self, data: &[Float]) -> (Int, Int) {
+        let (mean, _) = compute_mean_variance(data);
+
+        let mut max_pos = 0;
+        let mut max_neg = 0;
+        let mut current_pos = 0;
+        let mut current_neg = 0;
+
+        for &x in data {
+            if x > mean {
+                current_pos += 1;
+                current_neg = 0;
+                max_pos = max(max_pos, current_pos);
+            } else {
+                current_neg += 1;
+                current_pos = 0;
+                max_neg = max(max_neg, current_neg);
+            }
+        }
+
+        (max_pos, max_neg)
+    }
+
+    /// Zero crossing rate
+    fn zero_crossing_rate(&self, data: &[Float]) -> Float {
+        let n = data.len();
+        if n < 2 {
+            return 0.0;
+        }
+
+        let mut crossings = 0;
+        for i in 1..n {
+            if (data[i] >= 0.0 && data[i-1] < 0.0) || (data[i] < 0.0 && data[i-1] >= 0.0) {
+                crossings += 1;
+            }
+        }
+
+        crossings as Float / (n - 1) as Float
+    }
+
+    /// Mean crossing rate
+    fn mean_crossing_rate(&self, data: &[Float], mean: Float) -> Float {
+        let n = data.len();
+        if n < 2 {
+            return 0.0;
+        }
+
+        let mut crossings = 0;
+        for i in 1..n {
+            if (data[i] >= mean && data[i-1] < mean) || (data[i] < mean && data[i-1] >= mean) {
+                crossings += 1;
+            }
+        }
+
+        crossings as Float / (n - 1) as Float
+    }
+
+    /// Stationarity indicator (simplified ADF-like)
+    fn stationarity_indicator(&self, data: &[Float]) -> Float {
+        let n = data.len();
+        if n < 10 {
+            return 0.0;
+        }
+
+        // Compute first difference regression: Δy_t = α + β*y_{t-1} + ε
+        let diff: Vec<Float> = (1..n).map(|i| data[i] - data[i-1]).collect();
+        let lagged: Vec<Float> = (0..n-1).map(|i| data[i]).collect();
+
+        let (lag_mean, lag_var) = compute_mean_variance(&lagged);
+        let (diff_mean, _) = compute_mean_variance(&diff);
+
+        let mut cov = 0.0;
+        for i in 0..diff.len() {
+            cov += (lagged[i] - lag_mean) * (diff[i] - diff_mean);
+        }
+        cov /= diff.len() as Float;
+
+        let beta = if lag_var > 0.0 { cov / lag_var } else { 0.0 };
+
+        // More negative beta suggests stationarity
+        -beta
+    }
+
+    // ========================================================================
+    // FREQUENCY FEATURES
+    // ========================================================================
+
+    fn extract_frequency(&self, data: &[Float]) -> HashMap<String, Float> {
+        let mut features = HashMap::new();
+        let n = data.len();
+
+        if n < 4 {
+            return features;
+        }
+
+        // Compute FFT
+        let fft_result = self.compute_fft(data);
+        let power_spectrum: Vec<Float> = fft_result.iter().map(|&(re, im)| re * re + im * im).collect();
+
+        // Total power
+        let total_power: Float = power_spectrum.iter().sum();
+        features.insert("spectral_total_power".to_string(), total_power);
+
+        // Dominant frequency
+        let (dominant_freq, dominant_power) = self.find_dominant_frequency(&power_spectrum, n);
+        features.insert("dominant_frequency".to_string(), dominant_freq);
+        features.insert("dominant_power".to_string(), dominant_power);
+
+        // Spectral centroid
+        let centroid = self.spectral_centroid(&power_spectrum, n);
+        features.insert("spectral_centroid".to_string(), centroid);
+
+        // Spectral spread
+        let spread = self.spectral_spread(&power_spectrum, n, centroid);
+        features.insert("spectral_spread".to_string(), spread);
+
+        // Spectral entropy
+        let spectral_entropy = self.spectral_entropy(&power_spectrum);
+        features.insert("spectral_entropy".to_string(), spectral_entropy);
+
+        // Spectral flatness
+        let flatness = self.spectral_flatness(&power_spectrum);
+        features.insert("spectral_flatness".to_string(), flatness);
+
+        // Band powers (divide spectrum into bands)
+        let n_bands = 5;
+        let band_size = power_spectrum.len() / 2 / n_bands;
+        for i in 0..n_bands {
+            let start = i * band_size;
+            let end = (i + 1) * band_size;
+            let band_power: Float = power_spectrum[start..end].iter().sum();
+            let relative_power = if total_power > 0.0 { band_power / total_power } else { 0.0 };
+            features.insert(format!("band_{}_power", i), relative_power);
+        }
+
+        // Number of significant frequencies
+        let n_significant = self.count_significant_frequencies(&power_spectrum, total_power);
+        features.insert("n_significant_frequencies".to_string(), n_significant as Float);
+
+        features
+    }
+
+    /// Simple FFT computation (Cooley-Tukey radix-2)
+    fn compute_fft(&self, data: &[Float]) -> Vec<(Float, Float)> {
+        let n = data.len();
+        let n_fft = self.n_fft as usize;
+
+        // Pad to power of 2
+        let fft_size = n_fft.min(n).next_power_of_two();
+        let mut real: Vec<Float> = vec![0.0; fft_size];
+        let mut imag: Vec<Float> = vec![0.0; fft_size];
+
+        for i in 0..min(n, fft_size) {
+            real[i] = data[i];
+        }
+
+        // Apply window (Hanning)
+        for i in 0..fft_size {
+            let window = 0.5 * (1.0 - cos(2.0 * 3.14159265359 * i as Float / fft_size as Float));
+            real[i] *= window;
+        }
+
+        // Bit reversal
+        self.bit_reverse(&mut real, &mut imag);
+
+        // FFT butterfly
+        let mut m = 2;
+        while m <= fft_size {
+            let theta = -2.0 * 3.14159265359 / m as Float;
+            let wm_re = cos(theta);
+            let wm_im = sin(theta);
+
+            let mut k = 0;
+            while k < fft_size {
+                let mut w_re = 1.0;
+                let mut w_im = 0.0;
+
+                for j in 0..m/2 {
+                    let t_re = w_re * real[k + j + m/2] - w_im * imag[k + j + m/2];
+                    let t_im = w_re * imag[k + j + m/2] + w_im * real[k + j + m/2];
+
+                    let u_re = real[k + j];
+                    let u_im = imag[k + j];
+
+                    real[k + j] = u_re + t_re;
+                    imag[k + j] = u_im + t_im;
+                    real[k + j + m/2] = u_re - t_re;
+                    imag[k + j + m/2] = u_im - t_im;
+
+                    let new_w_re = w_re * wm_re - w_im * wm_im;
+                    let new_w_im = w_re * wm_im + w_im * wm_re;
+                    w_re = new_w_re;
+                    w_im = new_w_im;
+                }
+
+                k += m;
+            }
+
+            m *= 2;
+        }
+
+        real.iter().zip(imag.iter()).map(|(&r, &i)| (r, i)).collect()
+    }
+
+    /// Bit reversal for FFT
+    fn bit_reverse(&self, real: &mut [Float], imag: &mut [Float]) {
+        let n = real.len();
+        let mut j = 0;
+
+        for i in 0..n {
+            if i < j {
+                real.swap(i, j);
+                imag.swap(i, j);
+            }
+
+            let mut m = n / 2;
+            while m >= 1 && j >= m {
+                j -= m;
+                m /= 2;
+            }
+            j += m;
+        }
+    }
+
+    /// Find dominant frequency
+    fn find_dominant_frequency(&self, power: &[Float], n: usize) -> (Float, Float) {
+        let half = power.len() / 2;
+        let mut max_power = 0.0;
+        let mut max_idx = 1;
+
+        for i in 1..half {
+            if power[i] > max_power {
+                max_power = power[i];
+                max_idx = i;
+            }
+        }
+
+        let freq = max_idx as Float / n as Float;
+        (freq, max_power)
+    }
+
+    /// Spectral centroid
+    fn spectral_centroid(&self, power: &[Float], n: usize) -> Float {
+        let half = power.len() / 2;
+        let mut numer = 0.0;
+        let mut denom = 0.0;
+
+        for i in 1..half {
+            let freq = i as Float / n as Float;
+            numer += freq * power[i];
+            denom += power[i];
+        }
+
+        if denom > 0.0 { numer / denom } else { 0.0 }
+    }
+
+    /// Spectral spread
+    fn spectral_spread(&self, power: &[Float], n: usize, centroid: Float) -> Float {
+        let half = power.len() / 2;
+        let mut numer = 0.0;
+        let mut denom = 0.0;
+
+        for i in 1..half {
+            let freq = i as Float / n as Float;
+            numer += (freq - centroid).powi(2) * power[i];
+            denom += power[i];
+        }
+
+        if denom > 0.0 { sqrt(numer / denom) } else { 0.0 }
+    }
+
+    /// Spectral entropy
+    fn spectral_entropy(&self, power: &[Float]) -> Float {
+        let half = power.len() / 2;
+        let total: Float = power[1..half].iter().sum();
+
+        if total <= 0.0 {
+            return 0.0;
+        }
+
+        let mut entropy = 0.0;
+        for i in 1..half {
+            let p = power[i] / total;
+            if p > 1e-10 {
+                entropy -= p * log(p);
+            }
+        }
+
+        entropy / log(half as Float)  // Normalized
+    }
+
+    /// Spectral flatness
+    fn spectral_flatness(&self, power: &[Float]) -> Float {
+        let half = power.len() / 2;
+        let n = (half - 1) as Float;
+
+        let mut log_sum = 0.0;
+        let mut sum = 0.0;
+
+        for i in 1..half {
+            if power[i] > 1e-10 {
+                log_sum += log(power[i]);
+            } else {
+                log_sum += log(1e-10);
+            }
+            sum += power[i];
+        }
+
+        let geo_mean = exp(log_sum / n);
+        let arith_mean = sum / n;
+
+        if arith_mean > 0.0 { geo_mean / arith_mean } else { 0.0 }
+    }
+
+    /// Count significant frequencies
+    fn count_significant_frequencies(&self, power: &[Float], total: Float) -> Int {
+        let threshold = total / power.len() as Float * 2.0;  // Above average
+        power.iter().filter(|&&p| p > threshold).count() as Int
+    }
+
+    // ========================================================================
+    // ENTROPY FEATURES
+    // ========================================================================
+
+    fn extract_entropy(&self, data: &[Float]) -> HashMap<String, Float> {
+        let mut features = HashMap::new();
+        let n = data.len();
+
+        if n < 10 {
+            return features;
+        }
+
+        // Shannon entropy (binned)
+        let shannon = self.shannon_entropy(data, 20);
+        features.insert("shannon_entropy".to_string(), shannon);
+
+        // Sample entropy
+        let sample_ent = self.sample_entropy(data, 2, 0.2);
+        features.insert("sample_entropy".to_string(), sample_ent);
+
+        // Approximate entropy
+        let approx_ent = self.approximate_entropy(data, 2, 0.2);
+        features.insert("approximate_entropy".to_string(), approx_ent);
+
+        // Permutation entropy
+        let perm_ent = self.permutation_entropy(data, 3);
+        features.insert("permutation_entropy".to_string(), perm_ent);
+
+        // SVD entropy
+        let svd_ent = self.svd_entropy(data, 10);
+        features.insert("svd_entropy".to_string(), svd_ent);
+
+        features
+    }
+
+    /// Shannon entropy with binning
+    fn shannon_entropy(&self, data: &[Float], n_bins: Int) -> Float {
+        if data.is_empty() {
+            return 0.0;
+        }
+
+        let min_val = data.iter().cloned().fold(Float::INFINITY, Float::min);
+        let max_val = data.iter().cloned().fold(Float::NEG_INFINITY, Float::max);
+        let range = max_val - min_val;
+
+        if range < 1e-10 {
+            return 0.0;
+        }
+
+        let bin_width = range / n_bins as Float;
+        let mut bins = vec![0; n_bins as usize];
+
+        for &x in data {
+            let bin = ((x - min_val) / bin_width) as usize;
+            let bin = bin.min(n_bins as usize - 1);
+            bins[bin] += 1;
+        }
+
+        let n = data.len() as Float;
+        let mut entropy = 0.0;
+
+        for &count in &bins {
+            if count > 0 {
+                let p = count as Float / n;
+                entropy -= p * log(p);
+            }
+        }
+
+        entropy
+    }
+
+    /// Sample entropy
+    fn sample_entropy(&self, data: &[Float], m: usize, r: Float) -> Float {
+        let n = data.len();
+        if n < m + 2 {
+            return 0.0;
+        }
+
+        let std = sqrt(compute_mean_variance(data).1);
+        let tolerance = r * std;
+
+        let count_m = self.count_matches(data, m, tolerance);
+        let count_m1 = self.count_matches(data, m + 1, tolerance);
+
+        if count_m == 0 || count_m1 == 0 {
+            return 0.0;
+        }
+
+        -log(count_m1 as Float / count_m as Float)
+    }
+
+    /// Count pattern matches
+    fn count_matches(&self, data: &[Float], m: usize, tolerance: Float) -> Int {
+        let n = data.len();
+        let mut count = 0;
+
+        for i in 0..n - m {
+            for j in i + 1..n - m {
+                let mut is_match = true;
+                for k in 0..m {
+                    if abs(data[i + k] - data[j + k]) > tolerance {
+                        is_match = false;
+                        break;
+                    }
+                }
+                if is_match {
+                    count += 1;
+                }
+            }
+        }
+
+        count
+    }
+
+    /// Approximate entropy
+    fn approximate_entropy(&self, data: &[Float], m: usize, r: Float) -> Float {
+        let std = sqrt(compute_mean_variance(data).1);
+        let tolerance = r * std;
+
+        let phi_m = self.phi_function(data, m, tolerance);
+        let phi_m1 = self.phi_function(data, m + 1, tolerance);
+
+        phi_m - phi_m1
+    }
+
+    /// Phi function for ApEn
+    fn phi_function(&self, data: &[Float], m: usize, tolerance: Float) -> Float {
+        let n = data.len();
+        if n < m + 1 {
+            return 0.0;
+        }
+
+        let n_patterns = n - m + 1;
+        let mut sum = 0.0;
+
+        for i in 0..n_patterns {
+            let mut count = 0;
+            for j in 0..n_patterns {
+                let mut is_match = true;
+                for k in 0..m {
+                    if abs(data[i + k] - data[j + k]) > tolerance {
+                        is_match = false;
+                        break;
+                    }
+                }
+                if is_match {
+                    count += 1;
+                }
+            }
+            sum += log(count as Float / n_patterns as Float);
+        }
+
+        sum / n_patterns as Float
+    }
+
+    /// Permutation entropy
+    fn permutation_entropy(&self, data: &[Float], order: usize) -> Float {
+        let n = data.len();
+        if n < order + 1 {
+            return 0.0;
+        }
+
+        let mut pattern_counts: HashMap<Vec<usize>, Int> = HashMap::new();
+        let n_patterns = n - order + 1;
+
+        for i in 0..n_patterns {
+            let pattern: Vec<Float> = (0..order).map(|j| data[i + j]).collect();
+
+            // Get permutation order
+            let mut indices: Vec<usize> = (0..order).collect();
+            indices.sort_by(|&a, &b| pattern[a].partial_cmp(&pattern[b]).unwrap());
+
+            *pattern_counts.entry(indices).or_insert(0) += 1;
+        }
+
+        // Compute entropy
+        let mut entropy = 0.0;
+        for &count in pattern_counts.values() {
+            let p = count as Float / n_patterns as Float;
+            entropy -= p * log(p);
+        }
+
+        // Normalize by max entropy
+        let factorial = (1..=order).product::<usize>() as Float;
+        entropy / log(factorial)
+    }
+
+    /// SVD entropy
+    fn svd_entropy(&self, data: &[Float], embed_dim: usize) -> Float {
+        let n = data.len();
+        if n < embed_dim + 1 {
+            return 0.0;
+        }
+
+        // Create embedding matrix
+        let n_rows = n - embed_dim + 1;
+        let mut matrix = Matrix::zeros(n_rows, embed_dim);
+
+        for i in 0..n_rows {
+            for j in 0..embed_dim {
+                matrix[(i, j)] = data[i + j];
+            }
+        }
+
+        // Compute singular values (simplified: use eigenvalues of M'M)
+        let mut mtm = Matrix::zeros(embed_dim, embed_dim);
+        for i in 0..embed_dim {
+            for j in 0..embed_dim {
+                let mut sum = 0.0;
+                for k in 0..n_rows {
+                    sum += matrix[(k, i)] * matrix[(k, j)];
+                }
+                mtm[(i, j)] = sum;
+            }
+        }
+
+        // Power iteration to get eigenvalues (simplified)
+        let eigenvalues = self.estimate_eigenvalues(&mtm);
+
+        // Normalize eigenvalues
+        let total: Float = eigenvalues.iter().sum();
+        if total <= 0.0 {
+            return 0.0;
+        }
+
+        let mut entropy = 0.0;
+        for &ev in &eigenvalues {
+            let p = ev / total;
+            if p > 1e-10 {
+                entropy -= p * log(p);
+            }
+        }
+
+        entropy / log(embed_dim as Float)
+    }
+
+    /// Estimate eigenvalues using power iteration
+    fn estimate_eigenvalues(&self, m: &Matrix<Float>) -> Vec<Float> {
+        let n = m.rows();
+        let mut eigenvalues = Vec::with_capacity(n);
+        let mut remaining = m.clone();
+
+        for _ in 0..n {
+            // Power iteration
+            let mut v = vec![1.0; n];
+            let mut lambda = 0.0;
+
+            for _ in 0..50 {
+                let mut mv = vec![0.0; n];
+                for i in 0..n {
+                    for j in 0..n {
+                        mv[i] += remaining[(i, j)] * v[j];
+                    }
+                }
+
+                let norm: Float = mv.iter().map(|&x| x * x).sum::<Float>().sqrt();
+                if norm < 1e-10 {
+                    break;
+                }
+
+                lambda = norm;
+                for i in 0..n {
+                    v[i] = mv[i] / norm;
+                }
+            }
+
+            eigenvalues.push(lambda);
+
+            // Deflate
+            for i in 0..n {
+                for j in 0..n {
+                    remaining[(i, j)] -= lambda * v[i] * v[j];
+                }
+            }
+        }
+
+        eigenvalues
+    }
+
+    // ========================================================================
+    // NONLINEAR FEATURES
+    // ========================================================================
+
+    fn extract_nonlinear(&self, data: &[Float]) -> HashMap<String, Float> {
+        let mut features = HashMap::new();
+        let n = data.len();
+
+        if n < 20 {
+            return features;
+        }
+
+        // Hurst exponent
+        let hurst = self.hurst_exponent(data);
+        features.insert("hurst_exponent".to_string(), hurst);
+
+        // Lyapunov exponent estimate
+        let lyapunov = self.lyapunov_exponent(data, 3, 1);
+        features.insert("lyapunov_exponent".to_string(), lyapunov);
+
+        // Correlation dimension
+        let corr_dim = self.correlation_dimension(data, 3, 1);
+        features.insert("correlation_dimension".to_string(), corr_dim);
+
+        // DFA (Detrended Fluctuation Analysis)
+        let alpha = self.dfa_exponent(data);
+        features.insert("dfa_alpha".to_string(), alpha);
+
+        // Higuchi fractal dimension
+        let higuchi = self.higuchi_fractal_dimension(data, 10);
+        features.insert("higuchi_fd".to_string(), higuchi);
+
+        // Lempel-Ziv complexity
+        let lz_complexity = self.lempel_ziv_complexity(data);
+        features.insert("lz_complexity".to_string(), lz_complexity);
+
+        features
+    }
+
+    /// Hurst exponent using R/S analysis
+    fn hurst_exponent(&self, data: &[Float]) -> Float {
+        let n = data.len();
+        let min_window = 10;
+        let mut log_rs = Vec::new();
+        let mut log_n = Vec::new();
+
+        let mut window = min_window;
+        while window <= n / 2 {
+            let mut rs_values = Vec::new();
+
+            for start in (0..n).step_by(window) {
+                if start + window > n {
+                    break;
+                }
+
+                let segment: Vec<Float> = data[start..start+window].to_vec();
+                let (mean, _) = compute_mean_variance(&segment);
+
+                // Cumulative deviations
+                let mut cumdev = vec![0.0; window];
+                for i in 0..window {
+                    cumdev[i] = if i == 0 {
+                        segment[i] - mean
+                    } else {
+                        cumdev[i-1] + segment[i] - mean
+                    };
+                }
+
+                let range = cumdev.iter().cloned().fold(Float::NEG_INFINITY, Float::max) -
+                           cumdev.iter().cloned().fold(Float::INFINITY, Float::min);
+                let std = sqrt(compute_mean_variance(&segment).1);
+
+                if std > 0.0 {
+                    rs_values.push(range / std);
+                }
+            }
+
+            if !rs_values.is_empty() {
+                let avg_rs: Float = rs_values.iter().sum::<Float>() / rs_values.len() as Float;
+                log_rs.push(log(avg_rs));
+                log_n.push(log(window as Float));
+            }
+
+            window *= 2;
+        }
+
+        if log_rs.len() < 2 {
+            return 0.5;
+        }
+
+        // Linear regression of log(R/S) vs log(n)
+        let (slope, _, _) = self.linear_regression_xy(&log_n, &log_rs);
+        slope.clamp(0.0, 1.0)
+    }
+
+    /// Linear regression for two vectors
+    fn linear_regression_xy(&self, x: &[Float], y: &[Float]) -> (Float, Float, Float) {
+        let n = min(x.len(), y.len());
+        if n < 2 {
+            return (0.0, 0.0, 0.0);
+        }
+
+        let n_f = n as Float;
+        let sum_x: Float = x.iter().sum();
+        let sum_y: Float = y.iter().sum();
+        let sum_xy: Float = x.iter().zip(y.iter()).map(|(&a, &b)| a * b).sum();
+        let sum_x2: Float = x.iter().map(|&a| a * a).sum();
+
+        let denom = n_f * sum_x2 - sum_x * sum_x;
+        if abs(denom) < 1e-10 {
+            return (0.0, sum_y / n_f, 0.0);
+        }
+
+        let slope = (n_f * sum_xy - sum_x * sum_y) / denom;
+        let intercept = (sum_y - slope * sum_x) / n_f;
+
+        (slope, intercept, 0.0)
+    }
+
+    /// Lyapunov exponent estimate
+    fn lyapunov_exponent(&self, data: &[Float], embed_dim: usize, tau: usize) -> Float {
+        let n = data.len();
+        if n < embed_dim * tau + 20 {
+            return 0.0;
+        }
+
+        // Embed time series
+        let n_points = n - (embed_dim - 1) * tau;
+        let mut embedded = Vec::with_capacity(n_points);
+
+        for i in 0..n_points {
+            let point: Vec<Float> = (0..embed_dim).map(|j| data[i + j * tau]).collect();
+            embedded.push(point);
+        }
+
+        // Find average divergence of nearby trajectories
+        let mut divergences = Vec::new();
+
+        for i in 0..n_points - 10 {
+            // Find nearest neighbor (excluding temporal neighbors)
+            let mut min_dist = Float::INFINITY;
+            let mut nn_idx = 0;
+
+            for j in 0..n_points {
+                if abs(i as Int - j as Int) > 10 {
+                    let dist = self.euclidean_distance_vec(&embedded[i], &embedded[j]);
+                    if dist < min_dist && dist > 0.0 {
+                        min_dist = dist;
+                        nn_idx = j;
+                    }
+                }
+            }
+
+            if min_dist < Float::INFINITY {
+                // Track divergence over time
+                for k in 1..=5 {
+                    if i + k < n_points && nn_idx + k < n_points {
+                        let new_dist = self.euclidean_distance_vec(
+                            &embedded[i + k],
+                            &embedded[nn_idx + k]
+                        );
+                        if new_dist > 0.0 && min_dist > 0.0 {
+                            divergences.push(log(new_dist / min_dist) / k as Float);
+                        }
+                    }
+                }
+            }
+        }
+
+        if divergences.is_empty() {
+            return 0.0;
+        }
+
+        divergences.iter().sum::<Float>() / divergences.len() as Float
+    }
+
+    /// Euclidean distance for vectors
+    fn euclidean_distance_vec(&self, a: &[Float], b: &[Float]) -> Float {
+        let mut sum = 0.0;
+        for i in 0..min(a.len(), b.len()) {
+            sum += (a[i] - b[i]).powi(2);
+        }
+        sqrt(sum)
+    }
+
+    /// Correlation dimension
+    fn correlation_dimension(&self, data: &[Float], embed_dim: usize, tau: usize) -> Float {
+        let n = data.len();
+        if n < embed_dim * tau + 10 {
+            return 0.0;
+        }
+
+        // Embed
+        let n_points = n - (embed_dim - 1) * tau;
+        let mut embedded = Vec::with_capacity(n_points);
+
+        for i in 0..n_points {
+            let point: Vec<Float> = (0..embed_dim).map(|j| data[i + j * tau]).collect();
+            embedded.push(point);
+        }
+
+        // Compute correlation sum for different radii
+        let (mean, var) = compute_mean_variance(data);
+        let std = sqrt(var);
+        let radii: Vec<Float> = (1..10).map(|i| std * 0.1 * i as Float).collect();
+
+        let mut log_c = Vec::new();
+        let mut log_r = Vec::new();
+
+        for &r in &radii {
+            let mut count = 0;
+            let n_pairs = n_points * (n_points - 1) / 2;
+
+            for i in 0..n_points {
+                for j in i+1..n_points {
+                    if self.euclidean_distance_vec(&embedded[i], &embedded[j]) < r {
+                        count += 1;
+                    }
+                }
+            }
+
+            let c = count as Float / n_pairs as Float;
+            if c > 0.0 && r > 0.0 {
+                log_c.push(log(c));
+                log_r.push(log(r));
+            }
+        }
+
+        if log_c.len() < 3 {
+            return embed_dim as Float;
+        }
+
+        let (slope, _, _) = self.linear_regression_xy(&log_r, &log_c);
+        slope.max(0.0)
+    }
+
+    /// DFA exponent
+    fn dfa_exponent(&self, data: &[Float]) -> Float {
+        let n = data.len();
+        let (mean, _) = compute_mean_variance(data);
+
+        // Cumulative sum
+        let mut cumsum = vec![0.0; n];
+        for i in 0..n {
+            cumsum[i] = if i == 0 {
+                data[i] - mean
+            } else {
+                cumsum[i-1] + data[i] - mean
+            };
+        }
+
+        let window_sizes: Vec<usize> = vec![4, 8, 16, 32, 64, 128]
+            .into_iter()
+            .filter(|&w| w < n / 4)
+            .collect();
+
+        let mut log_f = Vec::new();
+        let mut log_n = Vec::new();
+
+        for &window in &window_sizes {
+            let n_windows = n / window;
+            let mut fluctuations = Vec::new();
+
+            for w in 0..n_windows {
+                let start = w * window;
+                let segment: Vec<Float> = cumsum[start..start+window].to_vec();
+
+                // Detrend with linear fit
+                let (slope, intercept, _) = self.linear_regression(&segment);
+                let mut rms = 0.0;
+                for i in 0..window {
+                    let trend = slope * i as Float + intercept;
+                    rms += (segment[i] - trend).powi(2);
+                }
+                fluctuations.push(sqrt(rms / window as Float));
+            }
+
+            let avg_f: Float = fluctuations.iter().sum::<Float>() / fluctuations.len() as Float;
+            if avg_f > 0.0 {
+                log_f.push(log(avg_f));
+                log_n.push(log(window as Float));
+            }
+        }
+
+        if log_f.len() < 2 {
+            return 0.5;
+        }
+
+        let (alpha, _, _) = self.linear_regression_xy(&log_n, &log_f);
+        alpha.clamp(0.0, 2.0)
+    }
+
+    /// Higuchi fractal dimension
+    fn higuchi_fractal_dimension(&self, data: &[Float], k_max: usize) -> Float {
+        let n = data.len();
+        if n < k_max + 1 {
+            return 1.0;
+        }
+
+        let mut log_l = Vec::new();
+        let mut log_k = Vec::new();
+
+        for k in 1..=k_max {
+            let mut lengths = Vec::new();
+
+            for m in 0..k {
+                let mut length = 0.0;
+                let n_points = (n - m - 1) / k;
+
+                if n_points > 0 {
+                    for i in 1..=n_points {
+                        length += abs(data[m + i * k] - data[m + (i - 1) * k]);
+                    }
+                    length *= (n - 1) as Float / (k * n_points * k) as Float;
+                    lengths.push(length);
+                }
+            }
+
+            if !lengths.is_empty() {
+                let avg: Float = lengths.iter().sum::<Float>() / lengths.len() as Float;
+                if avg > 0.0 {
+                    log_l.push(log(avg));
+                    log_k.push(log(1.0 / k as Float));
+                }
+            }
+        }
+
+        if log_l.len() < 2 {
+            return 1.0;
+        }
+
+        let (slope, _, _) = self.linear_regression_xy(&log_k, &log_l);
+        slope.clamp(1.0, 2.0)
+    }
+
+    /// Lempel-Ziv complexity
+    fn lempel_ziv_complexity(&self, data: &[Float]) -> Float {
+        let n = data.len();
+        if n < 2 {
+            return 0.0;
+        }
+
+        // Binarize
+        let median = self.compute_quantile(data, 0.5);
+        let binary: Vec<u8> = data.iter().map(|&x| if x > median { 1 } else { 0 }).collect();
+
+        // Count distinct patterns
+        let mut complexity = 0;
+        let mut i = 0;
+        let mut sub_len = 1;
+
+        while i + sub_len <= n {
+            // Check if current substring is new
+            let current = &binary[i..i+sub_len];
+            let mut found = false;
+
+            for j in 0..i {
+                if j + sub_len <= i && &binary[j..j+sub_len] == current {
+                    found = true;
+                    break;
+                }
+            }
+
+            if !found {
+                complexity += 1;
+                i += sub_len;
+                sub_len = 1;
+            } else {
+                sub_len += 1;
+                if i + sub_len > n {
+                    i += 1;
+                    sub_len = 1;
+                }
+            }
+        }
+
+        // Normalize
+        let b = 2.0;  // Binary alphabet
+        let norm = n as Float / log(n as Float) * log(b);
+        complexity as Float / norm
+    }
+
+    // ========================================================================
+    // DISTRIBUTION FEATURES
+    // ========================================================================
+
+    fn extract_distribution(&self, data: &[Float]) -> HashMap<String, Float> {
+        let mut features = HashMap::new();
+
+        if data.is_empty() {
+            return features;
+        }
+
+        // Quantiles
+        for &q in &self.quantiles {
+            let val = self.compute_quantile(data, q);
+            features.insert(format!("quantile_{:.0}", q * 100.0), val);
+        }
+
+        // Histogram features
+        let n_bins = 10;
+        let hist = self.compute_histogram(data, n_bins);
+
+        // Mode (most frequent bin)
+        let mode_bin = hist.iter().enumerate()
+            .max_by_key(|&(_, &count)| count)
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+        features.insert("mode_bin".to_string(), mode_bin as Float);
+
+        // Histogram statistics
+        let hist_mean: Float = hist.iter().sum::<Int>() as Float / n_bins as Float;
+        let hist_var: Float = hist.iter().map(|&x| (x as Float - hist_mean).powi(2)).sum::<Float>() / n_bins as Float;
+        features.insert("hist_variance".to_string(), hist_var);
+
+        // Proportion of data in each tail
+        let (mean, variance) = compute_mean_variance(data);
+        let std = sqrt(variance);
+        let left_tail = data.iter().filter(|&&x| x < mean - 2.0 * std).count() as Float / data.len() as Float;
+        let right_tail = data.iter().filter(|&&x| x > mean + 2.0 * std).count() as Float / data.len() as Float;
+        features.insert("left_tail_prop".to_string(), left_tail);
+        features.insert("right_tail_prop".to_string(), right_tail);
+
+        // Outlier ratio
+        let outliers = left_tail + right_tail;
+        features.insert("outlier_ratio".to_string(), outliers);
+
+        features
+    }
+
+    /// Compute histogram
+    fn compute_histogram(&self, data: &[Float], n_bins: Int) -> Vec<Int> {
+        let min_val = data.iter().cloned().fold(Float::INFINITY, Float::min);
+        let max_val = data.iter().cloned().fold(Float::NEG_INFINITY, Float::max);
+        let range = max_val - min_val;
+
+        if range < 1e-10 {
+            let mut hist = vec![0; n_bins as usize];
+            hist[n_bins as usize / 2] = data.len() as Int;
+            return hist;
+        }
+
+        let bin_width = range / n_bins as Float;
+        let mut hist = vec![0; n_bins as usize];
+
+        for &x in data {
+            let bin = ((x - min_val) / bin_width) as usize;
+            let bin = bin.min(n_bins as usize - 1);
+            hist[bin] += 1;
+        }
+
+        hist
+    }
+
+    // ========================================================================
+    // STRUCTURAL FEATURES
+    // ========================================================================
+
+    fn extract_structural(&self, data: &[Float]) -> HashMap<String, Float> {
+        let mut features = HashMap::new();
+        let n = data.len();
+
+        if n < 10 {
+            return features;
+        }
+
+        // Number of level crossings at various thresholds
+        let (mean, variance) = compute_mean_variance(data);
+        let std = sqrt(variance);
+
+        for sigma in [0.5, 1.0, 1.5, 2.0] {
+            let threshold_high = mean + sigma * std;
+            let threshold_low = mean - sigma * std;
+
+            let mut high_crossings = 0;
+            let mut low_crossings = 0;
+
+            for i in 1..n {
+                if (data[i] >= threshold_high && data[i-1] < threshold_high) ||
+                   (data[i] < threshold_high && data[i-1] >= threshold_high) {
+                    high_crossings += 1;
+                }
+                if (data[i] >= threshold_low && data[i-1] < threshold_low) ||
+                   (data[i] < threshold_low && data[i-1] >= threshold_low) {
+                    low_crossings += 1;
+                }
+            }
+
+            features.insert(format!("crossings_{}sigma_high", sigma), high_crossings as Float);
+            features.insert(format!("crossings_{}sigma_low", sigma), low_crossings as Float);
+        }
+
+        // Turning points
+        let (n_peaks, n_troughs) = self.count_peaks_troughs(data);
+        features.insert("turning_points".to_string(), (n_peaks + n_troughs) as Float);
+        features.insert("turning_point_rate".to_string(), (n_peaks + n_troughs) as Float / n as Float);
+
+        // Flatness measure (long runs near constant value)
+        let flatness = self.measure_flatness(data, 0.01);
+        features.insert("flatness".to_string(), flatness);
+
+        // Step-like behavior
+        let step_score = self.step_score(data);
+        features.insert("step_score".to_string(), step_score);
+
+        features
+    }
+
+    /// Measure flatness (proportion of nearly constant segments)
+    fn measure_flatness(&self, data: &[Float], threshold: Float) -> Float {
+        let n = data.len();
+        if n < 2 {
+            return 0.0;
+        }
+
+        let (_, variance) = compute_mean_variance(data);
+        let std = sqrt(variance);
+        let tol = threshold * std;
+
+        let mut flat_points = 0;
+        for i in 1..n {
+            if abs(data[i] - data[i-1]) < tol {
+                flat_points += 1;
+            }
+        }
+
+        flat_points as Float / (n - 1) as Float
+    }
+
+    /// Score for step-like behavior
+    fn step_score(&self, data: &[Float]) -> Float {
+        let n = data.len();
+        if n < 10 {
+            return 0.0;
+        }
+
+        let diff: Vec<Float> = (1..n).map(|i| abs(data[i] - data[i-1])).collect();
+        let (diff_mean, diff_var) = compute_mean_variance(&diff);
+
+        // High variance in differences suggests step-like behavior
+        if diff_mean > 0.0 {
+            sqrt(diff_var) / diff_mean
+        } else {
+            0.0
+        }
+    }
+
+    // ========================================================================
+    // ROLLING FEATURES
+    // ========================================================================
+
+    fn extract_rolling(&self, data: &[Float]) -> HashMap<String, Float> {
+        let mut features = HashMap::new();
+        let n = data.len();
+
+        for &window in &self.window_sizes {
+            let w = window as usize;
+            if w > n {
+                continue;
+            }
+
+            // Compute rolling statistics
+            let mut rolling_means = Vec::new();
+            let mut rolling_stds = Vec::new();
+
+            for i in 0..=n - w {
+                let segment: Vec<Float> = data[i..i+w].to_vec();
+                let (mean, var) = compute_mean_variance(&segment);
+                rolling_means.push(mean);
+                rolling_stds.push(sqrt(var));
+            }
+
+            // Statistics of rolling statistics
+            let (mean_of_means, var_of_means) = compute_mean_variance(&rolling_means);
+            let (mean_of_stds, var_of_stds) = compute_mean_variance(&rolling_stds);
+
+            features.insert(format!("rolling_{}_mean_mean", window), mean_of_means);
+            features.insert(format!("rolling_{}_mean_std", window), sqrt(var_of_means));
+            features.insert(format!("rolling_{}_std_mean", window), mean_of_stds);
+            features.insert(format!("rolling_{}_std_std", window), sqrt(var_of_stds));
+
+            // Trend in rolling mean
+            let (trend, _, _) = self.linear_regression(&rolling_means);
+            features.insert(format!("rolling_{}_mean_trend", window), trend);
+        }
+
+        features
+    }
+}
+
+// ============================================================================
+// FEATURE SET
+// ============================================================================
+
+/// Collection of extracted features
+@derive(Clone, Debug)]
+pub struct FeatureSet {
+    pub features: HashMap<String, Float>,
+    pub n_samples: usize,
+}
+
+impl FeatureSet {
+    /// Get feature value by name
+    pub fn get(&self, name: &str) -> Option<Float> {
+        self.features.get(name).cloned()
+    }
+
+    /// Get all feature names
+    pub fn names(&self) -> Vec<String> {
+        self.features.keys().cloned().collect()
+    }
+
+    /// Get feature values as vector (sorted by name)
+    pub fn to_vector(&self) -> Vec<Float> {
+        let mut names: Vec<_> = self.features.keys().collect();
+        names.sort();
+        names.iter().map(|n| self.features[*n]).collect()
+    }
+
+    /// Number of features
+    pub fn len(&self) -> usize {
+        self.features.len()
+    }
+
+    /// Merge with another feature set
+    pub fn merge(&mut self, other: &FeatureSet) {
+        for (k, v) in &other.features {
+            self.features.insert(k.clone(), *v);
+        }
+    }
+}
+
+// ============================================================================
+// FEATURE SELECTION
+// ============================================================================
+
+/// Feature selection using various methods
+pub struct FeatureSelector {
+    method: SelectionMethod,
+    n_features: Option<Int>,
+    threshold: Float,
+}
+
+@derive(Clone, Copy, Debug)]
+pub enum SelectionMethod {
+    VarianceThreshold,
+    CorrelationFilter,
+    MutualInformation,
+    ForwardSelection,
+    BackwardElimination,
+}
+
+impl FeatureSelector {
+    pub fn new(method: SelectionMethod) -> Self {
+        Self {
+            method,
+            n_features: None,
+            threshold: 0.01,
+        }
+    }
+
+    pub fn with_n_features(mut self, n: Int) -> Self {
+        self.n_features = Some(n);
+        self
+    }
+
+    pub fn with_threshold(mut self, t: Float) -> Self {
+        self.threshold = t;
+        self
+    }
+
+    /// Select features from multiple samples
+    pub fn select(&self, feature_sets: &[FeatureSet], targets: &[Float]) -> Vec<String> {
+        if feature_sets.is_empty() {
+            return Vec::new();
+        }
+
+        let feature_names = feature_sets[0].names();
+
+        match self.method {
+            SelectionMethod::VarianceThreshold => {
+                self.variance_threshold(&feature_sets, &feature_names)
+            }
+            SelectionMethod::CorrelationFilter => {
+                self.correlation_filter(&feature_sets, &feature_names, targets)
+            }
+            SelectionMethod::MutualInformation => {
+                self.mutual_information(&feature_sets, &feature_names, targets)
+            }
+            _ => feature_names,
+        }
+    }
+
+    /// Variance threshold selection
+    fn variance_threshold(&self, sets: &[FeatureSet], names: &[String]) -> Vec<String> {
+        let mut selected = Vec::new();
+
+        for name in names {
+            let values: Vec<Float> = sets.iter()
+                .filter_map(|s| s.get(name))
+                .collect();
+
+            if values.len() < 2 {
+                continue;
+            }
+
+            let (_, var) = compute_mean_variance(&values);
+            if var > self.threshold {
+                selected.push(name.clone());
+            }
+        }
+
+        selected
+    }
+
+    /// Correlation-based selection
+    fn correlation_filter(&self, sets: &[FeatureSet], names: &[String], targets: &[Float]) -> Vec<String> {
+        let mut correlations: Vec<(String, Float)> = Vec::new();
+
+        for name in names {
+            let values: Vec<Float> = sets.iter()
+                .filter_map(|s| s.get(name))
+                .collect();
+
+            if values.len() != targets.len() {
+                continue;
+            }
+
+            let corr = self.pearson_correlation(&values, targets).abs();
+            correlations.push((name.clone(), corr));
+        }
+
+        correlations.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+
+        let n = self.n_features.map(|n| n as usize).unwrap_or(names.len());
+        correlations.into_iter().take(n).map(|(name, _)| name).collect()
+    }
+
+    /// Mutual information selection
+    fn mutual_information(&self, sets: &[FeatureSet], names: &[String], targets: &[Float]) -> Vec<String> {
+        let mut mi_scores: Vec<(String, Float)> = Vec::new();
+
+        for name in names {
+            let values: Vec<Float> = sets.iter()
+                .filter_map(|s| s.get(name))
+                .collect();
+
+            if values.len() != targets.len() {
+                continue;
+            }
+
+            let mi = self.estimate_mutual_information(&values, targets);
+            mi_scores.push((name.clone(), mi));
+        }
+
+        mi_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+
+        let n = self.n_features.map(|n| n as usize).unwrap_or(names.len());
+        mi_scores.into_iter().take(n).map(|(name, _)| name).collect()
+    }
+
+    /// Pearson correlation
+    fn pearson_correlation(&self, x: &[Float], y: &[Float]) -> Float {
+        let n = min(x.len(), y.len()) as Float;
+        if n < 2.0 {
+            return 0.0;
+        }
+
+        let sum_x: Float = x.iter().sum();
+        let sum_y: Float = y.iter().sum();
+        let sum_xy: Float = x.iter().zip(y.iter()).map(|(&a, &b)| a * b).sum();
+        let sum_x2: Float = x.iter().map(|&a| a * a).sum();
+        let sum_y2: Float = y.iter().map(|&b| b * b).sum();
+
+        let num = n * sum_xy - sum_x * sum_y;
+        let den = sqrt((n * sum_x2 - sum_x * sum_x) * (n * sum_y2 - sum_y * sum_y));
+
+        if den > 1e-10 { num / den } else { 0.0 }
+    }
+
+    /// Estimate mutual information
+    fn estimate_mutual_information(&self, x: &[Float], y: &[Float]) -> Float {
+        let n = min(x.len(), y.len());
+        if n < 10 {
+            return 0.0;
+        }
+
+        // Bin both variables
+        let n_bins = (sqrt(n as Float) as Int).max(5);
+        let x_binned = self.bin_variable(x, n_bins);
+        let y_binned = self.bin_variable(y, n_bins);
+
+        // Joint and marginal distributions
+        let mut joint: HashMap<(Int, Int), Int> = HashMap::new();
+        let mut p_x: HashMap<Int, Int> = HashMap::new();
+        let mut p_y: HashMap<Int, Int> = HashMap::new();
+
+        for i in 0..n {
+            *joint.entry((x_binned[i], y_binned[i])).or_insert(0) += 1;
+            *p_x.entry(x_binned[i]).or_insert(0) += 1;
+            *p_y.entry(y_binned[i]).or_insert(0) += 1;
+        }
+
+        // Mutual information
+        let n_f = n as Float;
+        let mut mi = 0.0;
+
+        for ((x, y), &count) in &joint {
+            let p_xy = count as Float / n_f;
+            let px = p_x[x] as Float / n_f;
+            let py = p_y[y] as Float / n_f;
+
+            if p_xy > 0.0 && px > 0.0 && py > 0.0 {
+                mi += p_xy * log(p_xy / (px * py));
+            }
+        }
+
+        mi.max(0.0)
+    }
+
+    /// Bin a variable
+    fn bin_variable(&self, data: &[Float], n_bins: Int) -> Vec<Int> {
+        let min_val = data.iter().cloned().fold(Float::INFINITY, Float::min);
+        let max_val = data.iter().cloned().fold(Float::NEG_INFINITY, Float::max);
+        let range = max_val - min_val;
+
+        if range < 1e-10 {
+            return vec![0; data.len()];
+        }
+
+        let bin_width = range / n_bins as Float;
+        data.iter().map(|&x| {
+            let bin = ((x - min_val) / bin_width) as Int;
+            bin.min(n_bins - 1)
+        }).collect()
+    }
+}
+
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+
+fn compute_mean_variance(data: &[Float]) -> (Float, Float) {
+    let n = data.len();
+    if n == 0 {
+        return (0.0, 0.0);
+    }
+
+    let sum: Float = data.iter().sum();
+    let mean = sum / n as Float;
+
+    let var_sum: Float = data.iter().map(|&x| (x - mean).powi(2)).sum();
+    let variance = if n > 1 { var_sum / (n - 1) as Float } else { 0.0 };
+
+    (mean, variance)
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_feature_extraction() {
+        let data: Vec<Float> = (0..100).map(|i| (i as Float * 0.1).sin()).collect();
+
+        let extractor = FeatureExtractor::new();
+        let features = extractor.extract(&data);
+
+        assert!(features.len() > 0);
+        assert!(features.get("mean").is_some());
+        assert!(features.get("std").is_some());
+    }
+
+    #[test]
+    fn test_statistical_features() {
+        let data = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+
+        let extractor = FeatureExtractor::new();
+        let features = extractor.extract(&data);
+
+        assert!((features.get("mean").unwrap() - 3.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_entropy() {
+        let constant_data = vec![1.0; 100];
+        let random_data: Vec<Float> = (0..100).map(|i| (i as Float * 1.234).sin()).collect();
+
+        let extractor = FeatureExtractor::new()
+            .with_categories(vec![FeatureCategory::Entropy]);
+
+        let const_features = extractor.extract(&constant_data);
+        let random_features = extractor.extract(&random_data);
+
+        // Constant data should have lower entropy
+        assert!(const_features.get("shannon_entropy").unwrap() <
+                random_features.get("shannon_entropy").unwrap());
+    }
+}
