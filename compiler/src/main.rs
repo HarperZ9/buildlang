@@ -23,6 +23,7 @@ mod memory_layout;
 mod mir_representation;
 mod model_receipt;
 mod module_graph;
+mod pkg_check;
 mod pkg_cli;
 mod scientific_runtime;
 mod staticlib;
@@ -190,9 +191,9 @@ enum Commands {
         json: bool,
     },
 
-    /// Type-check a file
+    /// Type-check a file, or a package directory (Build.toml plus src/*.bld) as one unit
     Check {
-        /// Input file
+        /// Input file, or a package directory
         file: PathBuf,
 
         /// Write a machine-readable check receipt to a path, or '-' for stdout
@@ -458,9 +459,9 @@ enum Commands {
         no_fail_fast: bool,
     },
 
-    /// Lint BuildLang source files
+    /// Lint a BuildLang source file, or a package directory as one unit
     Lint {
-        /// Input file to lint
+        /// Input file to lint, or a package directory
         file: PathBuf,
     },
 
@@ -1240,6 +1241,10 @@ struct CheckReceiptDiagnostic {
     stage: &'static str,
     kind: String,
     message: String,
+    /// The file the diagnostic is in, when the check ran over a package
+    /// directory. Omitted for a single-file check, where `source` names it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    file: Option<String>,
     /// 1-based line of the diagnostic's start, when the stage resolved it.
     /// Omitted (not `null`) when absent, so a v1 consumer that never read the
     /// field keeps parsing unchanged.
@@ -1395,6 +1400,9 @@ struct ParseDiagnostic {
     /// help, or notes folded in. Help and notes ride their own fields so the
     /// receipt entry matches the shape of a type diagnostic.
     message: String,
+    /// The file the error is in, when the check ran over a package directory
+    /// (`line` is then a line of that file). `None` for a single-file check.
+    file: Option<String>,
     /// 1-based line of the error's start.
     line: usize,
     /// 1-based column of the error's start.
@@ -1425,6 +1433,10 @@ struct CheckOutcome {
     /// `CheckOutcome` outlives that borrow). Index-aligned with `type_errors`;
     /// `None` where the error's span is a synthetic-node dummy (no location).
     type_error_locations: Vec<Option<(usize, usize)>>,
+    /// For a package check: the file each `type_errors` entry is in, with
+    /// `type_error_locations` holding a line of that file. Empty for a
+    /// single-file check.
+    type_error_files: Vec<Option<String>>,
     function_summaries: Vec<FunctionEffectSummary>,
     /// Structured form of every parse and type error, parse errors first, in
     /// the same order as `parse_errors` then `type_errors`. Carries the stable
@@ -6202,6 +6214,7 @@ fn build_check_receipt(
                 stage: "parse",
                 kind: "ParseError".to_string(),
                 message: diag.message.clone(),
+                file: diag.file.clone(),
                 line: Some(diag.line),
                 col: Some(diag.col),
                 help: diag.help.clone(),
@@ -6214,6 +6227,7 @@ fn build_check_receipt(
             stage: "type",
             kind: type_error_kind(&err.error).to_string(),
             message: err.error.to_string(),
+            file: outcome.type_error_files.get(i).cloned().flatten(),
             line: loc.map(|(line, _)| line),
             col: loc.map(|(_, col)| col),
             help: err.help.clone(),
@@ -6267,6 +6281,9 @@ fn run_check(file: &Path) -> Result<CheckOutcome, i32> {
 /// (unreadable input, a lexer error) also leaves a structured diagnostic in
 /// `early` for `--error-format=json`.
 fn run_check_reporting(file: &Path, early: &mut Option<Diagnostic>) -> Result<CheckOutcome, i32> {
+    if file.is_dir() {
+        return pkg_check::run(file, early);
+    }
     let file_name = file.to_string_lossy().to_string();
     let mut input_digest_ledger = InputDigestLedger::default();
     let source_bytes = std::fs::read(file).map_err(|e| {
@@ -6306,12 +6323,64 @@ fn run_check_reporting(file: &Path, early: &mut Option<Diagnostic>) -> Result<Ch
     let chk_base = file.parent().unwrap_or(Path::new("."));
     let source = preprocess_includes_recording_inputs(&source, chk_base, &mut input_digest_ledger)
         .map_err(|_| unresolved(early))?;
-    let source_file = SourceFile::new(file.to_string_lossy(), source);
+    let unit = CheckUnit {
+        shown: file_name,
+        base: chk_base.to_path_buf(),
+        source,
+        source_digest,
+        ledger: input_digest_ledger,
+        origins: None,
+    };
+    run_check_unit(unit, early)
+}
+
+/// One unit to check: a file with its imports and includes already expanded,
+/// or the joined text of a package.
+struct CheckUnit<'a> {
+    /// What the user named, as diagnostics print it.
+    shown: String,
+    /// The folder `mod NAME;` and file-backed `use` paths resolve against.
+    base: PathBuf,
+    source: String,
+    source_digest: CheckReceiptSourceDigest,
+    ledger: InputDigestLedger,
+    /// For a package: the file and line each line of `source` came from.
+    origins: Option<&'a buildlang::pkg::local::linemap::LineMap>,
+}
+
+/// Lex, parse and check one unit. Positions in the outcome are positions in
+/// the original files when the unit carries `origins`.
+fn run_check_unit(unit: CheckUnit, early: &mut Option<Diagnostic>) -> Result<CheckOutcome, i32> {
+    let CheckUnit {
+        shown,
+        base,
+        source,
+        source_digest,
+        ledger: mut input_digest_ledger,
+        origins,
+    } = unit;
+    let chk_base = base.as_path();
+    let unresolved = |early: &mut Option<Diagnostic>| {
+        *early = Some(Diagnostic::bare(
+            diag_codes::INPUT_GRAPH_ERROR,
+            &shown,
+            "an import, include or module of this file could not be loaded; the reason is on stderr",
+        ));
+        1
+    };
+    let source_file = SourceFile::new(shown.as_str(), source);
 
     let mut lexer = Lexer::new(&source_file);
     let tokens = lexer.tokenize().map_err(|e| {
         eprintln!("Lexer error [{}]: {}", diag_codes::lexer_code(&e.kind), e);
-        *early = Some(Diagnostic::from_lexer(&e, &source_file));
+        let mut diagnostic = Diagnostic::from_lexer(&e, &source_file);
+        if let Some(map) = origins {
+            pkg_check::remap_diagnostic(&mut diagnostic, map);
+            if let Some(span) = &diagnostic.span {
+                eprintln!("  at {}:{}:{}", diagnostic.file, span.line, span.column);
+            }
+        }
+        *early = Some(diagnostic);
         1
     })?;
     let token_count = tokens.len();
@@ -6333,6 +6402,7 @@ fn run_check_reporting(file: &Path, early: &mut Option<Diagnostic>) -> Result<Ch
             let underline = (err.span.end.0.saturating_sub(err.span.start.0) as usize).max(1);
             ParseDiagnostic {
                 message: err.message(),
+                file: None,
                 line: line + 1,
                 col: col + 1,
                 snippet,
@@ -6423,9 +6493,9 @@ fn run_check_reporting(file: &Path, early: &mut Option<Diagnostic>) -> Result<Ch
     let input_digests = input_digest_ledger.into_sorted_records();
     let input_graph_digest = input_graph_digest(&input_digests);
 
-    Ok(CheckOutcome {
+    let mut outcome = CheckOutcome {
         diagnostics,
-        source: file.to_string_lossy().to_string(),
+        source: shown.clone(),
         compiler_version: buildlang::VERSION,
         language_version: language_version_string(),
         source_digest,
@@ -6436,9 +6506,14 @@ fn run_check_reporting(file: &Path, early: &mut Option<Diagnostic>) -> Result<Ch
         parse_errors,
         type_errors,
         type_error_locations,
+        type_error_files: Vec::new(),
         function_summaries,
         measured_constants,
-    })
+    };
+    if let Some(map) = origins {
+        pkg_check::remap_outcome(&mut outcome, map);
+    }
+    Ok(outcome)
 }
 
 fn render_check_line(receipt_to_stdout: bool, message: impl AsRef<str>) {
@@ -6454,6 +6529,7 @@ fn render_check_line(receipt_to_stdout: bool, message: impl AsRef<str>) {
 /// (the `build`/`run` renderer) so a parse error reads the same whether it is
 /// found by `check` or by `build`; the location was resolved in `run_check`.
 fn render_parse_diagnostic(source_path: &str, diag: &ParseDiagnostic, structured: &Diagnostic) {
+    let source_path = diag.file.as_deref().unwrap_or(source_path);
     eprintln!(
         "error[{}:{}:{}]: [{}] {}",
         source_path, diag.line, diag.col, structured.code, diag.message
@@ -6508,8 +6584,12 @@ fn render_check_human_output(outcome: &CheckOutcome, receipt_to_stdout: bool) {
         let structured = &outcome.diagnostics[outcome.parse_errors.len()..];
         for (i, err) in outcome.type_errors.iter().enumerate() {
             let code = structured.get(i).map_or("", |d| d.code);
+            let file = outcome.type_error_files.get(i).and_then(|f| f.as_deref());
             match outcome.type_error_locations.get(i).copied().flatten() {
-                Some((line, col)) => eprintln!("  {}:{}: [{}] {}", line, col, code, err),
+                Some((line, col)) => match file {
+                    Some(file) => eprintln!("  {}:{}:{}: [{}] {}", file, line, col, code, err),
+                    None => eprintln!("  {}:{}: [{}] {}", line, col, code, err),
+                },
                 None => eprintln!("  [{}] {}", code, err),
             }
         }
@@ -9246,6 +9326,12 @@ fn cmd_test(
 }
 
 fn cmd_lint(file: &PathBuf) -> Result<(), i32> {
+    if file.is_dir() {
+        let input = pkg_check::load(file).map_err(|_| 1)?;
+        let shown = file.display().to_string();
+        let base = file.join("src");
+        return lint_unit(&shown, &base, input.source, Some(&input.line_map));
+    }
     let source = std::fs::read_to_string(file).map_err(|e| {
         eprintln!("Error reading file '{}': {}", file.display(), e);
         1
@@ -9254,13 +9340,38 @@ fn cmd_lint(file: &PathBuf) -> Result<(), i32> {
     let source = resolve_imports(&source, file)?;
     let base = file.parent().unwrap_or(Path::new("."));
     let source = preprocess_includes(&source, base)?;
+    lint_unit(&file.display().to_string(), base, source, None)
+}
 
-    let source_file = SourceFile::new(file.to_string_lossy(), source.clone());
+/// Lint one unit: a file, or the joined text of a package. With `origins`
+/// every finding names the file and line it was copied from, and style
+/// findings are reported for the package's own files only (a dependency's
+/// style is its own business; its errors are still errors).
+fn lint_unit(
+    shown: &str,
+    base: &Path,
+    source: String,
+    origins: Option<&buildlang::pkg::local::linemap::LineMap>,
+) -> Result<(), i32> {
+    // `(file, line, report style findings here)` for a 1-based line of `source`.
+    let place = |line: usize| -> Option<(String, usize, bool)> {
+        match origins {
+            Some(map) => pkg_check::place(map, line),
+            None => Some((shown.to_string(), line, true)),
+        }
+    };
+    let source_file = SourceFile::new(shown, source.clone());
 
     // Lex
     let mut lexer = Lexer::new(&source_file);
     let tokens = lexer.tokenize().map_err(|e| {
         eprintln!("Lexer error: {}", e);
+        if origins.is_some() {
+            let pos = source_file.lookup_position(e.span.start);
+            if let Some((file, line, _)) = place(pos.line as usize) {
+                eprintln!("  at {}:{}:{}", file, line, pos.column);
+            }
+        }
         1
     })?;
 
@@ -9287,33 +9398,53 @@ fn cmd_lint(file: &PathBuf) -> Result<(), i32> {
     for err in checker.errors() {
         let span = err.span;
         let pos = source_file.lookup_position(span.start);
+        let (at_file, at_line) = match place(pos.line as usize) {
+            Some((file, line, _)) => (file, line),
+            None => (shown.to_string(), pos.line as usize),
+        };
         eprintln!(
             "\x1b[31merror\x1b[0m: {} ({}:{}:{})",
-            err,
-            file.display(),
-            pos.line,
-            pos.column
+            err, at_file, at_line, pos.column
         );
         errors += 1;
     }
 
     // Report parse errors
     for err in parser.errors() {
-        eprintln!("\x1b[31merror\x1b[0m: {} ({})", err, file.display());
+        if origins.is_some() {
+            let pos = source_file.lookup_position(err.span.start);
+            let (at_file, at_line) = match place(pos.line as usize) {
+                Some((file, line, _)) => (file, line),
+                None => (shown.to_string(), pos.line as usize),
+            };
+            eprintln!(
+                "\x1b[31merror\x1b[0m: {} ({}:{}:{})",
+                err.message(),
+                at_file,
+                at_line,
+                pos.column
+            );
+        } else {
+            eprintln!("\x1b[31merror\x1b[0m: {} ({})", err, shown);
+        }
         errors += 1;
     }
 
     // Lint checks: style warnings
     for (line_num, line) in source.lines().enumerate() {
         let trimmed = line.trim();
-        let line_num = line_num + 1;
+        let Some((at_file, line_num, own)) = place(line_num + 1) else {
+            continue;
+        };
+        if !own {
+            continue;
+        }
 
         // Trailing whitespace
         if line.trim_end().len() < line.len() {
             eprintln!(
                 "\x1b[33mwarning\x1b[0m: trailing whitespace ({}:{})",
-                file.display(),
-                line_num
+                at_file, line_num
             );
             warnings += 1;
         }
@@ -9329,7 +9460,7 @@ fn cmd_lint(file: &PathBuf) -> Result<(), i32> {
                 } else {
                     "HACK marker"
                 },
-                file.display(),
+                at_file,
                 line_num
             );
             warnings += 1;
@@ -9340,7 +9471,7 @@ fn cmd_lint(file: &PathBuf) -> Result<(), i32> {
             eprintln!(
                 "\x1b[33mwarning\x1b[0m: line exceeds 120 characters ({} chars) ({}:{})",
                 line.len(),
-                file.display(),
+                at_file,
                 line_num
             );
             warnings += 1;
@@ -9349,13 +9480,11 @@ fn cmd_lint(file: &PathBuf) -> Result<(), i32> {
 
     // Summary
     if errors == 0 && warnings == 0 {
-        println!("No issues found in '{}'", file.display());
+        println!("No issues found in '{}'", shown);
     } else {
         println!(
             "{} error(s), {} warning(s) in '{}'",
-            errors,
-            warnings,
-            file.display()
+            errors, warnings, shown
         );
     }
 
@@ -11185,6 +11314,7 @@ mod tests {
             parse_errors: Vec::new(),
             type_errors: Vec::new(),
             type_error_locations: Vec::new(),
+            type_error_files: Vec::new(),
             diagnostics: Vec::new(),
             function_summaries: vec![
                 FunctionEffectSummary {
@@ -11274,6 +11404,7 @@ mod tests {
             parse_errors: Vec::new(),
             type_errors: Vec::new(),
             type_error_locations: Vec::new(),
+            type_error_files: Vec::new(),
             diagnostics: Vec::new(),
             function_summaries: Vec::new(),
             measured_constants: Vec::new(),
