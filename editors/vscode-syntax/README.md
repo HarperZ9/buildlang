@@ -1,7 +1,4 @@
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/art/hero-dark.svg">
-  <img src="docs/art/hero-light.svg" alt="buildlang-vscode: Syntax highlighting for BuildLang .bld files in VS Code. A fine lattice of lines bulges outward around a bright core, as if seen through a lens, inside a ring." width="100%">
-</picture>
+<img src="docs/art/social.png" alt="buildlang-vscode: Syntax highlighting for BuildLang .bld files in VS Code. A fine lattice of lines bulges outward around a bright core, as if seen through a lens, inside a ring." width="100%">
 
 # buildlang-vscode
 

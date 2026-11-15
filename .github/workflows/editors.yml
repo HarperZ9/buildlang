@@ -2,8 +2,8 @@ name: editors
 
 # editors/tmLanguage and editors/vscode-syntax moved here from the buildlang-tmLanguage and
 # buildlang-vscode repositories. This carries their checks: the manifests and grammars are
-# well-formed JSON, the extension packs, the art receipts match the stored bytes, and the one
-# grammar the two folders share stays byte-identical.
+# well-formed JSON, the extension packs and builds as a .vsix, the art receipts match the stored
+# bytes, and the one grammar the two folders share stays byte-identical.
 
 on:
   pull_request:
@@ -79,6 +79,23 @@ jobs:
       - name: The syntax extension packs
         working-directory: editors/vscode-syntax
         run: npm pack --dry-run
+
+      # The old repository built the .vsix only on a release tag. Here it is built on every change,
+      # so a manifest the Marketplace tool refuses fails this job.
+      - name: The syntax extension builds as a .vsix
+        working-directory: editors/vscode-syntax
+        run: |
+          npx --yes @vscode/vsce@3.9.2 package --no-dependencies             --baseContentUrl https://github.com/HarperZ9/buildlang/blob/main/editors/vscode-syntax             --baseImagesUrl https://raw.githubusercontent.com/HarperZ9/buildlang/main/editors/vscode-syntax
+          ls -l buildlang-*.vsix
+
+      # The old grammar repository built a source zip on a release tag from this list of paths.
+      - name: Every path of the grammar's source package exists
+        working-directory: editors/tmLanguage
+        run: |
+          for p in grammars samples AUTHORS.md CHANGELOG.md CONTRIBUTING.md LICENSE README.md RELEASE.md language-configuration.json; do
+            [ -e "$p" ] || { echo "missing: $p"; exit 1; }
+          done
+          echo "all present"
 
       - name: Art receipt digests
         run: |
