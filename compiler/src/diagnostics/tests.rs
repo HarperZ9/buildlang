@@ -234,6 +234,11 @@ fn type_samples() -> Vec<TypeError> {
             path: s("core::simd::f32x4"),
             reason: s("the standard library has no module `simd`"),
         },
+        E::DuplicateAcrossFiles {
+            name: s("Sheet"),
+            first: s("pkg/src/a.bld:1"),
+            second: s("pkg/src/b.bld:3"),
+        },
         E::FormatArgNotStringLiteral {
             macro_name: s("println"),
             found: s("an expression"),
