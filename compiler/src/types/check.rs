@@ -381,11 +381,6 @@ impl<'ctx> TypeChecker<'ctx> {
         // the file is known.
         self.verify_use_paths();
 
-        // Operator implementations of the program's own types, so `v * 2.0`
-        // is typed by `impl Mul<f32> for Vec3`. Runs after collection: the
-        // operand and result types are all known.
-        self.collect_operator_impls(module);
-
         // Linear containment: a non-`#[linear]` aggregate may not hold a linear
         // field (it would launder the resource past no-cloning). Runs after all
         // types are collected so every field type's linearity is known.
@@ -676,88 +671,6 @@ impl<'ctx> TypeChecker<'ctx> {
                     },
                     m.name.span,
                 );
-            }
-        }
-    }
-
-    /// The method an operator trait declares, for the traits the C backend
-    /// dispatches to a user type's implementation.
-    fn operator_trait_method(trait_name: &str) -> Option<&'static str> {
-        match trait_name {
-            "Add" => Some("add"),
-            "Sub" => Some("sub"),
-            "Mul" => Some("mul"),
-            "Div" => Some("div"),
-            "Rem" => Some("rem"),
-            "Neg" => Some("neg"),
-            _ => None,
-        }
-    }
-
-    /// A type written as a plain name that is not `Self` (`f32`, `Vec3`).
-    fn is_plain_named_type(ty: &ast::Type) -> bool {
-        match &ty.kind {
-            ast::TypeKind::Path(path) => {
-                path.segments.len() == 1 && path.segments[0].ident.name.as_ref() != "Self"
-            }
-            _ => false,
-        }
-    }
-
-    /// Register `impl Add for T`, `impl Mul<R> for T`, `impl Neg for T` and
-    /// the like for the non-generic types of this program. Only signatures
-    /// written with plain type names are taken; any other form keeps the
-    /// older rule (both operands of one type, the result of that type).
-    fn collect_operator_impls(&mut self, module: &ast::Module) {
-        for item in &module.items {
-            let ItemKind::Impl(impl_) = &item.kind else {
-                continue;
-            };
-            let Some(trait_ref) = &impl_.trait_ref else {
-                continue;
-            };
-            if !impl_.generics.params.is_empty() {
-                continue;
-            }
-            let Some(method) = trait_ref
-                .path
-                .last_ident()
-                .and_then(|i| Self::operator_trait_method(i.name.as_ref()))
-            else {
-                continue;
-            };
-            let Some(def_id) = Self::extract_type_name_from_ast(&impl_.self_ty)
-                .and_then(|n| self.ctx.lookup_type_by_name(&n).map(|td| td.def_id))
-            else {
-                continue;
-            };
-            for impl_item in &impl_.items {
-                let ImplItemKind::Function(f) = &impl_item.kind else {
-                    continue;
-                };
-                if f.name.name.as_ref() != method {
-                    continue;
-                }
-                let Some(ret_ast) = f.sig.return_ty.as_ref() else {
-                    continue;
-                };
-                if !Self::is_plain_named_type(ret_ast) {
-                    continue;
-                }
-                // `self` and, for a binary operator, one right operand.
-                let rhs_ast = match (method, f.sig.params.len()) {
-                    ("neg", 1) => None,
-                    ("neg", _) => continue,
-                    (_, 2) => Some(&f.sig.params[1].ty),
-                    _ => continue,
-                };
-                if rhs_ast.is_some_and(|t| !Self::is_plain_named_type(t)) {
-                    continue;
-                }
-                let rhs = rhs_ast.map(|t| self.lower_type(t));
-                let ret = self.lower_type(ret_ast);
-                self.ctx
-                    .register_operator_method(def_id, Arc::from(method), rhs, ret);
             }
         }
     }

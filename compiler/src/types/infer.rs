@@ -4081,13 +4081,6 @@ impl<'ctx> TypeInfer<'ctx> {
             UnaryOp::Neg => {
                 // Negation works on numeric types
                 let result = self.apply(&inner_ty);
-                // `-v` on a type with `impl Neg` has the type `neg` returns.
-                if let TyKind::Adt(def_id, _) = &result.kind {
-                    let found = self.ctx.lookup_operator_method(*def_id, "neg").cloned();
-                    if let Some((None, ret)) = found {
-                        return self.apply(&ret);
-                    }
-                }
                 self.check_const_integer_expr(
                     &ast::Expr::new(
                         ExprKind::Unary {
@@ -4378,28 +4371,6 @@ impl<'ctx> TypeInfer<'ctx> {
                     span,
                 );
                 return Ty::error();
-            }
-        }
-
-        // An operator a user type implements: the right operand has the type
-        // the implementation takes and the result is what it returns, so
-        // `v * 2.0` with `impl Mul<f32> for Vec3` is a `Vec3`.
-        let operator_method = match op {
-            BinOp::Add => Some("add"),
-            BinOp::Sub => Some("sub"),
-            BinOp::Mul => Some("mul"),
-            BinOp::Div => Some("div"),
-            BinOp::Rem => Some("rem"),
-            _ => None,
-        };
-        if let Some(method) = operator_method {
-            let left_applied = self.apply(&left_ty);
-            if let TyKind::Adt(def_id, _) = &left_applied.kind {
-                let found = self.ctx.lookup_operator_method(*def_id, method).cloned();
-                if let Some((Some(rhs), ret)) = found {
-                    let _ = self.unify(&rhs, &right_ty, span);
-                    return self.apply(&ret);
-                }
             }
         }
 

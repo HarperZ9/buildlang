@@ -2017,32 +2017,6 @@ impl<'ctx> MirLowerer<'ctx> {
             }
         }
 
-        // `-v` on a struct with `impl Neg`: call its `neg`. The C compiler
-        // has no unary minus on a struct.
-        if matches!(op, AstUnaryOp::Neg) {
-            let inner_ty = self.type_of_value(&inner_val);
-            if let MirType::Struct(ref type_name) = inner_ty {
-                let key = (type_name.clone(), Arc::from("neg"));
-                if let Some(mangled_fn) = self.impl_methods.get(&key).cloned() {
-                    let ret_ty = self
-                        .module
-                        .find_function(mangled_fn.as_ref())
-                        .map(|f| f.sig.ret.clone())
-                        .unwrap_or(inner_ty.clone());
-                    let builder = self
-                        .current_fn
-                        .as_mut()
-                        .ok_or_else(|| CodegenError::Internal("No current function".to_string()))?;
-                    let result = builder.create_local(ret_ty);
-                    let cont = builder.create_block();
-                    let func = MirValue::Function(mangled_fn);
-                    builder.call(func, vec![inner_val], Some(result), cont);
-                    builder.switch_to_block(cont);
-                    return Ok(values::local(result));
-                }
-            }
-        }
-
         let mir_op = match op {
             AstUnaryOp::Neg => UnaryOp::Neg,
             // `~` is always bitwise complement.
