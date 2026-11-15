@@ -1,5 +1,6 @@
 // BuildLang Standard Library - Math Module
-// Extended math functions built on top of C math.h builtins (sqrt, sin, etc.).
+// Extended math functions built on top of C math.h builtins (sqrt, sin, etc.),
+// and the vector and matrix types `Vec2`, `Vec3`, `Vec4` and `Mat4`.
 
 // ---------------------------------------------------------------------------
 // Angle conversion
@@ -38,4 +39,394 @@ fn distance_2d_squared(x1: f64, y1: f64, x2: f64, y2: f64) -> f64 {
     let dx = x2 - x1;
     let dy = y2 - y1;
     dx * dx + dy * dy
+}
+
+// ---------------------------------------------------------------------------
+// Vectors and matrices (f32, column vectors, right-handed)
+// ---------------------------------------------------------------------------
+//
+// `use std::math::{Vec2, Vec3, Vec4, Mat4};` (or `core::math`) brings these.
+// Operators: `a + b`, `a - b` and `-a` work on two vectors of one type, and
+// `v * s`, `v / s` scale by an `f32`. A type has one implementation of each
+// operator, so the component-wise product is the method `mul_components`,
+// and a matrix times a vector is `Mat4::mul_vec4`.
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Vec2 {
+    pub x: f32,
+    pub y: f32,
+}
+
+impl Vec2 {
+    pub const ZERO: Vec2 = Vec2 { x: 0.0, y: 0.0 };
+    pub const ONE: Vec2 = Vec2 { x: 1.0, y: 1.0 };
+    pub const X: Vec2 = Vec2 { x: 1.0, y: 0.0 };
+    pub const Y: Vec2 = Vec2 { x: 0.0, y: 1.0 };
+
+    pub fn new(x: f32, y: f32) -> Vec2 {
+        Vec2 { x: x, y: y }
+    }
+    pub fn splat(v: f32) -> Vec2 {
+        Vec2 { x: v, y: v }
+    }
+    pub fn zero() -> Vec2 {
+        Vec2 { x: 0.0, y: 0.0 }
+    }
+    pub fn one() -> Vec2 {
+        Vec2 { x: 1.0, y: 1.0 }
+    }
+    pub fn dot(self, o: Vec2) -> f32 {
+        self.x * o.x + self.y * o.y
+    }
+    pub fn length_squared(self) -> f32 {
+        self.x * self.x + self.y * self.y
+    }
+    pub fn length(self) -> f32 {
+        self.length_squared().sqrt()
+    }
+    pub fn distance(self, o: Vec2) -> f32 {
+        Vec2::new(self.x - o.x, self.y - o.y).length()
+    }
+    pub fn scale(self, s: f32) -> Vec2 {
+        Vec2 { x: self.x * s, y: self.y * s }
+    }
+    pub fn mul_components(self, o: Vec2) -> Vec2 {
+        Vec2 { x: self.x * o.x, y: self.y * o.y }
+    }
+    pub fn normalize(self) -> Vec2 {
+        let len = self.length();
+        if len > 0.0 {
+            self.scale(1.0 / len)
+        } else {
+            self
+        }
+    }
+    pub fn lerp(self, o: Vec2, t: f32) -> Vec2 {
+        Vec2 { x: self.x + (o.x - self.x) * t, y: self.y + (o.y - self.y) * t }
+    }
+    pub fn extend(self, z: f32) -> Vec3 {
+        Vec3 { x: self.x, y: self.y, z: z }
+    }
+}
+
+impl Add for Vec2 {
+    type Output = Vec2;
+    fn add(self, o: Vec2) -> Vec2 {
+        Vec2 { x: self.x + o.x, y: self.y + o.y }
+    }
+}
+
+impl Sub for Vec2 {
+    type Output = Vec2;
+    fn sub(self, o: Vec2) -> Vec2 {
+        Vec2 { x: self.x - o.x, y: self.y - o.y }
+    }
+}
+
+impl Mul<f32> for Vec2 {
+    type Output = Vec2;
+    fn mul(self, s: f32) -> Vec2 {
+        Vec2 { x: self.x * s, y: self.y * s }
+    }
+}
+
+impl Div<f32> for Vec2 {
+    type Output = Vec2;
+    fn div(self, s: f32) -> Vec2 {
+        Vec2 { x: self.x / s, y: self.y / s }
+    }
+}
+
+impl Neg for Vec2 {
+    type Output = Vec2;
+    fn neg(self) -> Vec2 {
+        Vec2 { x: 0.0 - self.x, y: 0.0 - self.y }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Vec3 {
+    pub x: f32,
+    pub y: f32,
+    pub z: f32,
+}
+
+impl Vec3 {
+    pub const ZERO: Vec3 = Vec3 { x: 0.0, y: 0.0, z: 0.0 };
+    pub const ONE: Vec3 = Vec3 { x: 1.0, y: 1.0, z: 1.0 };
+    pub const X: Vec3 = Vec3 { x: 1.0, y: 0.0, z: 0.0 };
+    pub const Y: Vec3 = Vec3 { x: 0.0, y: 1.0, z: 0.0 };
+    pub const Z: Vec3 = Vec3 { x: 0.0, y: 0.0, z: 1.0 };
+
+    pub fn new(x: f32, y: f32, z: f32) -> Vec3 {
+        Vec3 { x: x, y: y, z: z }
+    }
+    pub fn splat(v: f32) -> Vec3 {
+        Vec3 { x: v, y: v, z: v }
+    }
+    pub fn zero() -> Vec3 {
+        Vec3 { x: 0.0, y: 0.0, z: 0.0 }
+    }
+    pub fn one() -> Vec3 {
+        Vec3 { x: 1.0, y: 1.0, z: 1.0 }
+    }
+    pub fn dot(self, o: Vec3) -> f32 {
+        self.x * o.x + self.y * o.y + self.z * o.z
+    }
+    pub fn cross(self, o: Vec3) -> Vec3 {
+        Vec3 {
+            x: self.y * o.z - self.z * o.y,
+            y: self.z * o.x - self.x * o.z,
+            z: self.x * o.y - self.y * o.x,
+        }
+    }
+    pub fn length_squared(self) -> f32 {
+        self.x * self.x + self.y * self.y + self.z * self.z
+    }
+    pub fn length(self) -> f32 {
+        self.length_squared().sqrt()
+    }
+    pub fn distance(self, o: Vec3) -> f32 {
+        Vec3::new(self.x - o.x, self.y - o.y, self.z - o.z).length()
+    }
+    pub fn scale(self, s: f32) -> Vec3 {
+        Vec3 { x: self.x * s, y: self.y * s, z: self.z * s }
+    }
+    pub fn mul_components(self, o: Vec3) -> Vec3 {
+        Vec3 { x: self.x * o.x, y: self.y * o.y, z: self.z * o.z }
+    }
+    pub fn normalize(self) -> Vec3 {
+        let len = self.length();
+        if len > 0.0 {
+            self.scale(1.0 / len)
+        } else {
+            self
+        }
+    }
+    pub fn lerp(self, o: Vec3, t: f32) -> Vec3 {
+        Vec3 {
+            x: self.x + (o.x - self.x) * t,
+            y: self.y + (o.y - self.y) * t,
+            z: self.z + (o.z - self.z) * t,
+        }
+    }
+    pub fn extend(self, w: f32) -> Vec4 {
+        Vec4 { x: self.x, y: self.y, z: self.z, w: w }
+    }
+    pub fn truncate(self) -> Vec2 {
+        Vec2 { x: self.x, y: self.y }
+    }
+}
+
+impl Add for Vec3 {
+    type Output = Vec3;
+    fn add(self, o: Vec3) -> Vec3 {
+        Vec3 { x: self.x + o.x, y: self.y + o.y, z: self.z + o.z }
+    }
+}
+
+impl Sub for Vec3 {
+    type Output = Vec3;
+    fn sub(self, o: Vec3) -> Vec3 {
+        Vec3 { x: self.x - o.x, y: self.y - o.y, z: self.z - o.z }
+    }
+}
+
+impl Mul<f32> for Vec3 {
+    type Output = Vec3;
+    fn mul(self, s: f32) -> Vec3 {
+        Vec3 { x: self.x * s, y: self.y * s, z: self.z * s }
+    }
+}
+
+impl Div<f32> for Vec3 {
+    type Output = Vec3;
+    fn div(self, s: f32) -> Vec3 {
+        Vec3 { x: self.x / s, y: self.y / s, z: self.z / s }
+    }
+}
+
+impl Neg for Vec3 {
+    type Output = Vec3;
+    fn neg(self) -> Vec3 {
+        Vec3 { x: 0.0 - self.x, y: 0.0 - self.y, z: 0.0 - self.z }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Vec4 {
+    pub x: f32,
+    pub y: f32,
+    pub z: f32,
+    pub w: f32,
+}
+
+impl Vec4 {
+    pub const ZERO: Vec4 = Vec4 { x: 0.0, y: 0.0, z: 0.0, w: 0.0 };
+    pub const ONE: Vec4 = Vec4 { x: 1.0, y: 1.0, z: 1.0, w: 1.0 };
+
+    pub fn new(x: f32, y: f32, z: f32, w: f32) -> Vec4 {
+        Vec4 { x: x, y: y, z: z, w: w }
+    }
+    pub fn splat(v: f32) -> Vec4 {
+        Vec4 { x: v, y: v, z: v, w: v }
+    }
+    pub fn zero() -> Vec4 {
+        Vec4 { x: 0.0, y: 0.0, z: 0.0, w: 0.0 }
+    }
+    pub fn one() -> Vec4 {
+        Vec4 { x: 1.0, y: 1.0, z: 1.0, w: 1.0 }
+    }
+    pub fn from_vec3(v: Vec3, w: f32) -> Vec4 {
+        Vec4 { x: v.x, y: v.y, z: v.z, w: w }
+    }
+    pub fn from_point(v: Vec3) -> Vec4 {
+        Vec4 { x: v.x, y: v.y, z: v.z, w: 1.0 }
+    }
+    pub fn dot(self, o: Vec4) -> f32 {
+        self.x * o.x + self.y * o.y + self.z * o.z + self.w * o.w
+    }
+    pub fn length_squared(self) -> f32 {
+        self.x * self.x + self.y * self.y + self.z * self.z + self.w * self.w
+    }
+    pub fn length(self) -> f32 {
+        self.length_squared().sqrt()
+    }
+    pub fn scale(self, s: f32) -> Vec4 {
+        Vec4 { x: self.x * s, y: self.y * s, z: self.z * s, w: self.w * s }
+    }
+    pub fn mul_components(self, o: Vec4) -> Vec4 {
+        Vec4 { x: self.x * o.x, y: self.y * o.y, z: self.z * o.z, w: self.w * o.w }
+    }
+    pub fn normalize(self) -> Vec4 {
+        let len = self.length();
+        if len > 0.0 {
+            self.scale(1.0 / len)
+        } else {
+            self
+        }
+    }
+    pub fn lerp(self, o: Vec4, t: f32) -> Vec4 {
+        Vec4 {
+            x: self.x + (o.x - self.x) * t,
+            y: self.y + (o.y - self.y) * t,
+            z: self.z + (o.z - self.z) * t,
+            w: self.w + (o.w - self.w) * t,
+        }
+    }
+    pub fn truncate(self) -> Vec3 {
+        Vec3 { x: self.x, y: self.y, z: self.z }
+    }
+    pub fn xyz(self) -> Vec3 {
+        Vec3 { x: self.x, y: self.y, z: self.z }
+    }
+}
+
+impl Add for Vec4 {
+    type Output = Vec4;
+    fn add(self, o: Vec4) -> Vec4 {
+        Vec4 { x: self.x + o.x, y: self.y + o.y, z: self.z + o.z, w: self.w + o.w }
+    }
+}
+
+impl Sub for Vec4 {
+    type Output = Vec4;
+    fn sub(self, o: Vec4) -> Vec4 {
+        Vec4 { x: self.x - o.x, y: self.y - o.y, z: self.z - o.z, w: self.w - o.w }
+    }
+}
+
+impl Mul<f32> for Vec4 {
+    type Output = Vec4;
+    fn mul(self, s: f32) -> Vec4 {
+        Vec4 { x: self.x * s, y: self.y * s, z: self.z * s, w: self.w * s }
+    }
+}
+
+impl Div<f32> for Vec4 {
+    type Output = Vec4;
+    fn div(self, s: f32) -> Vec4 {
+        Vec4 { x: self.x / s, y: self.y / s, z: self.z / s, w: self.w / s }
+    }
+}
+
+impl Neg for Vec4 {
+    type Output = Vec4;
+    fn neg(self) -> Vec4 {
+        Vec4 { x: 0.0 - self.x, y: 0.0 - self.y, z: 0.0 - self.z, w: 0.0 - self.w }
+    }
+}
+
+/// A 4 by 4 matrix held as four columns. `m.x_axis.y` is row 1 of column 0.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Mat4 {
+    pub x_axis: Vec4,
+    pub y_axis: Vec4,
+    pub z_axis: Vec4,
+    pub w_axis: Vec4,
+}
+
+impl Mat4 {
+    pub fn from_cols(x_axis: Vec4, y_axis: Vec4, z_axis: Vec4, w_axis: Vec4) -> Mat4 {
+        Mat4 { x_axis: x_axis, y_axis: y_axis, z_axis: z_axis, w_axis: w_axis }
+    }
+    pub fn identity() -> Mat4 {
+        Mat4 {
+            x_axis: Vec4 { x: 1.0, y: 0.0, z: 0.0, w: 0.0 },
+            y_axis: Vec4 { x: 0.0, y: 1.0, z: 0.0, w: 0.0 },
+            z_axis: Vec4 { x: 0.0, y: 0.0, z: 1.0, w: 0.0 },
+            w_axis: Vec4 { x: 0.0, y: 0.0, z: 0.0, w: 1.0 },
+        }
+    }
+    pub fn from_translation(t: Vec3) -> Mat4 {
+        let mut m = Mat4::identity();
+        m.w_axis = Vec4 { x: t.x, y: t.y, z: t.z, w: 1.0 };
+        m
+    }
+    pub fn from_scale(s: Vec3) -> Mat4 {
+        let mut m = Mat4::identity();
+        m.x_axis.x = s.x;
+        m.y_axis.y = s.y;
+        m.z_axis.z = s.z;
+        m
+    }
+    pub fn transpose(self) -> Mat4 {
+        Mat4 {
+            x_axis: Vec4 { x: self.x_axis.x, y: self.y_axis.x, z: self.z_axis.x, w: self.w_axis.x },
+            y_axis: Vec4 { x: self.x_axis.y, y: self.y_axis.y, z: self.z_axis.y, w: self.w_axis.y },
+            z_axis: Vec4 { x: self.x_axis.z, y: self.y_axis.z, z: self.z_axis.z, w: self.w_axis.z },
+            w_axis: Vec4 { x: self.x_axis.w, y: self.y_axis.w, z: self.z_axis.w, w: self.w_axis.w },
+        }
+    }
+    pub fn mul_vec4(self, v: Vec4) -> Vec4 {
+        Vec4 {
+            x: self.x_axis.x * v.x + self.y_axis.x * v.y + self.z_axis.x * v.z + self.w_axis.x * v.w,
+            y: self.x_axis.y * v.x + self.y_axis.y * v.y + self.z_axis.y * v.z + self.w_axis.y * v.w,
+            z: self.x_axis.z * v.x + self.y_axis.z * v.y + self.z_axis.z * v.z + self.w_axis.z * v.w,
+            w: self.x_axis.w * v.x + self.y_axis.w * v.y + self.z_axis.w * v.z + self.w_axis.w * v.w,
+        }
+    }
+    pub fn mul_mat4(self, o: Mat4) -> Mat4 {
+        Mat4 {
+            x_axis: self.mul_vec4(o.x_axis),
+            y_axis: self.mul_vec4(o.y_axis),
+            z_axis: self.mul_vec4(o.z_axis),
+            w_axis: self.mul_vec4(o.w_axis),
+        }
+    }
+    pub fn transform_point(self, p: Vec3) -> Vec3 {
+        let v = self.mul_vec4(Vec4 { x: p.x, y: p.y, z: p.z, w: 1.0 });
+        Vec3 { x: v.x, y: v.y, z: v.z }
+    }
+    pub fn transform_vector(self, d: Vec3) -> Vec3 {
+        let v = self.mul_vec4(Vec4 { x: d.x, y: d.y, z: d.z, w: 0.0 });
+        Vec3 { x: v.x, y: v.y, z: v.z }
+    }
+}
+
+impl Mul for Mat4 {
+    type Output = Mat4;
+    fn mul(self, o: Mat4) -> Mat4 {
+        self.mul_mat4(o)
+    }
 }
