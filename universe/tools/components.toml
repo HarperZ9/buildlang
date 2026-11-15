@@ -8,7 +8,10 @@
 # Fields: name, path (relative to repo root), language, tier (0 foundational,
 # 1 load-bearing, 2/3 lower), verify (shell cmd; exit 0 = ok), expect
 # ("tested" = runtime-verified, "build" = compile/transpile only), requires
-# (toolchain gate: "msvc" | "buildc"), heavy (skipped under --quick), note.
+# (toolchain gate: "msvc" | "buildc"), heavy (skipped under --quick), note,
+# xfail (known to fail: reported XFAIL while it fails, and a failure once it
+# passes, so the mark must go), covered_by (not run here; names the CI job
+# that runs it).
 #
 # NOTE: .bld modules that do NOT transpile standalone are intentionally not
 # registered: photon, quantum-finance, axiom, forge (known; see STATUS.md).
@@ -53,13 +56,14 @@ note = "RenderDoc capture -> JSON trace; runtime needs a live capture"
 
 [[component]]
 name = "buildlang"
-path = "buildlang/compiler"
+path = "../compiler"
 language = "rust"
 tier = 0
 verify = "cargo test --locked"
 expect = "tested"
 heavy = true
-note = "foundational compiler (separate repo; absent in CI). ~612 tests, ~20s."
+covered_by = "the CI workflow, jobs `test (ubuntu-latest)` and `test (windows-latest)`, which run cargo test in compiler/"
+note = "the compiler, one folder up in this repository. Its tests run in the CI workflow on every pull request, so this tool does not run them again."
 
 # --- BuildLang domain modules (verify = transpile to C via buildc) ---
 
@@ -69,9 +73,10 @@ path = "spectrum"
 language = "build"
 tier = 1
 requires = "buildc"
-verify = "buildc lib.bld --target c -o nul"
+verify = "buildc lib.bld --target c -o lib.c"
 expect = "build"
-note = "transpiles standalone to C"
+xfail = "HarperZ9/buildlang#290: does not compile to C with the current compiler"
+note = "registered for a standalone C build; fails it today (see xfail)"
 
 [[component]]
 name = "chromatic"
@@ -79,9 +84,10 @@ path = "chromatic"
 language = "build"
 tier = 1
 requires = "buildc"
-verify = "buildc lib.bld --target c -o nul"
+verify = "buildc lib.bld --target c -o lib.c"
 expect = "build"
-note = "transpiles standalone to C"
+xfail = "HarperZ9/buildlang#290: does not compile to C with the current compiler"
+note = "registered for a standalone C build; fails it today (see xfail)"
 
 [[component]]
 name = "delta"
@@ -89,9 +95,10 @@ path = "delta"
 language = "build"
 tier = 1
 requires = "buildc"
-verify = "buildc lib.bld --target c -o nul"
+verify = "buildc lib.bld --target c -o lib.c"
 expect = "build"
-note = "transpiles standalone to C"
+xfail = "HarperZ9/buildlang#290: does not compile to C with the current compiler"
+note = "registered for a standalone C build; fails it today (see xfail)"
 
 [[component]]
 name = "foundation"
@@ -99,9 +106,10 @@ path = "foundation"
 language = "build"
 tier = 1
 requires = "buildc"
-verify = "buildc lib.bld --target c -o nul"
+verify = "buildc lib.bld --target c -o lib.c"
 expect = "build"
-note = "transpiles standalone to C"
+xfail = "HarperZ9/buildlang#290: does not compile to C with the current compiler"
+note = "registered for a standalone C build; fails it today (see xfail)"
 
 [[component]]
 name = "oracle"
@@ -109,9 +117,10 @@ path = "oracle"
 language = "build"
 tier = 2
 requires = "buildc"
-verify = "buildc lib.bld --target c -o nul"
+verify = "buildc lib.bld --target c -o lib.c"
 expect = "build"
-note = "transpiles standalone to C"
+xfail = "HarperZ9/buildlang#290: does not compile to C with the current compiler"
+note = "registered for a standalone C build; fails it today (see xfail)"
 
 [[component]]
 name = "entropy"
@@ -119,9 +128,10 @@ path = "entropy"
 language = "build"
 tier = 2
 requires = "buildc"
-verify = "buildc lib.bld --target c -o nul"
+verify = "buildc lib.bld --target c -o lib.c"
 expect = "build"
-note = "transpiles standalone to C"
+xfail = "HarperZ9/buildlang#290: does not compile to C with the current compiler"
+note = "registered for a standalone C build; fails it today (see xfail)"
 
 [[component]]
 name = "field-tensor"
@@ -129,9 +139,10 @@ path = "field-tensor"
 language = "build"
 tier = 2
 requires = "buildc"
-verify = "buildc lib.bld --target c -o nul"
+verify = "buildc lib.bld --target c -o lib.c"
 expect = "build"
-note = "transpiles standalone to C"
+xfail = "HarperZ9/buildlang#290: does not compile to C with the current compiler"
+note = "registered for a standalone C build; fails it today (see xfail)"
 
 [[component]]
 name = "prism"
@@ -139,9 +150,10 @@ path = "prism"
 language = "build"
 tier = 2
 requires = "buildc"
-verify = "buildc lib.bld --target c -o nul"
+verify = "buildc lib.bld --target c -o lib.c"
 expect = "build"
-note = "transpiles standalone to C"
+xfail = "HarperZ9/buildlang#290: does not compile to C with the current compiler"
+note = "registered for a standalone C build; fails it today (see xfail)"
 
 [[component]]
 name = "calibrate"
@@ -149,9 +161,10 @@ path = "calibrate"
 language = "build"
 tier = 2
 requires = "buildc"
-verify = "buildc lib.bld --target c -o nul"
+verify = "buildc lib.bld --target c -o lib.c"
 expect = "build"
-note = "transpiles standalone to C"
+xfail = "HarperZ9/buildlang#290: does not compile to C with the current compiler"
+note = "registered for a standalone C build; fails it today (see xfail)"
 
 [[component]]
 name = "nova"
@@ -159,9 +172,10 @@ path = "nova"
 language = "build"
 tier = 2
 requires = "buildc"
-verify = "buildc lib.bld --target c -o nul"
+verify = "buildc lib.bld --target c -o lib.c"
 expect = "build"
-note = "transpiles standalone to C"
+xfail = "HarperZ9/buildlang#290: does not compile to C with the current compiler"
+note = "registered for a standalone C build; fails it today (see xfail)"
 
 [[component]]
 name = "entangle"
@@ -169,9 +183,10 @@ path = "entangle"
 language = "build"
 tier = 2
 requires = "buildc"
-verify = "buildc lib.bld --target c -o nul"
+verify = "buildc lib.bld --target c -o lib.c"
 expect = "build"
-note = "transpiles standalone to C"
+xfail = "HarperZ9/buildlang#290: does not compile to C with the current compiler"
+note = "registered for a standalone C build; fails it today (see xfail)"
 
 [[component]]
 name = "lumina"
@@ -179,9 +194,10 @@ path = "lumina"
 language = "build"
 tier = 3
 requires = "buildc"
-verify = "buildc lib.bld --target c -o nul"
+verify = "buildc lib.bld --target c -o lib.c"
 expect = "build"
-note = "transpiles standalone to C"
+xfail = "HarperZ9/buildlang#290: does not compile to C with the current compiler"
+note = "registered for a standalone C build; fails it today (see xfail)"
 
 [[component]]
 name = "neutrino"
@@ -189,9 +205,10 @@ path = "neutrino"
 language = "build"
 tier = 3
 requires = "buildc"
-verify = "buildc lib.bld --target c -o nul"
+verify = "buildc lib.bld --target c -o lib.c"
 expect = "build"
-note = "transpiles standalone to C"
+xfail = "HarperZ9/buildlang#290: does not compile to C with the current compiler"
+note = "registered for a standalone C build; fails it today (see xfail)"
 
 [[component]]
 name = "nexus"
@@ -199,9 +216,10 @@ path = "nexus"
 language = "build"
 tier = 3
 requires = "buildc"
-verify = "buildc lib.bld --target c -o nul"
+verify = "buildc lib.bld --target c -o lib.c"
 expect = "build"
-note = "transpiles standalone to C"
+xfail = "HarperZ9/buildlang#290: does not compile to C with the current compiler"
+note = "registered for a standalone C build; fails it today (see xfail)"
 
 [[component]]
 name = "refract"
@@ -209,9 +227,10 @@ path = "refract"
 language = "build"
 tier = 3
 requires = "buildc"
-verify = "buildc lib.bld --target c -o nul"
+verify = "buildc lib.bld --target c -o lib.c"
 expect = "build"
-note = "transpiles standalone to C"
+xfail = "HarperZ9/buildlang#290: does not compile to C with the current compiler"
+note = "registered for a standalone C build; fails it today (see xfail)"
 
 [[component]]
 name = "wavelength"
@@ -219,7 +238,8 @@ path = "wavelength"
 language = "build"
 tier = 3
 requires = "buildc"
-verify = "buildc lib.bld --target c -o nul"
+verify = "buildc lib.bld --target c -o lib.c"
 expect = "build"
-note = "transpiles standalone to C"
+xfail = "HarperZ9/buildlang#290: does not compile to C with the current compiler"
+note = "registered for a standalone C build; fails it today (see xfail)"
 
