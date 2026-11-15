@@ -132,11 +132,6 @@ pub struct TypeChecker<'ctx> {
     /// not a crash. Paths are removed after their subtree finishes so a
     /// diamond (two siblings importing the same leaf) is not a false cycle.
     loading_modules: HashSet<PathBuf>,
-    /// Canonical paths of the module files already collected. `mod geom;` in
-    /// two files names one file; its items are collected once.
-    collected_modules: HashSet<PathBuf>,
-    /// The same for the pass that checks a module file's bodies.
-    checked_modules: HashSet<PathBuf>,
     /// Cache of `use` module path (`a::b::c`) -> the set of top-level item
     /// names that module file exports (`None` when no backing file was found or
     /// it failed to parse). Reading a module's export names is read-only: it
@@ -169,8 +164,6 @@ impl<'ctx> TypeChecker<'ctx> {
             effect_ctx: super::effects::EffectContext::new(),
             source_dir: None,
             loading_modules: HashSet::new(),
-            collected_modules: HashSet::new(),
-            checked_modules: HashSet::new(),
             use_module_exports: HashMap::new(),
             pending_uses: Vec::new(),
             local_item_names: HashSet::new(),
@@ -277,8 +270,6 @@ impl<'ctx> TypeChecker<'ctx> {
         self.ctx.define_var(Arc::from("println"), Ty::fresh_var());
 
         // First pass: collect all type definitions
-        self.collected_modules.clear();
-        self.checked_modules.clear();
         for item in &module.items {
             self.collect_item(item);
         }
@@ -537,10 +528,6 @@ impl<'ctx> TypeChecker<'ctx> {
                         },
                         m.name.span,
                     );
-                    return;
-                }
-                if !self.collected_modules.insert(key.clone()) {
-                    self.loading_modules.remove(&key);
                     return;
                 }
                 if let Ok(source_text) = std::fs::read_to_string(&mod_path) {
@@ -2154,10 +2141,6 @@ impl<'ctx> TypeChecker<'ctx> {
                             },
                             m.name.span,
                         );
-                        return;
-                    }
-                    if !self.checked_modules.insert(key.clone()) {
-                        self.loading_modules.remove(&key);
                         return;
                     }
                     if let Ok(source_text) = std::fs::read_to_string(&mod_path) {
