@@ -5626,6 +5626,7 @@ fn type_error_kind(error: &TypeError) -> &'static str {
         TypeError::MeasuredConstantInvalid { .. } => "MeasuredConstantInvalid",
         TypeError::ModuleImportCycle { .. } => "ModuleImportCycle",
         TypeError::UnresolvedImport { .. } => "UnresolvedImport",
+        TypeError::DuplicateAcrossFiles { .. } => "DuplicateAcrossFiles",
         TypeError::UndefinedLoopLabel { .. } => "UndefinedLoopLabel",
         _ => "TypeError",
     }
@@ -6430,6 +6431,9 @@ fn run_check_unit(unit: CheckUnit, early: &mut Option<Diagnostic>) -> Result<Che
     checker.check_module(&ast);
 
     let mut type_errors = checker.errors().to_vec();
+    if let Some(map) = origins {
+        buildlang::types::package_duplicates::rewrite(&ast, &source_file, map, &mut type_errors);
+    }
     let function_summaries = checker.function_effect_summaries().to_vec();
 
     // MIR `#[linear]` checker (2b-wire): only lower + run it when the AST
@@ -9395,7 +9399,11 @@ fn lint_unit(
     let mut errors = 0u32;
 
     // Report type errors
-    for err in checker.errors() {
+    let mut type_errors = checker.errors().to_vec();
+    if let Some(map) = origins {
+        buildlang::types::package_duplicates::rewrite(&ast, &source_file, map, &mut type_errors);
+    }
+    for err in &type_errors {
         let span = err.span;
         let pos = source_file.lookup_position(span.start);
         let (at_file, at_line) = match place(pos.line as usize) {

@@ -52,6 +52,7 @@ mod hkt;
 mod infer;
 mod macro_args;
 pub mod measured;
+pub mod package_duplicates;
 mod parallel;
 mod parallel_hoist;
 pub(crate) mod parallel_walk;
